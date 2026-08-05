@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -9,6 +10,30 @@ import uvicorn
 
 from opensac.broker.app import create_broker_app
 from opensac.broker.service import BrokerService
+
+
+class BrokerAlreadyRunning(RuntimeError):
+    pass
+
+
+def _is_live_socket(path: Path) -> bool:
+    """Is a process currently accepting connections on this Unix socket?
+
+    A socket file left behind by a crashed process is indistinguishable from a
+    live one by `stat` alone; only a connect attempt tells them apart.
+    """
+    if not path.exists():
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(0.5)
+    try:
+        probe.connect(str(path))
+    except OSError:
+        return False
+    else:
+        return True
+    finally:
+        probe.close()
 
 
 class _EmbeddedServer(uvicorn.Server):
@@ -30,9 +55,25 @@ class BrokerRuntime:
         self.socket_path = socket_path.resolve()
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task[None] | None = None
+        self._owns_socket = False
 
     async def start(self) -> None:
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        # Refuse to evict a broker that is still serving. Unlinking it would
+        # not stop that process: it keeps its bound socket and answers the
+        # health check, while every sandbox launched afterwards fails to bind
+        # a mount source that no longer exists. The symptom (containers exit
+        # 125) points nowhere near the cause, so fail here instead. A second
+        # instance is never what the operator wants anyway, since both would
+        # also share one data directory.
+        if _is_live_socket(self.socket_path):
+            raise BrokerAlreadyRunning(
+                f"Another OpenSAC broker is already listening on {self.socket_path}. "
+                "Stop it before starting a new one, or point this instance at a "
+                "different OPENSAC_BROKER_SOCKET and OPENSAC_DATA_DIR."
+            )
+        # Anything left here now is a stale file from a process that died
+        # without cleaning up; bind() would fail with EADDRINUSE against it.
         self.socket_path.unlink(missing_ok=True)
         config = uvicorn.Config(
             create_broker_app(self.service),
@@ -46,6 +87,7 @@ class BrokerRuntime:
         self._task = asyncio.create_task(self._server.serve())
         for _ in range(100):
             if self.socket_path.exists():
+                self._owns_socket = True
                 return
             if self._task.done():
                 await self._task
@@ -57,4 +99,9 @@ class BrokerRuntime:
             self._server.should_exit = True
         if self._task is not None:
             await self._task
-        self.socket_path.unlink(missing_ok=True)
+        # Only clean up a socket this runtime actually created. A runtime that
+        # bailed out because someone else owned the path must not delete it on
+        # the way down -- that is the same eviction, just deferred.
+        if self._owns_socket:
+            self.socket_path.unlink(missing_ok=True)
+            self._owns_socket = False
