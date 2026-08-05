@@ -11,6 +11,8 @@ Available capabilities:
 - sdk.search.local_many(queries, limit_per_query=10, concurrency=5)
 - sdk.content.get_many(refs)
 - sdk.content.snippets(query, refs, max_tokens=4000, max_tokens_per_page=1000)
+- sdk.llm.complete(prompt, system=None, temperature=0.2, max_tokens=None)
+- sdk.llm.complete_many(prompts, concurrency=4)
 - sdk.llm.extract_many(items, instruction=..., schema=..., concurrency=4)
 - sdk.state.read_json/read_jsonl and write_json/write_jsonl using relative paths
 - sdk.output.submit(output, citations=[{"ref": hit.ref}, ...])

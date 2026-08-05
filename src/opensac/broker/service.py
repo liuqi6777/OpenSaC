@@ -60,6 +60,8 @@ class BrokerService:
             "content.get_many": self._content_get_many,
             "content.snippets": self._content_snippets,
             "citations.resolve": self._resolve_citations,
+            "llm.complete": self._complete,
+            "llm.complete_many": self._complete_many,
             "llm.extract_many": self._extract_many,
         }
         handler = handlers.get(method)
@@ -217,13 +219,96 @@ class BrokerService:
         chunks = await asyncio.gather(*(fetch(name, rows) for name, rows in grouped.items()))
         return [item.model_dump(mode="json") for chunk in chunks for item in chunk]
 
+    async def _chat(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        json_object: bool = False,
+    ) -> str:
+        messages: list[dict[str, str]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        options: dict[str, Any] = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+        if max_tokens is not None:
+            options["max_completion_tokens"] = max_tokens
+        if json_object:
+            options["response_format"] = {"type": "json_object"}
+        async with self._semaphore:
+            response = await self.model_client.chat.completions.create(
+                model=self.extraction_model,
+                messages=messages,
+                **options,
+            )
+        return response.choices[0].message.content or ""
+
+    def _require_model(self) -> None:
+        if self.model_client is None or not self.extraction_model:
+            raise RuntimeError("LLM access is not configured")
+
+    @staticmethod
+    def _clamp_temperature(value: Any) -> float:
+        return min(max(float(value), 0.0), 2.0)
+
+    @staticmethod
+    def _clamp_max_tokens(value: Any) -> int | None:
+        if value is None:
+            return None
+        return min(max(int(value), 1), 32_000)
+
+    async def _complete(self, state: BrokerSession, params: dict[str, Any]) -> str:
+        self._require_model()
+        prompt = str(params.get("prompt", "")).strip()
+        if not prompt:
+            raise ValueError("prompt must not be empty")
+        await state.policy.consume_llm(1)
+        system = params.get("system")
+        return await self._chat(
+            prompt,
+            system=str(system) if system else None,
+            temperature=self._clamp_temperature(params.get("temperature", 0.2)),
+            max_tokens=self._clamp_max_tokens(params.get("max_tokens")),
+        )
+
+    async def _complete_many(self, state: BrokerSession, params: dict[str, Any]) -> list[str]:
+        self._require_model()
+        prompts = [str(prompt) for prompt in params.get("prompts", [])]
+        if not prompts:
+            return []
+        if any(not prompt.strip() for prompt in prompts):
+            raise ValueError("prompts must not contain empty strings")
+        # Charge the whole fan-out up front: a partially charged batch that then
+        # trips the quota mid-flight would leave the caller unable to tell which
+        # prompts actually ran.
+        await state.policy.consume_llm(len(prompts))
+        system = params.get("system")
+        temperature = self._clamp_temperature(params.get("temperature", 0.2))
+        max_tokens = self._clamp_max_tokens(params.get("max_tokens"))
+        concurrency = min(max(int(params.get("concurrency", 4)), 1), 12)
+        gate = asyncio.Semaphore(concurrency)
+
+        async def one(prompt: str) -> str:
+            async with gate:
+                return await self._chat(
+                    prompt,
+                    system=str(system) if system else None,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+
+        return await asyncio.gather(*(one(prompt) for prompt in prompts))
+
     async def _extract_many(
         self,
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        if self.model_client is None or not self.extraction_model:
-            raise RuntimeError("LLM extraction is not configured")
+        self._require_model()
         items = params.get("items", [])
         await state.policy.consume_llm(len(items))
         schema = params.get("schema", {})
@@ -237,13 +322,8 @@ class BrokerService:
                 f"Input:\n{json.dumps(item, ensure_ascii=False, default=str)}\n\n"
                 "Return only one JSON object."
             )
-            async with gate, self._semaphore:
-                response = await self.model_client.chat.completions.create(
-                    model=self.extraction_model,
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                )
-            content = response.choices[0].message.content or "{}"
-            return json.loads(content)
+            async with gate:
+                content = await self._chat(prompt, json_object=True)
+            return json.loads(content or "{}")
 
         return await asyncio.gather(*(extract(item) for item in items))

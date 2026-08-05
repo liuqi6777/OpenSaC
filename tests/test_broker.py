@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from opensac_sdk.models import ContentSnippet, SearchHit
 
@@ -95,3 +97,82 @@ async def test_search_many_tolerates_partial_failure() -> None:
     assert batches[0]["error"] is None
     assert batches[1]["hits"] == []
     assert "must not be empty" in batches[1]["error"]
+
+
+class FakeModelClient:
+    """Minimal stand-in for the AsyncOpenAI surface the broker touches."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        parent = self
+
+        class Completions:
+            async def create(self, **kwargs):
+                parent.calls.append(kwargs)
+                prompt = kwargs["messages"][-1]["content"]
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=f"echo:{prompt}"))]
+                )
+
+        self.chat = SimpleNamespace(completions=Completions())
+
+
+def make_llm_service(**kwargs) -> tuple[BrokerService, FakeModelClient]:
+    client = FakeModelClient()
+    service = BrokerService(
+        {"web": FakeBackend("web")},
+        model_client=client,
+        extraction_model="test-model",
+    )
+    service.register_session(
+        Session(
+            id="sess_test",
+            token="token",
+            backends=["web"],
+            limits=RunLimits(**kwargs),
+            workspace="/tmp/session",
+        )
+    )
+    return service, client
+
+
+async def test_llm_complete_passes_system_prompt_and_charges_one_call() -> None:
+    service, client = make_llm_service(max_llm_calls=2)
+    answer = await service.call(
+        "token",
+        "llm.complete",
+        {"prompt": "plan the next queries", "system": "be terse", "temperature": 0.7},
+    )
+    assert answer == "echo:plan the next queries"
+    assert client.calls[0]["messages"][0] == {"role": "system", "content": "be terse"}
+    assert client.calls[0]["temperature"] == 0.7
+    # complete() is free-form, so it must not force JSON mode the way extract does.
+    assert "response_format" not in client.calls[0]
+    assert service.sessions["token"].policy.usage.llm_calls == 1
+
+
+async def test_llm_complete_many_preserves_prompt_order() -> None:
+    service, _ = make_llm_service(max_llm_calls=5)
+    answers = await service.call(
+        "token",
+        "llm.complete_many",
+        {"prompts": ["one", "two", "three"], "concurrency": 3},
+    )
+    assert answers == ["echo:one", "echo:two", "echo:three"]
+    assert service.sessions["token"].policy.usage.llm_calls == 3
+
+
+async def test_llm_complete_many_charges_the_whole_fanout_before_running() -> None:
+    service, client = make_llm_service(max_llm_calls=2)
+    with pytest.raises(QuotaExceeded):
+        await service.call("token", "llm.complete_many", {"prompts": ["one", "two", "three"]})
+    # Nothing ran, so the caller is not left guessing which prompts were charged.
+    assert client.calls == []
+    assert service.sessions["token"].policy.usage.llm_calls == 0
+
+
+async def test_llm_calls_fail_when_no_model_is_configured() -> None:
+    service = BrokerService({"web": FakeBackend("web")})
+    service.register_session(make_session())
+    with pytest.raises(RuntimeError, match="not configured"):
+        await service.call("token", "llm.complete", {"prompt": "hello"})

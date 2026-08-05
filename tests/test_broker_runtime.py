@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
+from opensac_sdk.llm import LLMResource
 from opensac_sdk.models import ContentSnippet, SearchHit
 from opensac_sdk.transport import UnixSocketTransport
 
@@ -49,5 +51,48 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
         )
         assert result[0]["snippet"] == "needle"
         assert result[0]["ref"].startswith("ref_")
+    finally:
+        await runtime.stop()
+
+
+class EchoModelClient:
+    def __init__(self) -> None:
+        class Completions:
+            async def create(self, **kwargs):
+                content = kwargs["messages"][-1]["content"].upper()
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+                )
+
+        self.chat = SimpleNamespace(completions=Completions())
+
+
+async def test_llm_resource_round_trips_over_real_unix_socket(tmp_path) -> None:
+    """Cover the SDK -> socket -> broker -> model path, not just the handler.
+
+    The unit tests call BrokerService directly, which would not catch an SDK
+    method whose params do not match what the handler reads.
+    """
+    service = BrokerService(
+        {"local": SocketBackend()},
+        model_client=EchoModelClient(),
+        extraction_model="test-model",
+    )
+    service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            limits=RunLimits(max_llm_calls=10),
+            workspace=str(tmp_path / "workspace"),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+    try:
+        resource = LLMResource(UnixSocketTransport(str(tmp_path / "broker.sock"), "secret"))
+        assert await asyncio.to_thread(resource.complete, "plan") == "PLAN"
+        assert await asyncio.to_thread(resource.complete_many, ["a", "b"]) == ["A", "B"]
+        assert service.sessions["secret"].policy.usage.llm_calls == 3
     finally:
         await runtime.stop()
