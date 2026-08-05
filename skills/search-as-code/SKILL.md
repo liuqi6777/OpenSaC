@@ -1,0 +1,59 @@
+---
+name: search-as-code
+description: Compose OpenSAC search primitives as Python programs.
+---
+
+# Search as Code
+
+Use Python for orchestration and `opensac_sdk` for every external capability.
+
+```python
+from opensac_sdk import sdk
+```
+
+## Primitives
+
+- `sdk.search.web(query, limit=10, domains=None)`
+- `sdk.search.local(query, limit=10)`
+- `sdk.search.web_many(queries, limit_per_query=10, concurrency=5)`
+- `sdk.search.local_many(queries, limit_per_query=10, concurrency=5)`
+- `sdk.content.get_many(refs)`
+- `sdk.content.snippets(query, refs, max_tokens=4000, max_tokens_per_page=1000)`
+- `sdk.llm.extract_many(items, instruction=..., schema=..., concurrency=4)`
+- `sdk.state.read_json/read_jsonl` and `write_json/write_jsonl`
+- `sdk.output.submit(output, citations=[{"ref": hit.ref}])`
+
+Search returns typed hits with `ref`, `backend`, `title`, `url`, `docid`, `domain`,
+`snippet`, `score`, and `rank`. Content calls accept only opaque refs returned during
+the current session.
+
+## Strategy
+
+Fan out independent queries with `*_many`. Encode source constraints in queries and
+`domains` before retrieval. Deduplicate with ordinary Python before fetching content.
+Fetch only promising candidates. Use deterministic code for regex, joins, filtering,
+counting, ranking, and coverage checks. Use `llm.extract_many` only for semantic work.
+
+Persist compact intermediate records to JSONL when later turns may need them. Submit
+only evidence and summaries useful to the control model, not every raw result.
+
+Never use direct HTTP, sockets, subprocesses, shell commands, credentials, environment
+inspection, or package installation. Citations must contain opaque refs returned by search;
+the broker resolves their trusted URL, document ID, title, and evidence. Never invent refs.
+
+## Pattern
+
+```python
+from opensac_sdk import sdk
+
+batches = sdk.search.web_many(queries, limit_per_query=8, concurrency=6)
+hits = {h.url: h for batch in batches for h in batch.hits if h.url}
+pages = sdk.content.snippets(goal, [h.ref for h in hits.values()])
+records = sdk.llm.extract_many(
+    [p.model_dump() for p in pages],
+    instruction=instruction,
+    schema=schema,
+)
+sdk.state.write_jsonl("records.jsonl", records)
+sdk.output.submit({"records": records})
+```

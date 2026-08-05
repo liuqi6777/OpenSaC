@@ -1,0 +1,7 @@
+.env
+.git
+.opensac
+.venv
+__pycache__
+dist
+tests
