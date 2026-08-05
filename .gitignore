@@ -26,6 +26,7 @@ htmlcov/
 # Build artifacts
 build/
 dist/
+_sandbox_wheel/
 *.egg-info/
 *.egg
 *.whl
