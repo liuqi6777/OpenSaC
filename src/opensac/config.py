@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     sandbox_memory: str = "512m"
     sandbox_cpus: float = 1.0
     sandbox_pids_limit: int = 64
+    # Ceiling on concurrently running containers. An external harness driving
+    # /exec across many parallel rollouts would otherwise start one container
+    # per in-flight tool call and exhaust the host.
+    sandbox_max_concurrency: int = 8
 
     max_turns: int = 8
     max_search_calls: int = 200

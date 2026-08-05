@@ -15,17 +15,22 @@ from openai import AsyncOpenAI
 from opensac.agent import AgentController
 from opensac.backends import LocalSearchBackend, PerplexityBackend
 from opensac.broker import BrokerRuntime, BrokerService
+from opensac.broker.service import BrokerSession
 from opensac.config import Settings
 from opensac.models import (
+    ExecCreate,
+    ExecResult,
     PublicRun,
     PublicSession,
     Run,
     RunCreate,
     RunStatus,
+    RunUsage,
     Session,
     SessionCreate,
 )
-from opensac.sandbox import DockerSandbox
+from opensac.sandbox import DockerSandbox, UnsafeCodeError
+from opensac.sandbox.base import SandboxRequest
 from opensac.store import StateStore
 
 
@@ -64,6 +69,10 @@ class ApplicationRuntime:
         )
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.events: dict[str, set[asyncio.Queue[dict]]] = defaultdict(set)
+        # /exec is driven by an external harness that may have dozens of
+        # rollouts in flight. Without a ceiling each in-flight tool call would
+        # start its own container.
+        self.sandbox_gate = asyncio.Semaphore(settings.sandbox_max_concurrency)
 
     async def start(self) -> None:
         await self.broker_runtime.start()
@@ -80,6 +89,70 @@ class ApplicationRuntime:
         event = {"type": event_type, "data": data}
         for queue in tuple(self.events[run_id]):
             await queue.put(event)
+
+    def bind_session(self, session: Session) -> BrokerSession:
+        """Attach a long-lived broker state to a session.
+
+        Runs get a throwaway token per run because their capability budget is
+        per-run. `/exec` is the opposite: the harness owns the loop, so quotas
+        and the search reference table have to survive across calls. Keying the
+        broker state on the durable `session.token` gives a program the ability
+        to persist refs to its workspace in one turn and resolve them in a
+        later one.
+
+        Idempotent, so a session created before a process restart keeps working.
+        Note that only the workspace survives such a restart: broker state is in
+        memory, so refs minted beforehand come back as unknown references.
+        """
+        state = self.broker.sessions.get(session.token)
+        if state is None:
+            state = self.broker.register_session(session)
+        return state
+
+    async def execute_code(self, session: Session, code: str) -> ExecResult:
+        state = self.bind_session(session)
+        workspace = Path(session.workspace)
+        try:
+            async with self.sandbox_gate:
+                result = await self.sandbox.execute(
+                    SandboxRequest(
+                        code=code,
+                        workspace=workspace,
+                        session_token=session.token,
+                    )
+                )
+        except UnsafeCodeError as exc:
+            # A rejection is a normal observation for the control model, not a
+            # transport error: it has to see the reason and rewrite the program.
+            return ExecResult(
+                exit_code=-1,
+                stdout="",
+                stderr="",
+                duration_seconds=0.0,
+                succeeded=False,
+                error=f"Rejected by the sandbox code validator: {exc}",
+                usage=self._session_usage(state),
+                artifacts=self.store.artifacts(session),
+            )
+        return ExecResult(
+            exit_code=result.exit_code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            duration_seconds=result.duration_seconds,
+            timed_out=result.timed_out,
+            succeeded=result.succeeded,
+            output=result.output,
+            citations=result.citations,
+            usage=self._session_usage(state, sandbox_seconds=result.duration_seconds),
+            artifacts=self.store.artifacts(session),
+        )
+
+    def _session_usage(self, state: BrokerSession, *, sandbox_seconds: float = 0.0) -> RunUsage:
+        return RunUsage(
+            search_calls=state.policy.usage.search_calls,
+            llm_calls=state.policy.usage.llm_calls,
+            sandbox_seconds=sandbox_seconds,
+        )
 
     async def execute_run(self, run: Run, session: Session) -> None:
         run_token = secrets.token_urlsafe(32)
@@ -186,6 +259,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task = asyncio.create_task(runtime.execute_run(run, session))
         runtime.tasks[run.id] = task
         return public_run(run)
+
+    @app.post(
+        "/v1/sessions/{session_id}/exec",
+        response_model=ExecResult,
+        dependencies=[Depends(authorize)],
+    )
+    async def execute_code(session_id: str, request: ExecCreate) -> ExecResult:
+        """Run one harness-authored program against this session's sandbox.
+
+        The caller owns the control loop. OpenSAC contributes the sandbox, the
+        SDK, and the broker; it never invokes a control model here.
+        """
+        session = get_session(session_id)
+        return await runtime.execute_code(session, request.code)
 
     @app.get("/v1/runs/{run_id}", response_model=PublicRun, dependencies=[Depends(authorize)])
     async def read_run(run_id: str) -> PublicRun:

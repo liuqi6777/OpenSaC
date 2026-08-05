@@ -83,11 +83,35 @@ POST   /v1/sessions
 GET    /v1/sessions/{session_id}
 DELETE /v1/sessions/{session_id}
 POST   /v1/sessions/{session_id}/runs
+POST   /v1/sessions/{session_id}/exec
 GET    /v1/runs/{run_id}
 GET    /v1/runs/{run_id}/events
 POST   /v1/runs/{run_id}/cancel
 GET    /v1/runs/{run_id}/artifacts/{path}
 ```
+
+## Bring Your Own Control Model
+
+`runs` delegates the whole task to OpenSAC's control model. `exec` inverts that: an
+external agent harness generates the program and OpenSAC contributes only the sandbox,
+the SDK, and the capability broker. Session state persists across `exec` calls -- the
+workspace filesystem and the search reference table -- so a program can serialize
+intermediate results in one turn and resolve their refs several turns later.
+
+```python
+from opensac import OpenSAC
+
+with OpenSAC(api_key="...") as client:
+    session = client.create_session(backends=["local"], limits={"max_search_calls": 2000})
+    result = client.exec_code(session["id"], "from opensac_sdk import sdk\n...")
+    print(result["stdout"], result["output"], result["usage"])
+    client.delete_session(session["id"])
+```
+
+A program rejected by the sandbox code validator comes back as a normal result with
+`succeeded: false` and a populated `error`, so the calling harness can feed the reason
+straight back to its model. `OPENSAC_SANDBOX_MAX_CONCURRENCY` caps how many containers
+run at once across all sessions.
 
 See `examples/research_pipeline.py` for representative model-generated code.
 

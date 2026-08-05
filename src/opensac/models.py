@@ -54,6 +54,39 @@ class RunUsage(BaseModel):
     sandbox_seconds: float = 0.0
 
 
+class ExecCreate(BaseModel):
+    """One turn of an externally driven Search as Code loop.
+
+    `POST /v1/sessions/{id}/runs` hands the task to OpenSAC's own control
+    model. `POST /v1/sessions/{id}/exec` instead lets a foreign agent harness
+    be the control plane: the harness generates the program and OpenSAC only
+    supplies the sandbox, the SDK, and the capability broker. Session state --
+    the workspace filesystem and the search reference table -- persists across
+    exec calls, so a program can serialize intermediate results in one turn and
+    resolve their refs several turns later.
+    """
+
+    code: str = Field(min_length=1)
+
+
+class ExecResult(BaseModel):
+    exit_code: int
+    stdout: str
+    stderr: str
+    duration_seconds: float
+    timed_out: bool = False
+    succeeded: bool
+    output: Any = None
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    # Set when the program never reached the sandbox (code validator rejection).
+    # Distinct from stderr, which carries failures of a program that did run.
+    error: str | None = None
+    # Cumulative for the session, not for this call: quotas are enforced across
+    # the whole externally driven loop.
+    usage: RunUsage
+    artifacts: list[str] = Field(default_factory=list)
+
+
 class Run(BaseModel):
     id: str
     session_id: str

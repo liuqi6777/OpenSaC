@@ -38,6 +38,16 @@ class OpenSAC:
         response.raise_for_status()
         return response.json()
 
+    def exec_code(self, session_id: str, code: str) -> dict[str, Any]:
+        """Run one program you generated yourself, instead of delegating to
+        OpenSAC's control model via `create_run`."""
+        response = self._client.post(f"/v1/sessions/{session_id}/exec", json={"code": code})
+        response.raise_for_status()
+        return response.json()
+
+    def delete_session(self, session_id: str) -> None:
+        self._client.delete(f"/v1/sessions/{session_id}").raise_for_status()
+
     def create_and_wait(
         self,
         session_id: str,
@@ -92,6 +102,16 @@ class AsyncOpenSAC:
         response = await self._client.get(f"/v1/runs/{run_id}")
         response.raise_for_status()
         return response.json()
+
+    async def exec_code(self, session_id: str, code: str) -> dict[str, Any]:
+        """Run one program you generated yourself, instead of delegating to
+        OpenSAC's control model via `create_run`."""
+        response = await self._client.post(f"/v1/sessions/{session_id}/exec", json={"code": code})
+        response.raise_for_status()
+        return response.json()
+
+    async def delete_session(self, session_id: str) -> None:
+        (await self._client.delete(f"/v1/sessions/{session_id}")).raise_for_status()
 
     async def create_and_wait(
         self,
