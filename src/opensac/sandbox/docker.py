@@ -34,7 +34,7 @@ class DockerSandbox:
     def command(self, request: SandboxRequest, *, cid_path: Path | None = None) -> list[str]:
         workspace = request.workspace.resolve()
         cid_path = cid_path or self.broker_socket.parent / "containers" / "test.cid"
-        return [
+        command = [
             "docker",
             "run",
             "--rm",
@@ -51,8 +51,12 @@ class DockerSandbox:
             str(self.pids_limit),
             "--memory",
             self.memory,
-            "--cpus",
-            str(self.cpus),
+        ]
+        # Hosts without a mounted cpu cgroup controller reject --cpus outright
+        # ("NanoCPUs can not be set"), so allow opting out with cpus <= 0.
+        if self.cpus > 0:
+            command += ["--cpus", str(self.cpus)]
+        command += [
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
             "--cidfile",
@@ -72,6 +76,7 @@ class DockerSandbox:
             self.image,
             "/workspace/.opensac-program.py",
         ]
+        return command
 
     async def execute(self, request: SandboxRequest) -> SandboxResult:
         validate_code(request.code)
