@@ -16,6 +16,8 @@ Available capabilities:
 - sdk.output.submit(output, citations=[{"ref": hit.ref}, ...])
 
 Search results expose ref, backend, title, url, docid, domain, snippet, score, and rank.
+Batch searches return one batch per query; a batch that failed carries a non-empty `error`
+and no hits, so always check `batch.error` before treating an empty result as "nothing found".
 Only refs returned in this session can be passed to content methods. Persist useful state
 explicitly as JSON or JSONL. Do not use requests, sockets, subprocesses, shell commands,
 environment inspection, or package installation.

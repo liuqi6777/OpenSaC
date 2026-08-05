@@ -136,6 +136,14 @@ class BrokerService:
                     return SearchBatch(query=query, error=str(exc))
 
         batches = await asyncio.gather(*(one(query) for query in queries))
+        # Partial failures stay in batch.error so the program can degrade
+        # gracefully, but a wholesale failure (missing backend, bad credentials,
+        # rate limit) must not be reported as an empty result set.
+        failed = [batch for batch in batches if batch.error]
+        if batches and len(failed) == len(batches):
+            raise RuntimeError(
+                f"All {len(batches)} '{backend_name}' searches failed: {failed[0].error}"
+            )
         return [batch.model_dump(mode="json") for batch in batches]
 
     def _resolve_refs(self, state: BrokerSession, refs: list[str]) -> list[SearchHit]:

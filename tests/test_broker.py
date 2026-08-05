@@ -29,6 +29,16 @@ class FakeBackend:
         return [ContentSnippet(ref=hit.ref, text=f"content:{query}", url=hit.url) for hit in hits]
 
 
+class BrokenBackend:
+    name = "web"
+
+    async def search(self, query, *, limit, domains=None):
+        raise RuntimeError("backend exploded")
+
+    async def content(self, hits, *, query=None):
+        raise RuntimeError("backend exploded")
+
+
 def make_session(*, backends=None, max_search_calls=2):
     return Session(
         id="sess_test",
@@ -67,3 +77,21 @@ async def test_broker_enforces_search_quota() -> None:
     await service.call("token", "search.web", {"query": "first"})
     with pytest.raises(QuotaExceeded):
         await service.call("token", "search.web", {"query": "second"})
+
+
+async def test_search_many_raises_when_every_query_fails() -> None:
+    service = BrokerService({"web": BrokenBackend()})
+    service.register_session(make_session(max_search_calls=5))
+    with pytest.raises(RuntimeError, match="backend exploded"):
+        await service.call("token", "search.web_many", {"queries": ["one", "two"]})
+
+
+async def test_search_many_tolerates_partial_failure() -> None:
+    service = BrokerService({"web": FakeBackend("web")})
+    service.register_session(make_session(max_search_calls=5))
+    # An empty query is rejected by the broker while the other one succeeds.
+    batches = await service.call("token", "search.web_many", {"queries": ["ok", ""]})
+    assert len(batches[0]["hits"]) == 1
+    assert batches[0]["error"] is None
+    assert batches[1]["hits"] == []
+    assert "must not be empty" in batches[1]["error"]
