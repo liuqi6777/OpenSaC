@@ -143,6 +143,7 @@ class ApplicationRuntime:
             succeeded=result.succeeded,
             output=result.output,
             citations=result.citations,
+            error=result.launch_error,
             usage=self._session_usage(state, sandbox_seconds=result.duration_seconds),
             artifacts=self.store.artifacts(session),
         )

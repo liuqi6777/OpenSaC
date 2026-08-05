@@ -128,9 +128,31 @@ class DockerSandbox:
             output=submitted.get("output"),
             citations=submitted.get("citations", []),
             timed_out=timed_out,
+            launch_error=self._launch_error(process.returncode, stderr),
         )
         cid_path.unlink(missing_ok=True)
         return result
+
+    @staticmethod
+    def _launch_error(returncode: int | None, stderr: str) -> str | None:
+        """Tell "the container never started" apart from "the program failed".
+
+        Docker reserves exit code 125 for its own refusals -- unknown image,
+        unreachable daemon, a resource flag the host will not honour -- and
+        prefixes those messages with "docker:". Everything else on 125 came
+        from the program, which is free to exit with any code it likes.
+
+        Reporting these as ordinary program failures is actively harmful: a
+        control model reads the traceback slot, assumes its code is wrong, and
+        rewrites it until the turn budget runs out. The resulting transcript
+        looks like a model that could not solve the task.
+        """
+        if returncode != 125:
+            return None
+        first_line = stderr.strip().splitlines()[0] if stderr.strip() else ""
+        if not first_line.startswith("docker:"):
+            return None
+        return f"The sandbox container could not be started: {first_line}"
 
     @staticmethod
     async def _remove_container(cid_path: Path) -> None:

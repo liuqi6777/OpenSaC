@@ -78,8 +78,10 @@ class ExecResult(BaseModel):
     succeeded: bool
     output: Any = None
     citations: list[dict[str, Any]] = Field(default_factory=list)
-    # Set when the program never reached the sandbox (code validator rejection).
-    # Distinct from stderr, which carries failures of a program that did run.
+    # Set when the program never ran: rejected by the code validator, or the
+    # sandbox container failed to start. Distinct from stderr, which carries
+    # failures of a program that did run, because only the latter is something
+    # the caller's control model can fix by rewriting its code.
     error: str | None = None
     # Cumulative for the session, not for this call: quotas are enforced across
     # the whole externally driven loop.
