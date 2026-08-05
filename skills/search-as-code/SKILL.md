@@ -45,7 +45,9 @@ still resolve in a later one. Submit only evidence and summaries useful to the c
 model, not every raw result.
 
 Never use direct HTTP, sockets, subprocesses, shell commands, credentials, environment
-inspection, or package installation. Citations must contain opaque refs returned by search;
+inspection, or package installation. Dunder attributes are rejected apart from `__name__`
+and `__doc__`, so report errors with `type(exc).__name__` and never introspect via
+`__class__` or `__dict__`. Citations must contain opaque refs returned by search;
 the broker resolves their trusted URL, document ID, title, and evidence. Never invent refs.
 
 ## Pattern

@@ -22,11 +22,36 @@ def test_validator_accepts_sdk_orchestration() -> None:
         "from socket import socket",
         "eval('1 + 1')",
         "object.__subclasses__()",
+        "().__class__.__bases__[0].__subclasses__()",
+        "print(sdk.search.__globals__)",
+        "print(open.__self__.__dict__)",
     ],
 )
 def test_validator_blocks_dangerous_code(code) -> None:
     with pytest.raises(UnsafeCodeError):
         validate_code(code)
+
+
+def test_validator_allows_reporting_an_exception_type() -> None:
+    """`type(exc).__name__` is how Python code names an error.
+
+    Generated pipelines wrap retrieval in try/except constantly, so rejecting
+    the whole program over its error message burned a turn per occurrence and
+    taught the control model nothing about the real rule.
+    """
+    validate_code(
+        "from opensac_sdk import sdk\n"
+        "try:\n"
+        "    hits = sdk.search.local('query')\n"
+        "except Exception as exc:\n"
+        "    print(f'{type(exc).__name__}: {exc}')\n"
+        "    print(sdk.search.local.__doc__)\n"
+    )
+
+
+def test_rejection_names_the_offending_dunder() -> None:
+    with pytest.raises(UnsafeCodeError, match="__class__"):
+        validate_code("x = object().__class__")
 
 
 def test_docker_command_has_security_boundaries(tmp_path) -> None:
