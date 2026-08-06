@@ -24,7 +24,7 @@ import secrets
 import tempfile
 from pathlib import Path
 
-from opensac.backends import LocalSearchBackend, PerplexityBackend
+from opensac.backends import LocalSearchBackend, SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService
 from opensac.config import Settings
 from opensac.models import RunLimits, Session
@@ -52,7 +52,7 @@ async def main() -> int:
     service = BrokerService(
         {
             "local": LocalSearchBackend(settings.local_search_base_url),
-            "web": PerplexityBackend(settings.perplexity_api_key),
+            "web": SerperBackend(settings.serper_api_key),
         },
         model_client=None,
         extraction_model="",

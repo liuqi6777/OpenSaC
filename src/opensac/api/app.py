@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from openai import AsyncOpenAI
 
 from opensac.agent import AgentController
-from opensac.backends import LocalSearchBackend, PerplexityBackend
+from opensac.backends import LocalSearchBackend, SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService
 from opensac.broker.service import BrokerSession
 from opensac.config import Settings
@@ -45,7 +45,7 @@ class ApplicationRuntime:
         self.broker = BrokerService(
             {
                 "local": LocalSearchBackend(settings.local_search_base_url),
-                "web": PerplexityBackend(settings.perplexity_api_key),
+                "web": SerperBackend(settings.serper_api_key),
             },
             model_client=self.model_client if settings.model_name else None,
             extraction_model=settings.model_name,

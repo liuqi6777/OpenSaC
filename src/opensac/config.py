@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     model_temperature: float = 0.1
 
     local_search_base_url: str = "http://127.0.0.1:8081"
-    perplexity_api_key: str = ""
+    serper_api_key: str = ""
 
     sandbox_image: str = "opensac-sandbox:latest"
     sandbox_timeout_seconds: int = 120

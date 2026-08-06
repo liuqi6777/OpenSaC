@@ -1,5 +1,5 @@
 from .base import SearchBackend
 from .local_http import LocalSearchBackend
-from .perplexity import PerplexityBackend
+from .serper import SerperBackend
 
-__all__ = ["LocalSearchBackend", "PerplexityBackend", "SearchBackend"]
+__all__ = ["LocalSearchBackend", "SearchBackend", "SerperBackend"]

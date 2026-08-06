@@ -15,7 +15,7 @@ OpenAI-compatible model -> generated Python -> Docker sandbox
                                                 |
                                   host capability broker
                                      /                 \
-                           local search HTTP       Perplexity SDK
+                            local search HTTP       Serper API
 ```
 
 The sandbox has no network, credentials, Docker socket, or host filesystem access beyond its
@@ -48,12 +48,11 @@ Configure `OPENSAC_MODEL_API_KEY`, `OPENSAC_MODEL_NAME`, and optionally
 For local retrieval, run the compatible DeepResearch endpoint at
 `OPENSAC_LOCAL_SEARCH_BASE_URL`. It must expose `POST /search` and `POST /get_document`.
 
-For web retrieval, install your private `perplexity-sdk` wheel and set a key. The SDK is not
-available from the configured public package registry, so it is intentionally loaded at runtime:
+For web retrieval, set a [Serper](https://serper.dev) API key. No extra dependency is needed --
+the backend talks to Serper's search and scrape endpoints over plain HTTP:
 
 ```bash
-uv pip install /path/to/perplexity_sdk.whl
-export OPENSAC_PERPLEXITY_API_KEY=pplx-...
+export OPENSAC_SERPER_API_KEY=...
 ```
 
 ## Submit A Task
