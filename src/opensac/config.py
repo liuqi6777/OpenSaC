@@ -38,3 +38,8 @@ class Settings(BaseSettings):
     max_llm_calls: int = 30
     max_concurrency: int = 12
     max_output_bytes: int = Field(default=1_000_000, ge=1024)
+    # Only reached by a session that disables context decoupling, where every
+    # capability result is echoed back through the trace. Generous on purpose:
+    # that arm exists to measure what the results cost in context, so the cap is
+    # a guard against one runaway page breaking the RPC response, not a budget.
+    max_context_payload_bytes: int = Field(default=200_000, ge=1024)

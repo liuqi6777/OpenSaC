@@ -5,7 +5,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from opensac.models import Run, RunCreate, Session, SessionCreate
+from opensac.models import ProgramRecord, Run, RunCreate, Session, SessionCreate
 
 
 class StateStore:
@@ -26,6 +26,10 @@ class StateStore:
             backends=request.backends,
             limits=request.limits,
             workspace=str(workspace),
+            # Frozen onto the session, not read from process settings: the arm a
+            # run belongs to has to stay recoverable from its own record after
+            # the server has been restarted with a different configuration.
+            mechanisms=request.mechanisms,
         )
         self.save_session(session)
         return session
@@ -67,8 +71,58 @@ class StateStore:
             raise KeyError(run_id)
         return Run.model_validate_json(path.read_text(encoding="utf-8"))
 
-    def artifacts(self, session: Session) -> list[str]:
-        workspace = Path(session.workspace)
+    def programs_dir(self, session: Session) -> Path:
+        """Where generated programs are archived.
+
+        A sibling of the workspace, never inside it. Two consequences are the
+        reason: the archive survives a session whose persistence mechanism is
+        switched off (the workspace is thrown away between calls there), and it
+        is never bind-mounted into the sandbox, so a program cannot read or
+        rewrite the record of what earlier programs did.
+        """
+        return self.sessions_dir / session.id / "programs"
+
+    def reserve_program(self, session: Session, code: str) -> tuple[int, Path]:
+        """Claim the next sequence number and write the program under it.
+
+        Callers must hold a per-session lock: two concurrent executions would
+        otherwise read the same directory listing and claim the same number.
+        """
+        directory = self.programs_dir(session)
+        directory.mkdir(parents=True, exist_ok=True)
+        sequence = len(list(directory.glob("*.py")))
+        path = directory / f"{sequence:03d}.py"
+        path.write_text(code, encoding="utf-8")
+        return sequence, path
+
+    def record_program(self, session: Session, record: ProgramRecord) -> None:
+        path = self.programs_dir(session) / "programs.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(record.model_dump_json() + "\n")
+
+    def programs(self, session: Session) -> list[ProgramRecord]:
+        path = self.programs_dir(session) / "programs.jsonl"
+        if not path.exists():
+            return []
+        return [
+            ProgramRecord.model_validate_json(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def artifacts(self, session: Session, workspace: Path | None = None) -> list[str]:
+        """Files the program wrote, as the control model should see them.
+
+        ``workspace`` overrides the session's own directory for a session that
+        has persistence disabled and therefore ran against a throwaway one. The
+        files are still reported: within a single program, writing and reading
+        back is ordinary behaviour, and it is only the survival across calls
+        that the switch removes.
+        """
+        workspace = Path(workspace or session.workspace)
+        if not workspace.exists():
+            return []
         return [
             str(path.relative_to(workspace))
             for path in workspace.rglob("*")

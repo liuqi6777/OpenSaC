@@ -7,9 +7,9 @@ from types import SimpleNamespace
 import pytest
 from opensac_sdk.models import ContentSnippet, SearchHit
 
-from opensac.broker.policy import QuotaExceeded
+from opensac.broker.policy import MechanismDisabled, QuotaExceeded
 from opensac.broker.service import BrokerService
-from opensac.models import RunLimits, Session
+from opensac.models import CAPABILITY_METHODS, Mechanisms, RunLimits, Session
 
 
 class FakeBackend:
@@ -43,13 +43,14 @@ class BrokenBackend:
         raise RuntimeError("backend exploded")
 
 
-def make_session(*, backends=None, max_search_calls=2):
+def make_session(*, backends=None, max_search_calls=2, mechanisms=None):
     return Session(
         id="sess_test",
         token="token",
         backends=backends or ["web"],
         limits=RunLimits(max_search_calls=max_search_calls),
         workspace="/tmp/session",
+        mechanisms=mechanisms or Mechanisms(),
     )
 
 
@@ -252,3 +253,212 @@ async def test_llm_calls_fail_when_no_model_is_configured() -> None:
     service.register_session(make_session())
     with pytest.raises(RuntimeError, match="not configured"):
         await service.call("token", "llm.complete", {"prompt": "hello"})
+
+
+class RankedBackend:
+    """Returns a fixed document set, so the same page recurs across queries."""
+
+    name = "web"
+
+    def __init__(self, urls: list[str]) -> None:
+        self.urls = urls
+
+    async def search(self, query, *, limit, domains=None):
+        return [
+            SearchHit(
+                ref="",
+                backend="web",
+                title=f"{query}-{index}",
+                url=url,
+                snippet="snippet",
+                score=1.0 / (index + 1),
+                rank=index + 1,
+            )
+            for index, url in enumerate(self.urls[:limit])
+        ]
+
+    async def content(self, hits, *, query=None):
+        return [ContentSnippet(ref=hit.ref, text="body", url=hit.url) for hit in hits]
+
+
+async def test_the_same_document_keeps_one_ref_across_queries() -> None:
+    """Two queries surfacing one page must hand back one handle.
+
+    With a fresh random ref per sighting the program cannot tell that it already
+    has the page, so it re-fetches it and double-counts the evidence -- and no
+    two runs of the same recorded search produce the same refs, which is what
+    makes a trajectory unreplayable.
+    """
+    service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
+    state = service.register_session(make_session(max_search_calls=5))
+
+    first = await service.call("token", "search.web", {"query": "one"})
+    second = await service.call("token", "search.web", {"query": "two"})
+
+    assert first[0]["ref"] == second[0]["ref"]
+    assert len(state.references) == 1
+
+
+async def test_refs_are_opaque_and_reproducible() -> None:
+    """Same document, different process: same handle."""
+    urls = ["https://Example.com/a?utm_source=news&id=7#section"]
+    left = BrokerService({"web": RankedBackend(urls)})
+    left.register_session(make_session())
+    right = BrokerService({"web": RankedBackend(urls)})
+    right.register_session(make_session())
+
+    one = (await left.call("token", "search.web", {"query": "q"}))[0]["ref"]
+    two = (await right.call("token", "search.web", {"query": "q"}))[0]["ref"]
+
+    assert one == two
+    assert one.startswith("ref_")
+    # Opaque: nothing a program could have constructed for itself.
+    assert "example.com" not in one
+
+
+def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:
+    canonical = BrokerService._canonical_url
+    assert canonical("HTTPS://Example.COM/a?utm_source=x&id=7#frag") == (
+        "https://example.com/a?id=7"
+    )
+    # Order of surviving parameters must not decide identity.
+    assert canonical("https://e.com/p?b=2&a=1") == canonical("https://e.com/p?a=1&b=2")
+    # Paths are left alone: /a and /a/ can be different pages and nothing here
+    # can prove otherwise.
+    assert canonical("https://e.com/a") != canonical("https://e.com/a/")
+
+
+async def test_trace_records_identity_and_rank_for_every_hit() -> None:
+    """Rank and duplication cannot be recovered after the fact.
+
+    A baseline that logged only `result_count` can never be asked afterwards
+    whether ranking or duplicate candidates were the bottleneck -- which is
+    exactly the question that decides whether a fusion/dedup layer is worth
+    building.
+    """
+    service = BrokerService(
+        {"web": RankedBackend(["https://example.com/a", "https://example.com/b"])}
+    )
+    service.register_session(make_session(max_search_calls=5))
+
+    await service.call(
+        "token",
+        "search.web_many",
+        {"queries": ["one", "two"], "limit_per_query": 2},
+        execution_id="exec-hits",
+    )
+    event = service.take_trace("token", "exec-hits")[0]
+
+    # A fan-out lands in one event, so per-query duplication is visible in it.
+    assert len(event.hits) == 4
+    assert [hit.rank for hit in event.hits] == [1, 2, 1, 2]
+    assert len({hit.identity for hit in event.hits}) == 2
+    assert event.hits[0].score == 1.0
+    # Addresses yes, page text no.
+    assert "snippet" not in event.model_dump_json()
+
+
+async def test_batching_disabled_forces_one_item_per_call() -> None:
+    """The switch bounds fan-out; it does not remove the method.
+
+    Removing `*_many` outright would also remove structured extraction, since
+    `llm.extract_many` has no singular form, and the arm would then be measuring
+    two things at once.
+    """
+    service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
+    service.register_session(
+        make_session(max_search_calls=5, mechanisms=Mechanisms(batching=False))
+    )
+
+    with pytest.raises(MechanismDisabled, match="at most one item"):
+        await service.call(
+            "token",
+            "search.web_many",
+            {"queries": ["one", "two"]},
+            execution_id="exec-block",
+        )
+    batches = await service.call("token", "search.web_many", {"queries": ["one"]})
+    assert len(batches[0]["hits"]) == 1
+
+    # A blocked call is still an event: an arm that disables a capability wants
+    # to know how often the model kept reaching for it.
+    blocked = service.take_trace("token", "exec-block")[0]
+    assert blocked.status == "error"
+    assert blocked.error_type == "MechanismDisabled"
+
+
+async def test_llm_subroutine_disabled_blocks_the_whole_capability_class() -> None:
+    service, client = make_llm_service(max_llm_calls=5)
+    service.sessions["token"].session.mechanisms = Mechanisms(llm_subroutine=False)
+
+    with pytest.raises(MechanismDisabled, match="plain Python"):
+        await service.call("token", "llm.complete", {"prompt": "plan"})
+    assert client.calls == []
+    # Blocked before the quota is touched, so the arm does not also change budget.
+    assert service.sessions["token"].policy.usage.llm_calls == 0
+
+
+async def test_context_decoupling_disabled_echoes_results_into_the_trace() -> None:
+    """The arm that separates "can orchestrate" from "middle never reaches context".
+
+    Same interface, same expressiveness -- only the results come back, so the
+    caller can put them in the control model's conversation.
+    """
+    service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
+    service.register_session(
+        make_session(mechanisms=Mechanisms(context_decoupling=False))
+    )
+
+    hits = await service.call(
+        "token", "search.web", {"query": "q"}, execution_id="exec-echo"
+    )
+    event = service.take_trace("token", "exec-echo")[0]
+    assert event.result_payload == hits
+    assert event.result_payload_truncated is False
+
+
+async def test_default_sessions_keep_results_out_of_the_trace() -> None:
+    service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
+    service.register_session(make_session())
+    await service.call("token", "search.web", {"query": "q"}, execution_id="exec-plain")
+    event = service.take_trace("token", "exec-plain")[0]
+    assert event.result_payload is None
+
+
+async def test_oversized_payload_is_capped_and_says_so() -> None:
+    service = BrokerService(
+        {"web": RankedBackend([f"https://example.com/{index}" for index in range(50)])},
+        max_context_payload_bytes=200,
+    )
+    service.register_session(
+        make_session(mechanisms=Mechanisms(context_decoupling=False))
+    )
+    await service.call(
+        "token", "search.web", {"query": "q", "limit": 50}, execution_id="exec-big"
+    )
+    event = service.take_trace("token", "exec-big")[0]
+    assert event.result_payload_truncated is True
+    assert len(event.result_payload) == 200
+
+
+async def test_capability_methods_stay_in_step_with_the_handler_table() -> None:
+    """CAPABILITY_METHODS drives the session manifest and so the skill text.
+
+    A capability added on one side only is either invisible to the model or
+    advertised to it without an implementation, and both cost a turn to find
+    out. The assertion lives on the dispatch path, so any call exercises it.
+    """
+    service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
+    service.register_session(make_session())
+    with pytest.raises(ValueError, match="Unsupported capability"):
+        await service.call("token", "search.nope", {})
+
+
+def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
+    assert Mechanisms().capabilities() == list(CAPABILITY_METHODS)
+    without_llm = Mechanisms(llm_subroutine=False).capabilities()
+    assert not any(method.startswith("llm.") for method in without_llm)
+    assert "search.web_many" in without_llm
+    # Batching bounds a call's width rather than removing it, so the method is
+    # still reachable and must still be advertised.
+    assert Mechanisms(batching=False).capabilities() == list(CAPABILITY_METHODS)

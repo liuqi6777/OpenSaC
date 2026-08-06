@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import tempfile
 import uuid
-from collections import defaultdict
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections import Counter, defaultdict
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -19,8 +20,10 @@ from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_p
 from opensac.broker.service import BrokerSession
 from opensac.config import Settings
 from opensac.models import (
+    CapabilityEvent,
     ExecCreate,
     ExecResult,
+    ProgramRecord,
     PublicRun,
     PublicSession,
     Run,
@@ -31,7 +34,7 @@ from opensac.models import (
     SessionCreate,
 )
 from opensac.sandbox import DockerSandbox, UnsafeCodeError
-from opensac.sandbox.base import SandboxRequest
+from opensac.sandbox.base import SandboxRequest, SandboxResult
 from opensac.store import StateStore
 
 
@@ -51,6 +54,7 @@ class ApplicationRuntime:
             model_client=self.model_client if settings.model_name else None,
             extraction_model=settings.model_name,
             max_concurrency=settings.max_concurrency,
+            max_context_payload_bytes=settings.max_context_payload_bytes,
         )
         broker_socket = resolve_broker_socket_path(settings.broker_socket)
         self.broker_runtime = BrokerRuntime(self.broker, broker_socket)
@@ -75,6 +79,7 @@ class ApplicationRuntime:
         # rollouts in flight. Without a ceiling each in-flight tool call would
         # start its own container.
         self.sandbox_gate = asyncio.Semaphore(settings.sandbox_max_concurrency)
+        self.session_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def start(self) -> None:
         await self.broker_runtime.start()
@@ -111,6 +116,49 @@ class ApplicationRuntime:
             state = self.broker.register_session(session)
         return state
 
+    @contextmanager
+    def _exec_workspace(self, session: Session) -> Iterator[Path]:
+        """The directory this execution runs against.
+
+        With persistence enabled -- the default and the only configuration a
+        normal run uses -- this is the session's own workspace, so files written
+        in one call are there in the next. Disabled, the program gets a fresh
+        directory that is discarded on the way out: it can still write and read
+        back within one program, but it cannot carry anything forward, which is
+        the property the ablation removes.
+        """
+        if session.mechanisms.persistence:
+            workspace = Path(session.workspace)
+            workspace.mkdir(parents=True, exist_ok=True)
+            yield workspace
+            return
+        with tempfile.TemporaryDirectory(prefix="opensac-ephemeral-") as directory:
+            yield Path(directory)
+
+    @staticmethod
+    def _program_error_category(
+        result: SandboxResult | None, *, rejected: bool = False
+    ) -> str | None:
+        """What went wrong, from what this process alone can see.
+
+        Deliberately coarser than the host-side classifier, which also reads the
+        capability trace and can tell a search failure from a fetch failure.
+        This one only has to separate the classes that decide whether a program
+        ran at all, because those are the ones that must not be read as the
+        model failing at the task.
+        """
+        if rejected:
+            return "code_validation"
+        if result is None:
+            return "sandbox"
+        if result.launch_error:
+            return "sandbox"
+        if result.timed_out:
+            return "timeout"
+        if result.exit_code != 0:
+            return "runtime"
+        return None
+
     async def execute_code(
         self,
         session: Session,
@@ -119,47 +167,100 @@ class ApplicationRuntime:
         include_trace: bool = False,
     ) -> ExecResult:
         state = self.bind_session(session)
-        workspace = Path(session.workspace)
-        execution_id = uuid.uuid4().hex if include_trace else None
-        try:
-            async with self.sandbox_gate:
-                result = await self.sandbox.execute(
-                    SandboxRequest(
-                        code=code,
-                        workspace=workspace,
-                        session_token=session.token,
-                        execution_id=execution_id,
-                    )
-                )
-        except UnsafeCodeError as exc:
-            # A rejection is a normal observation for the control model, not a
-            # transport error: it has to see the reason and rewrite the program.
-            return ExecResult(
-                exit_code=-1,
-                stdout="",
-                stderr="",
-                duration_seconds=0.0,
-                succeeded=False,
-                error=f"Rejected by the sandbox code validator: {exc}",
-                usage=self._session_usage(state),
-                artifacts=self.store.artifacts(session),
-                trace=self.broker.take_trace(session.token, execution_id),
+        # One execution at a time per session. The workspace, the program
+        # archive and the broker's reference table are all session-scoped, and
+        # two programs sharing them concurrently is not a configuration anyone
+        # asks for -- but it used to be reachable, and it silently corrupted the
+        # archive by letting one program's code be recorded against another's
+        # result. The ceiling on total containers is a separate, global gate.
+        async with self.session_locks[session.id]:
+            sequence, program_path = self.store.reserve_program(session, code)
+            # An execution id is always minted, not only when the caller wants
+            # the trace back: the per-program capability counts come from the
+            # same trace, and it is drained unconditionally below, so nothing
+            # accumulates for a caller that never asks for it.
+            execution_id = uuid.uuid4().hex
+            request_names = {
+                "program_filename": f".opensac-program-{sequence:03d}.py",
+                "output_filename": f".opensac-output-{sequence:03d}.json",
+            }
+            with self._exec_workspace(session) as workspace:
+                result: SandboxResult | None = None
+                rejection: str | None = None
+                try:
+                    async with self.sandbox_gate:
+                        result = await self.sandbox.execute(
+                            SandboxRequest(
+                                code=code,
+                                workspace=workspace,
+                                session_token=session.token,
+                                execution_id=execution_id,
+                                **request_names,
+                            )
+                        )
+                except UnsafeCodeError as exc:
+                    # A rejection is a normal observation for the control model,
+                    # not a transport error: it has to see the reason and
+                    # rewrite the program.
+                    rejection = f"Rejected by the sandbox code validator: {exc}"
+
+                if result is not None:
+                    await state.policy.record_sandbox_seconds(result.duration_seconds)
+                trace = self.broker.take_trace(session.token, execution_id)
+                artifacts = self.store.artifacts(session, workspace)
+
+            self.store.record_program(
+                session,
+                ProgramRecord(
+                    sequence=sequence,
+                    path=str(program_path),
+                    code=code,
+                    exit_code=result.exit_code if result else -1,
+                    timed_out=bool(result.timed_out) if result else False,
+                    duration_seconds=result.duration_seconds if result else 0.0,
+                    error=rejection or (result.launch_error if result else None),
+                    error_category=self._program_error_category(
+                        result, rejected=rejection is not None
+                    ),
+                    stdout_bytes=len(result.stdout.encode()) if result else 0,
+                    stderr_bytes=len(result.stderr.encode()) if result else 0,
+                    capability_calls=dict(Counter(event.method for event in trace)),
+                ),
             )
-        await state.policy.record_sandbox_seconds(result.duration_seconds)
-        return ExecResult(
-            exit_code=result.exit_code,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            duration_seconds=result.duration_seconds,
-            timed_out=result.timed_out,
-            succeeded=result.succeeded,
-            output=result.output,
-            citations=result.citations,
-            error=result.launch_error,
-            usage=self._session_usage(state),
-            artifacts=self.store.artifacts(session),
-            trace=self.broker.take_trace(session.token, execution_id),
-        )
+
+            return ExecResult(
+                exit_code=result.exit_code if result else -1,
+                stdout=result.stdout if result else "",
+                stderr=result.stderr if result else "",
+                duration_seconds=result.duration_seconds if result else 0.0,
+                timed_out=bool(result.timed_out) if result else False,
+                succeeded=bool(result.succeeded) if result else False,
+                output=result.output if result else None,
+                citations=result.citations if result else [],
+                error=rejection or (result.launch_error if result else None),
+                usage=self._session_usage(state),
+                artifacts=artifacts,
+                trace=self._returned_trace(session, trace, include_trace=include_trace),
+            )
+
+    @staticmethod
+    def _returned_trace(
+        session: Session,
+        trace: list[CapabilityEvent],
+        *,
+        include_trace: bool,
+    ) -> list[CapabilityEvent]:
+        """What of the trace goes back to the caller.
+
+        A session that disables context decoupling puts its results in the
+        trace, and those results are the whole point of that arm -- so the
+        caller gets them whether or not it asked for a trace, since a harness
+        written against the default would otherwise silently run the ablation
+        without receiving what makes it an ablation.
+        """
+        if include_trace or not session.mechanisms.context_decoupling:
+            return trace
+        return []
 
     def _session_usage(self, state: BrokerSession) -> RunUsage:
         return RunUsage.model_validate(state.policy.usage.model_dump())
@@ -220,7 +321,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Run not found") from exc
 
     def public_session(session: Session) -> PublicSession:
-        return PublicSession.model_validate(session.model_dump(exclude={"token", "workspace"}))
+        return PublicSession.model_validate(
+            {
+                **session.model_dump(exclude={"token", "workspace"}),
+                "capabilities": session.mechanisms.capabilities(),
+            }
+        )
 
     def public_run(run: Run) -> PublicRun:
         session = get_session(run.session_id)
@@ -256,6 +362,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session = get_session(session_id)
         runtime.broker.unregister_session(session.token)
         runtime.store.delete_session(session_id)
+        runtime.session_locks.pop(session_id, None)
         return {"status": "deleted"}
 
     @app.post(

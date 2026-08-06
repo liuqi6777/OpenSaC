@@ -1,25 +1,59 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
-import uuid
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from openai import AsyncOpenAI
 from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
 from opensac.backends.base import SearchBackend
-from opensac.broker.policy import CapabilityPolicy
-from opensac.models import CapabilityEvent, Session
+from opensac.broker.policy import CapabilityPolicy, MechanismDisabled
+from opensac.models import CAPABILITY_METHODS, CapabilityEvent, HitRecord, Mechanisms, Session
 
 _EVENT_MODEL_TOKENS: ContextVar[int] = ContextVar(
     "opensac_event_model_tokens", default=0
+)
+# Hits minted while serving the capability currently on the stack. `_search_many`
+# calls `_search` directly rather than re-entering `call`, so a fan-out
+# accumulates into the one event that represents it, which is what makes
+# per-query duplication measurable.
+#
+# Defaults to None rather than to a list: a mutable default is shared by every
+# context that never calls `.set()`, so a search reached outside `call` would
+# append to one process-global list that nothing ever drains.
+_EVENT_HITS: ContextVar[list[HitRecord] | None] = ContextVar(
+    "opensac_event_hits", default=None
+)
+
+# Query parameters that identify a referrer rather than a document. Stripping
+# them keeps two links to the same page from being counted as two documents.
+# Deliberately a short, conservative list: a parameter wrongly stripped merges
+# pages that are genuinely different, which is the worse error.
+_TRACKING_PARAMS = frozenset(
+    {
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_term",
+        "utm_content",
+        "utm_id",
+        "gclid",
+        "fbclid",
+        "msclkid",
+        "mc_cid",
+        "mc_eid",
+        "ref_src",
+        "spm",
+    }
 )
 
 
@@ -30,6 +64,10 @@ class BrokerSession:
     references: dict[str, SearchHit] = field(default_factory=dict)
     traces: dict[str, list[CapabilityEvent]] = field(default_factory=dict)
     trace_sequence: int = 0
+
+    @property
+    def mechanisms(self) -> Mechanisms:
+        return self.session.mechanisms
 
     def next_trace_sequence(self) -> int:
         self.trace_sequence += 1
@@ -44,12 +82,14 @@ class BrokerService:
         model_client: AsyncOpenAI | None = None,
         extraction_model: str = "",
         max_concurrency: int = 12,
+        max_context_payload_bytes: int = 200_000,
     ) -> None:
         self.backends = backends
         self.model_client = model_client
         self.extraction_model = extraction_model
         self.sessions: dict[str, BrokerSession] = {}
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        self.max_context_payload_bytes = max_context_payload_bytes
 
     def register_session(self, session: Session, *, token: str | None = None) -> BrokerSession:
         state = BrokerSession(
@@ -85,13 +125,28 @@ class BrokerService:
             "llm.complete_many": self._complete_many,
             "llm.extract_many": self._extract_many,
         }
+        assert set(handlers) == set(CAPABILITY_METHODS), (
+            "The handler table and models.CAPABILITY_METHODS have diverged. "
+            "CAPABILITY_METHODS drives the session manifest and therefore the "
+            "skill text, so a capability added on one side only is either "
+            "invisible to the model or advertised without an implementation."
+        )
         handler = handlers.get(method)
         if handler is None:
             raise ValueError(f"Unsupported capability: {method}")
         sequence = state.next_trace_sequence()
         started = time.monotonic()
         token_context = _EVENT_MODEL_TOKENS.set(0)
+        hits_context = _EVENT_HITS.set([])
         try:
+            # Mechanism gates sit inside the traced region on purpose: an arm
+            # that disables a capability wants to know how often the model kept
+            # reaching for it, which is only visible if blocked calls are events.
+            blocked = state.mechanisms.blocked_reason(method) or state.mechanisms.fanout_reason(
+                method, params
+            )
+            if blocked:
+                raise MechanismDisabled(blocked)
             result = await handler(state, params)
         except Exception as exc:
             self._append_trace(
@@ -104,12 +159,14 @@ class BrokerService:
                     duration_seconds=time.monotonic() - started,
                     queries=self._trace_queries(method, params),
                     input_count=self._trace_input_count(method, params),
+                    hits=list(_EVENT_HITS.get() or []),
                     model_tokens=_EVENT_MODEL_TOKENS.get(),
                     error_type=type(exc).__name__,
                 ),
             )
             raise
         else:
+            payload, truncated = self._context_payload(state, result)
             self._append_trace(
                 state,
                 execution_id,
@@ -121,12 +178,33 @@ class BrokerService:
                     queries=self._trace_queries(method, params),
                     input_count=self._trace_input_count(method, params),
                     result_count=self._trace_result_count(method, result),
+                    hits=list(_EVENT_HITS.get() or []),
                     model_tokens=_EVENT_MODEL_TOKENS.get(),
+                    result_payload=payload,
+                    result_payload_truncated=truncated,
                 ),
             )
             return result
         finally:
             _EVENT_MODEL_TOKENS.reset(token_context)
+            _EVENT_HITS.reset(hits_context)
+
+    def _context_payload(self, state: BrokerSession, result: Any) -> tuple[Any, bool]:
+        """The result echoed back for a session that disables context decoupling.
+
+        Returns ``(None, False)`` in every default run, so the trace a normal
+        experiment writes is unchanged. When the switch is off the whole result
+        goes back, capped only to keep one runaway page from breaking the RPC
+        response; the cap is reported rather than hidden, because an arm that
+        silently truncated would understate exactly the cost it exists to
+        measure.
+        """
+        if state.mechanisms.context_decoupling:
+            return None, False
+        encoded = json.dumps(result, ensure_ascii=False, default=str)
+        if len(encoded.encode("utf-8")) <= self.max_context_payload_bytes:
+            return result, False
+        return encoded[: self.max_context_payload_bytes], True
 
     @staticmethod
     def _append_trace(
@@ -204,10 +282,76 @@ class BrokerService:
                 limit=limit,
                 domains=params.get("domains"),
             )
+        recorded = _EVENT_HITS.get()
         for hit in hits:
-            hit.ref = f"ref_{uuid.uuid4().hex}"
-            state.references[hit.ref] = hit
+            identity = self._identity(hit)
+            hit.ref = self._ref_for(identity)
+            # First sighting wins. The stored hit is only used to reach content
+            # and to resolve a citation, and both are properties of the document
+            # rather than of the query that surfaced it; keeping the first makes
+            # the table independent of the order queries happened to complete.
+            # The dict returned to the program still carries this query's own
+            # rank and snippet.
+            state.references.setdefault(hit.ref, hit)
+            if recorded is not None:
+                recorded.append(
+                    HitRecord(identity=identity, rank=hit.rank, score=hit.score)
+                )
         return [hit.model_dump(mode="json") for hit in hits]
+
+    @staticmethod
+    def _canonical_url(url: str) -> str:
+        """Fold the spellings of a URL that mean the same page.
+
+        Conservative on purpose: lower-case scheme and host, drop the fragment,
+        drop known tracking parameters, sort what remains. No redirect
+        following, no rel=canonical, no path normalisation -- those need a
+        network round trip or a guess, and a wrong merge silently deletes a page
+        the program could otherwise have read.
+        """
+        parts = urlsplit(url.strip())
+        query = sorted(
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key.lower() not in _TRACKING_PARAMS
+        )
+        encoded = "&".join(f"{key}={value}" for key, value in query)
+        return urlunsplit(
+            (parts.scheme.lower(), parts.netloc.lower(), parts.path, encoded, "")
+        )
+
+    @classmethod
+    def _identity(cls, hit: SearchHit) -> str:
+        """A stable key for the document behind a hit.
+
+        Two jobs, and the second is the one that is easy to miss. It lets
+        duplicate candidates be counted across queries -- but it is also what
+        makes a reference reproducible: with a random handle per sighting, two
+        replays of the same recorded search produce different refs, and any
+        program that sorts or keys on a ref stops being deterministic.
+
+        Backends are never merged. A local docid and a web URL can describe the
+        same text, but nothing here can prove it, and a wrong merge is silent.
+        """
+        if hit.docid:
+            return f"{hit.backend}:docid:{hit.docid}"
+        if hit.url:
+            return f"{hit.backend}:url:{cls._canonical_url(hit.url)}"
+        # A backend that returns neither is degenerate, but falling back to a
+        # random key would quietly reintroduce the unreproducibility this method
+        # exists to remove.
+        digest = hashlib.sha256(f"{hit.title}\n{hit.snippet}".encode()).hexdigest()[:32]
+        return f"{hit.backend}:text:{digest}"
+
+    @staticmethod
+    def _ref_for(identity: str) -> str:
+        """An opaque, session-independent handle derived from the identity.
+
+        Opaque because a program must not construct one; derived because the
+        same document has to come back as the same ref for deduplication and
+        replay to work at all.
+        """
+        return f"ref_{hashlib.sha256(identity.encode()).hexdigest()[:16]}"
 
     async def _search_web_many(
         self, state: BrokerSession, params: dict[str, Any]

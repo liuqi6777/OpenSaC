@@ -104,3 +104,27 @@ def test_launch_error_marks_the_result_as_failed() -> None:
         launch_error="The sandbox container could not be started: docker: boom",
     )
     assert result.succeeded is False
+
+
+def test_program_and_output_files_are_named_per_execution(tmp_path) -> None:
+    """Two executions sharing a session must not share these two paths.
+
+    They used to be fixed names in the shared workspace, so concurrent calls
+    overwrote each other and the container ran whichever program landed last.
+    That corrupts the archive as well as the run: the code recorded for a
+    sequence would not be the code that produced its result.
+    """
+    socket = tmp_path / "broker.sock"
+    socket.touch()
+    sandbox = DockerSandbox(image="opensac-test", broker_socket=socket)
+    command = sandbox.command(
+        SandboxRequest(
+            "pass",
+            tmp_path / "workspace",
+            "secret",
+            program_filename=".opensac-program-007.py",
+            output_filename=".opensac-output-007.json",
+        )
+    )
+    assert command[-1] == "/workspace/.opensac-program-007.py"
+    assert "OPENSAC_OUTPUT_PATH=/workspace/.opensac-output-007.json" in command

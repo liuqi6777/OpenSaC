@@ -10,6 +10,17 @@ class QuotaExceeded(RuntimeError):
     pass
 
 
+class MechanismDisabled(RuntimeError):
+    """A capability the session's experimental arm has switched off.
+
+    Deliberately not a PermissionError: the broker maps those to HTTP 403,
+    whose body the SDK transport discards, so the program would see only
+    "Broker request failed". This one travels the ordinary error path, which
+    preserves the message -- and the message is the whole point, since the
+    program has to restructure itself around the missing capability.
+    """
+
+
 @dataclass
 class CapabilityPolicy:
     limits: RunLimits

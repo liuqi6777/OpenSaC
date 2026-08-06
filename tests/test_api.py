@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from opensac.api import create_app
@@ -127,3 +129,134 @@ def test_exec_rejects_unknown_session(tmp_path) -> None:
     with exec_client(tmp_path, RecordingSandbox()) as client:
         response = client.post("/v1/sessions/sess_missing/exec", json={"code": "pass\n"})
         assert response.status_code == 404
+
+
+class TurnMarkingSandbox:
+    """Writes a file named after the turn, so persistence is observable."""
+
+    def __init__(self) -> None:
+        self.requests: list[SandboxRequest] = []
+
+    async def execute(self, request: SandboxRequest) -> SandboxResult:
+        turn = len(self.requests)
+        self.requests.append(request)
+        (request.workspace / f"turn-{turn}.txt").write_text("x", encoding="utf-8")
+        return SandboxResult(
+            exit_code=0, stdout="", stderr="", duration_seconds=0.5
+        )
+
+
+def test_every_program_is_archived_with_the_name_it_ran_under(tmp_path) -> None:
+    """The generated program is the action; a run that keeps only counts has
+    thrown away its primary observation, and it cannot be recovered later."""
+    sandbox = TurnMarkingSandbox()
+    with exec_client(tmp_path, sandbox) as client:
+        runtime = client.app.state.runtime
+        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        for index in range(3):
+            client.post(
+                f"/v1/sessions/{session_id}/exec",
+                json={"code": f"print({index})\n"},
+            )
+
+        session = runtime.store.get_session(session_id)
+        records = runtime.store.programs(session)
+        assert [record.sequence for record in records] == [0, 1, 2]
+        assert [record.code for record in records] == ["print(0)\n", "print(1)\n", "print(2)\n"]
+        assert records[1].error_category is None
+
+        # The archived file and the file the container ran are named from the
+        # same sequence, so "recorded code == executed code" holds structurally
+        # rather than by convention.
+        assert sandbox.requests[1].program_filename == ".opensac-program-001.py"
+        archived = runtime.store.programs_dir(session) / "001.py"
+        assert archived.read_text(encoding="utf-8") == "print(1)\n"
+        # Archived beside the workspace, never inside it: a program must not be
+        # able to read or rewrite the record of what earlier programs did.
+        assert runtime.store.programs_dir(session) not in Path(session.workspace).parents
+
+
+def test_archive_records_a_validator_rejection_too(tmp_path) -> None:
+    sandbox = RecordingSandbox(raises=UnsafeCodeError("Blocked imports: socket"))
+    with exec_client(tmp_path, sandbox) as client:
+        runtime = client.app.state.runtime
+        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        client.post(f"/v1/sessions/{session_id}/exec", json={"code": "import socket\n"})
+
+        record = runtime.store.programs(runtime.store.get_session(session_id))[0]
+        assert record.error_category == "code_validation"
+        assert "Blocked imports" in record.error
+        assert record.code == "import socket\n"
+
+
+def test_persistence_disabled_discards_the_workspace_between_calls(tmp_path) -> None:
+    """Within one program, write-then-read still works; across calls it does not.
+
+    That is the whole mechanism: what the switch removes is the agent's ability
+    to carry its own notes forward, not its ability to use a filesystem.
+    """
+    with exec_client(tmp_path, TurnMarkingSandbox()) as client:
+        session_id = client.post(
+            "/v1/sessions",
+            json={"backends": ["local"], "mechanisms": {"persistence": False}},
+        ).json()["id"]
+
+        first = client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"})
+        second = client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"})
+        assert first.json()["artifacts"] == ["turn-0.txt"]
+        assert second.json()["artifacts"] == ["turn-1.txt"]
+
+
+def test_persistence_enabled_keeps_the_workspace(tmp_path) -> None:
+    with exec_client(tmp_path, TurnMarkingSandbox()) as client:
+        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"})
+        second = client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"})
+        assert sorted(second.json()["artifacts"]) == ["turn-0.txt", "turn-1.txt"]
+
+
+def test_program_archive_survives_a_session_without_persistence(tmp_path) -> None:
+    """The archive lives beside the workspace precisely so this holds."""
+    with exec_client(tmp_path, TurnMarkingSandbox()) as client:
+        runtime = client.app.state.runtime
+        session_id = client.post(
+            "/v1/sessions",
+            json={"backends": ["local"], "mechanisms": {"persistence": False}},
+        ).json()["id"]
+        client.post(f"/v1/sessions/{session_id}/exec", json={"code": "print(1)\n"})
+
+        records = runtime.store.programs(runtime.store.get_session(session_id))
+        assert [record.code for record in records] == ["print(1)\n"]
+
+
+def test_session_reports_its_mechanisms_and_reachable_capabilities(tmp_path) -> None:
+    """A host builds its skill text from this, not from a copy of the constant.
+
+    Naming a primitive the session cannot reach costs the model a turn to find
+    out, so the manifest has to come from the session itself.
+    """
+    with exec_client(tmp_path, RecordingSandbox()) as client:
+        payload = client.post(
+            "/v1/sessions",
+            json={"backends": ["local"], "mechanisms": {"llm_subroutine": False}},
+        ).json()
+        assert payload["mechanisms"]["llm_subroutine"] is False
+        assert payload["mechanisms"]["batching"] is True
+        assert not any(method.startswith("llm.") for method in payload["capabilities"])
+        assert "search.local_many" in payload["capabilities"]
+
+        # Recorded on the session, which is what makes an arm recoverable after
+        # the run.
+        stored = client.app.state.runtime.store.get_session(payload["id"])
+        assert stored.mechanisms.llm_subroutine is False
+
+
+def test_omitted_mechanisms_default_to_the_unablated_session(tmp_path) -> None:
+    with exec_client(tmp_path, RecordingSandbox()) as client:
+        payload = client.post("/v1/sessions", json={"backends": ["local"]}).json()
+        assert payload["mechanisms"] == {
+            "batching": True,
+            "persistence": True,
+            "llm_subroutine": True,
+            "context_decoupling": True,
+        }

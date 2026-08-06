@@ -29,6 +29,23 @@ Search returns typed hits with `ref`, `backend`, `title`, `url`, `docid`, `domai
 `snippet`, `score`, and `rank`. Content calls accept only opaque refs returned during
 the current session.
 
+A `ref` is stable for the document behind it: the same page or document returned by two
+different queries comes back as the same `ref`, so `{h.ref: h for ...}` deduplicates a
+multi-query candidate pool without comparing URLs by hand.
+
+## Session capabilities
+
+The primitive list above is the full set. A session may have some of it switched off for
+an experiment, in which case the disabled calls raise with a message saying so and how to
+work around it — batching may be limited to one item per call, `sdk.llm.*` may be
+unavailable, and the workspace may not survive across turns. Read the session's
+`capabilities` list rather than assuming, and when a call reports a disabled mechanism,
+restructure around it instead of retrying the same call.
+
+> Hosts that generate their own skill text: build the primitive list from the session's
+> `capabilities` field, not from a copy of this file. Naming a capability the session
+> cannot reach costs the model a turn to discover.
+
 ## Strategy
 
 Fan out independent queries with `*_many`. Encode source constraints in queries and

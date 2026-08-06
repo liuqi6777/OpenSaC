@@ -11,6 +11,15 @@ class SandboxRequest:
     workspace: Path
     session_token: str
     execution_id: str | None = None
+    # Per-execution names for the two files the runtime puts in the workspace.
+    # They used to be fixed, which meant two `/exec` calls sharing a session
+    # overwrote each other's program and output: whichever container started
+    # last decided what both of them ran. The archived copy of a program has to
+    # be the one that actually executed, so this is a correctness requirement
+    # for the program corpus and not only a concurrency fix. Defaults preserve
+    # the historical names for callers that construct a request positionally.
+    program_filename: str = ".opensac-program.py"
+    output_filename: str = ".opensac-output.json"
 
 
 @dataclass

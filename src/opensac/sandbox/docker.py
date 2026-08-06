@@ -72,18 +72,18 @@ class DockerSandbox:
             "--env",
             "OPENSAC_WORKSPACE=/workspace",
             "--env",
-            "OPENSAC_OUTPUT_PATH=/workspace/.opensac-output.json",
+            f"OPENSAC_OUTPUT_PATH=/workspace/{request.output_filename}",
         ]
         if request.execution_id:
             command += ["--env", f"OPENSAC_EXECUTION_ID={request.execution_id}"]
-        command += [self.image, "/workspace/.opensac-program.py"]
+        command += [self.image, f"/workspace/{request.program_filename}"]
         return command
 
     async def execute(self, request: SandboxRequest) -> SandboxResult:
         validate_code(request.code)
         request.workspace.mkdir(parents=True, exist_ok=True)
-        program_path = request.workspace / ".opensac-program.py"
-        output_path = request.workspace / ".opensac-output.json"
+        program_path = request.workspace / request.program_filename
+        output_path = request.workspace / request.output_filename
         containers_dir = self.broker_socket.parent / "containers"
         containers_dir.mkdir(parents=True, exist_ok=True)
         cid_path = containers_dir / f"{uuid.uuid4().hex}.cid"
@@ -132,6 +132,11 @@ class DockerSandbox:
             launch_error=self._launch_error(process.returncode, stderr),
         )
         cid_path.unlink(missing_ok=True)
+        # Both files are per-execution now, so nothing later overwrites them and
+        # they would otherwise pile up in a workspace the program has to keep
+        # listing. The archived copy of the program lives outside the workspace.
+        program_path.unlink(missing_ok=True)
+        output_path.unlink(missing_ok=True)
         return result
 
     @staticmethod
