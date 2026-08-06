@@ -4,6 +4,9 @@ OpenSAC is an open reference implementation of the Search as Code architecture. 
 model generates Python, a locked-down Docker sandbox executes it, and an embedded SDK exposes
 search primitives through a host-side capability broker.
 
+See [the design goals and capability roadmap](docs/design.md) for the intended system
+properties, current implementation status, primitive-selection criteria, and next milestones.
+
 ## Architecture
 
 ```text
