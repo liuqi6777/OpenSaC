@@ -70,7 +70,7 @@ def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None
         session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
         response = client.post(
             f"/v1/sessions/{session_id}/exec",
-            json={"code": "from opensac_sdk import sdk\n"},
+            json={"code": "from opensac_sdk import sdk\n", "include_trace": True},
         )
         assert response.status_code == 200
         payload = response.json()
@@ -79,6 +79,8 @@ def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None
         assert payload["output"] == {"records": 3}
         assert payload["citations"][0]["ref"] == "ref_1"
         assert payload["artifacts"] == ["evidence.jsonl"]
+        assert payload["trace"] == []
+        assert sandbox.requests[0].execution_id
         # No control model was consulted: the caller supplied the program.
         assert sandbox.requests[0].code == "from opensac_sdk import sdk\n"
 

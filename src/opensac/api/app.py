@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,7 +15,7 @@ from openai import AsyncOpenAI
 
 from opensac.agent import AgentController
 from opensac.backends import LocalSearchBackend, SerperBackend
-from opensac.broker import BrokerRuntime, BrokerService
+from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_path
 from opensac.broker.service import BrokerSession
 from opensac.config import Settings
 from opensac.models import (
@@ -51,10 +52,11 @@ class ApplicationRuntime:
             extraction_model=settings.model_name,
             max_concurrency=settings.max_concurrency,
         )
-        self.broker_runtime = BrokerRuntime(self.broker, settings.broker_socket)
+        broker_socket = resolve_broker_socket_path(settings.broker_socket)
+        self.broker_runtime = BrokerRuntime(self.broker, broker_socket)
         self.sandbox = DockerSandbox(
             image=settings.sandbox_image,
-            broker_socket=settings.broker_socket,
+            broker_socket=broker_socket,
             timeout_seconds=settings.sandbox_timeout_seconds,
             memory=settings.sandbox_memory,
             cpus=settings.sandbox_cpus,
@@ -109,9 +111,16 @@ class ApplicationRuntime:
             state = self.broker.register_session(session)
         return state
 
-    async def execute_code(self, session: Session, code: str) -> ExecResult:
+    async def execute_code(
+        self,
+        session: Session,
+        code: str,
+        *,
+        include_trace: bool = False,
+    ) -> ExecResult:
         state = self.bind_session(session)
         workspace = Path(session.workspace)
+        execution_id = uuid.uuid4().hex if include_trace else None
         try:
             async with self.sandbox_gate:
                 result = await self.sandbox.execute(
@@ -119,6 +128,7 @@ class ApplicationRuntime:
                         code=code,
                         workspace=workspace,
                         session_token=session.token,
+                        execution_id=execution_id,
                     )
                 )
         except UnsafeCodeError as exc:
@@ -133,7 +143,9 @@ class ApplicationRuntime:
                 error=f"Rejected by the sandbox code validator: {exc}",
                 usage=self._session_usage(state),
                 artifacts=self.store.artifacts(session),
+                trace=self.broker.take_trace(session.token, execution_id),
             )
+        await state.policy.record_sandbox_seconds(result.duration_seconds)
         return ExecResult(
             exit_code=result.exit_code,
             stdout=result.stdout,
@@ -144,16 +156,13 @@ class ApplicationRuntime:
             output=result.output,
             citations=result.citations,
             error=result.launch_error,
-            usage=self._session_usage(state, sandbox_seconds=result.duration_seconds),
+            usage=self._session_usage(state),
             artifacts=self.store.artifacts(session),
+            trace=self.broker.take_trace(session.token, execution_id),
         )
 
-    def _session_usage(self, state: BrokerSession, *, sandbox_seconds: float = 0.0) -> RunUsage:
-        return RunUsage(
-            search_calls=state.policy.usage.search_calls,
-            llm_calls=state.policy.usage.llm_calls,
-            sandbox_seconds=sandbox_seconds,
-        )
+    def _session_usage(self, state: BrokerSession) -> RunUsage:
+        return RunUsage.model_validate(state.policy.usage.model_dump())
 
     async def execute_run(self, run: Run, session: Session) -> None:
         run_token = secrets.token_urlsafe(32)
@@ -273,7 +282,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         SDK, and the broker; it never invokes a control model here.
         """
         session = get_session(session_id)
-        return await runtime.execute_code(session, request.code)
+        return await runtime.execute_code(
+            session,
+            request.code,
+            include_trace=request.include_trace,
+        )
 
     @app.get("/v1/runs/{run_id}", response_model=PublicRun, dependencies=[Depends(authorize)])
     async def read_run(run_id: str) -> PublicRun:

@@ -29,6 +29,9 @@ class UnixSocketTransport:
     def call(self, method: str, params: dict[str, Any]) -> Any:
         transport = httpx.HTTPTransport(uds=self.socket_path)
         headers = {"Authorization": f"Bearer {self.session_token}"}
+        execution_id = os.environ.get("OPENSAC_EXECUTION_ID", "").strip()
+        if execution_id:
+            headers["X-OpenSAC-Execution-ID"] = execution_id
         request = RpcRequest(method=method, params=params)
         try:
             with httpx.Client(

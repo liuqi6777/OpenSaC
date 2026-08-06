@@ -17,12 +17,18 @@ def create_broker_app(service: BrokerService) -> FastAPI:
     async def call(
         request: RpcRequest,
         authorization: str | None = Header(default=None),
+        x_opensac_execution_id: str | None = Header(default=None),
     ) -> RpcResponse:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Missing bearer token")
         token = authorization.removeprefix("Bearer ")
         try:
-            result = await service.call(token, request.method, request.params)
+            result = await service.call(
+                token,
+                request.method,
+                request.params,
+                execution_id=x_opensac_execution_id,
+            )
             return RpcResponse(ok=True, result=result)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc

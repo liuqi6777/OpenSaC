@@ -1,0 +1,7 @@
+{
+  "goal": "What revenue did GoalWidget report in Singapore?",
+  "text": "Overview of cooking traditions and regional weather patterns that are unrelated to the target company.\n\nGoalWidget reported revenue of 42 million dollars after its Singapore launch in 2024.\n\nClosing travel notes discuss rail passes, hotels, and sightseeing recommendations unrelated to revenue.",
+  "max_chars": 120,
+  "expected_passage_index": 1,
+  "expected_text": "GoalWidget reported revenue of 42 million dollars after its Singapore launch in 2024."
+}

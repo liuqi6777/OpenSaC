@@ -10,6 +10,7 @@ class SandboxRequest:
     code: str
     workspace: Path
     session_token: str
+    execution_id: str | None = None
 
 
 @dataclass

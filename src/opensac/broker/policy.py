@@ -29,6 +29,18 @@ class CapabilityPolicy:
                 raise QuotaExceeded("LLM call quota exceeded")
             self.usage.llm_calls += amount
 
+    async def record_content_fetches(self, amount: int) -> None:
+        async with self._lock:
+            self.usage.content_fetches += amount
+
+    async def record_pipeline_model_tokens(self, amount: int) -> None:
+        async with self._lock:
+            self.usage.pipeline_model_tokens += amount
+
+    async def record_sandbox_seconds(self, amount: float) -> None:
+        async with self._lock:
+            self.usage.sandbox_seconds += amount
+
     def require_backend(self, backend: str) -> None:
         if backend not in self.allowed_backends:
             raise PermissionError(f"Backend '{backend}' is not enabled for this session")

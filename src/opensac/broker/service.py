@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -12,7 +16,11 @@ from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
 from opensac.backends.base import SearchBackend
 from opensac.broker.policy import CapabilityPolicy
-from opensac.models import Session
+from opensac.models import CapabilityEvent, Session
+
+_EVENT_MODEL_TOKENS: ContextVar[int] = ContextVar(
+    "opensac_event_model_tokens", default=0
+)
 
 
 @dataclass
@@ -20,6 +28,12 @@ class BrokerSession:
     session: Session
     policy: CapabilityPolicy
     references: dict[str, SearchHit] = field(default_factory=dict)
+    traces: dict[str, list[CapabilityEvent]] = field(default_factory=dict)
+    trace_sequence: int = 0
+
+    def next_trace_sequence(self) -> int:
+        self.trace_sequence += 1
+        return self.trace_sequence
 
 
 class BrokerService:
@@ -48,7 +62,14 @@ class BrokerService:
     def unregister_session(self, token: str) -> None:
         self.sessions.pop(token, None)
 
-    async def call(self, token: str, method: str, params: dict[str, Any]) -> Any:
+    async def call(
+        self,
+        token: str,
+        method: str,
+        params: dict[str, Any],
+        *,
+        execution_id: str | None = None,
+    ) -> Any:
         state = self.sessions.get(token)
         if state is None:
             raise PermissionError("Unknown or expired session token")
@@ -67,7 +88,90 @@ class BrokerService:
         handler = handlers.get(method)
         if handler is None:
             raise ValueError(f"Unsupported capability: {method}")
-        return await handler(state, params)
+        sequence = state.next_trace_sequence()
+        started = time.monotonic()
+        token_context = _EVENT_MODEL_TOKENS.set(0)
+        try:
+            result = await handler(state, params)
+        except Exception as exc:
+            self._append_trace(
+                state,
+                execution_id,
+                CapabilityEvent(
+                    sequence=sequence,
+                    method=method,
+                    status="error",
+                    duration_seconds=time.monotonic() - started,
+                    queries=self._trace_queries(method, params),
+                    input_count=self._trace_input_count(method, params),
+                    model_tokens=_EVENT_MODEL_TOKENS.get(),
+                    error_type=type(exc).__name__,
+                ),
+            )
+            raise
+        else:
+            self._append_trace(
+                state,
+                execution_id,
+                CapabilityEvent(
+                    sequence=sequence,
+                    method=method,
+                    status="ok",
+                    duration_seconds=time.monotonic() - started,
+                    queries=self._trace_queries(method, params),
+                    input_count=self._trace_input_count(method, params),
+                    result_count=self._trace_result_count(method, result),
+                    model_tokens=_EVENT_MODEL_TOKENS.get(),
+                ),
+            )
+            return result
+        finally:
+            _EVENT_MODEL_TOKENS.reset(token_context)
+
+    @staticmethod
+    def _append_trace(
+        state: BrokerSession,
+        execution_id: str | None,
+        event: CapabilityEvent,
+    ) -> None:
+        if execution_id:
+            state.traces.setdefault(execution_id, []).append(event)
+
+    def take_trace(self, token: str, execution_id: str | None) -> list[CapabilityEvent]:
+        if not execution_id:
+            return []
+        state = self.sessions.get(token)
+        if state is None:
+            return []
+        return state.traces.pop(execution_id, [])
+
+    @staticmethod
+    def _trace_queries(method: str, params: dict[str, Any]) -> list[str]:
+        if not method.startswith("search."):
+            return []
+        if method.endswith("_many"):
+            return [str(item) for item in params.get("queries", [])]
+        query = str(params.get("query", ""))
+        return [query] if query else []
+
+    @staticmethod
+    def _trace_input_count(method: str, params: dict[str, Any]) -> int:
+        if method.startswith("search."):
+            return len(params.get("queries", [])) if method.endswith("_many") else 1
+        if method.startswith("content.") or method == "citations.resolve":
+            return len(params.get("refs", []))
+        if method in {"llm.complete_many", "llm.extract_many"}:
+            key = "prompts" if method == "llm.complete_many" else "items"
+            return len(params.get(key, []))
+        return 1
+
+    @staticmethod
+    def _trace_result_count(method: str, result: Any) -> int:
+        if method.startswith("search.") and method.endswith("_many"):
+            return sum(len(batch.get("hits", [])) for batch in result)
+        if isinstance(result, list):
+            return len(result)
+        return 1 if result is not None else 0
 
     async def _search_web(
         self, state: BrokerSession, params: dict[str, Any]
@@ -186,16 +290,102 @@ class BrokerService:
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
         hits = self._resolve_refs(state, params.get("refs", []))
-        rows = await self._fetch_content(state, hits, query=str(params.get("query", "")))
+        query = str(params.get("query", ""))
+        rows = await self._fetch_content(state, hits, query=query)
         per_page_chars = max(int(params.get("max_tokens_per_page", 1000)), 1) * 4
         total_chars = max(int(params.get("max_tokens", 4000)), 1) * 4
         used = 0
         for row in rows:
-            row["text"] = row["text"][:per_page_chars]
+            text, metadata = self._select_passage(row["text"], query, per_page_chars)
+            row["text"] = text
+            row["metadata"] = {**row.get("metadata", {}), **metadata}
             if used + len(row["text"]) > total_chars:
                 row["text"] = row["text"][: max(total_chars - used, 0)]
+                row["metadata"]["truncated_by_total_budget"] = True
             used += len(row["text"])
         return [row for row in rows if row["text"]]
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+        return re.sub(r"\n{3,}", "\n\n", normalized).strip()
+
+    @staticmethod
+    def _word_tokens(text: str) -> list[str]:
+        return re.findall(r"\w+", (text or "").lower())
+
+    @classmethod
+    def _score_passage(cls, passage: str, query: str) -> float:
+        normalized_passage = passage.strip()
+        normalized_query = query.strip()
+        if not normalized_passage or not normalized_query:
+            return 0.0
+        query_tokens = set(cls._word_tokens(normalized_query))
+        passage_tokens = set(cls._word_tokens(normalized_passage))
+        overlap_recall = (
+            sum(1 for token in query_tokens if token in passage_tokens)
+            / max(1, len(query_tokens))
+        )
+        char_similarity = SequenceMatcher(
+            None,
+            normalized_query.lower(),
+            normalized_passage.lower(),
+        ).ratio()
+        return overlap_recall * 0.85 + char_similarity * 0.15
+
+    @classmethod
+    def _select_passage(
+        cls,
+        text: str,
+        query: str,
+        max_chars: int,
+    ) -> tuple[str, dict[str, Any]]:
+        normalized = cls._normalize_text(text)
+        if not normalized:
+            return "", {"passage_score": 0.0}
+        paragraphs = [
+            part.strip() for part in re.split(r"\n\s*\n+", normalized) if part.strip()
+        ]
+        if not paragraphs or not query.strip():
+            return normalized[:max_chars], {
+                "passage_index": 0,
+                "passage_score": 0.0,
+                "passage_start": 0,
+                "passage_end": min(len(normalized), max_chars),
+            }
+
+        positions: list[tuple[int, int]] = []
+        scores: list[float] = []
+        start = 0
+        for paragraph in paragraphs:
+            positions.append((start, start + len(paragraph)))
+            scores.append(cls._score_passage(paragraph, query))
+            start += len(paragraph) + 2
+        best_index = max(range(len(paragraphs)), key=scores.__getitem__)
+        best_start, best_end = positions[best_index]
+        remaining = max(0, max_chars - len(paragraphs[best_index]))
+        window_start = max(0, best_start - remaining // 2)
+        window_end = best_end + remaining // 2
+        selected_indexes = [
+            index
+            for index, (paragraph_start, paragraph_end) in enumerate(positions)
+            if index == best_index
+            or (paragraph_start >= window_start and paragraph_end <= window_end)
+        ]
+        snippet = cls._normalize_text(
+            "\n\n".join(paragraphs[index] for index in selected_indexes)
+        )[:max_chars]
+        selected_start = positions[selected_indexes[0]][0]
+        selected_end = min(
+            positions[selected_indexes[-1]][1],
+            selected_start + len(snippet),
+        )
+        return snippet, {
+            "passage_index": best_index,
+            "passage_score": scores[best_index],
+            "passage_start": selected_start,
+            "passage_end": selected_end,
+        }
 
     async def _fetch_content(
         self,
@@ -208,6 +398,7 @@ class BrokerService:
         for hit in hits:
             state.policy.require_backend(hit.backend)
             grouped.setdefault(hit.backend, []).append(hit)
+        await state.policy.record_content_fetches(len(hits))
 
         async def fetch(name: str, backend_hits: list[SearchHit]) -> list[ContentSnippet]:
             backend = self.backends.get(name)
@@ -227,7 +418,7 @@ class BrokerService:
         temperature: float | None = None,
         max_tokens: int | None = None,
         json_object: bool = False,
-    ) -> str:
+    ) -> tuple[str, int]:
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -245,7 +436,9 @@ class BrokerService:
                 messages=messages,
                 **options,
             )
-        return response.choices[0].message.content or ""
+        usage = getattr(response, "usage", None)
+        tokens = int(getattr(usage, "total_tokens", 0) or 0)
+        return response.choices[0].message.content or "", tokens
 
     def _require_model(self) -> None:
         if self.model_client is None or not self.extraction_model:
@@ -268,12 +461,15 @@ class BrokerService:
             raise ValueError("prompt must not be empty")
         await state.policy.consume_llm(1)
         system = params.get("system")
-        return await self._chat(
+        answer, tokens = await self._chat(
             prompt,
             system=str(system) if system else None,
             temperature=self._clamp_temperature(params.get("temperature", 0.2)),
             max_tokens=self._clamp_max_tokens(params.get("max_tokens")),
         )
+        await state.policy.record_pipeline_model_tokens(tokens)
+        _EVENT_MODEL_TOKENS.set(_EVENT_MODEL_TOKENS.get() + tokens)
+        return answer
 
     async def _complete_many(self, state: BrokerSession, params: dict[str, Any]) -> list[str]:
         self._require_model()
@@ -292,7 +488,7 @@ class BrokerService:
         concurrency = min(max(int(params.get("concurrency", 4)), 1), 12)
         gate = asyncio.Semaphore(concurrency)
 
-        async def one(prompt: str) -> str:
+        async def one(prompt: str) -> tuple[str, int]:
             async with gate:
                 return await self._chat(
                     prompt,
@@ -301,7 +497,11 @@ class BrokerService:
                     max_tokens=max_tokens,
                 )
 
-        return await asyncio.gather(*(one(prompt) for prompt in prompts))
+        results = await asyncio.gather(*(one(prompt) for prompt in prompts))
+        total_tokens = sum(tokens for _, tokens in results)
+        await state.policy.record_pipeline_model_tokens(total_tokens)
+        _EVENT_MODEL_TOKENS.set(_EVENT_MODEL_TOKENS.get() + total_tokens)
+        return [answer for answer, _ in results]
 
     async def _extract_many(
         self,
@@ -316,14 +516,18 @@ class BrokerService:
         concurrency = min(max(int(params.get("concurrency", 4)), 1), 12)
         gate = asyncio.Semaphore(concurrency)
 
-        async def extract(item: Any) -> dict[str, Any]:
+        async def extract(item: Any) -> tuple[str, int]:
             prompt = (
                 f"{instruction}\n\nJSON schema:\n{json.dumps(schema)}\n\n"
                 f"Input:\n{json.dumps(item, ensure_ascii=False, default=str)}\n\n"
                 "Return only one JSON object."
             )
             async with gate:
-                content = await self._chat(prompt, json_object=True)
-            return json.loads(content or "{}")
+                content, tokens = await self._chat(prompt, json_object=True)
+            return content, tokens
 
-        return await asyncio.gather(*(extract(item) for item in items))
+        results = await asyncio.gather(*(extract(item) for item in items))
+        total_tokens = sum(tokens for _, tokens in results)
+        await state.policy.record_pipeline_model_tokens(total_tokens)
+        _EVENT_MODEL_TOKENS.set(_EVENT_MODEL_TOKENS.get() + total_tokens)
+        return [json.loads(content or "{}") for content, _ in results]

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -111,7 +113,8 @@ class FakeModelClient:
                 parent.calls.append(kwargs)
                 prompt = kwargs["messages"][-1]["content"]
                 return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content=f"echo:{prompt}"))]
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=f"echo:{prompt}"))],
+                    usage=SimpleNamespace(total_tokens=11),
                 )
 
         self.chat = SimpleNamespace(completions=Completions())
@@ -149,6 +152,77 @@ async def test_llm_complete_passes_system_prompt_and_charges_one_call() -> None:
     # complete() is free-form, so it must not force JSON mode the way extract does.
     assert "response_format" not in client.calls[0]
     assert service.sessions["token"].policy.usage.llm_calls == 1
+    assert service.sessions["token"].policy.usage.pipeline_model_tokens == 11
+
+
+async def test_capability_trace_records_compact_inputs_results_and_errors() -> None:
+    service = BrokerService({"web": FakeBackend("web")})
+    service.register_session(make_session(max_search_calls=5))
+    await service.call(
+        "token",
+        "search.web_many",
+        {"queries": ["one", "two"], "limit_per_query": 1},
+        execution_id="exec-1",
+    )
+    with pytest.raises(ValueError):
+        await service.call(
+            "token",
+            "content.get_many",
+            {"refs": ["missing"]},
+            execution_id="exec-1",
+        )
+
+    trace = service.take_trace("token", "exec-1")
+    assert [event.method for event in trace] == ["search.web_many", "content.get_many"]
+    assert trace[0].queries == ["one", "two"]
+    assert trace[0].input_count == 2
+    assert trace[0].result_count == 2
+    assert trace[1].status == "error"
+    assert trace[1].error_type == "ValueError"
+    assert "missing" not in str(trace[0].model_dump())
+
+
+async def test_query_aware_snippets_select_the_relevant_paragraph() -> None:
+    class PassageBackend(FakeBackend):
+        async def content(self, hits, *, query=None):
+            del query
+            text = (
+                "An unrelated introduction about cooking and weather.\n\n"
+                "Vector databases use HNSW indexes for approximate nearest-neighbor search.\n\n"
+                "An unrelated conclusion about travel."
+            )
+            return [ContentSnippet(ref=hit.ref, text=text) for hit in hits]
+
+    service = BrokerService({"web": PassageBackend("web")})
+    state = service.register_session(make_session())
+    hits = await service.call("token", "search.web", {"query": "seed"})
+    snippets = await service.call(
+        "token",
+        "content.snippets",
+        {
+            "query": "HNSW nearest neighbor",
+            "refs": [hits[0]["ref"]],
+            "max_tokens_per_page": 12,
+        },
+    )
+    assert "HNSW indexes" in snippets[0]["text"]
+    assert "cooking" not in snippets[0]["text"]
+    assert snippets[0]["metadata"]["passage_index"] == 1
+    assert snippets[0]["metadata"]["passage_score"] > 0
+    assert state.policy.usage.content_fetches == 1
+
+
+def test_query_aware_passage_matches_shared_golden_fixture() -> None:
+    fixture = json.loads(
+        (Path(__file__).parent / "data" / "query_aware_passage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    text, metadata = BrokerService._select_passage(
+        fixture["text"], fixture["goal"], fixture["max_chars"]
+    )
+    assert text == fixture["expected_text"]
+    assert metadata["passage_index"] == fixture["expected_passage_index"]
 
 
 async def test_llm_complete_many_preserves_prompt_order() -> None:
@@ -157,9 +231,11 @@ async def test_llm_complete_many_preserves_prompt_order() -> None:
         "token",
         "llm.complete_many",
         {"prompts": ["one", "two", "three"], "concurrency": 3},
+        execution_id="exec-many",
     )
     assert answers == ["echo:one", "echo:two", "echo:three"]
     assert service.sessions["token"].policy.usage.llm_calls == 3
+    assert service.take_trace("token", "exec-many")[0].model_tokens == 33
 
 
 async def test_llm_complete_many_charges_the_whole_fanout_before_running() -> None:

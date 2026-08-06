@@ -73,9 +73,10 @@ class DockerSandbox:
             "OPENSAC_WORKSPACE=/workspace",
             "--env",
             "OPENSAC_OUTPUT_PATH=/workspace/.opensac-output.json",
-            self.image,
-            "/workspace/.opensac-program.py",
         ]
+        if request.execution_id:
+            command += ["--env", f"OPENSAC_EXECUTION_ID={request.execution_id}"]
+        command += [self.image, "/workspace/.opensac-program.py"]
         return command
 
     async def execute(self, request: SandboxRequest) -> SandboxResult:

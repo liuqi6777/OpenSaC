@@ -44,7 +44,7 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
     runtime = BrokerRuntime(service, tmp_path / "broker.sock")
     await runtime.start()
     try:
-        transport = UnixSocketTransport(str(tmp_path / "broker.sock"), "secret")
+        transport = UnixSocketTransport(str(runtime.socket_path), "secret")
         result = await asyncio.to_thread(
             transport.call,
             "search.local",
@@ -91,7 +91,7 @@ async def test_llm_resource_round_trips_over_real_unix_socket(tmp_path) -> None:
     runtime = BrokerRuntime(service, tmp_path / "broker.sock")
     await runtime.start()
     try:
-        resource = LLMResource(UnixSocketTransport(str(tmp_path / "broker.sock"), "secret"))
+        resource = LLMResource(UnixSocketTransport(str(runtime.socket_path), "secret"))
         assert await asyncio.to_thread(resource.complete, "plan") == "PLAN"
         assert await asyncio.to_thread(resource.complete_many, ["a", "b"]) == ["A", "B"]
         assert service.sessions["secret"].policy.usage.llm_calls == 3
@@ -127,16 +127,16 @@ async def test_second_broker_refuses_to_evict_a_live_socket(tmp_path) -> None:
 
         # The loser must leave the winner's socket alone, on the way in and on
         # the way back out.
-        assert socket_path.exists()
+        assert first.socket_path.exists()
         await second.stop()
-        assert socket_path.exists()
+        assert first.socket_path.exists()
 
-        transport = UnixSocketTransport(str(socket_path), "secret")
+        transport = UnixSocketTransport(str(first.socket_path), "secret")
         hits = await asyncio.to_thread(transport.call, "search.local", {"query": "q", "limit": 1})
         assert hits[0]["snippet"] == "q"
     finally:
         await first.stop()
-    assert not socket_path.exists()
+    assert not first.socket_path.exists()
 
 
 async def test_broker_replaces_a_stale_socket_file(tmp_path) -> None:
@@ -147,6 +147,6 @@ async def test_broker_replaces_a_stale_socket_file(tmp_path) -> None:
     runtime = BrokerRuntime(BrokerService({"local": SocketBackend()}), socket_path)
     await runtime.start()
     try:
-        assert socket_path.is_socket()
+        assert runtime.socket_path.is_socket()
     finally:
         await runtime.stop()

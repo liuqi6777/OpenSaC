@@ -49,7 +49,9 @@ class RunCreate(BaseModel):
 
 class RunUsage(BaseModel):
     model_tokens: int = 0
+    pipeline_model_tokens: int = 0
     search_calls: int = 0
+    content_fetches: int = 0
     llm_calls: int = 0
     sandbox_seconds: float = 0.0
 
@@ -67,6 +69,20 @@ class ExecCreate(BaseModel):
     """
 
     code: str = Field(min_length=1)
+    include_trace: bool = False
+
+
+class CapabilityEvent(BaseModel):
+    sequence: int
+    method: str
+    status: str
+    duration_seconds: float
+    queries: list[str] = Field(default_factory=list)
+    input_count: int = 0
+    result_count: int = 0
+    model_tokens: int = 0
+    error_type: str | None = None
+    error: str | None = None
 
 
 class ExecResult(BaseModel):
@@ -87,6 +103,7 @@ class ExecResult(BaseModel):
     # the whole externally driven loop.
     usage: RunUsage
     artifacts: list[str] = Field(default_factory=list)
+    trace: list[CapabilityEvent] = Field(default_factory=list)
 
 
 class Run(BaseModel):
