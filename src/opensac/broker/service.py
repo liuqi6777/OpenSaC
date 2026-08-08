@@ -62,6 +62,20 @@ class BrokerSession:
     session: Session
     policy: CapabilityPolicy
     references: dict[str, SearchHit] = field(default_factory=dict)
+    # Secondary indexes over the same hits, so a program can address a document
+    # by the identifier it can actually see and re-type. A ref is opaque by
+    # design -- the program must not be able to construct one -- but opacity and
+    # transcribability are different requirements, and encoding both into one
+    # string served neither: the handle has to be unguessable for the broker and
+    # short and reliable for the model.
+    #
+    # This does not widen what a program may reach. Admission is still "this
+    # session searched it up": a docid never returned by a search is absent from
+    # these tables and still raises. Only the lookup key changed, so backend
+    # routing, `require_backend`, and citation provenance all keep working off
+    # the same stored `SearchHit`.
+    by_docid: dict[str, SearchHit] = field(default_factory=dict)
+    by_url: dict[str, SearchHit] = field(default_factory=dict)
     traces: dict[str, list[CapabilityEvent]] = field(default_factory=dict)
     trace_sequence: int = 0
 
@@ -72,6 +86,22 @@ class BrokerSession:
     def next_trace_sequence(self) -> int:
         self.trace_sequence += 1
         return self.trace_sequence
+
+    def remember(self, hit: SearchHit) -> None:
+        """Index one hit under every handle it can be reached by.
+
+        ``setdefault`` throughout: first sighting wins. The stored hit is only
+        used to reach content and to resolve a citation, and both are properties
+        of the document rather than of the query that surfaced it, so keeping
+        the first makes the tables independent of the order queries happened to
+        complete. The dict returned to the program still carries this query's
+        own rank and snippet.
+        """
+        self.references.setdefault(hit.ref, hit)
+        if hit.docid:
+            self.by_docid.setdefault(str(hit.docid), hit)
+        if hit.url:
+            self.by_url.setdefault(hit.url, hit)
 
 
 class BrokerService:
@@ -120,6 +150,8 @@ class BrokerService:
             "search.local_many": self._search_local_many,
             "content.get_many": self._content_get_many,
             "content.snippets": self._content_snippets,
+            "content.read": self._content_read,
+            "content.grep": self._content_grep,
             "citations.resolve": self._resolve_citations,
             "llm.complete": self._complete,
             "llm.complete_many": self._complete_many,
@@ -276,23 +308,19 @@ class BrokerService:
         if not query:
             raise ValueError("query must not be empty")
         limit = min(max(int(params.get("limit", 10)), 1), 100)
+        offset = min(max(int(params.get("offset", 0)), 0), 500)
         async with self._semaphore:
             hits = await backend.search(
                 query,
                 limit=limit,
+                offset=offset,
                 domains=params.get("domains"),
             )
         recorded = _EVENT_HITS.get()
         for hit in hits:
             identity = self._identity(hit)
             hit.ref = self._ref_for(identity)
-            # First sighting wins. The stored hit is only used to reach content
-            # and to resolve a citation, and both are properties of the document
-            # rather than of the query that surfaced it; keeping the first makes
-            # the table independent of the order queries happened to complete.
-            # The dict returned to the program still carries this query's own
-            # rank and snippet.
-            state.references.setdefault(hit.ref, hit)
+            state.remember(hit)
             if recorded is not None:
                 recorded.append(
                     HitRecord(identity=identity, rank=hit.rank, score=hit.score)
@@ -379,7 +407,12 @@ class BrokerService:
                     hits = await self._search(
                         state,
                         backend_name,
-                        {"query": query, "limit": params.get("limit_per_query", 10)},
+                        {
+                            "query": query,
+                            "limit": params.get("limit_per_query", 10),
+                            "offset": params.get("offset", 0),
+                            "domains": params.get("domains"),
+                        },
                     )
                     return SearchBatch(query=query, hits=hits)
                 except Exception as exc:
@@ -396,11 +429,32 @@ class BrokerService:
             )
         return [batch.model_dump(mode="json") for batch in batches]
 
+    @staticmethod
+    def _lookup(state: BrokerSession, handle: str) -> SearchHit | None:
+        """One handle to the hit behind it, or None if this session never saw it.
+
+        Three tables, one admission rule. The raise below is the enforcement
+        point of the capability boundary -- the sandbox has no network, so a
+        search is the only way a document can enter reach -- and widening the
+        set of accepted *keys* does not widen the set of reachable *documents*.
+        A docid the corpus contains but no query in this session returned is
+        still refused, which is what keeps a recall metric meaningful.
+        """
+        return (
+            state.references.get(handle)
+            or state.by_docid.get(handle)
+            or state.by_url.get(handle)
+        )
+
     def _resolve_refs(self, state: BrokerSession, refs: list[str]) -> list[SearchHit]:
-        missing = [ref for ref in refs if ref not in state.references]
+        resolved = [(handle, self._lookup(state, str(handle))) for handle in refs]
+        missing = [handle for handle, hit in resolved if hit is None]
         if missing:
-            raise ValueError(f"Unknown references: {', '.join(missing[:3])}")
-        return [state.references[ref] for ref in refs]
+            raise ValueError(
+                f"Unknown references: {', '.join(str(handle) for handle in missing[:3])}. "
+                "Pass a ref, docid, or URL that a search in this session returned."
+            )
+        return [hit for _, hit in resolved if hit is not None]
 
     async def _resolve_citations(
         self,
@@ -448,6 +502,112 @@ class BrokerService:
                 row["metadata"]["truncated_by_total_budget"] = True
             used += len(row["text"])
         return [row for row in rows if row["text"]]
+
+    # Documents in a research corpus are mostly longer than any budget that can
+    # be handed to a control model -- median ~9k characters, p90 ~62k -- so
+    # `get_many` (whole document) and `snippets` (one broker-chosen window) both
+    # answer "show me this page" and neither answers "show me the part of this
+    # page I can name". Without a third option the passage a program sees is
+    # decided by a scoring function it cannot inspect, and if the answer is not
+    # in that window nothing downstream can recover it.
+    #
+    # `read` and `grep` are that third option, and they are deliberately the
+    # same pair the function-calling profiles already expose, with the same
+    # 1-indexed line contract: a line number from `grep` is an `offset` for
+    # `read`, no character arithmetic anywhere. Both work on the text a backend
+    # returned, so neither knows which backend it is on.
+
+    @staticmethod
+    def _document_lines(row: dict[str, Any]) -> list[str]:
+        return str(row.get("text") or "").splitlines()
+
+    async def _content_read(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        hits = self._resolve_refs(state, params.get("refs", []))
+        rows = await self._fetch_content(state, hits, query=None)
+        # 1-indexed, and an offset below 1 is clamped rather than refused: a
+        # program computing `match.line - 5` near the top of a document is
+        # asking for the beginning, not making an error.
+        offset = max(int(params.get("offset", 1)), 1)
+        limit = min(max(int(params.get("limit", 200)), 1), 5_000)
+        windows: list[dict[str, Any]] = []
+        for row in rows:
+            lines = self._document_lines(row)
+            total = len(lines)
+            window = lines[offset - 1 : offset - 1 + limit]
+            end = offset - 1 + len(window)
+            windows.append(
+                {
+                    **row,
+                    "text": "\n".join(window),
+                    "metadata": {
+                        **row.get("metadata", {}),
+                        "start_line": offset if window else 0,
+                        "end_line": end,
+                        "total_lines": total,
+                        # None at end of document, so `while next_offset:` is a
+                        # correct scroll loop.
+                        "next_offset": end + 1 if end < total else None,
+                    },
+                }
+            )
+        return windows
+
+    @staticmethod
+    def _compile_pattern(pattern: str) -> re.Pattern[str]:
+        """Case-insensitive, and a malformed regex degrades to a literal search.
+
+        A program that meant to search for ``C++ (programming)`` should get its
+        matches rather than a traceback about an unbalanced parenthesis.
+        """
+        try:
+            return re.compile(pattern, flags=re.IGNORECASE)
+        except re.error:
+            return re.compile(re.escape(pattern), flags=re.IGNORECASE)
+
+    async def _content_grep(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        pattern = str(params.get("pattern", ""))
+        if not pattern:
+            raise ValueError("pattern must not be empty")
+        hits = self._resolve_refs(state, params.get("refs", []))
+        rows = await self._fetch_content(state, hits, query=None)
+        regex = self._compile_pattern(pattern)
+        context = min(max(int(params.get("context", 0)), 0), 20)
+        # Bounded per document rather than in total: an unbounded grep over 50
+        # candidates is how a program fills its own output budget with one call,
+        # and a global cap would let the first document starve the other 49.
+        max_per_ref = min(max(int(params.get("max_matches_per_ref", 20)), 1), 200)
+        matches: list[dict[str, Any]] = []
+        for row in rows:
+            lines = self._document_lines(row)
+            metadata = row.get("metadata", {})
+            found = 0
+            for index, line in enumerate(lines):
+                if found >= max_per_ref:
+                    break
+                if not regex.search(line):
+                    continue
+                found += 1
+                matches.append(
+                    {
+                        "ref": row.get("ref", ""),
+                        "docid": metadata.get("docid"),
+                        "url": row.get("url"),
+                        "title": row.get("title", ""),
+                        "line": index + 1,
+                        "text": line,
+                        "before": lines[max(0, index - context) : index] if context else [],
+                        "after": lines[index + 1 : index + 1 + context] if context else [],
+                    }
+                )
+        return matches
 
     @staticmethod
     def _normalize_text(text: str) -> str:

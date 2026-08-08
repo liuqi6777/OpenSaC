@@ -26,22 +26,28 @@ class SerperBackend:
         query: str,
         *,
         limit: int,
+        offset: int = 0,
         domains: list[str] | None = None,
     ) -> list[SearchHit]:
         if domains:
             sites = " OR ".join(f"site:{domain}" for domain in domains)
             query = f"{query} ({sites})"
+        # Deepen the request and slice, rather than using Serper's `page`:
+        # paging renumbers `position` per page, and the rank a hit carries has
+        # to stay comparable across the two backends and joinable offline.
+        depth = offset + limit
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 self.search_url,
                 headers=self._headers(),
-                json={"q": query, "num": limit},
+                json={"q": query, "num": depth},
             )
             response.raise_for_status()
         payload = response.json()
         return [
             self._normalize_hit(hit, index + 1)
-            for index, hit in enumerate(payload.get("organic", [])[:limit])
+            for index, hit in enumerate(payload.get("organic", [])[:depth])
+            if index >= offset
         ]
 
     def _normalize_hit(self, hit: dict, rank: int) -> SearchHit:

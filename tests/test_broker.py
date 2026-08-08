@@ -13,21 +13,31 @@ from opensac.models import CAPABILITY_METHODS, Mechanisms, RunLimits, Session
 
 
 class FakeBackend:
-    def __init__(self, name: str) -> None:
-        self.name = name
+    """One hit per rank, so `offset` is observable rather than assumed.
 
-    async def search(self, query, *, limit, domains=None):
-        return [
-            SearchHit(
-                ref="",
-                backend=self.name,
-                title=query,
-                url="https://example.com" if self.name == "web" else None,
-                docid="1" if self.name == "local" else None,
-                snippet="snippet",
-                rank=1,
-            )
-        ]
+    Ranks are absolute positions in the full result list -- the same contract
+    the real backends keep -- which is what lets a test tell "the window moved"
+    apart from "the window was renumbered".
+    """
+
+    def __init__(self, name: str, *, depth: int = 1) -> None:
+        self.name = name
+        self.depth = depth
+
+    def _hit(self, query: str, rank: int) -> SearchHit:
+        return SearchHit(
+            ref="",
+            backend=self.name,
+            title=query,
+            url=f"https://example.com/{rank}" if self.name == "web" else None,
+            docid=str(rank) if self.name == "local" else None,
+            snippet="snippet",
+            rank=rank,
+        )
+
+    async def search(self, query, *, limit, offset=0, domains=None):
+        ranks = range(offset + 1, min(offset + limit, self.depth) + 1)
+        return [self._hit(query, rank) for rank in ranks]
 
     async def content(self, hits, *, query=None):
         return [ContentSnippet(ref=hit.ref, text=f"content:{query}", url=hit.url) for hit in hits]
@@ -36,7 +46,7 @@ class FakeBackend:
 class BrokenBackend:
     name = "web"
 
-    async def search(self, query, *, limit, domains=None):
+    async def search(self, query, *, limit, offset=0, domains=None):
         raise RuntimeError("backend exploded")
 
     async def content(self, hits, *, query=None):
@@ -66,7 +76,7 @@ async def test_broker_scopes_references_and_fetches_content() -> None:
     )
     assert content[0]["text"] == "content:fact"
     citations = await service.call("token", "citations.resolve", {"refs": [hits[0]["ref"]]})
-    assert citations[0]["url"] == "https://example.com"
+    assert citations[0]["url"] == "https://example.com/1"
 
 
 async def test_broker_enforces_backend_permissions() -> None:
@@ -263,7 +273,7 @@ class RankedBackend:
     def __init__(self, urls: list[str]) -> None:
         self.urls = urls
 
-    async def search(self, query, *, limit, domains=None):
+    async def search(self, query, *, limit, offset=0, domains=None):
         return [
             SearchHit(
                 ref="",
@@ -274,7 +284,8 @@ class RankedBackend:
                 score=1.0 / (index + 1),
                 rank=index + 1,
             )
-            for index, url in enumerate(self.urls[:limit])
+            for index, url in enumerate(self.urls[: offset + limit])
+            if index >= offset
         ]
 
     async def content(self, hits, *, query=None):
@@ -314,6 +325,156 @@ async def test_refs_are_opaque_and_reproducible() -> None:
     assert one.startswith("ref_")
     # Opaque: nothing a program could have constructed for itself.
     assert "example.com" not in one
+
+
+async def test_a_docid_reaches_the_document_a_ref_reaches() -> None:
+    """The handle the model can actually re-type must work.
+
+    A ref has to be unguessable, which makes it long and random-looking, and a
+    program carries it across turns by copying it through its own output. The
+    docid is right there in the same hit and is what a model reaches for. Both
+    now resolve to one document, so the design keeps the property it needs
+    (unforgeable) without charging for one it does not (verbatim transcription).
+    """
+    service = BrokerService({"local": FakeBackend("local")})
+    service.register_session(make_session(backends=["local"], max_search_calls=5))
+    hits = await service.call("token", "search.local", {"query": "q"})
+
+    by_ref = await service.call("token", "content.get_many", {"refs": [hits[0]["ref"]]})
+    by_docid = await service.call("token", "content.get_many", {"refs": [hits[0]["docid"]]})
+    by_ref_again = await service.call("token", "citations.resolve", {"refs": [hits[0]["docid"]]})
+
+    assert by_docid == by_ref
+    # A citation resolved from a docid still reports the canonical ref, so
+    # provenance does not fork by which key the caller happened to use.
+    assert by_ref_again[0]["ref"] == hits[0]["ref"]
+
+
+async def test_a_document_this_session_never_searched_is_still_refused() -> None:
+    """The admission rule is unchanged; only the lookup key is wider.
+
+    `_resolve_refs` raising is the enforcement point of the capability
+    boundary, not parameter validation: the sandbox has no network, so search
+    is the only door. If a docid the corpus contains were reachable without
+    being retrieved, a program could walk the docid space and any recall
+    measurement over it would be meaningless.
+    """
+    service = BrokerService({"local": FakeBackend("local")})
+    service.register_session(make_session(backends=["local"], max_search_calls=5))
+    await service.call("token", "search.local", {"query": "q"})
+
+    with pytest.raises(ValueError, match="Unknown references"):
+        await service.call("token", "content.get_many", {"refs": ["999"]})
+
+
+async def test_offset_reaches_ranks_a_bare_limit_cannot() -> None:
+    """Depth is authorisation, not convenience.
+
+    Because a ref is minted only for a returned hit, `limit` is both what a
+    program can see and what it is allowed to fetch. Without an offset, a
+    document at rank 15 is not merely inconvenient to reach, it is unreachable.
+    """
+    service = BrokerService({"local": FakeBackend("local", depth=50)})
+    state = service.register_session(make_session(backends=["local"], max_search_calls=5))
+
+    shallow = await service.call("token", "search.local", {"query": "q", "limit": 10})
+    deep = await service.call(
+        "token", "search.local", {"query": "q", "limit": 10, "offset": 10}
+    )
+
+    assert [hit["rank"] for hit in shallow] == list(range(1, 11))
+    # Ranks stay absolute: the second window reports 11..20, not 1..10 again.
+    assert [hit["rank"] for hit in deep] == list(range(11, 21))
+    assert not {hit["ref"] for hit in shallow} & {hit["ref"] for hit in deep}
+    # And the deeper hits are now fetchable, which is the point.
+    assert deep[0]["docid"] in state.by_docid
+
+
+async def test_grep_line_numbers_are_read_offsets() -> None:
+    """The two halves compose without character arithmetic.
+
+    This is the same contract the function-calling profiles keep, and matching
+    it is deliberate: it is the coordinate system the model already writes
+    against, and a second convention here would be paid for in wrong offsets.
+    """
+    lines = [f"line {index}" for index in range(1, 41)]
+    lines[24] = "the target phrase is here"
+
+    class Paged:
+        name = "local"
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
+
+        async def content(self, hits, *, query=None):
+            return [ContentSnippet(ref=hit.ref, text="\n".join(lines)) for hit in hits]
+
+    service = BrokerService({"local": Paged()})
+    service.register_session(make_session(backends=["local"], max_search_calls=5))
+    hits = await service.call("token", "search.local", {"query": "q"})
+    ref = hits[0]["ref"]
+
+    matches = await service.call(
+        "token", "content.grep", {"refs": [ref], "pattern": r"target \w+", "context": 1}
+    )
+    assert len(matches) == 1
+    assert matches[0]["line"] == 25
+    assert matches[0]["before"] == ["line 24"]
+    assert matches[0]["after"] == ["line 26"]
+
+    window = await service.call(
+        "token", "content.read", {"refs": [ref], "offset": matches[0]["line"], "limit": 2}
+    )
+    assert window[0]["text"].splitlines()[0] == "the target phrase is here"
+    assert window[0]["metadata"]["start_line"] == 25
+    assert window[0]["metadata"]["total_lines"] == 40
+
+
+async def test_read_reports_where_to_continue_and_where_to_stop() -> None:
+    """`next_offset` is None at the end, so `while offset:` terminates."""
+
+    class Doc:
+        name = "local"
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
+
+        async def content(self, hits, *, query=None):
+            return [ContentSnippet(ref=hit.ref, text="\n".join("abcde")) for hit in hits]
+
+    service = BrokerService({"local": Doc()})
+    service.register_session(make_session(backends=["local"], max_search_calls=5))
+    ref = (await service.call("token", "search.local", {"query": "q"}))[0]["ref"]
+
+    head = await service.call("token", "content.read", {"refs": [ref], "limit": 3})
+    assert head[0]["text"] == "a\nb\nc"
+    assert head[0]["metadata"]["next_offset"] == 4
+
+    tail = await service.call(
+        "token", "content.read", {"refs": [ref], "offset": 4, "limit": 3}
+    )
+    assert tail[0]["text"] == "d\ne"
+    assert tail[0]["metadata"]["next_offset"] is None
+
+
+async def test_grep_falls_back_to_a_literal_search_for_a_bad_pattern() -> None:
+    """A program that meant `C++ (lang)` should get matches, not a traceback."""
+
+    class Doc:
+        name = "local"
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
+
+        async def content(self, hits, *, query=None):
+            return [ContentSnippet(ref=hit.ref, text="written in C++ (1985)") for hit in hits]
+
+    service = BrokerService({"local": Doc()})
+    service.register_session(make_session(backends=["local"], max_search_calls=5))
+    ref = (await service.call("token", "search.local", {"query": "q"}))[0]["ref"]
+
+    matches = await service.call("token", "content.grep", {"refs": [ref], "pattern": "C++ ("})
+    assert [match["line"] for match in matches] == [1]
 
 
 def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:

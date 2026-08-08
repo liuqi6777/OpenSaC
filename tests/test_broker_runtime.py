@@ -15,7 +15,7 @@ from opensac.models import RunLimits, Session
 class SocketBackend:
     name = "local"
 
-    async def search(self, query, *, limit, domains=None):
+    async def search(self, query, *, limit, offset=0, domains=None):
         return [
             SearchHit(
                 ref="",

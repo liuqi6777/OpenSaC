@@ -38,6 +38,8 @@ CAPABILITY_METHODS: tuple[str, ...] = (
     "search.local_many",
     "content.get_many",
     "content.snippets",
+    "content.read",
+    "content.grep",
     "citations.resolve",
     "llm.complete",
     "llm.complete_many",

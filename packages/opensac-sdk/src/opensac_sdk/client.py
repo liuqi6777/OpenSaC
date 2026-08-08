@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .citations import CitationsResource
 from .content import ContentResource
 from .llm import LLMResource
 from .output import OutputResource
@@ -17,6 +18,7 @@ class OpenSACClient:
     ) -> None:
         self.search = SearchResource(transport)
         self.content = ContentResource(transport)
+        self.citations = CitationsResource(transport)
         self.llm = LLMResource(transport)
         self.state = state
         self.output = output

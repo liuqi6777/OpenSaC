@@ -33,7 +33,9 @@ def test_search_resource_returns_typed_hits() -> None:
     transport = FakeTransport()
     hits = SearchResource(transport).web("query", limit=3)
     assert hits[0].ref == "ref_1"
-    assert transport.calls == [("search.web", {"query": "query", "limit": 3, "domains": None})]
+    assert transport.calls == [
+        ("search.web", {"query": "query", "limit": 3, "offset": 0, "domains": None})
+    ]
 
 
 def test_state_round_trip_and_path_confinement(tmp_path) -> None:
