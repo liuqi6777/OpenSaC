@@ -68,9 +68,18 @@ def _strip_repeated_title(body: str, title: str) -> str:
 class LocalSearchBackend:
     name = "local"
 
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 30.0,
+        fetch_concurrency: int = 6,
+    ) -> None:
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
+        # The retriever behind this is the same process every other tool
+        # profile queries, so an unbounded fan-out here does not only slow this
+        # run down, it perturbs the thing the comparison holds fixed.
+        self._fetch_gate = asyncio.Semaphore(max(1, fetch_concurrency))
 
     async def search(
         self,
@@ -131,14 +140,25 @@ class LocalSearchBackend:
         del query
 
         async def fetch(client: httpx.AsyncClient, hit: SearchHit) -> ContentSnippet:
-            response = await client.post(
-                urljoin(self.base_url, "get_document"),
-                json={"docid": hit.docid},
-            )
-            response.raise_for_status()
-            payload = response.json()
+            metadata: dict[str, object] = {"docid": hit.docid, "backend": self.name}
+            try:
+                async with self._fetch_gate:
+                    response = await client.post(
+                        urljoin(self.base_url, "get_document"),
+                        json={"docid": hit.docid},
+                    )
+                response.raise_for_status()
+                payload = response.json()
+            except Exception as exc:
+                # One unreadable document must not take the other forty-nine
+                # with it: the program asked for a batch and can act on a
+                # partial one, but not on an exception.
+                metadata["fetch_error"] = f"{type(exc).__name__}: {exc}"
+                return ContentSnippet(ref=hit.ref, text="", title=hit.title, metadata=metadata)
             text = str(payload.get("text", ""))
             fields, _ = parse_document_frontmatter(text)
+            if date := hit.date or fields.get("date"):
+                metadata["date"] = date
             return ContentSnippet(
                 ref=hit.ref,
                 # The header is left in the text on purpose: it is part of the
@@ -147,12 +167,8 @@ class LocalSearchBackend:
                 # offset a program computed from a `grep`.
                 text=text,
                 title=hit.title or fields.get("title", ""),
-                metadata={
-                    "docid": hit.docid,
-                    "backend": self.name,
-                    **({"date": date} if (date := hit.date or fields.get("date")) else {}),
-                },
+                metadata=metadata,
             )
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            return await asyncio.gather(*(fetch(client, hit) for hit in hits))
+            return list(await asyncio.gather(*(fetch(client, hit) for hit in hits)))

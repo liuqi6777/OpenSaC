@@ -12,6 +12,12 @@ class ContentResource:
     `read` are the pair that lets the program choose: locate a line, then read
     around it. Line numbers are 1-indexed and shared between the two, so a
     `ContentMatch.line` is a `read(offset=...)` with no arithmetic.
+
+    A document retrieved once is cached for the rest of the session, so reading
+    the same pool repeatedly is cheap after the first pass. Every method returns
+    one row per requested document, in order; a page that could not be
+    retrieved comes back with empty `text` and `metadata["fetch_error"]` rather
+    than being dropped, so a short result is never mistaken for a complete one.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
@@ -27,16 +33,20 @@ class ContentResource:
         *,
         offset: int = 1,
         limit: int = 200,
+        max_chars: int = 100_000,
     ) -> list[ContentSnippet]:
         """The same line window of each document, 1-indexed.
 
         `metadata` carries `start_line`, `end_line`, `total_lines`, and
         `next_offset` (None at the end), so scrolling one document is a loop
         and heading a whole candidate list is one call.
+
+        `max_chars` bounds the window as well as `limit`, because a line is a
+        sentence in some corpora and a whole section in scraped web pages.
         """
         result = self._transport.call(
             "content.read",
-            {"refs": refs, "offset": offset, "limit": limit},
+            {"refs": refs, "offset": offset, "limit": limit, "max_chars": max_chars},
         )
         return [ContentSnippet.model_validate(item) for item in result]
 

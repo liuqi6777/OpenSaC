@@ -22,6 +22,20 @@ class Settings(BaseSettings):
 
     local_search_base_url: str = "http://127.0.0.1:8081"
     serper_api_key: str = ""
+    # Concurrent document fetches inside one `content.*` call. The broker's own
+    # semaphore admits a whole call as one unit, so without this a program
+    # asking for fifty pages opens fifty simultaneous requests to the provider,
+    # which is a rate limit on the web backend and a thundering herd on the
+    # local one.
+    backend_fetch_concurrency: int = Field(default=6, ge=1, le=64)
+    # Document text cached per session, in bytes. `grep` and `read` are meant to
+    # be used repeatedly over one candidate pool, so without a cache the
+    # recommended survey/locate/verify shape refetches the whole pool once per
+    # stage -- affordable against a local index, three times the bill and the
+    # latency against a paid scrape API. Beyond the budget new documents are
+    # simply not cached; nothing is evicted, so a long rollout degrades to the
+    # old behaviour instead of thrashing.
+    session_content_cache_bytes: int = Field(default=32_000_000, ge=0)
 
     sandbox_image: str = "opensac-sandbox:latest"
     sandbox_timeout_seconds: int = 120

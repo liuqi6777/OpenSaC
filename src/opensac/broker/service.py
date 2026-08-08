@@ -76,6 +76,16 @@ class BrokerSession:
     # the same stored `SearchHit`.
     by_docid: dict[str, SearchHit] = field(default_factory=dict)
     by_url: dict[str, SearchHit] = field(default_factory=dict)
+    # Document text already retrieved in this session, keyed by ref. Scoped to
+    # the session because that is the rollout: the pool a program builds is the
+    # thing it reads repeatedly, and nothing about one question's reading should
+    # reach another's.
+    #
+    # Only successful fetches are stored. Caching a failure would freeze a
+    # transient timeout for the rest of the rollout, and re-reading a page that
+    # failed once is exactly what a program should be allowed to do.
+    content_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    content_cache_bytes: int = 0
     traces: dict[str, list[CapabilityEvent]] = field(default_factory=dict)
     trace_sequence: int = 0
 
@@ -86,6 +96,23 @@ class BrokerSession:
     def next_trace_sequence(self) -> int:
         self.trace_sequence += 1
         return self.trace_sequence
+
+    def cache_content(self, row: dict[str, Any], budget: int) -> None:
+        """Keep a fetched document for the rest of the session, within budget.
+
+        Past the budget nothing is evicted and nothing new is stored: the
+        rollout degrades to fetching every time, which is merely the old
+        behaviour, rather than to a cache that spends its time thrashing.
+        """
+        ref = str(row.get("ref") or "")
+        text = row.get("text") or ""
+        if not ref or ref in self.content_cache or row.get("metadata", {}).get("fetch_error"):
+            return
+        size = len(text)
+        if self.content_cache_bytes + size > budget:
+            return
+        self.content_cache[ref] = row
+        self.content_cache_bytes += size
 
     def remember(self, hit: SearchHit) -> None:
         """Index one hit under every handle it can be reached by.
@@ -113,6 +140,7 @@ class BrokerService:
         extraction_model: str = "",
         max_concurrency: int = 12,
         max_context_payload_bytes: int = 200_000,
+        session_content_cache_bytes: int = 32_000_000,
     ) -> None:
         self.backends = backends
         self.model_client = model_client
@@ -120,6 +148,7 @@ class BrokerService:
         self.sessions: dict[str, BrokerSession] = {}
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self.max_context_payload_bytes = max_context_payload_bytes
+        self.session_content_cache_bytes = session_content_cache_bytes
 
     def register_session(self, session: Session, *, token: str | None = None) -> BrokerSession:
         state = BrokerSession(
@@ -501,7 +530,11 @@ class BrokerService:
                 row["text"] = row["text"][: max(total_chars - used, 0)]
                 row["metadata"]["truncated_by_total_budget"] = True
             used += len(row["text"])
-        return [row for row in rows if row["text"]]
+        # An empty passage is dropped -- that is the budget doing its job -- but
+        # a document that could not be retrieved is kept, because "nothing
+        # relevant on this page" and "nobody could read this page" lead to
+        # different next moves and both arrive here as empty text.
+        return [row for row in rows if row["text"] or row["metadata"].get("fetch_error")]
 
     # Documents in a research corpus are mostly longer than any budget that can
     # be handed to a control model -- median ~9k characters, p90 ~62k -- so
@@ -533,27 +566,37 @@ class BrokerService:
         # asking for the beginning, not making an error.
         offset = max(int(params.get("offset", 1)), 1)
         limit = min(max(int(params.get("limit", 200)), 1), 5_000)
+        # A line is not a fixed amount of text. In the local corpus a line is a
+        # sentence; in a scraped web page it is often a whole section, so the
+        # same `limit` spans two orders of magnitude between backends. This is
+        # a ceiling on the response, not a budget the program is meant to
+        # manage -- generous enough that ordinary reading never meets it.
+        max_chars = min(max(int(params.get("max_chars", 100_000)), 1), 400_000)
         windows: list[dict[str, Any]] = []
         for row in rows:
             lines = self._document_lines(row)
             total = len(lines)
             window = lines[offset - 1 : offset - 1 + limit]
+            # Trim by whole lines, so `end_line` keeps meaning what it says and
+            # a follow-up read resumes on a real boundary.
+            clipped = False
+            while window and len("\n".join(window)) > max_chars and len(window) > 1:
+                window.pop()
+                clipped = True
+            text = "\n".join(window)[:max_chars]
             end = offset - 1 + len(window)
-            windows.append(
-                {
-                    **row,
-                    "text": "\n".join(window),
-                    "metadata": {
-                        **row.get("metadata", {}),
-                        "start_line": offset if window else 0,
-                        "end_line": end,
-                        "total_lines": total,
-                        # None at end of document, so `while next_offset:` is a
-                        # correct scroll loop.
-                        "next_offset": end + 1 if end < total else None,
-                    },
-                }
-            )
+            metadata = {
+                **row.get("metadata", {}),
+                "start_line": offset if window else 0,
+                "end_line": end,
+                "total_lines": total,
+                # None at end of document, so `while next_offset:` is a correct
+                # scroll loop.
+                "next_offset": end + 1 if end < total else None,
+            }
+            if clipped:
+                metadata["truncated_by_max_chars"] = True
+            windows.append({**row, "text": text, "metadata": metadata})
         return windows
 
     @staticmethod
@@ -698,11 +741,24 @@ class BrokerService:
         *,
         query: str | None,
     ) -> list[dict[str, Any]]:
+        """Text for every requested hit, in the order requested.
+
+        Three properties the callers above depend on. One row per hit, so a
+        program can pair results with what it asked for. Caller order, so
+        pairing is positional and not a join. And a document already read in
+        this session is served from the cache: `grep` and `read` exist to be
+        used repeatedly over one pool, and refetching it per stage is
+        affordable against a local index but is three times the bill and the
+        latency against a paid scrape API.
+        """
         grouped: dict[str, list[SearchHit]] = {}
+        misses: list[SearchHit] = []
         for hit in hits:
             state.policy.require_backend(hit.backend)
-            grouped.setdefault(hit.backend, []).append(hit)
-        await state.policy.record_content_fetches(len(hits))
+            if hit.ref not in state.content_cache:
+                misses.append(hit)
+                grouped.setdefault(hit.backend, []).append(hit)
+        await state.policy.record_content_fetches(len(hits), len(misses))
 
         async def fetch(name: str, backend_hits: list[SearchHit]) -> list[ContentSnippet]:
             backend = self.backends.get(name)
@@ -712,7 +768,47 @@ class BrokerService:
                 return await backend.content(backend_hits, query=query)
 
         chunks = await asyncio.gather(*(fetch(name, rows) for name, rows in grouped.items()))
-        return [item.model_dump(mode="json") for chunk in chunks for item in chunk]
+        fetched = {
+            item.ref: item.model_dump(mode="json") for chunk in chunks for item in chunk
+        }
+        for row in fetched.values():
+            state.cache_content(row, self.session_content_cache_bytes)
+
+        rows: list[dict[str, Any]] = []
+        for hit in hits:
+            cached = state.content_cache.get(hit.ref) or fetched.get(hit.ref)
+            # Copied, never handed out by reference. `_content_snippets`
+            # replaces `text` and `metadata` on the rows it is given, so
+            # returning the cached object itself would let one call to
+            # `snippets` overwrite the stored document with the passage it
+            # selected -- and every later `read` of that document would silently
+            # be a read of that passage.
+            row = dict(cached) if cached is not None else None
+            if row is None:
+                # A backend that returned fewer rows than it was given. The
+                # protocol forbids it, but a silent hole here would surface as
+                # a shorter list than the program asked for, which is the exact
+                # failure mode this method exists to remove.
+                row = {
+                    "ref": hit.ref,
+                    "text": "",
+                    "url": hit.url,
+                    "title": hit.title,
+                    "metadata": {
+                        "backend": hit.backend,
+                        "fetch_error": "backend returned no result for this document",
+                    },
+                }
+            rows.append(row)
+
+        # A wholesale failure must not read as "these pages were all empty".
+        # Partial failures stay in the rows, where a program can act on them;
+        # everything failing is infrastructure, and continuing would spend the
+        # rest of the rollout drawing conclusions from nothing.
+        if rows and all(row.get("metadata", {}).get("fetch_error") for row in rows):
+            first = rows[0]["metadata"]["fetch_error"]
+            raise RuntimeError(f"All {len(rows)} document fetches failed: {first}")
+        return rows
 
     async def _chat(
         self,

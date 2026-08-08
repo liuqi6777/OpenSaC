@@ -48,13 +48,20 @@ class ApplicationRuntime:
         )
         self.broker = BrokerService(
             {
-                "local": LocalSearchBackend(settings.local_search_base_url),
-                "web": SerperBackend(settings.serper_api_key),
+                "local": LocalSearchBackend(
+                    settings.local_search_base_url,
+                    fetch_concurrency=settings.backend_fetch_concurrency,
+                ),
+                "web": SerperBackend(
+                    settings.serper_api_key,
+                    fetch_concurrency=settings.backend_fetch_concurrency,
+                ),
             },
             model_client=self.model_client if settings.model_name else None,
             extraction_model=settings.model_name,
             max_concurrency=settings.max_concurrency,
             max_context_payload_bytes=settings.max_context_payload_bytes,
+            session_content_cache_bytes=settings.session_content_cache_bytes,
         )
         broker_socket = resolve_broker_socket_path(settings.broker_socket)
         self.broker_runtime = BrokerRuntime(self.broker, broker_socket)

@@ -477,6 +477,152 @@ async def test_grep_falls_back_to_a_literal_search_for_a_bad_pattern() -> None:
     assert [match["line"] for match in matches] == [1]
 
 
+class CountingBackend:
+    """Records how often it was actually asked to retrieve a document."""
+
+    name = "local"
+
+    def __init__(self, *, fail: set[str] | None = None) -> None:
+        self.fetched: list[str] = []
+        self.fail = fail or set()
+
+    async def search(self, query, *, limit, offset=0, domains=None):
+        return [
+            SearchHit(ref="", backend="local", docid=str(index), snippet="s", rank=index)
+            for index in range(offset + 1, offset + limit + 1)
+        ]
+
+    async def content(self, hits, *, query=None):
+        rows = []
+        for hit in hits:
+            self.fetched.append(hit.docid)
+            if hit.docid in self.fail:
+                rows.append(
+                    ContentSnippet(
+                        ref=hit.ref,
+                        text="",
+                        metadata={"docid": hit.docid, "fetch_error": "HTTPError: 403"},
+                    )
+                )
+            else:
+                rows.append(
+                    ContentSnippet(
+                        ref=hit.ref,
+                        text=f"body of {hit.docid}",
+                        metadata={"docid": hit.docid},
+                    )
+                )
+        return rows
+
+
+async def test_a_document_is_retrieved_once_per_session() -> None:
+    """grep and read are meant to be used repeatedly over one pool.
+
+    Without a cache the recommended survey/locate/verify shape refetches every
+    candidate once per stage. Against a local index that is merely wasteful;
+    against a metered scrape API it is three times the bill and the latency.
+    """
+    backend = CountingBackend()
+    service = BrokerService({"local": backend})
+    state = service.register_session(make_session(backends=["local"], max_search_calls=5))
+    hits = await service.call("token", "search.local", {"query": "q", "limit": 3})
+    refs = [hit["ref"] for hit in hits]
+
+    await service.call("token", "content.get_many", {"refs": refs})
+    await service.call("token", "content.grep", {"refs": refs, "pattern": "body"})
+    await service.call("token", "content.read", {"refs": refs})
+
+    assert backend.fetched == ["1", "2", "3"]
+    # Both numbers are reported: one follows the program's behaviour, the other
+    # follows the bill, and a cache is exactly what makes them diverge.
+    assert state.policy.usage.content_fetches == 9
+    assert state.policy.usage.content_backend_fetches == 3
+
+
+async def test_a_selected_passage_never_overwrites_the_cached_document() -> None:
+    """`content.snippets` rewrites the rows it is handed.
+
+    If those rows were the cached objects, one call to `snippets` would replace
+    the stored document with the passage it chose, and every later `read` of
+    that document would silently be a read of that passage instead.
+    """
+    backend = CountingBackend()
+    service = BrokerService({"local": backend})
+    service.register_session(make_session(backends=["local"], max_search_calls=5))
+    ref = (await service.call("token", "search.local", {"query": "q", "limit": 1}))[0]["ref"]
+
+    await service.call(
+        "token", "content.snippets", {"refs": [ref], "query": "body", "max_tokens_per_page": 1}
+    )
+    rows = await service.call("token", "content.get_many", {"refs": [ref]})
+
+    assert rows[0]["text"] == "body of 1"
+
+
+async def test_every_requested_document_comes_back_in_order() -> None:
+    """A short list is never mistaken for a complete one.
+
+    A dropped failure makes a partial result look whole: the program sees two
+    pages where it asked for three and cannot learn which one is missing, and
+    `read` on a page that failed to load becomes indistinguishable from `read`
+    on a page that is empty.
+    """
+    backend = CountingBackend(fail={"2"})
+    service = BrokerService({"local": backend})
+    service.register_session(make_session(backends=["local"], max_search_calls=5))
+    hits = await service.call("token", "search.local", {"query": "q", "limit": 3})
+    refs = [hit["ref"] for hit in hits]
+
+    rows = await service.call("token", "content.get_many", {"refs": refs})
+
+    assert [row["ref"] for row in rows] == refs
+    assert rows[1]["metadata"]["fetch_error"] == "HTTPError: 403"
+    assert rows[1]["text"] == ""
+    # A failure is not cached: a transient timeout must not be frozen for the
+    # rest of the rollout.
+    await service.call("token", "content.get_many", {"refs": refs})
+    assert backend.fetched == ["1", "2", "3", "2"]
+
+
+async def test_every_fetch_failing_is_raised_not_reported_as_empty_pages() -> None:
+    backend = CountingBackend(fail={"1", "2"})
+    service = BrokerService({"local": backend})
+    service.register_session(make_session(backends=["local"], max_search_calls=5))
+    hits = await service.call("token", "search.local", {"query": "q", "limit": 2})
+
+    with pytest.raises(RuntimeError, match="All 2 document fetches failed"):
+        await service.call(
+            "token", "content.get_many", {"refs": [hit["ref"] for hit in hits]}
+        )
+
+
+async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
+    """A line is a sentence in one corpus and a whole section in another."""
+
+    class Fat:
+        name = "local"
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
+
+        async def content(self, hits, *, query=None):
+            return [ContentSnippet(ref=hit.ref, text="\n".join(["x" * 500] * 20)) for hit in hits]
+
+    service = BrokerService({"local": Fat()})
+    service.register_session(make_session(backends=["local"], max_search_calls=5))
+    ref = (await service.call("token", "search.local", {"query": "q"}))[0]["ref"]
+
+    rows = await service.call(
+        "token", "content.read", {"refs": [ref], "limit": 20, "max_chars": 1200}
+    )
+    assert len(rows[0]["text"]) <= 1200
+    assert rows[0]["metadata"]["truncated_by_max_chars"] is True
+    # Trimmed on a line boundary, so the reported end_line is a real one and a
+    # follow-up read resumes where this one stopped.
+    assert rows[0]["metadata"]["end_line"] == 2
+    assert rows[0]["metadata"]["next_offset"] == 3
+
+
 def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:
     canonical = BrokerService._canonical_url
     assert canonical("HTTPS://Example.COM/a?utm_source=x&id=7#frag") == (

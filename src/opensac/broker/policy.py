@@ -40,9 +40,16 @@ class CapabilityPolicy:
                 raise QuotaExceeded("LLM call quota exceeded")
             self.usage.llm_calls += amount
 
-    async def record_content_fetches(self, amount: int) -> None:
+    async def record_content_fetches(self, requested: int, from_backend: int) -> None:
+        """Charge one ``content.*`` call against both fetch counters.
+
+        Taken together they say what a cache saved. ``requested`` follows the
+        program's behaviour and ``from_backend`` follows the bill, and the two
+        stop being the same number the moment a document is read twice.
+        """
         async with self._lock:
-            self.usage.content_fetches += amount
+            self.usage.content_fetches += requested
+            self.usage.content_backend_fetches += from_backend
 
     async def record_pipeline_model_tokens(self, amount: int) -> None:
         async with self._lock:

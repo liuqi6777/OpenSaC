@@ -152,7 +152,16 @@ class RunUsage(BaseModel):
     model_tokens: int = 0
     pipeline_model_tokens: int = 0
     search_calls: int = 0
+    # Documents the program asked for, counting every request including the ones
+    # a session cache served.
     content_fetches: int = 0
+    # Documents actually retrieved from a backend. The pair is deliberate: one
+    # number alone cannot answer both "how much fetching did the program do"
+    # (a property of its strategy) and "how much load did it cause" (a property
+    # of the infrastructure), and a cache makes those two diverge. Reporting
+    # only the first would hide the saving; only the second would make a program
+    # look like it stopped reading.
+    content_backend_fetches: int = 0
     llm_calls: int = 0
     sandbox_seconds: float = 0.0
 

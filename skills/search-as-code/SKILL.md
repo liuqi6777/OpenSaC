@@ -41,7 +41,10 @@ Handles cannot be invented or guessed: retrieval is the one door into the corpus
 `offset` is depth into the ranking, and it decides more than convenience. A document
 becomes readable only by being returned from a search, so `limit` is at once how far
 you can see and how far you are allowed to reach. If you believe the answer sits below
-the first page, ask for it with `offset` rather than rewriting the query.
+the first page, ask for it with `offset` rather than rewriting the query. Backends differ
+in how deep they go: the local corpus has no ceiling, while web search serves at most rank
+100 and refuses a deeper request rather than clipping it, so a program is never told it
+read a rank that nothing looked at.
 
 Reading a document has four shapes, and the last two are what let you choose the passage
 instead of accepting one:
@@ -55,6 +58,17 @@ instead of accepting one:
 A `ContentMatch.line` is a `read(offset=...)` directly, so locating and reading compose
 with no character arithmetic. Most corpus documents are far longer than anything worth
 printing, so `grep` then `read` is usually cheaper and more reliable than `get_many`.
+Because a line is a sentence in some corpora and a whole section in a scraped web page,
+`read` bounds its window by characters as well as by lines and says so in `metadata`.
+
+A document is retrieved once per session and cached, so grepping and re-reading a pool you
+already fetched costs nothing further; `content_fetches` and `content_backend_fetches` are
+both reported so the saving is visible rather than hidden. Every content call returns one
+row per handle requested, in order. A page that could not be retrieved — a paywall, a
+robots block, a timeout — comes back with empty `text` and `metadata["fetch_error"]`
+rather than being dropped, so a short result is never mistaken for a complete one. Only if
+*every* document in a call fails does the call raise, since that is infrastructure rather
+than a property of the pages.
 
 ## Session capabilities
 

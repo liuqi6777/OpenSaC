@@ -28,4 +28,14 @@ class SearchBackend(Protocol):
         hits: list[SearchHit],
         *,
         query: str | None = None,
-    ) -> list[ContentSnippet]: ...
+    ) -> list[ContentSnippet]:
+        """One snippet per hit, in the order given.
+
+        A document that could not be retrieved comes back as a row with empty
+        ``text`` and ``metadata["fetch_error"]`` describing why, never as a
+        missing row. Dropping it silently makes a partial result look like a
+        complete one: the program sees four pages where it asked for ten and
+        has no way to learn which six are missing, and `content.read` on a page
+        that failed to load becomes indistinguishable from one that is empty.
+        """
+        ...

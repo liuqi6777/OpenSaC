@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+import httpx
 import pytest
 from opensac_sdk.models import SearchHit
 
 from opensac.backends import local_http
+from opensac.backends import serper as serper_module
 from opensac.backends.local_http import LocalSearchBackend, parse_document_frontmatter
+from opensac.backends.serper import SerperBackend
 
 # What the retrieval service actually returns: the document's YAML header is
 # inside `snippet`, and the body then repeats the title as its first line.
@@ -120,3 +124,71 @@ async def test_content_keeps_the_header_in_the_text(client) -> None:
     # A hit whose own title was empty still renders one, recovered from the body.
     assert rows[0].title == "Royal Rumble (2020) - Wikipedia"
     assert rows[0].metadata["date"] == "2018-11-19"
+
+
+async def test_one_unreadable_document_does_not_fail_the_batch(monkeypatch) -> None:
+    """The program asked for a batch and can act on a partial one.
+
+    It cannot act on an exception, and it cannot act on a silently shortened
+    list either -- so a failure travels back as a row that says so.
+    """
+
+    class Failing(FakeClient):
+        async def post(self, url, *, json):
+            if json.get("docid") == "2":
+                raise httpx.ConnectError("boom")
+            return FakeResponse({"text": "body"})
+
+    monkeypatch.setattr(local_http.httpx, "AsyncClient", Failing)
+    hits = [
+        SearchHit(ref=f"ref_{n}", backend="local", docid=str(n), rank=n) for n in (1, 2, 3)
+    ]
+    rows = await LocalSearchBackend("http://localhost:8081").content(hits)
+
+    assert [row.ref for row in rows] == ["ref_1", "ref_2", "ref_3"]
+    assert rows[1].text == ""
+    assert "ConnectError" in rows[1].metadata["fetch_error"]
+    assert rows[2].text == "body"
+
+
+def test_web_search_refuses_depth_it_cannot_serve() -> None:
+    """Silently clipping would let a program believe it read rank 150.
+
+    It would then conclude the document is not in the index, when what
+    happened is that nothing ever looked past rank 100.
+    """
+    backend = SerperBackend("key")
+    with pytest.raises(ValueError, match="reaches rank 100 at most"):
+        asyncio.run(backend.search("q", limit=10, offset=100))
+
+
+async def test_web_content_reports_a_page_it_could_not_scrape(monkeypatch) -> None:
+    """Paywalls and robots blocks are ordinary on the open web.
+
+    Dropping them makes "nobody could read this" look like "this said
+    nothing", and only one of those is worth re-querying over.
+    """
+
+    class Blocked:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def post(self, url, *, headers, json):
+            raise httpx.HTTPError("403 Forbidden")
+
+    monkeypatch.setattr(serper_module.httpx, "AsyncClient", Blocked)
+    hits = [
+        SearchHit(ref="ref_1", backend="web", url="https://example.com/a", rank=1),
+        SearchHit(ref="ref_2", backend="web", url=None, rank=2),
+    ]
+    rows = await SerperBackend("key").content(hits)
+
+    assert [row.ref for row in rows] == ["ref_1", "ref_2"]
+    assert "HTTPError" in rows[0].metadata["fetch_error"]
+    assert "no URL" in rows[1].metadata["fetch_error"]
