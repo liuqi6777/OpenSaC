@@ -46,6 +46,38 @@ def test_state_round_trip_and_path_confinement(tmp_path) -> None:
         state.write_json("../escape.json", {})
 
 
+def test_state_accumulates_across_calls_without_rewriting(tmp_path) -> None:
+    """Extending a record must not cost the whole file each time.
+
+    The recommended shape saves a candidate pool in one turn and adds evidence
+    to it in later ones. With only whole-file writes that is read-everything
+    then write-everything, and a program that dies midway loses all of it.
+    """
+    state = StateResource(str(tmp_path))
+    state.append_jsonl("evidence.jsonl", [{"n": 1}])
+    state.append_jsonl("evidence.jsonl", [{"n": 2}, {"n": 3}])
+    assert state.read_jsonl("evidence.jsonl") == [{"n": 1}, {"n": 2}, {"n": 3}]
+    # A whole-file write still replaces, so the two are distinguishable.
+    state.write_jsonl("evidence.jsonl", [{"n": 9}])
+    assert state.read_jsonl("evidence.jsonl") == [{"n": 9}]
+
+
+def test_state_can_be_asked_what_is_there(tmp_path) -> None:
+    """A later turn has to tell "saved nothing" from "never ran"."""
+    state = StateResource(str(tmp_path))
+    assert state.exists("pool.jsonl") is False
+    state.write_jsonl("pool.jsonl", [{"a": 1}])
+    state.write_json("notes/summary.json", {"b": 2})
+    assert state.exists("pool.jsonl") is True
+
+    assert state.list() == ["notes/summary.json", "pool.jsonl"]
+    assert state.list("notes/") == ["notes/summary.json"]
+    # Runtime internals stay hidden: a program that read or rewrote them would
+    # be editing the record of its own execution.
+    (tmp_path / ".opensac-output.json").write_text("{}")
+    assert ".opensac-output.json" not in state.list()
+
+
 def test_output_submission(tmp_path) -> None:
     path = tmp_path / "output.json"
     transport = FakeTransport()

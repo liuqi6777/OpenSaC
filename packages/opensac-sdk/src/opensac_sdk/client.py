@@ -5,6 +5,7 @@ from .content import ContentResource
 from .llm import LLMResource
 from .output import OutputResource
 from .search import SearchResource
+from .session import SessionResource
 from .state import StateResource
 from .transport import UnixSocketTransport
 
@@ -19,6 +20,7 @@ class OpenSACClient:
         self.search = SearchResource(transport)
         self.content = ContentResource(transport)
         self.citations = CitationsResource(transport)
+        self.session = SessionResource(transport)
         self.llm = LLMResource(transport)
         self.state = state
         self.output = output

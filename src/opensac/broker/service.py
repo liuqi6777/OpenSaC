@@ -182,6 +182,7 @@ class BrokerService:
             "content.read": self._content_read,
             "content.grep": self._content_grep,
             "citations.resolve": self._resolve_citations,
+            "session.usage": self._session_usage,
             "llm.complete": self._complete,
             "llm.complete_many": self._complete_many,
             "llm.extract_many": self._extract_many,
@@ -484,6 +485,29 @@ class BrokerService:
                 "Pass a ref, docid, or URL that a search in this session returned."
             )
         return [hit for _, hit in resolved if hit is not None]
+
+    async def _session_usage(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """What this session has spent, and what it is allowed to spend.
+
+        Both halves, because a count without its ceiling cannot be acted on:
+        "48 searches" is a reason to slow down against a budget of 50 and
+        nothing at all against a budget of 2000. Counted as a capability call
+        like any other -- an exception for it would make the trace stop being a
+        complete record of what the program asked for.
+        """
+        del params
+        usage = state.policy.usage
+        limits = state.policy.limits
+        return {
+            **usage.model_dump(mode="json"),
+            "max_search_calls": limits.max_search_calls,
+            "max_llm_calls": limits.max_llm_calls,
+            "documents_seen": len(state.references),
+        }
 
     async def _resolve_citations(
         self,

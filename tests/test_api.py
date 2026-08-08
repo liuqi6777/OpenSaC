@@ -87,6 +87,32 @@ def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None
         assert sandbox.requests[0].code == "from opensac_sdk import sdk\n"
 
 
+def test_workspace_can_be_read_back_before_the_session_is_deleted(tmp_path) -> None:
+    """The harness's last chance to keep what the program wrote.
+
+    `artifacts` on an exec result gives names; the contents live only in the
+    sandbox and are never rendered to a control model. Once the session is
+    deleted they are gone, so a run without this stays re-runnable but stops
+    being re-questionable.
+    """
+    sandbox = RecordingSandbox()
+    with exec_client(tmp_path, sandbox) as client:
+        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        client.post(
+            f"/v1/sessions/{session_id}/exec",
+            json={"code": "from opensac_sdk import sdk\n"},
+        )
+
+        snapshot = client.get(f"/v1/sessions/{session_id}/workspace").json()
+        assert snapshot["files"] == [
+            {"path": "evidence.jsonl", "bytes": 3, "text": "{}\n", "truncated": False}
+        ]
+        assert snapshot["omitted"] == []
+
+        client.delete(f"/v1/sessions/{session_id}")
+        assert client.get(f"/v1/sessions/{session_id}/workspace").status_code == 404
+
+
 def test_exec_keeps_one_broker_session_across_turns(tmp_path) -> None:
     """Refs and quota must survive across calls or filesystem serde is useless.
 

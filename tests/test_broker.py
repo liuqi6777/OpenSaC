@@ -623,6 +623,27 @@ async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
     assert rows[0]["metadata"]["next_offset"] == 3
 
 
+async def test_a_program_can_read_its_own_budget() -> None:
+    """Spend and ceiling together, because a count alone cannot be acted on.
+
+    "48 searches" is a reason to slow down against a budget of 50 and nothing
+    at all against a budget of 2000. The host renders these counters into the
+    observation the control model reads, but the code that decides whether to
+    search again runs in the sandbox and could not see them.
+    """
+    service = BrokerService({"local": FakeBackend("local", depth=5)})
+    service.register_session(make_session(backends=["local"], max_search_calls=7))
+    await service.call("token", "search.local", {"query": "q", "limit": 2})
+    await service.call("token", "content.get_many", {"refs": ["1"]})
+
+    usage = await service.call("token", "session.usage", {})
+
+    assert usage["search_calls"] == 1
+    assert usage["max_search_calls"] == 7
+    assert usage["content_fetches"] == 1
+    assert usage["documents_seen"] == 2
+
+
 def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:
     canonical = BrokerService._canonical_url
     assert canonical("HTTPS://Example.COM/a?utm_source=x&id=7#frag") == (

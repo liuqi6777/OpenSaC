@@ -32,6 +32,7 @@ from opensac.models import (
     RunUsage,
     Session,
     SessionCreate,
+    WorkspaceSnapshot,
 )
 from opensac.sandbox import DockerSandbox, UnsafeCodeError
 from opensac.sandbox.base import SandboxRequest, SandboxResult
@@ -363,6 +364,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def read_session(session_id: str) -> PublicSession:
         return public_session(get_session(session_id))
+
+    @app.get(
+        "/v1/sessions/{session_id}/workspace",
+        response_model=WorkspaceSnapshot,
+        dependencies=[Depends(authorize)],
+    )
+    async def read_workspace(
+        session_id: str,
+        max_total_bytes: int = 200_000,
+        max_file_bytes: int = 50_000,
+    ) -> WorkspaceSnapshot:
+        """Read the workspace back before the session is deleted.
+
+        For the harness archiving a finished rollout, not for the control
+        model: nothing here passes through an observation, which is why it is
+        a separate request rather than a field on `ExecResult`.
+        """
+        return runtime.store.snapshot_workspace(
+            get_session(session_id),
+            max_total_bytes=max(max_total_bytes, 0),
+            max_file_bytes=max(max_file_bytes, 0),
+        )
 
     @app.delete("/v1/sessions/{session_id}", dependencies=[Depends(authorize)])
     async def delete_session(session_id: str) -> dict[str, str]:

@@ -5,7 +5,15 @@ import shutil
 import uuid
 from pathlib import Path
 
-from opensac.models import ProgramRecord, Run, RunCreate, Session, SessionCreate
+from opensac.models import (
+    ProgramRecord,
+    Run,
+    RunCreate,
+    Session,
+    SessionCreate,
+    WorkspaceFile,
+    WorkspaceSnapshot,
+)
 
 
 class StateStore:
@@ -128,6 +136,54 @@ class StateStore:
             for path in workspace.rglob("*")
             if path.is_file() and not path.name.startswith(".opensac-")
         ]
+
+    def snapshot_workspace(
+        self,
+        session: Session,
+        *,
+        max_total_bytes: int,
+        max_file_bytes: int,
+    ) -> WorkspaceSnapshot:
+        """Everything the program wrote, for the record kept after the session dies.
+
+        Deleting a session is the moment its evidence disappears: what the
+        rollout actually collected in the sandbox, and what it had decided was
+        worth keeping, exist nowhere else. Reading it back first is the
+        difference between a run that can be re-questioned and one that can only
+        be re-run.
+
+        Bounded, and honest about the bound. A workspace holding a corpus dump
+        must not be copied wholesale into a prediction record, but a snapshot
+        that quietly returned half of one would misdescribe the program.
+        """
+        files: list[WorkspaceFile] = []
+        omitted: list[str] = []
+        used = 0
+        for relative in sorted(self.artifacts(session)):
+            path = Path(session.workspace) / relative
+            try:
+                size = path.stat().st_size
+            except OSError:
+                omitted.append(relative)
+                continue
+            if used >= max_total_bytes:
+                omitted.append(relative)
+                continue
+            budget = min(max_file_bytes, max_total_bytes - used)
+            # errors="replace" rather than a skip: a file that is not valid
+            # UTF-8 is still evidence that the program wrote it, and losing the
+            # row would be a worse record than losing a few characters.
+            text = path.read_bytes()[:budget].decode("utf-8", errors="replace")
+            used += len(text)
+            files.append(
+                WorkspaceFile(
+                    path=relative,
+                    bytes=size,
+                    text=text,
+                    truncated=size > budget,
+                )
+            )
+        return WorkspaceSnapshot(files=files, omitted=omitted)
 
     def read_artifact(self, session: Session, relative_path: str) -> Path:
         workspace = Path(session.workspace).resolve()

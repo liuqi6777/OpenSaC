@@ -41,6 +41,11 @@ CAPABILITY_METHODS: tuple[str, ...] = (
     "content.read",
     "content.grep",
     "citations.resolve",
+    # The program's own budget. Without it the only place the remaining quota
+    # appears is the observation the host renders for the control model, so the
+    # code that decides whether to search again cannot see what searching has
+    # already cost.
+    "session.usage",
     "llm.complete",
     "llm.complete_many",
     "llm.extract_many",
@@ -226,6 +231,29 @@ class CapabilityEvent(BaseModel):
     # model's context. Empty in every default run.
     result_payload: Any = None
     result_payload_truncated: bool = False
+
+
+class WorkspaceFile(BaseModel):
+    """One file a program wrote, with its content, for the research record.
+
+    Not part of `ExecResult`: this is read once at the end of a rollout, by the
+    harness, on its way to archiving the run. Putting it in every execution
+    result would push the workspace through the control model's observation on
+    every turn, which is the one thing the architecture exists to avoid.
+    """
+
+    path: str
+    bytes: int
+    text: str
+    truncated: bool = False
+
+
+class WorkspaceSnapshot(BaseModel):
+    files: list[WorkspaceFile] = Field(default_factory=list)
+    # Files present but not returned, because the snapshot budget ran out
+    # first. Reported rather than dropped: a snapshot that silently omitted
+    # half the workspace would misrepresent what the program accumulated.
+    omitted: list[str] = Field(default_factory=list)
 
 
 class ExecResult(BaseModel):
