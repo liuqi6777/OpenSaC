@@ -6,7 +6,7 @@ queries = [
     "approximate nearest neighbor search",
 ]
 
-batches = sdk.search.local_many(queries, limit_per_query=5, concurrency=3)
+batches = sdk.search.many(queries, limit_per_query=5, concurrency=3)
 
 failed = [batch for batch in batches if batch.error]
 if len(failed) == len(batches):

@@ -14,6 +14,8 @@ from opensac.models import RunLimits, Session
 
 class SocketBackend:
     name = "local"
+    supports_domains = False
+    max_depth = None
 
     async def search(self, query, *, limit, offset=0, domains=None):
         return [
@@ -47,7 +49,7 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
         transport = UnixSocketTransport(str(runtime.socket_path), "secret")
         result = await asyncio.to_thread(
             transport.call,
-            "search.local",
+            "search.query",
             {"query": "needle", "limit": 1},
         )
         assert result[0]["snippet"] == "needle"
@@ -132,7 +134,7 @@ async def test_second_broker_refuses_to_evict_a_live_socket(tmp_path) -> None:
         assert first.socket_path.exists()
 
         transport = UnixSocketTransport(str(first.socket_path), "secret")
-        hits = await asyncio.to_thread(transport.call, "search.local", {"query": "q", "limit": 1})
+        hits = await asyncio.to_thread(transport.call, "search.query", {"query": "q", "limit": 1})
         assert hits[0]["snippet"] == "q"
     finally:
         await first.stop()

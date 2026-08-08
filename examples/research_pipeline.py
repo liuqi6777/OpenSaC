@@ -6,7 +6,7 @@ queries = [
     "Milvus vector search official documentation",
 ]
 
-batches = sdk.search.web_many(queries, limit_per_query=8, concurrency=3)
+batches = sdk.search.many(queries, limit_per_query=8, concurrency=3)
 official_domains = {"postgresql.org", "github.com", "elastic.co", "milvus.io"}
 
 unique = {}

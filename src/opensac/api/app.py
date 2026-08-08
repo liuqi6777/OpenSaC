@@ -354,6 +354,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         unknown = set(request.backends) - {"web", "local"}
         if unknown:
             raise HTTPException(status_code=422, detail=f"Unknown backends: {sorted(unknown)}")
+        # One search backend per session. `search.query` resolves to it, so two
+        # would leave the broker picking one and the program unable to tell
+        # which -- and a session that silently searched half of what it enabled
+        # is the quiet kind of wrong. Mixed retrieval, when there is an
+        # experiment that wants it, is an explicit parameter and an arm of its
+        # own, not a default nobody chose.
+        if len(set(request.backends)) != 1:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A session takes exactly one search backend, got "
+                    f"{sorted(set(request.backends))}."
+                ),
+            )
         session = runtime.store.create_session(request)
         return public_session(session)
 

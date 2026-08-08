@@ -8,6 +8,15 @@ from opensac_sdk.models import ContentSnippet, SearchHit
 class SearchBackend(Protocol):
     name: str
 
+    # Deployment facts a caller must be able to read off the backend rather than
+    # infer from its name. The broker enforces both, so that the one search
+    # capability stays backend-neutral in its *name* while staying honest about
+    # what this particular deployment can do: a parameter a backend cannot
+    # honour is refused, never quietly dropped.
+    supports_domains: bool
+    # Deepest rank reachable, or None for a backend with no ceiling.
+    max_depth: int | None
+
     async def search(
         self,
         query: str,

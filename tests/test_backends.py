@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import httpx
@@ -151,15 +150,20 @@ async def test_one_unreadable_document_does_not_fail_the_batch(monkeypatch) -> N
     assert rows[2].text == "body"
 
 
-def test_web_search_refuses_depth_it_cannot_serve() -> None:
-    """Silently clipping would let a program believe it read rank 150.
+def test_backends_declare_what_they_can_and_cannot_do() -> None:
+    """The two facts the broker refuses a request on, read off the backend.
 
-    It would then conclude the document is not in the index, when what
-    happened is that nothing ever looked past rank 100.
+    They are declarations rather than checks because the refusal is central:
+    one `search` capability can only stay backend-neutral in its name if every
+    backend reports its limits in the same vocabulary. The enforcement lives in
+    `tests/test_broker.py`.
     """
-    backend = SerperBackend("key")
-    with pytest.raises(ValueError, match="reaches rank 100 at most"):
-        asyncio.run(backend.search("q", limit=10, offset=100))
+    assert SerperBackend("key").max_depth == 100
+    assert SerperBackend("key").supports_domains is True
+    # A dense index over a fixed corpus: bounded by the corpus, not by a
+    # service policy, and with no notion of a site to filter on.
+    assert LocalSearchBackend("http://localhost").max_depth is None
+    assert LocalSearchBackend("http://localhost").supports_domains is False
 
 
 async def test_web_content_reports_a_page_it_could_not_scrape(monkeypatch) -> None:

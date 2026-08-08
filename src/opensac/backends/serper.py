@@ -11,6 +11,10 @@ class SerperBackend:
     name = "web"
     search_url = "https://google.serper.dev/search"
     scrape_url = "https://scrape.serper.dev"
+    # Pushed down into the query as `site:` rather than filtered afterwards,
+    # which is the point: the ranking is recomputed under the constraint instead
+    # of being thinned after the fact.
+    supports_domains = True
     # Results one SERP request will serve. Depth past this is not a matter of
     # asking harder -- there is no such response -- so it is refused rather
     # than quietly clipped. A program told it read rank 150 when it read rank
@@ -49,14 +53,10 @@ class SerperBackend:
         # Deepen the request and slice, rather than using Serper's `page`:
         # paging renumbers `position` per page, and the rank a hit carries has
         # to stay comparable across the two backends and joinable offline.
+        # `max_depth` is declared, not checked here: the broker refuses a
+        # request past it before this runs, so that every backend's ceiling is
+        # reported to the program in the same words.
         depth = offset + limit
-        if depth > self.max_depth:
-            raise ValueError(
-                f"Web search reaches rank {self.max_depth} at most, and "
-                f"offset={offset} with limit={limit} asks for {depth}. "
-                "Narrow the window or find the document with a different query; "
-                "the local backend has no such ceiling."
-            )
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(
                 self.search_url,

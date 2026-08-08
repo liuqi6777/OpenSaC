@@ -13,10 +13,8 @@ from opensac_sdk import sdk
 
 ## Primitives
 
-- `sdk.search.web(query, limit=10, offset=0, domains=None)`
-- `sdk.search.local(query, limit=10, offset=0)`
-- `sdk.search.web_many(queries, limit_per_query=10, offset=0, concurrency=5)`
-- `sdk.search.local_many(queries, limit_per_query=10, offset=0, concurrency=5)`
+- `sdk.search(query, limit=10, offset=0, domains=None)`
+- `sdk.search.many(queries, limit_per_query=10, offset=0, concurrency=5, domains=None)`
 - `sdk.content.get_many(refs)`
 - `sdk.content.snippets(query, refs, max_tokens=4000, max_tokens_per_page=1000)`
 - `sdk.content.grep(refs, pattern, context=0, max_matches_per_ref=20)`
@@ -40,13 +38,19 @@ you may equally pass a `docid` or a `url` from a hit you already hold — whiche
 easiest to carry — but only for documents a search in this session actually returned.
 Handles cannot be invented or guessed: retrieval is the one door into the corpus.
 
-`offset` is depth into the ranking, and it decides more than convenience. A document
+There is one `search`, and it reaches whichever corpus this session was deployed against;
+`hit.backend` names it. Which one is not something a program chooses, so it is not in the
+method name — a program written against one arm runs unchanged against another. Where a
+backend genuinely differs it differs in a parameter, and the difference is always refused
+rather than absorbed: a backend with no domain filter rejects `domains` instead of
+returning unfiltered hits, and a backend that serves only to rank 100 rejects a deeper
+request instead of clipping it. A program is never told it read a rank that nothing looked
+at, or searched a site nothing filtered on.
+
+`offset` is depth into that ranking, and it decides more than convenience. A document
 becomes readable only by being returned from a search, so `limit` is at once how far
 you can see and how far you are allowed to reach. If you believe the answer sits below
-the first page, ask for it with `offset` rather than rewriting the query. Backends differ
-in how deep they go: the local corpus has no ceiling, while web search serves at most rank
-100 and refuses a deeper request rather than clipping it, so a program is never told it
-read a rank that nothing looked at.
+the first page, ask for it with `offset` rather than rewriting the query.
 
 Reading a document has four shapes, and the last two are what let you choose the passage
 instead of accepting one:
@@ -145,7 +149,7 @@ resolves its trusted URL, document ID, title, and evidence.
 ```python
 from opensac_sdk import sdk
 
-batches = sdk.search.web_many(queries, limit_per_query=10, concurrency=6)
+batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
 hits = {h.ref: h for batch in batches if not batch.error for h in batch.hits}
 for ref, hit in hits.items():
     print(f"{hit.rank} {ref} {hit.date or ''} {hit.title}")

@@ -5,10 +5,8 @@ All external I/O must use `from opensac_sdk import sdk`. You may use Python's st
 library for filtering, joining, regexes, aggregation, and other deterministic processing.
 
 Available capabilities:
-- sdk.search.web(query, limit=10, domains=None)
-- sdk.search.local(query, limit=10)
-- sdk.search.web_many(queries, limit_per_query=10, concurrency=5)
-- sdk.search.local_many(queries, limit_per_query=10, concurrency=5)
+- sdk.search(query, limit=10, offset=0, domains=None)
+- sdk.search.many(queries, limit_per_query=10, offset=0, concurrency=5, domains=None)
 - sdk.content.get_many(refs)
 - sdk.content.snippets(query, refs, max_tokens=4000, max_tokens_per_page=1000)
 - sdk.llm.complete(prompt, system=None, temperature=0.2, max_tokens=None)

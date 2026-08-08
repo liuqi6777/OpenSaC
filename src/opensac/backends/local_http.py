@@ -67,6 +67,14 @@ def _strip_repeated_title(body: str, title: str) -> str:
 
 class LocalSearchBackend:
     name = "local"
+    # The corpus has no notion of a site, and a filter that cannot be honoured
+    # is refused by the broker rather than ignored here. It used to be silently
+    # dropped, which handed a program filtering by domain an unfiltered result
+    # set and no way to find out.
+    supports_domains = False
+    # A dense index over a fixed corpus: depth is bounded by the corpus, not by
+    # a service policy, so there is no rank the backend refuses to reach.
+    max_depth = None
 
     def __init__(
         self,
@@ -89,6 +97,9 @@ class LocalSearchBackend:
         offset: int = 0,
         domains: list[str] | None = None,
     ) -> list[SearchHit]:
+        # Accepted and unused: the broker refuses a domain filter before it gets
+        # here (`supports_domains = False`), so reaching this line with one set
+        # is a broker bug rather than something to absorb quietly.
         del domains
         # The retrieval service has no offset parameter, so depth is reached by
         # asking for the whole prefix and discarding it. Wasteful on the wire

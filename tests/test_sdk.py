@@ -31,10 +31,10 @@ class FakeTransport:
 
 def test_search_resource_returns_typed_hits() -> None:
     transport = FakeTransport()
-    hits = SearchResource(transport).web("query", limit=3)
+    hits = SearchResource(transport)("query", limit=3)
     assert hits[0].ref == "ref_1"
     assert transport.calls == [
-        ("search.web", {"query": "query", "limit": 3, "offset": 0, "domains": None})
+        ("search.query", {"query": "query", "limit": 3, "offset": 0, "domains": None})
     ]
 
 

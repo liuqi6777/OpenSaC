@@ -7,6 +7,14 @@ from .transport import UnixSocketTransport
 class SearchResource:
     """Retrieval, the only way a document enters this session's reach.
 
+    One search, not one per backend. Which corpus a session searches is a
+    deployment fact rather than a choice a program makes -- a session reaches
+    exactly one -- so putting the backend in the method name would only make a
+    program unportable between arms. Where backends genuinely differ they
+    differ in a parameter: `domains` is refused by a backend that has no domain
+    filter, and a depth past what a backend serves is refused rather than
+    clipped. `hit.backend` still says where a document came from.
+
     `offset` is depth into the ranking, and it matters more than paging usually
     does: a document becomes fetchable only by being returned from a search, so
     `limit` is at once how much you can see and how much you are allowed to
@@ -18,7 +26,7 @@ class SearchResource:
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
-    def web(
+    def __call__(
         self,
         query: str,
         *,
@@ -27,19 +35,12 @@ class SearchResource:
         domains: list[str] | None = None,
     ) -> list[SearchHit]:
         result = self._transport.call(
-            "search.web",
+            "search.query",
             {"query": query, "limit": limit, "offset": offset, "domains": domains},
         )
         return [SearchHit.model_validate(hit) for hit in result]
 
-    def local(self, query: str, *, limit: int = 10, offset: int = 0) -> list[SearchHit]:
-        result = self._transport.call(
-            "search.local",
-            {"query": query, "limit": limit, "offset": offset},
-        )
-        return [SearchHit.model_validate(hit) for hit in result]
-
-    def web_many(
+    def many(
         self,
         queries: list[str],
         *,
@@ -49,32 +50,13 @@ class SearchResource:
         domains: list[str] | None = None,
     ) -> list[SearchBatch]:
         result = self._transport.call(
-            "search.web_many",
+            "search.query_many",
             {
                 "queries": queries,
                 "limit_per_query": limit_per_query,
                 "offset": offset,
                 "concurrency": concurrency,
                 "domains": domains,
-            },
-        )
-        return [SearchBatch.model_validate(batch) for batch in result]
-
-    def local_many(
-        self,
-        queries: list[str],
-        *,
-        limit_per_query: int = 10,
-        offset: int = 0,
-        concurrency: int = 5,
-    ) -> list[SearchBatch]:
-        result = self._transport.call(
-            "search.local_many",
-            {
-                "queries": queries,
-                "limit_per_query": limit_per_query,
-                "offset": offset,
-                "concurrency": concurrency,
             },
         )
         return [SearchBatch.model_validate(batch) for batch in result]

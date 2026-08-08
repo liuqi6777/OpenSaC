@@ -173,10 +173,8 @@ class BrokerService:
         if state is None:
             raise PermissionError("Unknown or expired session token")
         handlers: dict[str, Callable[[BrokerSession, dict[str, Any]], Awaitable[Any]]] = {
-            "search.web": self._search_web,
-            "search.local": self._search_local,
-            "search.web_many": self._search_web_many,
-            "search.local_many": self._search_local_many,
+            "search.query": self._search_query,
+            "search.query_many": self._search_query_many,
             "content.get_many": self._content_get_many,
             "content.snippets": self._content_snippets,
             "content.read": self._content_read,
@@ -313,38 +311,68 @@ class BrokerService:
             return len(result)
         return 1 if result is not None else 0
 
-    async def _search_web(
-        self, state: BrokerSession, params: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        return await self._search(state, "web", params)
+    def _search_backend(self, state: BrokerSession) -> tuple[str, SearchBackend]:
+        """The one backend this session searches.
 
-    async def _search_local(
+        Resolved from the session rather than from the method name, which is
+        what makes `search.query` backend-neutral. `create_session` admits
+        exactly one, so there is nothing to choose between here; a session that
+        somehow holds two is a bug worth stopping on rather than a tie to break
+        arbitrarily.
+        """
+        names = sorted(state.policy.allowed_backends & set(self.backends))
+        if len(names) != 1:
+            raise RuntimeError(
+                "A session must have exactly one configured search backend, "
+                f"this one has {names or sorted(state.policy.allowed_backends)}."
+            )
+        return names[0], self.backends[names[0]]
+
+    async def _search_query(
         self, state: BrokerSession, params: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        return await self._search(state, "local", params)
+        return await self._search(state, params)
 
     async def _search(
         self,
         state: BrokerSession,
-        backend_name: str,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        backend_name, backend = self._search_backend(state)
         state.policy.require_backend(backend_name)
         await state.policy.record_search()
-        backend = self.backends.get(backend_name)
-        if backend is None:
-            raise RuntimeError(f"Backend '{backend_name}' is not configured")
         query = str(params.get("query", "")).strip()
         if not query:
             raise ValueError("query must not be empty")
+        domains = params.get("domains")
+        # Refused rather than dropped. A backend-neutral method name is only
+        # honest if a parameter it cannot honour fails loudly: a program that
+        # asked for one site and silently got the whole web draws exactly the
+        # wrong conclusion from an empty result.
+        if domains and not backend.supports_domains:
+            raise ValueError(
+                f"The '{backend_name}' backend has no domain filter, so "
+                f"domains={list(domains)!r} cannot be honoured. Drop the argument "
+                "and filter the hits in Python, or put the constraint in the query."
+            )
         limit = min(max(int(params.get("limit", 10)), 1), 100)
         offset = min(max(int(params.get("offset", 0)), 0), 500)
+        # Same rule as `domains`, for the other thing a backend cannot honour.
+        # Clipping would let a program believe it read rank 150 and conclude the
+        # document is absent, when nothing ever looked past the ceiling.
+        depth = offset + limit
+        if backend.max_depth is not None and depth > backend.max_depth:
+            raise ValueError(
+                f"The '{backend_name}' backend reaches rank {backend.max_depth} at "
+                f"most, and offset={offset} with limit={limit} asks for {depth}. "
+                "Narrow the window, or find the document with a different query."
+            )
         async with self._semaphore:
             hits = await backend.search(
                 query,
                 limit=limit,
                 offset=offset,
-                domains=params.get("domains"),
+                domains=domains,
             )
         recorded = _EVENT_HITS.get()
         for hit in hits:
@@ -411,20 +439,14 @@ class BrokerService:
         """
         return f"ref_{hashlib.sha256(identity.encode()).hexdigest()[:16]}"
 
-    async def _search_web_many(
+    async def _search_query_many(
         self, state: BrokerSession, params: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        return await self._search_many(state, "web", params)
-
-    async def _search_local_many(
-        self, state: BrokerSession, params: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        return await self._search_many(state, "local", params)
+        return await self._search_many(state, params)
 
     async def _search_many(
         self,
         state: BrokerSession,
-        backend_name: str,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
         queries = [str(query) for query in params.get("queries", [])]
@@ -436,7 +458,6 @@ class BrokerService:
                 try:
                     hits = await self._search(
                         state,
-                        backend_name,
                         {
                             "query": query,
                             "limit": params.get("limit_per_query", 10),
@@ -455,7 +476,7 @@ class BrokerService:
         failed = [batch for batch in batches if batch.error]
         if batches and len(failed) == len(batches):
             raise RuntimeError(
-                f"All {len(batches)} '{backend_name}' searches failed: {failed[0].error}"
+                f"All {len(batches)} searches failed: {failed[0].error}"
             )
         return [batch.model_dump(mode="json") for batch in batches]
 

@@ -20,9 +20,17 @@ class FakeBackend:
     apart from "the window was renumbered".
     """
 
+    max_depth = None
+
     def __init__(self, name: str, *, depth: int = 1) -> None:
         self.name = name
         self.depth = depth
+
+    @property
+    def supports_domains(self) -> bool:
+        # Mirrors the real pair rather than declaring one answer, so a test
+        # standing this in for "local" gets local's refusals.
+        return self.name == "web"
 
     def _hit(self, query: str, rank: int) -> SearchHit:
         return SearchHit(
@@ -45,6 +53,8 @@ class FakeBackend:
 
 class BrokenBackend:
     name = "web"
+    supports_domains = True
+    max_depth = None
 
     async def search(self, query, *, limit, offset=0, domains=None):
         raise RuntimeError("backend exploded")
@@ -67,7 +77,7 @@ def make_session(*, backends=None, mechanisms=None):
 async def test_broker_scopes_references_and_fetches_content() -> None:
     service = BrokerService({"web": FakeBackend("web")})
     service.register_session(make_session())
-    hits = await service.call("token", "search.web", {"query": "query", "limit": 3})
+    hits = await service.call("token", "search.query", {"query": "query", "limit": 3})
     assert hits[0]["ref"].startswith("ref_")
     content = await service.call(
         "token",
@@ -79,11 +89,49 @@ async def test_broker_scopes_references_and_fetches_content() -> None:
     assert citations[0]["url"] == "https://example.com/1"
 
 
-async def test_broker_enforces_backend_permissions() -> None:
+async def test_search_fails_loudly_when_the_session_backend_is_not_configured() -> None:
+    """The one thing resolution must never do is pick something else.
+
+    `search.query` carries no backend name, so a session pointed at a backend
+    this broker does not have has to stop here. Falling through to whatever is
+    configured would run the whole question against the wrong corpus and report
+    a score for it.
+    """
     service = BrokerService({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["web"]))
-    with pytest.raises(PermissionError):
-        await service.call("token", "search.local", {"query": "query"})
+    with pytest.raises(RuntimeError, match="exactly one configured search backend"):
+        await service.call("token", "search.query", {"query": "query"})
+
+
+async def test_search_refuses_a_domain_filter_the_backend_cannot_honour() -> None:
+    """Silently dropping it is how a program mistakes the whole web for one site.
+
+    It filters by domain, gets unfiltered hits back, finds nothing relevant and
+    concludes the site has no such page -- with no signal anywhere that the
+    constraint was never applied. This is the reason the method name is
+    backend-neutral while the parameters are not.
+    """
+    service = BrokerService({"local": FakeBackend("local")})
+    service.register_session(make_session(backends=["local"]))
+    with pytest.raises(ValueError, match="no domain filter"):
+        await service.call(
+            "token", "search.query", {"query": "q", "domains": ["example.com"]}
+        )
+    # The same call without the argument is fine, so the refusal is about the
+    # parameter rather than about the backend.
+    assert await service.call("token", "search.query", {"query": "q"})
+
+
+async def test_search_refuses_depth_the_backend_cannot_serve() -> None:
+    """Enforced centrally so every backend refuses in the same words."""
+
+    class Shallow(FakeBackend):
+        max_depth = 100
+
+    service = BrokerService({"web": Shallow("web", depth=200)})
+    service.register_session(make_session(backends=["web"]))
+    with pytest.raises(ValueError, match="reaches rank 100 at most"):
+        await service.call("token", "search.query", {"query": "q", "limit": 10, "offset": 100})
 
 
 async def test_searches_are_counted_and_never_capped() -> None:
@@ -98,7 +146,7 @@ async def test_searches_are_counted_and_never_capped() -> None:
     service = BrokerService({"web": FakeBackend("web")})
     state = service.register_session(make_session())
     for index in range(25):
-        await service.call("token", "search.web", {"query": f"q{index}"})
+        await service.call("token", "search.query", {"query": f"q{index}"})
     assert state.policy.usage.search_calls == 25
 
 
@@ -106,14 +154,14 @@ async def test_search_many_raises_when_every_query_fails() -> None:
     service = BrokerService({"web": BrokenBackend()})
     service.register_session(make_session())
     with pytest.raises(RuntimeError, match="backend exploded"):
-        await service.call("token", "search.web_many", {"queries": ["one", "two"]})
+        await service.call("token", "search.query_many", {"queries": ["one", "two"]})
 
 
 async def test_search_many_tolerates_partial_failure() -> None:
     service = BrokerService({"web": FakeBackend("web")})
     service.register_session(make_session())
     # An empty query is rejected by the broker while the other one succeeds.
-    batches = await service.call("token", "search.web_many", {"queries": ["ok", ""]})
+    batches = await service.call("token", "search.query_many", {"queries": ["ok", ""]})
     assert len(batches[0]["hits"]) == 1
     assert batches[0]["error"] is None
     assert batches[1]["hits"] == []
@@ -179,7 +227,7 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
     service.register_session(make_session())
     await service.call(
         "token",
-        "search.web_many",
+        "search.query_many",
         {"queries": ["one", "two"], "limit_per_query": 1},
         execution_id="exec-1",
     )
@@ -192,7 +240,11 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
         )
 
     trace = service.take_trace("token", "exec-1")
-    assert [event.method for event in trace] == ["search.web_many", "content.get_many"]
+    assert [event.method for event in trace] == ["search.query_many", "content.get_many"]
+    # Also pins the `_many` suffix. `_trace_queries` and `_trace_input_count`
+    # split on it, and the host's analysis derives queries-per-question from
+    # this field; a batch method renamed without the suffix would leave both
+    # counting one query per call and reporting a plausible wrong number.
     assert trace[0].queries == ["one", "two"]
     assert trace[0].input_count == 2
     assert trace[0].result_count == 2
@@ -214,7 +266,7 @@ async def test_query_aware_snippets_select_the_relevant_paragraph() -> None:
 
     service = BrokerService({"web": PassageBackend("web")})
     state = service.register_session(make_session())
-    hits = await service.call("token", "search.web", {"query": "seed"})
+    hits = await service.call("token", "search.query", {"query": "seed"})
     snippets = await service.call(
         "token",
         "content.snippets",
@@ -276,6 +328,10 @@ class RankedBackend:
 
     name = "web"
 
+    supports_domains = True
+
+    max_depth = None
+
     def __init__(self, urls: list[str]) -> None:
         self.urls = urls
 
@@ -309,8 +365,8 @@ async def test_the_same_document_keeps_one_ref_across_queries() -> None:
     service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
     state = service.register_session(make_session())
 
-    first = await service.call("token", "search.web", {"query": "one"})
-    second = await service.call("token", "search.web", {"query": "two"})
+    first = await service.call("token", "search.query", {"query": "one"})
+    second = await service.call("token", "search.query", {"query": "two"})
 
     assert first[0]["ref"] == second[0]["ref"]
     assert len(state.references) == 1
@@ -324,8 +380,8 @@ async def test_refs_are_opaque_and_reproducible() -> None:
     right = BrokerService({"web": RankedBackend(urls)})
     right.register_session(make_session())
 
-    one = (await left.call("token", "search.web", {"query": "q"}))[0]["ref"]
-    two = (await right.call("token", "search.web", {"query": "q"}))[0]["ref"]
+    one = (await left.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    two = (await right.call("token", "search.query", {"query": "q"}))[0]["ref"]
 
     assert one == two
     assert one.startswith("ref_")
@@ -344,7 +400,7 @@ async def test_a_docid_reaches_the_document_a_ref_reaches() -> None:
     """
     service = BrokerService({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
-    hits = await service.call("token", "search.local", {"query": "q"})
+    hits = await service.call("token", "search.query", {"query": "q"})
 
     by_ref = await service.call("token", "content.get_many", {"refs": [hits[0]["ref"]]})
     by_docid = await service.call("token", "content.get_many", {"refs": [hits[0]["docid"]]})
@@ -367,7 +423,7 @@ async def test_a_document_this_session_never_searched_is_still_refused() -> None
     """
     service = BrokerService({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
-    await service.call("token", "search.local", {"query": "q"})
+    await service.call("token", "search.query", {"query": "q"})
 
     with pytest.raises(ValueError, match="Unknown references"):
         await service.call("token", "content.get_many", {"refs": ["999"]})
@@ -383,9 +439,9 @@ async def test_offset_reaches_ranks_a_bare_limit_cannot() -> None:
     service = BrokerService({"local": FakeBackend("local", depth=50)})
     state = service.register_session(make_session(backends=["local"]))
 
-    shallow = await service.call("token", "search.local", {"query": "q", "limit": 10})
+    shallow = await service.call("token", "search.query", {"query": "q", "limit": 10})
     deep = await service.call(
-        "token", "search.local", {"query": "q", "limit": 10, "offset": 10}
+        "token", "search.query", {"query": "q", "limit": 10, "offset": 10}
     )
 
     assert [hit["rank"] for hit in shallow] == list(range(1, 11))
@@ -408,6 +464,8 @@ async def test_grep_line_numbers_are_read_offsets() -> None:
 
     class Paged:
         name = "local"
+        supports_domains = False
+        max_depth = None
 
         async def search(self, query, *, limit, offset=0, domains=None):
             return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
@@ -417,7 +475,7 @@ async def test_grep_line_numbers_are_read_offsets() -> None:
 
     service = BrokerService({"local": Paged()})
     service.register_session(make_session(backends=["local"]))
-    hits = await service.call("token", "search.local", {"query": "q"})
+    hits = await service.call("token", "search.query", {"query": "q"})
     ref = hits[0]["ref"]
 
     matches = await service.call(
@@ -441,6 +499,8 @@ async def test_read_reports_where_to_continue_and_where_to_stop() -> None:
 
     class Doc:
         name = "local"
+        supports_domains = False
+        max_depth = None
 
         async def search(self, query, *, limit, offset=0, domains=None):
             return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
@@ -450,7 +510,7 @@ async def test_read_reports_where_to_continue_and_where_to_stop() -> None:
 
     service = BrokerService({"local": Doc()})
     service.register_session(make_session(backends=["local"]))
-    ref = (await service.call("token", "search.local", {"query": "q"}))[0]["ref"]
+    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
 
     head = await service.call("token", "content.read", {"refs": [ref], "limit": 3})
     assert head[0]["text"] == "a\nb\nc"
@@ -468,6 +528,8 @@ async def test_grep_falls_back_to_a_literal_search_for_a_bad_pattern() -> None:
 
     class Doc:
         name = "local"
+        supports_domains = False
+        max_depth = None
 
         async def search(self, query, *, limit, offset=0, domains=None):
             return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
@@ -477,7 +539,7 @@ async def test_grep_falls_back_to_a_literal_search_for_a_bad_pattern() -> None:
 
     service = BrokerService({"local": Doc()})
     service.register_session(make_session(backends=["local"]))
-    ref = (await service.call("token", "search.local", {"query": "q"}))[0]["ref"]
+    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
 
     matches = await service.call("token", "content.grep", {"refs": [ref], "pattern": "C++ ("})
     assert [match["line"] for match in matches] == [1]
@@ -487,6 +549,10 @@ class CountingBackend:
     """Records how often it was actually asked to retrieve a document."""
 
     name = "local"
+
+    supports_domains = False
+
+    max_depth = None
 
     def __init__(self, *, fail: set[str] | None = None) -> None:
         self.fetched: list[str] = []
@@ -531,7 +597,7 @@ async def test_a_document_is_retrieved_once_per_session() -> None:
     backend = CountingBackend()
     service = BrokerService({"local": backend})
     state = service.register_session(make_session(backends=["local"]))
-    hits = await service.call("token", "search.local", {"query": "q", "limit": 3})
+    hits = await service.call("token", "search.query", {"query": "q", "limit": 3})
     refs = [hit["ref"] for hit in hits]
 
     await service.call("token", "content.get_many", {"refs": refs})
@@ -555,7 +621,7 @@ async def test_a_selected_passage_never_overwrites_the_cached_document() -> None
     backend = CountingBackend()
     service = BrokerService({"local": backend})
     service.register_session(make_session(backends=["local"]))
-    ref = (await service.call("token", "search.local", {"query": "q", "limit": 1}))[0]["ref"]
+    ref = (await service.call("token", "search.query", {"query": "q", "limit": 1}))[0]["ref"]
 
     await service.call(
         "token", "content.snippets", {"refs": [ref], "query": "body", "max_tokens_per_page": 1}
@@ -576,7 +642,7 @@ async def test_every_requested_document_comes_back_in_order() -> None:
     backend = CountingBackend(fail={"2"})
     service = BrokerService({"local": backend})
     service.register_session(make_session(backends=["local"]))
-    hits = await service.call("token", "search.local", {"query": "q", "limit": 3})
+    hits = await service.call("token", "search.query", {"query": "q", "limit": 3})
     refs = [hit["ref"] for hit in hits]
 
     rows = await service.call("token", "content.get_many", {"refs": refs})
@@ -594,7 +660,7 @@ async def test_every_fetch_failing_is_raised_not_reported_as_empty_pages() -> No
     backend = CountingBackend(fail={"1", "2"})
     service = BrokerService({"local": backend})
     service.register_session(make_session(backends=["local"]))
-    hits = await service.call("token", "search.local", {"query": "q", "limit": 2})
+    hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
 
     with pytest.raises(RuntimeError, match="All 2 document fetches failed"):
         await service.call(
@@ -607,6 +673,8 @@ async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
 
     class Fat:
         name = "local"
+        supports_domains = False
+        max_depth = None
 
         async def search(self, query, *, limit, offset=0, domains=None):
             return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
@@ -616,7 +684,7 @@ async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
 
     service = BrokerService({"local": Fat()})
     service.register_session(make_session(backends=["local"]))
-    ref = (await service.call("token", "search.local", {"query": "q"}))[0]["ref"]
+    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
 
     rows = await service.call(
         "token", "content.read", {"refs": [ref], "limit": 20, "max_chars": 1200}
@@ -638,7 +706,7 @@ async def test_a_program_can_read_what_it_has_spent() -> None:
     """
     service = BrokerService({"local": FakeBackend("local", depth=5)})
     service.register_session(make_session(backends=["local"]))
-    await service.call("token", "search.local", {"query": "q", "limit": 2})
+    await service.call("token", "search.query", {"query": "q", "limit": 2})
     await service.call("token", "content.get_many", {"refs": ["1"]})
 
     usage = await service.call("token", "session.usage", {})
@@ -676,7 +744,7 @@ async def test_trace_records_identity_and_rank_for_every_hit() -> None:
 
     await service.call(
         "token",
-        "search.web_many",
+        "search.query_many",
         {"queries": ["one", "two"], "limit_per_query": 2},
         execution_id="exec-hits",
     )
@@ -706,11 +774,11 @@ async def test_batching_disabled_forces_one_item_per_call() -> None:
     with pytest.raises(MechanismDisabled, match="at most one item"):
         await service.call(
             "token",
-            "search.web_many",
+            "search.query_many",
             {"queries": ["one", "two"]},
             execution_id="exec-block",
         )
-    batches = await service.call("token", "search.web_many", {"queries": ["one"]})
+    batches = await service.call("token", "search.query_many", {"queries": ["one"]})
     assert len(batches[0]["hits"]) == 1
 
     # A blocked call is still an event: an arm that disables a capability wants
@@ -743,7 +811,7 @@ async def test_context_decoupling_disabled_echoes_results_into_the_trace() -> No
     )
 
     hits = await service.call(
-        "token", "search.web", {"query": "q"}, execution_id="exec-echo"
+        "token", "search.query", {"query": "q"}, execution_id="exec-echo"
     )
     event = service.take_trace("token", "exec-echo")[0]
     assert event.result_payload == hits
@@ -753,7 +821,7 @@ async def test_context_decoupling_disabled_echoes_results_into_the_trace() -> No
 async def test_default_sessions_keep_results_out_of_the_trace() -> None:
     service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
     service.register_session(make_session())
-    await service.call("token", "search.web", {"query": "q"}, execution_id="exec-plain")
+    await service.call("token", "search.query", {"query": "q"}, execution_id="exec-plain")
     event = service.take_trace("token", "exec-plain")[0]
     assert event.result_payload is None
 
@@ -767,7 +835,7 @@ async def test_oversized_payload_is_capped_and_says_so() -> None:
         make_session(mechanisms=Mechanisms(context_decoupling=False))
     )
     await service.call(
-        "token", "search.web", {"query": "q", "limit": 50}, execution_id="exec-big"
+        "token", "search.query", {"query": "q", "limit": 50}, execution_id="exec-big"
     )
     event = service.take_trace("token", "exec-big")[0]
     assert event.result_payload_truncated is True
@@ -791,7 +859,7 @@ def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
     assert Mechanisms().capabilities() == list(CAPABILITY_METHODS)
     without_llm = Mechanisms(llm_subroutine=False).capabilities()
     assert not any(method.startswith("llm.") for method in without_llm)
-    assert "search.web_many" in without_llm
+    assert "search.query_many" in without_llm
     # Batching bounds a call's width rather than removing it, so the method is
     # still reachable and must still be advertised.
     assert Mechanisms(batching=False).capabilities() == list(CAPABILITY_METHODS)

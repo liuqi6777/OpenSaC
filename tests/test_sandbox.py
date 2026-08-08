@@ -12,7 +12,7 @@ from opensac.sandbox import (
 
 
 def test_validator_accepts_sdk_orchestration() -> None:
-    validate_code("from opensac_sdk import sdk\nhits = sdk.search.web('query')")
+    validate_code("from opensac_sdk import sdk\nhits = sdk.search('query')")
 
 
 @pytest.mark.parametrize(
@@ -42,10 +42,10 @@ def test_validator_allows_reporting_an_exception_type() -> None:
     validate_code(
         "from opensac_sdk import sdk\n"
         "try:\n"
-        "    hits = sdk.search.local('query')\n"
+        "    hits = sdk.search('query')\n"
         "except Exception as exc:\n"
         "    print(f'{type(exc).__name__}: {exc}')\n"
-        "    print(sdk.search.local.__doc__)\n"
+        "    print(sdk.search.__doc__)\n"
     )
 
 

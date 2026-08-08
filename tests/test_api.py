@@ -36,6 +36,24 @@ def test_public_session_api_rejects_unknown_backend(tmp_path) -> None:
         assert response.status_code == 422
 
 
+def test_a_session_takes_exactly_one_search_backend(tmp_path) -> None:
+    """Two would leave `search.query` picking one and the program unable to tell.
+
+    Refused at creation rather than resolved at call time: a session that
+    searched half of what it enabled is wrong in a way nothing downstream can
+    detect. Mixed retrieval, when an experiment wants it, is an explicit
+    parameter and an arm of its own.
+    """
+    settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    with TestClient(create_app(settings)) as client:
+        both = client.post("/v1/sessions", json={"backends": ["web", "local"]})
+        assert both.status_code == 422
+        assert "exactly one search backend" in both.json()["detail"]
+        assert client.post("/v1/sessions", json={"backends": []}).status_code == 422
+        # The default is one backend, so an omitted field stays valid.
+        assert client.post("/v1/sessions", json={}).status_code == 200
+
+
 class RecordingSandbox:
     """Stands in for DockerSandbox so /exec is testable without a Docker host."""
 
@@ -269,7 +287,16 @@ def test_session_reports_its_mechanisms_and_reachable_capabilities(tmp_path) -> 
         assert payload["mechanisms"]["llm_subroutine"] is False
         assert payload["mechanisms"]["batching"] is True
         assert not any(method.startswith("llm.") for method in payload["capabilities"])
-        assert "search.local_many" in payload["capabilities"]
+        assert "search.query_many" in payload["capabilities"]
+
+        # The manifest used to over-advertise: it filtered on mechanisms only,
+        # so a local-only session still announced `search.web`. One neutral
+        # search name makes the manifest correct on both backends by
+        # construction rather than by a second filter that could drift.
+        web = client.post("/v1/sessions", json={"backends": ["web"]}).json()
+        for manifest in (payload["capabilities"], web["capabilities"]):
+            assert "search.query" in manifest
+            assert not any("web" in method or "local" in method for method in manifest)
 
         # Recorded on the session, which is what makes an arm recoverable after
         # the run.

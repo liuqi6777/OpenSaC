@@ -40,10 +40,17 @@ class RunLimits(BaseModel):
 # therefore to the skill text), and a method listed here without a handler would
 # be advertised to the model and then fail on first use.
 CAPABILITY_METHODS: tuple[str, ...] = (
-    "search.web",
-    "search.local",
-    "search.web_many",
-    "search.local_many",
+    # One search, whichever backend this session was deployed against. The
+    # backend is a deployment fact, not something a program chooses: it reaches
+    # exactly one corpus, and naming that corpus in the method would make the
+    # generated program unportable across arms and the skill text differ by
+    # backend for no gain. Where a backend genuinely differs -- a domain filter,
+    # a depth ceiling -- it differs in a *parameter*, which the broker refuses
+    # explicitly rather than absorbing (design.md 3.8). `hit.backend` still
+    # carries provenance, so nothing downstream loses track of where a document
+    # came from.
+    "search.query",
+    "search.query_many",
     "content.get_many",
     "content.snippets",
     "content.read",
@@ -63,8 +70,7 @@ CAPABILITY_METHODS: tuple[str, ...] = (
 # batching is disabled, so the ablation lands on "may I fan out in one call"
 # rather than on "does this method exist".
 FANOUT_METHODS: dict[str, str] = {
-    "search.web_many": "queries",
-    "search.local_many": "queries",
+    "search.query_many": "queries",
     "llm.complete_many": "prompts",
     "llm.extract_many": "items",
 }
@@ -139,7 +145,10 @@ class Mechanisms(BaseModel):
 
 
 class SessionCreate(BaseModel):
-    backends: list[str] = Field(default_factory=lambda: ["web", "local"])
+    # One search backend per session; the API refuses more (see `create_session`).
+    # `local` is the default because it needs no credentials, so a fresh install
+    # is runnable before anyone has a Serper key.
+    backends: list[str] = Field(default_factory=lambda: ["local"])
     limits: RunLimits = Field(default_factory=RunLimits)
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
 
