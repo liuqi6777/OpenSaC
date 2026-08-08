@@ -3,11 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
-from opensac.models import RunLimits, RunUsage
-
-
-class QuotaExceeded(RuntimeError):
-    pass
+from opensac.models import RunUsage
 
 
 class MechanismDisabled(RuntimeError):
@@ -23,21 +19,31 @@ class MechanismDisabled(RuntimeError):
 
 @dataclass
 class CapabilityPolicy:
-    limits: RunLimits
+    """What a session is allowed to reach, and what it has spent.
+
+    Two jobs that look similar and are not. `require_backend` is a boundary:
+    refusing it is the point, and a session that reaches past it is a bug.
+    Everything else here only counts.
+
+    There is deliberately no ceiling on the counts. A hard cap in a research
+    harness has two possible fates and neither is useful: set high enough not to
+    interfere it is dead code, and set low enough to bind it converts a question
+    into a zero that reads afterwards as a model failure rather than as the
+    budget it was. The numbers are instead handed to the program through
+    `session.usage`, so a policy that wants to ration retrieval can be written
+    and measured rather than imposed.
+    """
+
     allowed_backends: set[str]
     usage: RunUsage = field(default_factory=RunUsage)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-    async def consume_search(self, amount: int = 1) -> None:
+    async def record_search(self, amount: int = 1) -> None:
         async with self._lock:
-            if self.usage.search_calls + amount > self.limits.max_search_calls:
-                raise QuotaExceeded("Search call quota exceeded")
             self.usage.search_calls += amount
 
-    async def consume_llm(self, amount: int = 1) -> None:
+    async def record_llm(self, amount: int = 1) -> None:
         async with self._lock:
-            if self.usage.llm_calls + amount > self.limits.max_llm_calls:
-                raise QuotaExceeded("LLM call quota exceeded")
             self.usage.llm_calls += amount
 
     async def record_content_fetches(self, requested: int, from_backend: int) -> None:

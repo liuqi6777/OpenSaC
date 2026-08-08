@@ -20,9 +20,17 @@ class RunStatus(StrEnum):
 
 
 class RunLimits(BaseModel):
+    """Bounds on OpenSAC's own control loop, not on what a program may retrieve.
+
+    Retrieval and pipeline-LLM ceilings used to live here. They were removed
+    rather than raised: in a research harness a hard cap is dead code when it
+    never binds and a manufactured zero when it does, and either way the volume
+    a paradigm retrieves at is an outcome worth measuring rather than a
+    parameter worth fixing. `RunUsage` still counts everything, and
+    `session.usage` hands the counts to the program.
+    """
+
     max_turns: int = Field(default=8, ge=1, le=50)
-    max_search_calls: int = Field(default=200, ge=1, le=5000)
-    max_llm_calls: int = Field(default=30, ge=0, le=500)
     timeout_seconds: int = Field(default=300, ge=1, le=3600)
 
 

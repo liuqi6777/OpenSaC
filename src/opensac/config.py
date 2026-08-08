@@ -48,8 +48,6 @@ class Settings(BaseSettings):
     sandbox_max_concurrency: int = 8
 
     max_turns: int = 8
-    max_search_calls: int = 200
-    max_llm_calls: int = 30
     max_concurrency: int = 12
     max_output_bytes: int = Field(default=1_000_000, ge=1024)
     # Only reached by a session that disables context decoupling, where every

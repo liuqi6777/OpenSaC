@@ -153,7 +153,7 @@ class BrokerService:
     def register_session(self, session: Session, *, token: str | None = None) -> BrokerSession:
         state = BrokerSession(
             session=session,
-            policy=CapabilityPolicy(session.limits, set(session.backends)),
+            policy=CapabilityPolicy(set(session.backends)),
         )
         self.sessions[token or session.token] = state
         return state
@@ -330,7 +330,7 @@ class BrokerService:
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
         state.policy.require_backend(backend_name)
-        await state.policy.consume_search()
+        await state.policy.record_search()
         backend = self.backends.get(backend_name)
         if backend is None:
             raise RuntimeError(f"Backend '{backend_name}' is not configured")
@@ -491,21 +491,20 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        """What this session has spent, and what it is allowed to spend.
+        """What this session has spent so far.
 
-        Both halves, because a count without its ceiling cannot be acted on:
-        "48 searches" is a reason to slow down against a budget of 50 and
-        nothing at all against a budget of 2000. Counted as a capability call
-        like any other -- an exception for it would make the trace stop being a
-        complete record of what the program asked for.
+        Nothing here is a ceiling. The broker does not ration retrieval, so
+        these are the numbers a program throttles itself by if it chooses to --
+        which is the point: a policy the program applies can be read off its
+        code and measured, and one the broker imposes can only be hit.
+
+        Counted as a capability call like any other. An exception for it would
+        make the trace stop being a complete record of what the program asked
+        for.
         """
         del params
-        usage = state.policy.usage
-        limits = state.policy.limits
         return {
-            **usage.model_dump(mode="json"),
-            "max_search_calls": limits.max_search_calls,
-            "max_llm_calls": limits.max_llm_calls,
+            **state.policy.usage.model_dump(mode="json"),
             "documents_seen": len(state.references),
         }
 
@@ -883,7 +882,7 @@ class BrokerService:
         prompt = str(params.get("prompt", "")).strip()
         if not prompt:
             raise ValueError("prompt must not be empty")
-        await state.policy.consume_llm(1)
+        await state.policy.record_llm(1)
         system = params.get("system")
         answer, tokens = await self._chat(
             prompt,
@@ -902,10 +901,10 @@ class BrokerService:
             return []
         if any(not prompt.strip() for prompt in prompts):
             raise ValueError("prompts must not contain empty strings")
-        # Charge the whole fan-out up front: a partially charged batch that then
-        # trips the quota mid-flight would leave the caller unable to tell which
-        # prompts actually ran.
-        await state.policy.consume_llm(len(prompts))
+        # The whole fan-out is counted before it runs, so a batch that dies
+        # partway is still reported at the size it was dispatched at rather than
+        # at however far it got.
+        await state.policy.record_llm(len(prompts))
         system = params.get("system")
         temperature = self._clamp_temperature(params.get("temperature", 0.2))
         max_tokens = self._clamp_max_tokens(params.get("max_tokens"))
@@ -934,7 +933,7 @@ class BrokerService:
     ) -> list[dict[str, Any]]:
         self._require_model()
         items = params.get("items", [])
-        await state.policy.consume_llm(len(items))
+        await state.policy.record_llm(len(items))
         schema = params.get("schema", {})
         instruction = str(params.get("instruction", ""))
         concurrency = min(max(int(params.get("concurrency", 4)), 1), 12)

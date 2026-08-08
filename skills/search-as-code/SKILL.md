@@ -27,7 +27,7 @@ from opensac_sdk import sdk
 - `sdk.llm.extract_many(items, instruction=..., schema=..., concurrency=4)`
 - `sdk.state.read_json/read_jsonl`, `write_json/write_jsonl`, `append_jsonl`, `exists`,
   `list(prefix="")`
-- `sdk.session.usage()` — calls spent and the ceilings they are measured against
+- `sdk.session.usage()` — searches, fetches and LLM calls made so far
 - `sdk.output.submit(output, citations=[{"ref": hit.ref}])`
 
 Search returns typed hits with `ref`, `backend`, `title`, `url`, `docid`, `domain`,
@@ -129,9 +129,10 @@ Persist compact intermediate records to JSONL when later turns may need them. Th
 workspace and the ref table survive across turns, so handles written to JSONL in one turn
 still resolve in a later one: extend a record with `append_jsonl` rather than reading and
 rewriting it, and call `exists` before assuming an earlier turn left something behind.
-`session.usage()` reports spend against ceilings, which is the only way code inside the
-sandbox can see a budget the caller renders outside it. Submit only evidence and summaries
-useful to the control model, not every raw result.
+`session.usage()` reports how much has been retrieved so far. Nothing rations it — there
+are no ceilings — so it is there for a program that wants to pace itself: retrieval
+climbing while evidence does not is the signal to read rather than search again. Submit
+only evidence and summaries useful to the control model, not every raw result.
 
 Never use direct HTTP, sockets, subprocesses, shell commands, credentials, environment
 inspection, or package installation. Dunder attributes are rejected apart from `__name__`

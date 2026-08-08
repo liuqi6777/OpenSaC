@@ -84,7 +84,7 @@ async def test_llm_resource_round_trips_over_real_unix_socket(tmp_path) -> None:
             id="session",
             token="secret",
             backends=["local"],
-            limits=RunLimits(max_llm_calls=10),
+            limits=RunLimits(),
             workspace=str(tmp_path / "workspace"),
         )
     )
