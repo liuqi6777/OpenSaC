@@ -39,11 +39,39 @@ BLOCKED_CALLS = {"__import__", "breakpoint", "compile", "eval", "exec", "help", 
 ALLOWED_DUNDER_ATTRIBUTES = {"__name__", "__doc__"}
 
 
+def _point_at(code: str, exc: SyntaxError) -> str:
+    """The offending line with a caret under it.
+
+    A rejection is the whole turn's output, so what it says is the only thing
+    the next program is written from. `(<unknown>, line 10)` names a coordinate
+    into a file the model cannot open -- it has to reconstruct which line that
+    was from the code it emitted, and it reliably rewrites the wrong one.
+
+    Worth the few lines because the errors are concentrated: three quarters of
+    all rejections here are one message, quote escaping inside a phrase query,
+    where the difference between the broken line and its correct neighbour is a
+    single backslash. That is invisible in prose and obvious under a caret.
+    """
+    lines = code.splitlines()
+    lineno = exc.lineno or 0
+    if not 1 <= lineno <= len(lines):
+        return ""
+    source = lines[lineno - 1]
+    # `exc.offset` is 1-based and may point one past the end of the line.
+    column = max(1, min(exc.offset or 1, len(source) + 1))
+    stripped = source.lstrip()
+    indent = len(source) - len(stripped)
+    label = f"line {lineno}: "
+    return f"\n  {label}{stripped}\n  {' ' * (len(label) + column - 1 - indent)}^"
+
+
 def validate_code(code: str) -> None:
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
-        raise UnsafeCodeError(f"Generated code is invalid Python: {exc}") from exc
+        raise UnsafeCodeError(
+            f"Generated code is invalid Python: {exc}{_point_at(code, exc)}"
+        ) from exc
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

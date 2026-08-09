@@ -128,3 +128,46 @@ def test_program_and_output_files_are_named_per_execution(tmp_path) -> None:
     )
     assert command[-1] == "/workspace/.opensac-program-007.py"
     assert "OPENSAC_OUTPUT_PATH=/workspace/.opensac-output-007.json" in command
+
+
+def test_a_syntax_rejection_points_at_the_line_instead_of_naming_it() -> None:
+    """A rejection is the whole turn's output, so it is what the retry is written from.
+
+    `(<unknown>, line 3)` is a coordinate into a file the model cannot open: it
+    has to work out which line that was from the code it emitted, and it
+    reliably rewrites the wrong one. The errors are concentrated enough for
+    this to matter -- three quarters of them are quote escaping inside a phrase
+    query, where the broken line and its correct neighbour differ by one
+    backslash.
+    """
+    code = 'queries = [\n    "Portland salon owner",\n    \\"Spokane business",\n]\n'
+    with pytest.raises(UnsafeCodeError) as caught:
+        validate_code(code)
+
+    message = str(caught.value)
+    # The original message is kept verbatim; the pointer is added after it.
+    assert "Generated code is invalid Python:" in message
+    assert 'line 3: \\"Spokane business",' in message
+    caret = message.splitlines()[-1]
+    assert caret.strip() == "^"
+    assert caret.index("^") == message.splitlines()[-2].index('\\"') + 1
+
+
+def test_a_syntax_rejection_survives_a_line_number_it_cannot_use() -> None:
+    """The pointer is best-effort; the rejection is not.
+
+    `exc.lineno` can fall outside the source and `exc.offset` can point one
+    past the end of its line. Losing the whole rejection to an IndexError
+    there would turn a fixable mistake into a silent one, so every malformed
+    program must still come back as a rejection that names the problem.
+    """
+    malformed = [
+        "print('unterminated\n",  # offset past the end of the line
+        "(",  # one character, never closed
+        "\n\n\n    x = (\n",  # error on a line that is only indentation
+        "x = 1\n\t y = 2\n",  # mixed indentation
+        "�",  # not even decodable as an identifier
+    ]
+    for code in malformed:
+        with pytest.raises(UnsafeCodeError, match="invalid Python"):
+            validate_code(code)

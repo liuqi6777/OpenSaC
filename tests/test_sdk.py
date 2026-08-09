@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from opensac_sdk.models import ContentSnippet
 from opensac_sdk.output import OutputResource
 from opensac_sdk.search import SearchResource
 from opensac_sdk.state import StateResource
@@ -92,3 +93,79 @@ def test_output_rejects_unscoped_citation(tmp_path) -> None:
         OutputResource(str(tmp_path / "output.json"), FakeTransport()).submit(
             {}, citations=[{"url": "https://invented.example"}]
         )
+
+
+def test_a_result_answers_to_either_spelling_of_a_field_read() -> None:
+    """One type, two access styles -- not two representations tolerating each other.
+
+    Programs reach for `hit["docid"]` because that is what every search API
+    they have read returns, and the attribute-only form turns that prior into
+    `'SearchHit' object is not subscriptable`, which ends the turn.
+    """
+    hit = SearchResource(FakeTransport())("query")[0]
+    assert hit["ref"] == hit.ref == "ref_1"
+    assert hit.get("title") == "Title"
+    assert hit.get("nonexistent") is None
+    assert hit.get("nonexistent", "fallback") == "fallback"
+    assert "ref" in hit and "nonexistent" not in hit
+    assert dict(hit)["rank"] == 1
+    # Neither spelling can reach past the fields, so they cannot disagree.
+    with pytest.raises(KeyError):
+        hit["nonexistent"]
+
+
+def test_a_snippet_carries_the_date_of_the_hit_it_came_from() -> None:
+    """`SearchHit.date` exists because time-constrained tasks are common.
+
+    A snippet with `title` and `url` but no `date` reads like an oversight, and
+    a program written on that assumption dies rather than skipping a filter.
+    """
+    assert "date" in ContentSnippet.model_fields
+    snippet = ContentSnippet(ref="ref_1", text="body", date="1994")
+    assert snippet.date == snippet["date"] == "1994"
+
+
+def test_a_result_written_to_the_workspace_comes_back_readable(tmp_path) -> None:
+    """The round trip is where the type is lost, so it must not lose the access.
+
+    JSON cannot carry a Python type, so a hit written in one turn returns as a
+    mapping in the next. Programs go on writing `row.ref` because that is how
+    every other line around it is written.
+    """
+    state = StateResource(str(tmp_path))
+    hit = SearchResource(FakeTransport())("query")[0]
+
+    # Passed straight in: `default=str` would have written the repr instead,
+    # and a later turn subscripting that string would get a character.
+    state.write_jsonl("pool.jsonl", [hit])
+    assert json.loads((tmp_path / "pool.jsonl").read_text())["ref"] == "ref_1"
+
+    row = state.read_jsonl("pool.jsonl")[0]
+    assert row.ref == row["ref"] == "ref_1"
+    assert row.rank == 1
+    # Still an ordinary dict: it survives json, unpacking and the dict methods.
+    assert isinstance(row, dict)
+    assert json.dumps(row)
+    assert {**row}["title"] == "Title"
+    assert sorted(row.keys())[:2] == ["backend", "date"]
+
+
+def test_a_row_says_what_it_has_when_a_field_is_missing(tmp_path) -> None:
+    state = StateResource(str(tmp_path))
+    state.write_jsonl("pool.jsonl", [{"ref": "ref_1", "rank": 2}])
+    row = state.read_jsonl("pool.jsonl")[0]
+    with pytest.raises(AttributeError, match="rank"):
+        _ = row.raank
+
+
+def test_nesting_reads_the_same_way_at_every_depth(tmp_path) -> None:
+    """Eager, so that `row["metadata"].x` and `row.metadata.x` cannot differ."""
+    state = StateResource(str(tmp_path))
+    state.write_jsonl("pool.jsonl", [{"metadata": {"backend": "local"}, "runs": [{"n": 1}]}])
+    row = state.read_jsonl("pool.jsonl")[0]
+    assert row.metadata.backend == row["metadata"]["backend"] == "local"
+    assert row["metadata"].backend == row.metadata["backend"] == "local"
+    assert row.runs[0].n == 1
+    # write_json / read_json are the same channel and must not diverge.
+    state.write_json("one.json", {"metadata": {"backend": "local"}})
+    assert state.read_json("one.json").metadata.backend == "local"

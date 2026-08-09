@@ -5,6 +5,51 @@ import os
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
+
+class Row(dict):
+    """A row read back from the workspace, readable either way.
+
+    JSON has no way to carry a Python type, so a `SearchHit` written in turn 1
+    can only come back in turn 4 as a mapping. What a program then does with it
+    is written in the style of everything around it -- `row.ref`, `row.rank` --
+    and plain dicts answer that with `AttributeError`, killing the turn.
+
+    Tagging the type on write was the alternative and is worse: it puts a
+    private key in a file whose whole value is being ordinary JSON, and it
+    makes reading back a file the program edited itself a validation error
+    rather than a read.
+
+    So the type is not restored; the access is. Attribute reads are resolved
+    against the keys, and because `__getattr__` runs only after normal lookup
+    fails, `.keys` / `.items` / `.get` still mean the dict methods -- which
+    also means a row with a key named `items` is reachable only as `row["items"]`.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(
+                f"{name!r} is not a field of this row. It has: "
+                f"{', '.join(sorted(map(str, self))) or '(no fields)'}"
+            ) from None
+
+
+def _wrap(value: Any) -> Any:
+    """Make nested mappings read the same way as the row that holds them.
+
+    Eager rather than on access, so that `row["metadata"].backend` and
+    `row.metadata.backend` cannot behave differently. Only containers are
+    walked, so the cost is in the shape of the data and not its size.
+    """
+    if isinstance(value, dict):
+        return Row((key, _wrap(item)) for key, item in value.items())
+    if isinstance(value, list):
+        return [_wrap(item) for item in value]
+    return value
+
 
 class StateResource:
     """The workspace, which is how a program takes notes across turns.
@@ -28,9 +73,22 @@ class StateResource:
         return path
 
     @staticmethod
-    def _dump(rows: list[Any]) -> str:
+    def _row(row: Any) -> Any:
+        """Accept a result object where a mapping is expected.
+
+        Programs pass `sdk.search` results here directly, and `default=str`
+        would have turned each one into its `repr` -- a file of strings that
+        looks fine until a later turn subscripts one and gets a character.
+        Dumping the model instead makes writing a hit and writing
+        `hit.model_dump()` the same operation.
+        """
+        return row.model_dump(mode="json") if isinstance(row, BaseModel) else row
+
+    @classmethod
+    def _dump(cls, rows: list[Any]) -> str:
         return "".join(
-            json.dumps(row, ensure_ascii=True, default=str) + "\n" for row in rows
+            json.dumps(cls._row(row), ensure_ascii=True, default=str) + "\n"
+            for row in rows
         )
 
     def write_jsonl(self, relative_path: str, rows: list[Any]) -> None:
@@ -73,16 +131,16 @@ class StateResource:
     def read_jsonl(self, relative_path: str) -> list[Any]:
         path = self._path(relative_path)
         with path.open("r", encoding="utf-8") as handle:
-            return [json.loads(line) for line in handle if line.strip()]
+            return [_wrap(json.loads(line)) for line in handle if line.strip()]
 
     def write_json(self, relative_path: str, value: Any) -> None:
         path = self._path(relative_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(value, ensure_ascii=True, indent=2, default=str)
+        payload = json.dumps(self._row(value), ensure_ascii=True, indent=2, default=str)
         path.write_text(payload, encoding="utf-8")
 
     def read_json(self, relative_path: str) -> Any:
-        return json.loads(self._path(relative_path).read_text(encoding="utf-8"))
+        return _wrap(json.loads(self._path(relative_path).read_text(encoding="utf-8")))
 
     @classmethod
     def from_environment(cls) -> StateResource:

@@ -961,3 +961,65 @@ def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
     # Batching bounds a call's width rather than removing it, so the method is
     # still reachable and must still be advertised.
     assert Mechanisms(batching=False).capabilities() == list(CAPABILITY_METHODS)
+
+
+async def test_a_ref_with_the_prefix_dropped_still_resolves() -> None:
+    """The one spelling repair allowed, because it is not a guess.
+
+    Restoring a constant prefix is an exact hit on a full key: it resolves to
+    one document or to none. Programs lose the prefix by slicing their own
+    output or reading a truncated column, and the fix costs nothing.
+    """
+    service = BrokerService({"local": FakeBackend("local")})
+    service.register_session(make_session(backends=["local"]))
+    hits = await service.call("token", "search.query", {"query": "q"})
+    ref = hits[0]["ref"]
+
+    bare = await service.call("token", "content.get_many", {"refs": [ref.removeprefix("ref_")]})
+    assert bare == await service.call("token", "content.get_many", {"refs": [ref]})
+
+
+async def test_a_mistyped_ref_is_refused_rather_than_repaired() -> None:
+    """Nearest-match would nearly always be right, which is why it is absent.
+
+    A few hundred refs in a 16-hex space means an edit-distance-1 neighbour is
+    almost certainly the intended document -- and "almost certainly" about
+    *which document* is the wrong trade. It converts an error the program can
+    see into a silent read of, and citation to, a document nobody asked for.
+    """
+    service = BrokerService({"local": FakeBackend("local")})
+    service.register_session(make_session(backends=["local"]))
+    hits = await service.call("token", "search.query", {"query": "q"})
+    ref = hits[0]["ref"]
+
+    one_character_off = ref[:-1] + ("0" if ref[-1] != "0" else "1")
+    with pytest.raises(ValueError, match="Unknown references"):
+        await service.call("token", "content.get_many", {"refs": [one_character_off]})
+    # A truncated ref is a prefix of a real one and is refused for the same
+    # reason: a prefix that is unique today can be ambiguous later.
+    with pytest.raises(ValueError, match="Unknown references"):
+        await service.call("token", "content.get_many", {"refs": [ref[:-2]]})
+
+
+async def test_a_single_handle_passed_unwrapped_is_not_read_character_by_character() -> None:
+    """A bare string is iterable, so the error it produced named nothing.
+
+    `Unknown references: r, e, f` tells a program neither what was wrong nor
+    which handle failed. Accepting the unwrapped form resolves the same
+    document the wrapped form would, so nothing new becomes reachable.
+    """
+    service = BrokerService({"local": FakeBackend("local")})
+    service.register_session(make_session(backends=["local"]))
+    hits = await service.call("token", "search.query", {"query": "q"})
+
+    unwrapped = await service.call("token", "content.get_many", {"refs": hits[0]["ref"]})
+    assert unwrapped == await service.call("token", "content.get_many", {"refs": [hits[0]["ref"]]})
+
+
+async def test_a_snippet_carries_the_date_of_the_hit_that_found_it() -> None:
+    """Filled from the hit, so a backend cannot forget to."""
+    service = BrokerService({"local": FakeBackend("local")})
+    service.register_session(make_session(backends=["local"]))
+    hits = await service.call("token", "search.query", {"query": "q"})
+    rows = await service.call("token", "content.get_many", {"refs": [hits[0]["ref"]]})
+    assert rows[0].get("date") == hits[0].get("date")

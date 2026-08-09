@@ -515,14 +515,35 @@ class BrokerService:
         set of accepted *keys* does not widen the set of reachable *documents*.
         A docid the corpus contains but no query in this session returned is
         still refused, which is what keeps a recall metric meaningful.
+
+        The `ref_` fallback is the one spelling repair allowed here, and it is
+        allowed because it is not a guess: it is an exact hit on a full key
+        after restoring a constant prefix, so it resolves to one document or to
+        none. Fuzzy repair is deliberately absent. Programs mistype these
+        handles constantly -- a third of the rejected ones are a single
+        character from a real ref -- and with a few hundred refs in a 16-hex
+        space a nearest-match would nearly always be right. Nearly always right
+        about *which document* is the wrong trade: it converts an error the
+        program can see and recover from into a silent read of, and citation
+        to, a document nobody asked for. The transcription problem is real and
+        is fixed by not making programs copy handles, not here.
         """
         return (
             state.references.get(handle)
             or state.by_docid.get(handle)
             or state.by_url.get(handle)
+            # A ref with the prefix dropped, which is what printing
+            # `ref.split("_")[1]` or reading a truncated column produces.
+            or state.references.get(f"ref_{handle}")
         )
 
     def _resolve_refs(self, state: BrokerSession, refs: list[str]) -> list[SearchHit]:
+        # A bare string is iterable, so without this a single handle passed
+        # unwrapped is resolved one character at a time and the program is told
+        # `Unknown references: r, e, f`, which names nothing it can act on.
+        # Accepting it resolves the same document the wrapped form would.
+        if isinstance(refs, str):
+            refs = [refs]
         resolved = [(handle, self._lookup(state, str(handle))) for handle in refs]
         missing = [handle for handle, hit in resolved if hit is None]
         if missing:
@@ -891,6 +912,13 @@ class BrokerService:
                         "fetch_error": "backend returned no result for this document",
                     },
                 }
+            # Carried from the hit rather than asked of the backends. The hit is
+            # the only thing that knows it -- a fetch returns a page, not the
+            # search record that found it -- and doing it here means a backend
+            # cannot forget to. `setdefault` semantics: a backend that does
+            # parse a date off the page itself is closer to the truth.
+            if row.get("date") is None and hit.date is not None:
+                row["date"] = hit.date
             rows.append(row)
 
         # A wholesale failure must not read as "these pages were all empty".
