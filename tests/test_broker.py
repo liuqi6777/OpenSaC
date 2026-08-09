@@ -759,6 +759,104 @@ async def test_trace_records_identity_and_rank_for_every_hit() -> None:
     assert "snippet" not in event.model_dump_json()
 
 
+async def test_trace_records_which_documents_a_content_call_opened() -> None:
+    """Surfacing and opening are different failures with different remedies.
+
+    Searches have always carried identities, so a trace could say whether the
+    gold document was ever *found*. Without the same on content events it could
+    not say whether it was ever *read* -- and "the query never reached it" and
+    "the program saw it and moved on" call for opposite fixes. Nothing
+    reconstructs it afterwards: the handle in the transcript is opaque and the
+    table behind it dies with the session.
+    """
+    service = BrokerService({"local": FakeBackend("local", depth=3)})
+    service.register_session(make_session(backends=["local"]))
+    await service.call("token", "search.query", {"query": "q", "limit": 3})
+
+    await service.call(
+        "token",
+        "content.get_many",
+        {"refs": ["2", "3"]},
+        execution_id="exec-read",
+    )
+    event = service.take_trace("token", "exec-read")[0]
+
+    assert [hit.identity for hit in event.hits] == ["local:docid:2", "local:docid:3"]
+    # The rank of the sighting that put the document in reach, not of this call.
+    assert [hit.rank for hit in event.hits] == [2, 3]
+    assert "content:" not in event.model_dump_json()
+
+
+async def test_trace_records_which_documents_a_citation_resolved() -> None:
+    """`citations.resolve` takes handles too, so provenance is traceable the same way."""
+    service = BrokerService({"local": FakeBackend("local", depth=2)})
+    service.register_session(make_session(backends=["local"]))
+    await service.call("token", "search.query", {"query": "q", "limit": 2})
+
+    await service.call(
+        "token",
+        "citations.resolve",
+        {"refs": ["1"]},
+        execution_id="exec-cite",
+    )
+    event = service.take_trace("token", "exec-cite")[0]
+
+    assert [hit.identity for hit in event.hits] == ["local:docid:1"]
+
+
+async def test_a_failed_event_records_why_and_not_only_the_type() -> None:
+    """`error_type` alone collapses cases whose remedies differ.
+
+    Every one of these is a `ValueError`: an unknown handle means the program
+    lost a reference, an empty pattern means it built the call wrong. A trace
+    that stored only the type would report them as one failure mode.
+    """
+    service = BrokerService({"local": FakeBackend("local", depth=2)})
+    service.register_session(make_session(backends=["local"]))
+    await service.call("token", "search.query", {"query": "q", "limit": 2})
+
+    with pytest.raises(ValueError):
+        await service.call(
+            "token",
+            "content.get_many",
+            {"refs": ["nope"]},
+            execution_id="exec-unknown",
+        )
+    with pytest.raises(ValueError):
+        await service.call(
+            "token",
+            "content.grep",
+            {"refs": ["1"], "pattern": ""},
+            execution_id="exec-pattern",
+        )
+
+    unknown = service.take_trace("token", "exec-unknown")[0]
+    pattern = service.take_trace("token", "exec-pattern")[0]
+
+    assert unknown.error_type == pattern.error_type == "ValueError"
+    assert "Unknown references: nope" in (unknown.error or "")
+    assert "pattern must not be empty" in (pattern.error or "")
+    # A call that resolved nothing opened nothing.
+    assert unknown.hits == []
+
+
+def test_a_trace_error_message_is_bounded_but_never_empty() -> None:
+    """A backend is free to put a response body in an exception.
+
+    Bounded for volume rather than secrecy -- the trace already records
+    addresses and queries verbatim -- and `None` rather than `""` for a bare
+    raise, because an empty string reads as "the message was dropped".
+    """
+    bound = BrokerService._ERROR_MESSAGE_CHARS
+    long = BrokerService._trace_error_message(RuntimeError("x" * (bound + 100)))
+
+    assert long is not None
+    assert long.startswith("x" * 32) and long.endswith("... [truncated]")
+    assert len(long) < bound + 100
+    assert BrokerService._trace_error_message(ValueError()) is None
+
+
+
 async def test_batching_disabled_forces_one_item_per_call() -> None:
     """The switch bounds fan-out; it does not remove the method.
 

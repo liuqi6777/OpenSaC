@@ -222,6 +222,7 @@ class BrokerService:
                     hits=list(_EVENT_HITS.get() or []),
                     model_tokens=_EVENT_MODEL_TOKENS.get(),
                     error_type=type(exc).__name__,
+                    error=self._trace_error_message(exc),
                 ),
             )
             raise
@@ -310,6 +311,30 @@ class BrokerService:
         if isinstance(result, list):
             return len(result)
         return 1 if result is not None else 0
+
+    # A failed event without its message is a category, not a diagnosis. The
+    # type alone collapses cases whose remedies differ completely: `ValueError`
+    # covers an unrecognised handle, an empty grep pattern and a depth beyond
+    # what the backend serves, and only the text says which one happened.
+    #
+    # Bounded because the trace is written for every run and has to stay
+    # publishable, and an exception is the one field here whose content is not
+    # under this module's control -- a backend is free to put a response body in
+    # it. Addresses and queries are already recorded verbatim, so the bound is
+    # about volume rather than secrecy; the head is kept because that is where
+    # the exception says what it is.
+    _ERROR_MESSAGE_CHARS = 400
+
+    @classmethod
+    def _trace_error_message(cls, exc: BaseException) -> str | None:
+        message = str(exc).strip()
+        if not message:
+            # `raise ValueError` with no argument is a real case, and an empty
+            # string in the record would read as "the message was dropped".
+            return None
+        if len(message) <= cls._ERROR_MESSAGE_CHARS:
+            return message
+        return message[: cls._ERROR_MESSAGE_CHARS] + "... [truncated]"
 
     def _search_backend(self, state: BrokerSession) -> tuple[str, SearchBackend]:
         """The one backend this session searches.
@@ -505,7 +530,30 @@ class BrokerService:
                 f"Unknown references: {', '.join(str(handle) for handle in missing[:3])}. "
                 "Pass a ref, docid, or URL that a search in this session returned."
             )
-        return [hit for _, hit in resolved if hit is not None]
+        hits = [hit for _, hit in resolved if hit is not None]
+        # Every consumer of a handle passes through here -- the four content
+        # methods and `citations.resolve` -- so this is the one place that knows
+        # which documents a non-search event touched.
+        #
+        # Recording it is what makes the second half of the retrieval funnel
+        # measurable. `search.*` events already carry identities, so a trace
+        # could always answer "did the gold document ever surface"; without this
+        # it could not answer "was it ever opened", and those two questions have
+        # completely different remedies. Reconstructing it afterwards is not
+        # possible: refs are opaque in the transcript and the ref->docid table
+        # dies with the session.
+        #
+        # `rank` is the rank of the sighting `remember()` kept, i.e. where the
+        # document first appeared, not a property of this call. That is the
+        # useful reading -- "the program opened something it had seen at rank 34"
+        # -- and it is the only rank a content event has.
+        recorded = _EVENT_HITS.get()
+        if recorded is not None:
+            recorded.extend(
+                HitRecord(identity=self._identity(hit), rank=hit.rank, score=hit.score)
+                for hit in hits
+            )
+        return hits
 
     async def _session_usage(
         self,

@@ -205,7 +205,7 @@ class ExecCreate(BaseModel):
 
 
 class HitRecord(BaseModel):
-    """One search result, reduced to what offline analysis needs.
+    """One document an event touched, reduced to what offline analysis needs.
 
     ``identity`` is the stable key the broker assigns
     (docs/research-instrumentation.md 1.2) -- enough to count duplicates across
@@ -215,6 +215,13 @@ class HitRecord(BaseModel):
     make the trace impossible to join against a corpus's qrels, and "did the
     agent ever surface the gold document" is the first question anyone asks of
     a failed run.
+
+    Recorded on ``content.*`` and ``citations.resolve`` as well as on searches,
+    because surfacing and opening are different events with different remedies:
+    a gold document that never appeared is a query-formulation failure, and one
+    that appeared and was never opened is a reading failure, and a trace with
+    identities on only one side cannot tell them apart. On those events ``rank``
+    is where the document first appeared, which is the only rank they have.
 
     What stays out is page text: no snippet, no title, no fetched content. The
     trace is written for every run and has to remain publishable, and a
