@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
+import httpx
 import pytest
 from opensac_sdk.models import ContentSnippet
 from opensac_sdk.output import OutputResource
 from opensac_sdk.search import SearchResource
 from opensac_sdk.state import StateResource
+from opensac_sdk.transport import UnixSocketTransport
 
 
 class FakeTransport:
@@ -28,6 +31,37 @@ class FakeTransport:
                 "rank": 1,
             }
         ]
+
+
+def test_unix_transport_reuses_one_http_client_for_all_calls() -> None:
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "http://opensac/v1/call"),
+        json={"ok": True, "result": {"value": 1}, "error": None},
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.posts = 0
+            self.closed = 0
+
+        def post(self, *_args, **_kwargs):
+            self.posts += 1
+            return response
+
+        def close(self) -> None:
+            self.closed += 1
+
+    fake = FakeClient()
+    with patch("opensac_sdk.transport.httpx.Client", return_value=fake) as client_type:
+        transport = UnixSocketTransport("/tmp/broker.sock", "token")
+        assert transport.call("session.usage", {}) == {"value": 1}
+        assert transport.call("session.usage", {}) == {"value": 1}
+        transport.close()
+
+    assert client_type.call_count == 1
+    assert fake.posts == 2
+    assert fake.closed == 1
 
 
 def test_search_resource_returns_typed_hits() -> None:

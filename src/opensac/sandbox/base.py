@@ -20,6 +20,11 @@ class SandboxRequest:
     # the historical names for callers that construct a request positionally.
     program_filename: str = ".opensac-program.py"
     output_filename: str = ".opensac-output.json"
+    # The broker token is an execution credential, not a stable session key:
+    # internal runs mint a fresh token even when they share one session.  Warm
+    # sandboxes therefore use this id for lifecycle/reuse when the caller can
+    # provide it, and fall back to the token for older callers.
+    session_id: str | None = None
 
 
 @dataclass
@@ -31,6 +36,9 @@ class SandboxResult:
     output: Any = None
     citations: list[dict[str, Any]] = field(default_factory=list)
     timed_out: bool = False
+    # Host-observed phase timings. Optional so alternate sandbox
+    # implementations keep their existing contract.
+    timings: dict[str, float] = field(default_factory=dict)
     # Set when the runtime refused to start the program at all: a missing
     # image, an unavailable daemon, a host that rejects a resource flag. Kept
     # apart from stderr because a control model can act on a failing program

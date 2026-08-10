@@ -1,10 +1,27 @@
+import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from opensac.api import create_app
+from opensac.api.app import (
+    ApplicationRuntime,
+    ExecIndeterminateError,
+    SessionCleanupError,
+    SessionClosingError,
+)
 from opensac.config import Settings
-from opensac.sandbox import SandboxRequest, SandboxResult, UnsafeCodeError
+from opensac.models import (
+    ExecCreate,
+    ExecRecord,
+    ExecRecordStatus,
+    RunCreate,
+    RunStatus,
+    SessionCreate,
+)
+from opensac.sandbox import SandboxRequest, SandboxResult, UnsafeCodeError, WarmDockerSandbox
 
 
 def test_public_session_api_hides_capability_token(tmp_path) -> None:
@@ -27,6 +44,9 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["id"].startswith("sess_")
         assert "token" not in payload
         assert "workspace" not in payload
+        assert payload["features"] == ["idempotent_exec"]
+        assert payload["closing"] is False
+        assert payload["last_access"]
 
 
 def test_public_session_api_rejects_unknown_backend(tmp_path) -> None:
@@ -76,6 +96,55 @@ class RecordingSandbox:
         )
 
 
+class BlockingSandbox(RecordingSandbox):
+    """Holds one execution open so DELETE and duplicate requests can race it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.close_calls: list[str] = []
+
+    async def execute(self, request: SandboxRequest) -> SandboxResult:
+        self.requests.append(request)
+        self.started.set()
+        await self.release.wait()
+        return SandboxResult(
+            exit_code=0,
+            stdout="ran once\n",
+            stderr="",
+            duration_seconds=1.0,
+            output={"request": len(self.requests)},
+        )
+
+    async def close_session(self, session) -> None:
+        self.close_calls.append(session.id)
+
+
+class RetryingCloseSandbox(RecordingSandbox):
+    def __init__(self, *, fail: bool = True) -> None:
+        super().__init__()
+        self.fail = fail
+        self.close_calls: list[str] = []
+
+    async def close_session(self, session) -> None:
+        self.close_calls.append(session.id)
+        if self.fail:
+            raise RuntimeError("docker rm failed")
+
+
+class BlockingController:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute(self, run, **_kwargs):
+        self.started.set()
+        await self.release.wait()
+        run.status = RunStatus.COMPLETED
+        return run
+
+
 def exec_client(tmp_path, sandbox) -> TestClient:
     settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
     app = create_app(settings)
@@ -100,9 +169,171 @@ def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None
         assert payload["citations"][0]["ref"] == "ref_1"
         assert payload["artifacts"] == ["evidence.jsonl"]
         assert payload["trace"] == []
+        assert set(payload["timings"]) >= {
+            "session_queue_seconds",
+            "prepare_seconds",
+            "sandbox_queue_seconds",
+            "sandbox_execute_seconds",
+            "postprocess_seconds",
+            "server_total_seconds",
+        }
         assert sandbox.requests[0].execution_id
         # No control model was consulted: the caller supplied the program.
         assert sandbox.requests[0].code == "from opensac_sdk import sdk\n"
+
+
+def test_health_reports_capacity_and_warm_mode_is_selectable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def reap_orphans(_: WarmDockerSandbox) -> int:
+        return 0
+
+    monkeypatch.setattr(WarmDockerSandbox, "reap_orphans", reap_orphans)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        broker_socket=tmp_path / "broker.sock",
+        sandbox_mode="warm",
+        sandbox_max_concurrency=3,
+    )
+    app = create_app(settings)
+    assert isinstance(app.state.runtime.sandbox, WarmDockerSandbox)
+    with TestClient(app) as client:
+        payload = client.get("/healthz").json()
+    assert payload["sandbox_mode"] == "warm"
+    assert payload["sandbox"] == {
+        "capacity": 3,
+        "active": 0,
+        "waiting": 0,
+        "admitted": 0,
+    }
+
+
+def test_exec_id_retries_return_the_persisted_result_and_conflicts_are_409(tmp_path) -> None:
+    sandbox = RecordingSandbox()
+    with exec_client(tmp_path, sandbox) as client:
+        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        request = {"exec_id": "rollout-1:turn-4", "code": "print('once')\n"}
+
+        first = client.post(f"/v1/sessions/{session_id}/exec", json=request)
+        retry = client.post(f"/v1/sessions/{session_id}/exec", json=request)
+        conflict = client.post(
+            f"/v1/sessions/{session_id}/exec",
+            json={"exec_id": request["exec_id"], "code": "print('different')\n"},
+        )
+
+        assert first.status_code == retry.status_code == 200
+        assert retry.json() == first.json()
+        assert len(sandbox.requests) == 1
+        assert conflict.status_code == 409
+        assert "different payload" in conflict.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_exec_ids_run_the_sandbox_once(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    sandbox = BlockingSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    request = ExecCreate(exec_id="rollout-2:turn-9", code="print('once')\n")
+    try:
+        first = asyncio.create_task(runtime.execute_code(session.id, request))
+        await asyncio.wait_for(sandbox.started.wait(), timeout=1)
+        duplicate = asyncio.create_task(runtime.execute_code(session.id, request))
+        await asyncio.sleep(0)
+        assert len(sandbox.requests) == 1
+
+        sandbox.release.set()
+        first_result, duplicate_result = await asyncio.gather(first, duplicate)
+
+        assert first_result == duplicate_result
+        assert len(sandbox.requests) == 1
+        assert len(runtime.store.programs(session)) == 1
+    finally:
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_completed_exec_id_survives_an_application_restart(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    first_runtime = ApplicationRuntime(settings)
+    first_sandbox = RecordingSandbox()
+    first_runtime.sandbox = first_sandbox
+    session = first_runtime.store.create_session(SessionCreate(backends=["local"]))
+    request = ExecCreate(exec_id="rollout-3:turn-2", code="print('durable')\n")
+    try:
+        original = await first_runtime.execute_code(session.id, request)
+    finally:
+        await first_runtime.model_client.close()
+
+    restarted = ApplicationRuntime(settings)
+    restarted_sandbox = RecordingSandbox()
+    restarted.sandbox = restarted_sandbox
+    try:
+        replay = await restarted.execute_code(session.id, request)
+        assert replay == original
+        assert restarted_sandbox.requests == []
+    finally:
+        await restarted.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_does_not_cancel_idempotent_execution(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    sandbox = BlockingSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    request = ExecCreate(exec_id="rollout-4:turn-1", code="print('detached')\n")
+    waiter = asyncio.create_task(runtime.execute_code(session.id, request))
+    try:
+        await sandbox.started.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        retry = asyncio.create_task(runtime.execute_code(session.id, request))
+        await asyncio.sleep(0)
+        assert len(sandbox.requests) == 1
+        sandbox.release.set()
+
+        assert (await retry).succeeded is True
+        stored = runtime.store.get_exec_record(session, request.exec_id)
+        assert stored is not None
+        assert stored.status is ExecRecordStatus.COMPLETED
+        assert len(sandbox.requests) == 1
+    finally:
+        sandbox.release.set()
+        await asyncio.gather(*tuple(runtime.exec_tasks), return_exceptions=True)
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_refuses_to_reexecute_a_pending_exec_record(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    sandbox = RecordingSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    request = ExecCreate(exec_id="rollout-5:turn-8", code="print('unknown')\n")
+    runtime.store.save_exec_record(
+        session,
+        ExecRecord(
+            exec_id=request.exec_id,
+            request_hash=runtime._exec_request_hash(request),
+            status=ExecRecordStatus.PENDING,
+            completed_at=None,
+        ),
+    )
+    try:
+        with pytest.raises(ExecIndeterminateError, match="indeterminate prior attempt"):
+            await runtime.execute_code(session.id, request)
+        assert sandbox.requests == []
+    finally:
+        await runtime.model_client.close()
 
 
 def test_workspace_can_be_read_back_before_the_session_is_deleted(tmp_path) -> None:
@@ -154,6 +385,330 @@ def test_exec_keeps_one_broker_session_across_turns(tmp_path) -> None:
 
         client.delete(f"/v1/sessions/{session_id}")
         assert token not in runtime.broker.sessions
+
+
+@pytest.mark.asyncio
+async def test_delete_marks_closing_waits_for_inflight_exec_and_rejects_new_work(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    sandbox = BlockingSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    try:
+        running = asyncio.create_task(
+            runtime.execute_code(session.id, ExecCreate(code="print('running')\n"))
+        )
+        await sandbox.started.wait()
+
+        deleting = asyncio.create_task(runtime.close_session(session.id))
+        await asyncio.sleep(0)
+        assert runtime.store.get_session(session.id).closing is True
+        assert deleting.done() is False
+        with pytest.raises(SessionClosingError):
+            await runtime.execute_code(session.id, ExecCreate(code="print('too late')\n"))
+
+        sandbox.release.set()
+        assert (await running).succeeded is True
+        assert await deleting is True
+        assert sandbox.close_calls == [session.id]
+        assert session.token not in runtime.broker.sessions
+        with pytest.raises(KeyError):
+            runtime.store.get_session(session.id)
+    finally:
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_revokes_token_but_keeps_durable_closing_session(
+    tmp_path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    runtime = ApplicationRuntime(settings)
+    sandbox = RetryingCloseSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    runtime.bind_session(session)
+    try:
+        with pytest.raises(SessionCleanupError, match="Sandbox cleanup failed"):
+            await runtime.close_session(session.id)
+
+        persisted = runtime.store.get_session(session.id)
+        assert persisted.closing is True
+        assert session.token not in runtime.broker.sessions
+
+        sandbox.fail = False
+        assert await runtime.close_session(session.id) is True
+        with pytest.raises(KeyError):
+            runtime.store.get_session(session.id)
+    finally:
+        await runtime.model_client.close()
+
+
+def test_delete_cleanup_failure_returns_503_and_preserves_session(tmp_path) -> None:
+    sandbox = RetryingCloseSandbox()
+    with exec_client(tmp_path, sandbox) as client:
+        runtime = client.app.state.runtime
+        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session = runtime.store.get_session(session_id)
+        runtime.bind_session(session)
+
+        response = client.delete(f"/v1/sessions/{session_id}")
+
+        assert response.status_code == 503
+        assert runtime.store.get_session(session_id).closing is True
+        assert session.token not in runtime.broker.sessions
+
+
+@pytest.mark.asyncio
+async def test_startup_cleanup_failure_keeps_closing_session_for_next_start(
+    tmp_path,
+) -> None:
+    settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    seed = ApplicationRuntime(settings)
+    session = seed.store.create_session(SessionCreate(backends=["local"]))
+    seed.store.mark_session_closing(session.id)
+    await seed.model_client.close()
+
+    failed = ApplicationRuntime(settings)
+    failed.sandbox = RetryingCloseSandbox()
+    try:
+        with pytest.raises(SessionCleanupError):
+            await failed.start()
+        assert failed.store.get_session(session.id).closing is True
+    finally:
+        await failed.stop()
+
+    recovered = ApplicationRuntime(settings)
+    recovered.sandbox = RetryingCloseSandbox(fail=False)
+    try:
+        await recovered.start()
+        with pytest.raises(KeyError):
+            recovered.store.get_session(session.id)
+    finally:
+        await recovered.stop()
+
+
+@pytest.mark.asyncio
+async def test_immediate_delete_waits_for_an_admitted_exec_before_its_task_starts(
+    tmp_path,
+) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    sandbox = BlockingSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    running = asyncio.create_task(
+        runtime.execute_code(
+            session.id,
+            ExecCreate(exec_id="immediate-delete", code="print('admitted')\n"),
+        )
+    )
+    deleting = asyncio.create_task(runtime.close_session(session.id))
+    try:
+        await asyncio.wait_for(sandbox.started.wait(), timeout=1)
+        assert deleting.done() is False
+        assert runtime.store.get_session(session.id).closing is True
+
+        sandbox.release.set()
+        assert (await running).succeeded is True
+        assert await deleting is True
+        assert len(sandbox.requests) == 1
+    finally:
+        sandbox.release.set()
+        await asyncio.gather(running, deleting, return_exceptions=True)
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_immediate_delete_waits_for_an_admitted_internal_run(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(
+            data_dir=tmp_path / "data",
+            broker_socket=tmp_path / "broker.sock",
+            model_name="test-model",
+        )
+    )
+    controller = BlockingController()
+    runtime.controller = controller
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    run = runtime.store.create_run(session.id, RunCreate(input="research"))
+
+    async def submit() -> asyncio.Task[None]:
+        task = runtime.start_run_task(run, session)
+        # Let an already-ready DELETE run before the admitted child gets its
+        # first turn. The reservation must be sufficient; the session lock is
+        # deliberately not held yet.
+        await asyncio.sleep(0)
+        return task
+
+    submitting = asyncio.create_task(submit())
+    deleting = asyncio.create_task(runtime.close_session(session.id))
+    try:
+        running = await submitting
+        await asyncio.wait_for(controller.started.wait(), timeout=1)
+        assert deleting.done() is False
+
+        controller.release.set()
+        await running
+        assert await deleting is True
+        with pytest.raises(KeyError):
+            runtime.store.get_session(session.id)
+    finally:
+        controller.release.set()
+        await asyncio.gather(submitting, deleting, return_exceptions=True)
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_ttl_reaper_removes_only_idle_sessions_and_cleans_broker_state(tmp_path) -> None:
+    now = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    runtime = ApplicationRuntime(
+        Settings(
+            data_dir=tmp_path / "data",
+            broker_socket=tmp_path / "broker.sock",
+            session_ttl_seconds=60,
+            session_reaper_interval_seconds=5,
+        )
+    )
+    sandbox = BlockingSandbox()
+    runtime.sandbox = sandbox
+    stale = runtime.store.create_session(SessionCreate(backends=["local"]))
+    fresh = runtime.store.create_session(SessionCreate(backends=["local"]))
+    runtime.store.touch_session(stale.id, at=now - timedelta(seconds=61))
+    runtime.store.touch_session(fresh.id, at=now - timedelta(seconds=59))
+    runtime.bind_session(stale)
+    runtime.bind_session(fresh)
+    try:
+        removed = await runtime.reap_expired_sessions(now=now)
+
+        assert removed == [stale.id]
+        assert sandbox.close_calls == [stale.id]
+        assert stale.token not in runtime.broker.sessions
+        assert fresh.token in runtime.broker.sessions
+        assert runtime.store.get_session(fresh.id).id == fresh.id
+        with pytest.raises(KeyError):
+            runtime.store.get_session(stale.id)
+    finally:
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_ttl_reaper_backs_off_for_an_admitted_exec_before_its_task_starts(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    runtime = ApplicationRuntime(
+        Settings(
+            data_dir=tmp_path / "data",
+            broker_socket=tmp_path / "broker.sock",
+            session_ttl_seconds=60,
+        )
+    )
+    sandbox = BlockingSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    stale_at = now - timedelta(seconds=61)
+    runtime.store.touch_session(session.id, at=stale_at)
+    running = asyncio.create_task(
+        runtime.execute_code(session.id, ExecCreate(code="print('refresh')\n"))
+    )
+    reaping = asyncio.create_task(runtime.reap_expired_sessions(now=now))
+    try:
+        assert await reaping == []
+        await asyncio.wait_for(sandbox.started.wait(), timeout=1)
+        sandbox.release.set()
+        assert (await running).succeeded is True
+        assert runtime.store.get_session(session.id).last_access > stale_at
+    finally:
+        sandbox.release.set()
+        await asyncio.gather(running, reaping, return_exceptions=True)
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_persists_an_inflight_internal_run_as_cancelled(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(
+            data_dir=tmp_path / "data",
+            broker_socket=tmp_path / "broker.sock",
+            model_name="test-model",
+        )
+    )
+    controller = BlockingController()
+    runtime.controller = controller
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    run = runtime.store.create_run(session.id, RunCreate(input="research"))
+    running = runtime.start_run_task(run, session)
+    stopped = False
+    try:
+        await asyncio.wait_for(controller.started.wait(), timeout=1)
+        await runtime.stop()
+        stopped = True
+
+        assert running.cancelled()
+        assert runtime.store.get_run(run.id).status is RunStatus.CANCELLED
+    finally:
+        if not stopped:
+            controller.release.set()
+            await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_model_client_when_broker_shutdown_fails(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    original_model_client = runtime.model_client
+
+    class FailingBrokerRuntime:
+        async def stop(self) -> None:
+            await runtime.broker.aclose()
+            raise RuntimeError("broker stop failed")
+
+    class RecordingModelClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    model_client = RecordingModelClient()
+    runtime.broker_runtime = FailingBrokerRuntime()
+    runtime.model_client = model_client
+    try:
+        with pytest.raises(RuntimeError, match="broker stop failed"):
+            await runtime.stop()
+        assert model_client.closed is True
+    finally:
+        await original_model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_cleans_up_after_partial_start_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_app(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    runtime = app.state.runtime
+    stopped = False
+
+    async def failing_start() -> None:
+        raise RuntimeError("partial startup failure")
+
+    async def record_stop() -> None:
+        nonlocal stopped
+        stopped = True
+
+    monkeypatch.setattr(runtime, "start", failing_start)
+    monkeypatch.setattr(runtime, "stop", record_stop)
+
+    with pytest.raises(RuntimeError, match="partial startup failure"):
+        async with app.router.lifespan_context(app):
+            pass
+    assert stopped is True
 
 
 def test_exec_returns_validator_rejection_as_an_observation(tmp_path) -> None:

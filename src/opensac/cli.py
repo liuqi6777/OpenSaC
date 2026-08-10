@@ -57,7 +57,7 @@ def run(
     task: str,
     base_url: str = "http://127.0.0.1:8000",
     api_key: str = "",
-    backends: str = "web,local",
+    backends: str = "local",
 ) -> None:
     """Submit one task to a running OpenSAC API."""
     with OpenSAC(base_url=base_url, api_key=api_key) as client:

@@ -33,6 +33,17 @@ class SerperBackend:
         # the whole candidate pool. The broker's semaphore admits this call as
         # a single unit and cannot see inside it.
         self._fetch_gate = asyncio.Semaphore(max(1, fetch_concurrency))
+        self._client: httpx.AsyncClient | None = None
+
+    def _http(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
@@ -57,13 +68,12 @@ class SerperBackend:
         # request past it before this runs, so that every backend's ceiling is
         # reported to the program in the same words.
         depth = offset + limit
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                self.search_url,
-                headers=self._headers(),
-                json={"q": query, "num": depth},
-            )
-            response.raise_for_status()
+        response = await self._http().post(
+            self.search_url,
+            headers=self._headers(),
+            json={"q": query, "num": depth},
+        )
+        response.raise_for_status()
         payload = response.json()
         return [
             self._normalize_hit(hit, index + 1)
@@ -93,8 +103,8 @@ class SerperBackend:
         del query
         if not hits:
             return []
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            return list(await asyncio.gather(*(self._scrape(client, hit) for hit in hits)))
+        client = self._http()
+        return list(await asyncio.gather(*(self._scrape(client, hit) for hit in hits)))
 
     def _failed(self, hit: SearchHit, reason: str) -> ContentSnippet:
         return ContentSnippet(

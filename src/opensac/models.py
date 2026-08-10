@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def utc_now() -> datetime:
@@ -17,6 +17,11 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class ExecRecordStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
 
 
 class RunLimits(BaseModel):
@@ -161,6 +166,15 @@ class Session(BaseModel):
     workspace: str
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
     created_at: datetime = Field(default_factory=utc_now)
+    # Updated by every operation that keeps the session alive. Kept beside the
+    # session rather than in process memory so a restarted reaper does not make
+    # every old workspace immortal (or immediately reap a session that was just
+    # used by the previous process).
+    last_access: datetime = Field(default_factory=utc_now)
+    # Persisted before DELETE waits for an in-flight execution. A new process
+    # that starts in the middle of cleanup therefore continues closing instead
+    # of admitting new work into a workspace whose owner already deleted it.
+    closing: bool = False
 
 
 class RunCreate(BaseModel):
@@ -202,6 +216,10 @@ class ExecCreate(BaseModel):
 
     code: str = Field(min_length=1)
     include_trace: bool = False
+    # A caller-owned idempotency key. Omitted preserves the original behaviour:
+    # every request is a new action. When present, the completed response is
+    # durable and a retry of the same payload does not execute the program again.
+    exec_id: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class HitRecord(BaseModel):
@@ -281,6 +299,7 @@ class WorkspaceSnapshot(BaseModel):
 
 
 class ExecResult(BaseModel):
+    exec_id: str | None = None
     exit_code: int
     stdout: str
     stderr: str
@@ -299,6 +318,31 @@ class ExecResult(BaseModel):
     usage: RunUsage
     artifacts: list[str] = Field(default_factory=list)
     trace: list[CapabilityEvent] = Field(default_factory=list)
+    timings: dict[str, float] = Field(default_factory=dict)
+
+
+class ExecRecord(BaseModel):
+    """One durable idempotent execution response.
+
+    ``pending`` is written before entering the sandbox. If the process dies in
+    the indeterminate interval before a completed response is atomically
+    persisted, a restarted server refuses to silently execute the action again.
+    """
+
+    exec_id: str
+    request_hash: str
+    status: ExecRecordStatus = ExecRecordStatus.COMPLETED
+    result: ExecResult | None = None
+    completed_at: datetime | None = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        if self.status is ExecRecordStatus.PENDING:
+            if self.result is not None or self.completed_at is not None:
+                raise ValueError("A pending execution cannot have a completed result")
+        elif self.result is None or self.completed_at is None:
+            raise ValueError("A completed execution must have a result and completion time")
+        return self
 
 
 class Run(BaseModel):
@@ -357,7 +401,12 @@ class PublicSession(BaseModel):
     # Derived from `mechanisms`, returned so a host can build its skill text from
     # what the session can actually reach instead of from a duplicated constant.
     capabilities: list[str]
+    # Feature negotiation for transport behaviour. In particular, a host must
+    # not retry `/exec` against an older server that silently ignores `exec_id`.
+    features: list[str] = Field(default_factory=list)
     created_at: datetime
+    last_access: datetime
+    closing: bool
 
 
 class PublicRun(BaseModel):

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import sys
+
 import pytest
 
 from opensac.sandbox import (
@@ -9,6 +12,7 @@ from opensac.sandbox import (
     UnsafeCodeError,
     validate_code,
 )
+from opensac.sandbox.docker import read_bounded_process_output
 
 
 def test_validator_accepts_sdk_orchestration() -> None:
@@ -66,8 +70,21 @@ def test_docker_command_has_security_boundaries(tmp_path) -> None:
     assert "--cap-drop ALL" in joined
     assert "no-new-privileges" in joined
     assert "OPENSAC_SESSION_TOKEN=secret" in joined
+    assert "OPENSAC_READY_PATH=/workspace/.opensac-output.json.ready" in joined
     assert str(socket.resolve()) in joined
     assert str(workspace.resolve() / ".opensac-container-id") not in joined
+
+
+def test_startup_marker_is_converted_to_a_bounded_duration(tmp_path) -> None:
+    marker = tmp_path / "ready"
+    marker.write_text(str(int(101.25 * 1_000_000_000)), encoding="utf-8")
+    assert DockerSandbox._startup_seconds(
+        marker, wall_started=101.0, duration_seconds=2.0
+    ) == pytest.approx(0.25)
+    # A corrupt or stale marker must not invent time outside this execution.
+    assert DockerSandbox._startup_seconds(
+        marker, wall_started=99.0, duration_seconds=1.0
+    ) == 1.0
 
 
 def test_docker_refusal_is_reported_as_a_launch_error() -> None:
@@ -202,3 +219,51 @@ def test_a_syntax_rejection_survives_a_line_number_it_cannot_use() -> None:
     for code in malformed:
         with pytest.raises(UnsafeCodeError, match="invalid Python"):
             validate_code(code)
+
+
+async def test_real_subprocess_output_is_bounded_and_terminated() -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        (
+            "import os\n"
+            "while True:\n"
+            " os.write(1, b'x' * 65536)\n"
+            " os.write(2, b'y' * 65536)\n"
+        ),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    captured = await read_bounded_process_output(
+        process,
+        max_output_bytes=8192,
+        timeout_seconds=5,
+    )
+
+    assert captured.output_limit_exceeded is True
+    assert captured.timed_out is False
+    assert len(captured.stdout) + len(captured.stderr.split(b"\nOpenSAC", 1)[0]) <= 8192
+    assert b"reached the output limit" in captured.stderr
+    assert process.returncode != 0
+
+
+async def test_output_exactly_at_cap_is_not_terminated() -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        "import os; os.write(1, b'x' * 4096)",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    captured = await read_bounded_process_output(
+        process,
+        max_output_bytes=4096,
+        timeout_seconds=5,
+    )
+
+    assert captured.stdout == b"x" * 4096
+    assert captured.stderr == b""
+    assert captured.output_limit_exceeded is False
+    assert process.returncode == 0

@@ -71,6 +71,7 @@ async def test_controller_executes_code_then_finishes(tmp_path) -> None:
     assert result.output == "complete"
     assert result.usage.model_tokens == 20
     assert len(sandbox.requests) == 1
+    assert sandbox.requests[0].session_id == "sess_test"
 
 
 async def test_controller_rejects_unobserved_final_citations(tmp_path) -> None:

@@ -112,13 +112,16 @@ class BrokerRuntime:
         raise RuntimeError("Capability broker did not create its Unix socket")
 
     async def stop(self) -> None:
-        if self._server is not None:
-            self._server.should_exit = True
-        if self._task is not None:
-            await self._task
-        # Only clean up a socket this runtime actually created. A runtime that
-        # bailed out because someone else owned the path must not delete it on
-        # the way down -- that is the same eviction, just deferred.
-        if self._owns_socket:
-            self.socket_path.unlink(missing_ok=True)
-            self._owns_socket = False
+        try:
+            if self._server is not None:
+                self._server.should_exit = True
+            if self._task is not None:
+                await self._task
+        finally:
+            # Only clean up a socket this runtime actually created. A runtime
+            # that bailed out because someone else owned the path must not
+            # delete it on the way down -- that is the same eviction, deferred.
+            if self._owns_socket:
+                self.socket_path.unlink(missing_ok=True)
+                self._owns_socket = False
+            await self.service.aclose()

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
-from opensac_sdk.models import ContentSnippet, SearchHit
+from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
 
 class SearchBackend(Protocol):
@@ -48,3 +48,28 @@ class SearchBackend(Protocol):
         that failed to load becomes indistinguishable from one that is empty.
         """
         ...
+
+
+@runtime_checkable
+class BatchSearchBackend(Protocol):
+    """Optional backend fast path for one transport-level batch request.
+
+    The broker continues to support :class:`SearchBackend` implementations that
+    only expose ``search``.  Backends implementing this protocol can avoid one
+    HTTP round trip per query and, more importantly for dense retrieval, let the
+    downstream service encode the queries as one model batch.
+    """
+
+    async def search_many(
+        self,
+        queries: list[str],
+        *,
+        limit: int,
+        offset: int = 0,
+        domains: list[str] | None = None,
+    ) -> list[SearchBatch]: ...
+
+
+@runtime_checkable
+class ClosableSearchBackend(Protocol):
+    async def aclose(self) -> None: ...

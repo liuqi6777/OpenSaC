@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 from .citations import CitationsResource
 from .content import ContentResource
 from .llm import LLMResource
@@ -17,6 +19,7 @@ class OpenSACClient:
         state: StateResource,
         output: OutputResource,
     ) -> None:
+        self._transport = transport
         self.search = SearchResource(transport)
         self.content = ContentResource(transport)
         self.citations = CitationsResource(transport)
@@ -34,15 +37,34 @@ class OpenSACClient:
             OutputResource.from_environment(transport),
         )
 
+    def close(self) -> None:
+        self._transport.close()
+
+    def __enter__(self) -> OpenSACClient:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
 
 class LazyOpenSACClient:
     def __init__(self) -> None:
         self._client: OpenSACClient | None = None
+        self._client_lock = threading.Lock()
 
     def _get(self) -> OpenSACClient:
-        if self._client is None:
-            self._client = OpenSACClient.from_environment()
-        return self._client
+        if self._client is not None:
+            return self._client
+        with self._client_lock:
+            if self._client is None:
+                self._client = OpenSACClient.from_environment()
+            return self._client
+
+    def close(self) -> None:
+        with self._client_lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
     def __getattr__(self, name: str):
         return getattr(self._get(), name)

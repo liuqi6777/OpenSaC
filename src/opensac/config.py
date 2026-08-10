@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,6 +15,11 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     api_key: str = ""
+    # Zero preserves the original explicit-lifecycle behaviour. Deployments
+    # serving ephemeral rollout workers can opt into lease-style cleanup; the
+    # reaper never removes a session with an execution holding its session lock.
+    session_ttl_seconds: float = Field(default=0.0, ge=0.0)
+    session_reaper_interval_seconds: float = Field(default=60.0, gt=0.0)
 
     model_api_key: str = ""
     model_base_url: str | None = None
@@ -22,6 +28,13 @@ class Settings(BaseSettings):
 
     local_search_base_url: str = "http://127.0.0.1:8081"
     serper_api_key: str = ""
+    # Admission limits are enforced by the broker before query fan-out. Keep
+    # the defaults wide enough for research pipelines while bounding one
+    # malformed/generated call independently of rollout-level usage metrics.
+    search_max_queries_per_request: int = Field(default=64, ge=1)
+    search_max_query_chars: int = Field(default=4096, ge=1)
+    # Retrieval depth (offset + limit), matching the local backend's top_k.
+    search_max_top_k: int = Field(default=600, ge=1)
     # Concurrent document fetches inside one `content.*` call. The broker's own
     # semaphore admits a whole call as one unit, so without this a program
     # asking for fifty pages opens fifty simultaneous requests to the provider,
@@ -38,6 +51,11 @@ class Settings(BaseSettings):
     session_content_cache_bytes: int = Field(default=32_000_000, ge=0)
 
     sandbox_image: str = "opensac-sandbox:latest"
+    # `cold` preserves one docker run per execution. `warm` keeps one hardened
+    # container per active session while still starting a fresh Python process
+    # for every program.
+    sandbox_mode: Literal["cold", "warm"] = "cold"
+    sandbox_warm_idle_seconds: float = Field(default=300.0, ge=0.0)
     sandbox_timeout_seconds: int = 120
     sandbox_memory: str = "512m"
     sandbox_cpus: float = 1.0

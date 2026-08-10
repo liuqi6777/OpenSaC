@@ -15,7 +15,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 from openai import AsyncOpenAI
 from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
-from opensac.backends.base import SearchBackend
+from opensac.backends.base import BatchSearchBackend, ClosableSearchBackend, SearchBackend
 from opensac.broker.policy import CapabilityPolicy, MechanismDisabled
 from opensac.models import CAPABILITY_METHODS, CapabilityEvent, HitRecord, Mechanisms, Session
 
@@ -141,6 +141,9 @@ class BrokerService:
         max_concurrency: int = 12,
         max_context_payload_bytes: int = 200_000,
         session_content_cache_bytes: int = 32_000_000,
+        max_search_queries_per_request: int = 64,
+        max_search_query_chars: int = 4096,
+        max_search_top_k: int = 600,
     ) -> None:
         self.backends = backends
         self.model_client = model_client
@@ -149,6 +152,28 @@ class BrokerService:
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self.max_context_payload_bytes = max_context_payload_bytes
         self.session_content_cache_bytes = session_content_cache_bytes
+        retrieval_limits = {
+            "max_search_queries_per_request": max_search_queries_per_request,
+            "max_search_query_chars": max_search_query_chars,
+            "max_search_top_k": max_search_top_k,
+        }
+        for name, value in retrieval_limits.items():
+            if int(value) < 1:
+                raise ValueError(f"{name} must be at least 1")
+        self.max_search_queries_per_request = int(max_search_queries_per_request)
+        self.max_search_query_chars = int(max_search_query_chars)
+        self.max_search_top_k = int(max_search_top_k)
+
+    async def aclose(self) -> None:
+        """Close backend-owned connection pools once the broker stops."""
+        closable: list[ClosableSearchBackend] = []
+        seen: set[int] = set()
+        for backend in self.backends.values():
+            if id(backend) in seen or not isinstance(backend, ClosableSearchBackend):
+                continue
+            seen.add(id(backend))
+            closable.append(backend)
+        await asyncio.gather(*(backend.aclose() for backend in closable))
 
     def register_session(self, session: Session, *, token: str | None = None) -> BrokerSession:
         state = BrokerSession(
@@ -284,14 +309,19 @@ class BrokerService:
             return []
         return state.traces.pop(execution_id, [])
 
-    @staticmethod
-    def _trace_queries(method: str, params: dict[str, Any]) -> list[str]:
+    def _trace_queries(self, method: str, params: dict[str, Any]) -> list[str]:
         if not method.startswith("search."):
             return []
         if method.endswith("_many"):
-            return [str(item) for item in params.get("queries", [])]
+            raw_queries = params.get("queries", [])
+            if not isinstance(raw_queries, list):
+                return []
+            return [
+                str(item)[: self.max_search_query_chars]
+                for item in raw_queries[: self.max_search_queries_per_request]
+            ]
         query = str(params.get("query", ""))
-        return [query] if query else []
+        return [query[: self.max_search_query_chars]] if query else []
 
     @staticmethod
     def _trace_input_count(method: str, params: dict[str, Any]) -> int:
@@ -358,17 +388,22 @@ class BrokerService:
     ) -> list[dict[str, Any]]:
         return await self._search(state, params)
 
-    async def _search(
+    def _prepare_search(
         self,
         state: BrokerSession,
         params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[str, SearchBackend, str, list[str] | None, int, int]:
+        """Validate one query without executing it or charging usage."""
         backend_name, backend = self._search_backend(state)
         state.policy.require_backend(backend_name)
-        await state.policy.record_search()
         query = str(params.get("query", "")).strip()
         if not query:
             raise ValueError("query must not be empty")
+        if len(query) > self.max_search_query_chars:
+            raise ValueError(
+                f"query has {len(query)} characters, exceeding the broker maximum "
+                f"of {self.max_search_query_chars}"
+            )
         domains = params.get("domains")
         # Refused rather than dropped. A backend-neutral method name is only
         # honest if a parameter it cannot honour fails loudly: a program that
@@ -380,8 +415,7 @@ class BrokerService:
                 f"domains={list(domains)!r} cannot be honoured. Drop the argument "
                 "and filter the hits in Python, or put the constraint in the query."
             )
-        limit = min(max(int(params.get("limit", 10)), 1), 100)
-        offset = min(max(int(params.get("offset", 0)), 0), 500)
+        limit, offset = self._search_window(params)
         # Same rule as `domains`, for the other thing a backend cannot honour.
         # Clipping would let a program believe it read rank 150 and conclude the
         # document is absent, when nothing ever looked past the ceiling.
@@ -392,13 +426,35 @@ class BrokerService:
                 f"most, and offset={offset} with limit={limit} asks for {depth}. "
                 "Narrow the window, or find the document with a different query."
             )
-        async with self._semaphore:
-            hits = await backend.search(
-                query,
-                limit=limit,
-                offset=offset,
-                domains=domains,
+        return backend_name, backend, query, domains, limit, offset
+
+    def _search_window(
+        self,
+        params: dict[str, Any],
+        *,
+        limit_key: str = "limit",
+    ) -> tuple[int, int]:
+        """Validate a requested retrieval window before clipping or fan-out."""
+        limit = max(int(params.get(limit_key, 10)), 1)
+        offset = max(int(params.get("offset", 0)), 0)
+        if limit > 100:
+            raise ValueError(f"{limit_key} must be at most 100, got {limit}")
+        if offset > 500:
+            raise ValueError(f"offset must be at most 500, got {offset}")
+        depth = offset + limit
+        if depth > self.max_search_top_k:
+            raise ValueError(
+                f"offset={offset} with {limit_key}={limit} asks for retrieval "
+                f"depth {depth}, exceeding the broker maximum of "
+                f"{self.max_search_top_k}"
             )
+        return limit, offset
+
+    def _record_search_hits(
+        self,
+        state: BrokerSession,
+        hits: list[SearchHit],
+    ) -> list[dict[str, Any]]:
         recorded = _EVENT_HITS.get()
         for hit in hits:
             identity = self._identity(hit)
@@ -409,6 +465,24 @@ class BrokerService:
                     HitRecord(identity=identity, rank=hit.rank, score=hit.score)
                 )
         return [hit.model_dump(mode="json") for hit in hits]
+
+    async def _search(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        backend_name, _ = self._search_backend(state)
+        state.policy.require_backend(backend_name)
+        await state.policy.record_search()
+        _, backend, query, domains, limit, offset = self._prepare_search(state, params)
+        async with self._semaphore:
+            hits = await backend.search(
+                query,
+                limit=limit,
+                offset=offset,
+                domains=domains,
+            )
+        return self._record_search_hits(state, hits)
 
     @staticmethod
     def _canonical_url(url: str) -> str:
@@ -474,27 +548,57 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        queries = [str(query) for query in params.get("queries", [])]
+        raw_queries = params.get("queries", [])
+        if not isinstance(raw_queries, list):
+            raise ValueError("queries must be a list")
+        if len(raw_queries) > self.max_search_queries_per_request:
+            raise ValueError(
+                f"query_many contains {len(raw_queries)} queries, exceeding the "
+                f"broker maximum of {self.max_search_queries_per_request}"
+            )
+        queries = [str(query) for query in raw_queries]
+        for index, query in enumerate(queries):
+            stripped = query.strip()
+            if len(stripped) > self.max_search_query_chars:
+                raise ValueError(
+                    f"query at index {index} has {len(stripped)} characters, "
+                    f"exceeding the broker maximum of {self.max_search_query_chars}"
+                )
+        self._search_window(params, limit_key="limit_per_query")
         concurrency = min(max(int(params.get("concurrency", 5)), 1), 20)
-        gate = asyncio.Semaphore(concurrency)
+        try:
+            backend_name, backend = self._search_backend(state)
+        except Exception:
+            # Let the established per-query path retain its exact error and
+            # accounting semantics when no backend can be resolved.
+            backend_name, backend = "", None
 
-        async def one(query: str) -> SearchBatch:
-            async with gate:
-                try:
-                    hits = await self._search(
-                        state,
-                        {
-                            "query": query,
-                            "limit": params.get("limit_per_query", 10),
-                            "offset": params.get("offset", 0),
-                            "domains": params.get("domains"),
-                        },
-                    )
-                    return SearchBatch(query=query, hits=hits)
-                except Exception as exc:
-                    return SearchBatch(query=query, error=str(exc))
+        if (
+            backend_name == "local"
+            and backend is not None
+            and isinstance(backend, BatchSearchBackend)
+        ):
+            batches = await self._search_many_batched(state, backend, queries, params)
+        else:
+            gate = asyncio.Semaphore(concurrency)
 
-        batches = await asyncio.gather(*(one(query) for query in queries))
+            async def one(query: str) -> SearchBatch:
+                async with gate:
+                    try:
+                        hits = await self._search(
+                            state,
+                            {
+                                "query": query,
+                                "limit": params.get("limit_per_query", 10),
+                                "offset": params.get("offset", 0),
+                                "domains": params.get("domains"),
+                            },
+                        )
+                        return SearchBatch(query=query, hits=hits)
+                    except Exception as exc:
+                        return SearchBatch(query=query, error=str(exc))
+
+            batches = await asyncio.gather(*(one(query) for query in queries))
         # Partial failures stay in batch.error so the program can degrade
         # gracefully, but a wholesale failure (missing backend, bad credentials,
         # rate limit) must not be reported as an empty result set.
@@ -504,6 +608,74 @@ class BrokerService:
                 f"All {len(batches)} searches failed: {failed[0].error}"
             )
         return [batch.model_dump(mode="json") for batch in batches]
+
+    async def _search_many_batched(
+        self,
+        state: BrokerSession,
+        backend: BatchSearchBackend,
+        queries: list[str],
+        params: dict[str, Any],
+    ) -> list[SearchBatch]:
+        """Execute valid local queries in one backend call and restore row order."""
+        backend_name, _ = self._search_backend(state)
+        state.policy.require_backend(backend_name)
+        await state.policy.record_search(len(queries))
+        batches: list[SearchBatch | None] = [None] * len(queries)
+        valid_indices: list[int] = []
+        valid_queries: list[str] = []
+        batch_options: tuple[int, int, list[str] | None] | None = None
+
+        for index, query in enumerate(queries):
+            try:
+                _, prepared_backend, prepared_query, domains, limit, offset = (
+                    self._prepare_search(
+                        state,
+                        {
+                            "query": query,
+                            "limit": params.get("limit_per_query", 10),
+                            "offset": params.get("offset", 0),
+                            "domains": params.get("domains"),
+                        },
+                    )
+                )
+                if prepared_backend is not backend:
+                    raise RuntimeError("Session search backend changed during batch execution.")
+                batch_options = (limit, offset, domains)
+                valid_indices.append(index)
+                valid_queries.append(prepared_query)
+            except Exception as exc:
+                batches[index] = SearchBatch(query=query, error=str(exc))
+
+        if valid_queries:
+            assert batch_options is not None
+            limit, offset, domains = batch_options
+            try:
+                async with self._semaphore:
+                    returned = await backend.search_many(
+                        valid_queries,
+                        limit=limit,
+                        offset=offset,
+                        domains=domains,
+                    )
+                if len(returned) != len(valid_queries):
+                    raise RuntimeError(
+                        "Batch backend returned an invalid result count: "
+                        f"expected {len(valid_queries)}, got {len(returned)}."
+                    )
+            except Exception as exc:
+                for index in valid_indices:
+                    batches[index] = SearchBatch(query=queries[index], error=str(exc))
+            else:
+                for index, batch in zip(valid_indices, returned, strict=True):
+                    hits = self._record_search_hits(state, list(batch.hits))
+                    batches[index] = SearchBatch(
+                        query=queries[index],
+                        hits=hits,
+                        error=batch.error,
+                    )
+
+        assert all(batch is not None for batch in batches)
+        return [batch for batch in batches if batch is not None]
 
     @staticmethod
     def _lookup(state: BrokerSession, handle: str) -> SearchHit | None:

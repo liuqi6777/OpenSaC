@@ -1,5 +1,7 @@
 FROM python:3.12.12-slim
 
+ENV OPENSAC_SANDBOX_CONTRACT=2
+
 RUN groupadd --gid 10001 opensac \
     && useradd --uid 10001 --gid opensac --create-home opensac
 

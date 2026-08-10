@@ -45,11 +45,15 @@ uv run opensac build-sandbox
 uv run opensac serve
 ```
 
+Rebuild the sandbox image after upgrading this checkout. The preflight probe checks its
+contract version so a stale tag cannot silently miss bundled SDK or entrypoint changes.
+
 Configure `OPENSAC_MODEL_API_KEY`, `OPENSAC_MODEL_NAME`, and optionally
 `OPENSAC_MODEL_BASE_URL`. Set `OPENSAC_API_KEY` outside local development.
 
 For local retrieval, run the compatible DeepResearch endpoint at
-`OPENSAC_LOCAL_SEARCH_BASE_URL`. It must expose `POST /search` and `POST /get_document`.
+`OPENSAC_LOCAL_SEARCH_BASE_URL`. It must expose `POST /search`, `POST /search_many`,
+and `POST /get_document`.
 
 For web retrieval, set a [Serper](https://serper.dev) API key. No extra dependency is needed --
 the backend talks to Serper's search and scrape endpoints over plain HTTP:
@@ -104,16 +108,60 @@ intermediate results in one turn and resolve their refs several turns later.
 from opensac import OpenSAC
 
 with OpenSAC(api_key="...") as client:
-    session = client.create_session(backends=["local"], limits={"max_search_calls": 2000})
-    result = client.exec_code(session["id"], "from opensac_sdk import sdk\n...")
+    session = client.create_session(backends=["local"])
+    result = client.exec_code(
+        session["id"],
+        "from opensac_sdk import sdk\n...",
+        exec_id="rollout-17:turn-3",
+        include_trace=True,
+    )
     print(result["stdout"], result["output"], result["usage"])
     client.delete_session(session["id"])
 ```
 
 A program rejected by the sandbox code validator comes back as a normal result with
 `succeeded: false` and a populated `error`, so the calling harness can feed the reason
-straight back to its model. `OPENSAC_SANDBOX_MAX_CONCURRENCY` caps how many containers
-run at once across all sessions.
+straight back to its model. `OPENSAC_SANDBOX_MAX_CONCURRENCY` caps how many programs execute
+at once across all sessions; warm-container lifetime is bounded separately by
+session deletion/TTL and `OPENSAC_SANDBOX_WARM_IDLE_SECONDS`.
+Warm containers are owner-labeled by broker socket; a restarted OpenSAC process removes
+containers orphaned by a prior crash without touching other instances on the host.
+
+`exec_id` is an idempotency key. A retry with the same payload returns the durable original
+response; reusing it for different code returns 409. The session manifest advertises
+`features: ["idempotent_exec"]`, allowing older clients and servers to negotiate retries safely.
+
+## Throughput tuning
+
+Cold mode starts one container per program. Warm mode keeps the hardened namespace and mounts
+per session while each program still runs in a fresh `python -I` child process:
+
+```bash
+OPENSAC_SANDBOX_MODE=warm \
+OPENSAC_SANDBOX_WARM_IDLE_SECONDS=300 \
+OPENSAC_SESSION_TTL_SECONDS=3600 \
+uv run opensac serve
+```
+
+Every `/exec` response includes phase timings for the session queue, global sandbox queue,
+validation/setup, startup, program execution, and post-processing. `/healthz` exposes active
+and waiting sandbox work. Measure cold and warm on the target Docker host with:
+
+```bash
+uv run python scripts/benchmark_exec.py \
+  --concurrency 1,4,8,16 --requests 64 --output benchmark.json
+```
+
+For a retrieval workload, pass `--code-file program.py`; capability latency is aggregated from
+the returned trace. Warmup always runs `pass`, so it warms the executor without populating the
+measured session's retrieval cache, references, or workspace. The report keeps HTTP/transport,
+program, warmup, and cleanup failures instead of stopping at the first saturated request, and
+records the server health snapshot plus the measured code hash. The local retriever uses
+`/search_many` and a bounded GPU microbatch rather than serializing one model forward per query.
+The broker rejects a capability call before fan-out when it exceeds
+`OPENSAC_SEARCH_MAX_QUERIES_PER_REQUEST` (default 64), `OPENSAC_SEARCH_MAX_QUERY_CHARS`
+(default 4096), or `OPENSAC_SEARCH_MAX_TOP_K` (default 600, measured as `offset + limit`).
+These per-request safety limits are independent of measured rollout-level search usage.
 
 See `examples/research_pipeline.py` for representative model-generated code.
 
@@ -123,7 +171,7 @@ The external Python client supports both synchronous and asynchronous applicatio
 from opensac import OpenSAC
 
 with OpenSAC(api_key="...") as client:
-    session = client.create_session(backends=["web", "local"])
+    session = client.create_session(backends=["local"])
     result = client.create_and_wait(session["id"], "Research the task")
 ```
 

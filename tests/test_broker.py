@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from opensac_sdk.models import ContentSnippet, SearchHit
+from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
 from opensac.broker.policy import MechanismDisabled
 from opensac.broker.service import BrokerService
@@ -134,14 +134,78 @@ async def test_search_refuses_depth_the_backend_cannot_serve() -> None:
         await service.call("token", "search.query", {"query": "q", "limit": 10, "offset": 100})
 
 
+async def test_search_rejects_query_and_depth_budgets_before_backend_call() -> None:
+    class Counting(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__("web", depth=100)
+            self.calls = 0
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            self.calls += 1
+            return await super().search(
+                query, limit=limit, offset=offset, domains=domains
+            )
+
+    backend = Counting()
+    service = BrokerService(
+        {"web": backend},
+        max_search_query_chars=4,
+        max_search_top_k=20,
+    )
+    service.register_session(make_session())
+
+    with pytest.raises(ValueError, match="5 characters"):
+        await service.call("token", "search.query", {"query": "abcde"})
+    with pytest.raises(ValueError, match="retrieval depth 21"):
+        await service.call(
+            "token", "search.query", {"query": "ok", "limit": 10, "offset": 11}
+        )
+
+    assert backend.calls == 0
+
+
+async def test_search_many_rejects_hard_budgets_before_fanout() -> None:
+    service = BrokerService(
+        {"web": FakeBackend("web")},
+        max_search_queries_per_request=2,
+        max_search_query_chars=4,
+        max_search_top_k=20,
+    )
+    state = service.register_session(make_session())
+
+    with pytest.raises(ValueError, match="3 queries"):
+        await service.call(
+            "token",
+            "search.query_many",
+            {"queries": ["a", "b", "c"]},
+            execution_id="oversized-batch",
+        )
+    with pytest.raises(ValueError, match="index 1 has 5 characters"):
+        await service.call(
+            "token", "search.query_many", {"queries": ["ok", "abcde"]}
+        )
+    with pytest.raises(ValueError, match="retrieval depth 21"):
+        await service.call(
+            "token",
+            "search.query_many",
+            {"queries": ["ok"], "limit_per_query": 10, "offset": 11},
+        )
+
+    assert state.policy.usage.search_calls == 0
+    rejected = service.take_trace("token", "oversized-batch")[0]
+    assert rejected.input_count == 3
+    assert rejected.queries == ["a", "b"]
+
+
 async def test_searches_are_counted_and_never_capped() -> None:
-    """Retrieval volume is measured, not rationed.
+    """Retrieval volume across valid calls is measured, not rationed.
 
     A ceiling here has two fates and neither helps: high enough not to
     interfere it is dead code, low enough to bind it turns a question into a
     zero that afterwards reads as a model failure. Volume is also the quantity
     a paradigm comparison is trying to observe, so fixing it would remove the
-    measurement.
+    measurement. Per-request shape limits only reject pathological individual
+    payloads; they do not impose a rollout-level search-call budget.
     """
     service = BrokerService({"web": FakeBackend("web")})
     state = service.register_session(make_session())
@@ -166,6 +230,64 @@ async def test_search_many_tolerates_partial_failure() -> None:
     assert batches[0]["error"] is None
     assert batches[1]["hits"] == []
     assert "must not be empty" in batches[1]["error"]
+
+
+async def test_local_search_many_prefers_backend_batch_and_preserves_order() -> None:
+    class BatchLocal(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__("local")
+            self.batch_calls: list[list[str]] = []
+            self.single_calls = 0
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            self.single_calls += 1
+            return await super().search(
+                query, limit=limit, offset=offset, domains=domains
+            )
+
+        async def search_many(self, queries, *, limit, offset=0, domains=None):
+            self.batch_calls.append(list(queries))
+            return [
+                SearchBatch(query=query, hits=[self._hit(query, offset + 1)])
+                for query in queries
+            ]
+
+    backend = BatchLocal()
+    service = BrokerService({"local": backend})
+    state = service.register_session(make_session(backends=["local"]))
+
+    batches = await service.call(
+        "token",
+        "search.query_many",
+        {"queries": ["second", "", "first"], "limit_per_query": 1},
+    )
+
+    assert backend.batch_calls == [["second", "first"]]
+    assert backend.single_calls == 0
+    assert [batch["query"] for batch in batches] == ["second", "", "first"]
+    assert [batches[0]["hits"][0]["title"], batches[2]["hits"][0]["title"]] == [
+        "second",
+        "first",
+    ]
+    assert "must not be empty" in batches[1]["error"]
+    assert state.policy.usage.search_calls == 3
+
+
+async def test_broker_closes_each_backend_instance_once() -> None:
+    class Closable(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__("local")
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    backend = Closable()
+    service = BrokerService({"local": backend, "same-instance": backend})
+
+    await service.aclose()
+
+    assert backend.close_calls == 1
 
 
 class FakeModelClient:

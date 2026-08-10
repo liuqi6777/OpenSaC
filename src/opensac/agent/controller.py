@@ -86,6 +86,7 @@ class AgentController:
                         code=action.code or "",
                         workspace=workspace,
                         session_token=session_token,
+                        session_id=run.session_id,
                     )
                 )
                 run.usage.sandbox_seconds += result.duration_seconds

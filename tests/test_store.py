@@ -1,4 +1,6 @@
-from opensac.models import RunCreate, SessionCreate
+from datetime import UTC, datetime
+
+from opensac.models import ExecRecord, ExecResult, RunCreate, RunUsage, SessionCreate
 from opensac.store import StateStore
 
 
@@ -17,6 +19,38 @@ def test_store_persists_sessions_runs_and_artifacts(tmp_path) -> None:
 
     store.delete_session(session.id)
     assert not artifact.exists()
+
+
+def test_store_persists_session_lifecycle_and_idempotent_exec_results(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    session = store.create_session(SessionCreate(backends=["local"]))
+    touched_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
+
+    touched = store.touch_session(session.id, at=touched_at)
+    assert touched.last_access == touched_at
+    assert store.mark_session_closing(session.id).closing is True
+
+    record = ExecRecord(
+        exec_id="rollout-7:step-3",
+        request_hash="a" * 64,
+        result=ExecResult(
+            exit_code=0,
+            stdout="done\n",
+            stderr="",
+            duration_seconds=1.0,
+            succeeded=True,
+            usage=RunUsage(search_calls=2),
+        ),
+    )
+    store.save_exec_record(session, record)
+
+    reopened = StateStore(tmp_path)
+    restored = reopened.get_exec_record(session, record.exec_id)
+    assert restored is not None
+    assert restored.request_hash == "a" * 64
+    assert restored.result.stdout == "done\n"
+    assert restored.result.usage.search_calls == 2
+    assert reopened.get_session(session.id).closing is True
 
 
 def test_workspace_snapshot_is_bounded_and_says_what_it_left_out(tmp_path) -> None:

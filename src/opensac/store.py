@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import secrets
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from opensac.models import (
+    ExecRecord,
     ProgramRecord,
     Run,
     RunCreate,
@@ -13,6 +16,7 @@ from opensac.models import (
     SessionCreate,
     WorkspaceFile,
     WorkspaceSnapshot,
+    utc_now,
 )
 
 
@@ -45,7 +49,17 @@ class StateStore:
     def save_session(self, session: Session) -> None:
         path = self.sessions_dir / session.id / "session.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(session.model_dump_json(indent=2), encoding="utf-8")
+        self._atomic_write_text(path, session.model_dump_json(indent=2))
+
+    @staticmethod
+    def _atomic_write_text(path: Path, text: str) -> None:
+        """Replace one JSON record without exposing a partial file to retries."""
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(text, encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def get_session(self, session_id: str) -> Session:
         path = self.sessions_dir / session_id / "session.json"
@@ -53,9 +67,52 @@ class StateStore:
             raise KeyError(session_id)
         return Session.model_validate_json(path.read_text(encoding="utf-8"))
 
+    def sessions(self) -> list[Session]:
+        """Every durable session, including one left halfway through closing."""
+        sessions: list[Session] = []
+        for path in sorted(self.sessions_dir.glob("*/session.json")):
+            sessions.append(Session.model_validate_json(path.read_text(encoding="utf-8")))
+        return sessions
+
+    def touch_session(self, session_id: str, *, at: datetime | None = None) -> Session:
+        session = self.get_session(session_id)
+        session.last_access = at or utc_now()
+        self.save_session(session)
+        return session
+
+    def mark_session_closing(self, session_id: str) -> Session:
+        session = self.get_session(session_id)
+        if not session.closing:
+            session.closing = True
+            self.save_session(session)
+        return session
+
     def delete_session(self, session_id: str) -> None:
         self.get_session(session_id)
         shutil.rmtree(self.sessions_dir / session_id)
+
+    def execs_dir(self, session: Session) -> Path:
+        return self.sessions_dir / session.id / "execs"
+
+    def _exec_record_path(self, session: Session, exec_id: str) -> Path:
+        # The client id is data, never a path component. Besides traversal, this
+        # also avoids filesystem-specific restrictions on otherwise valid ids.
+        digest = hashlib.sha256(exec_id.encode("utf-8")).hexdigest()
+        return self.execs_dir(session) / f"{digest}.json"
+
+    def get_exec_record(self, session: Session, exec_id: str) -> ExecRecord | None:
+        path = self._exec_record_path(session, exec_id)
+        if not path.exists():
+            return None
+        record = ExecRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        if record.exec_id != exec_id:
+            raise RuntimeError("Stored execution id does not match its lookup key")
+        return record
+
+    def save_exec_record(self, session: Session, record: ExecRecord) -> None:
+        path = self._exec_record_path(session, record.exec_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_text(path, record.model_dump_json(indent=2))
 
     def create_run(self, session_id: str, request: RunCreate) -> Run:
         run = Run(
