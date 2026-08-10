@@ -5,14 +5,20 @@ import hashlib
 import inspect
 import json
 import logging
+import os
+import resource
 import secrets
+import socket
+import sys
 import tempfile
 import time
 import uuid
+import weakref
 from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +29,7 @@ from openai import AsyncOpenAI
 from opensac.agent import AgentController
 from opensac.backends import LocalSearchBackend, SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_path
+from opensac.broker.policy import BudgetExceeded
 from opensac.broker.service import BrokerSession
 from opensac.config import Settings
 from opensac.metrics import CapacityGate, CapacityLimitedSandbox
@@ -42,6 +49,7 @@ from opensac.models import (
     Session,
     SessionCreate,
     WorkspaceSnapshot,
+    budget_remaining,
     utc_now,
 )
 from opensac.sandbox import DockerSandbox, UnsafeCodeError, WarmDockerSandbox
@@ -67,10 +75,41 @@ class ExecIndeterminateError(RuntimeError):
     pass
 
 
+class WorkerDrainingError(RuntimeError):
+    pass
+
+
+class SessionCapacityError(RuntimeError):
+    pass
+
+
+class SessionCreateConflictError(RuntimeError):
+    pass
+
+
+class SessionLostError(RuntimeError):
+    pass
+
+
+class SessionExpiredError(RuntimeError):
+    pass
+
+
 class ApplicationRuntime:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.store = StateStore(settings.data_dir)
+        identity_seed = f"{socket.gethostname()}|{settings.data_dir.resolve()}"
+        self.worker_id = settings.worker_id or (
+            f"{socket.gethostname()}-{hashlib.sha256(identity_seed.encode()).hexdigest()[:10]}"
+        )
+        self.worker_epoch = uuid.uuid4().hex
+        self.started_monotonic = time.monotonic()
+        self.accepting = True
+        self.session_create_lock = asyncio.Lock()
+        self.session_lifecycle_locks: weakref.WeakValueDictionary[
+            str, asyncio.Lock
+        ] = weakref.WeakValueDictionary()
         self.model_client = AsyncOpenAI(
             api_key=settings.model_api_key or "not-configured",
             base_url=settings.model_base_url,
@@ -109,6 +148,7 @@ class ApplicationRuntime:
         )
         if sandbox_type is WarmDockerSandbox:
             sandbox_kwargs["idle_timeout_seconds"] = settings.sandbox_warm_idle_seconds
+            sandbox_kwargs["max_containers"] = settings.sandbox_max_warm_containers
         self.sandbox = sandbox_type(**sandbox_kwargs)
         self.sandbox_gate = CapacityGate(settings.sandbox_max_concurrency)
         self.controller = AgentController(
@@ -145,10 +185,14 @@ class ApplicationRuntime:
         for session in self.store.sessions():
             if session.closing:
                 await self.close_session(session.id)
-        if self.settings.session_ttl_seconds > 0 or self._warm_reaper_enabled():
-            self._reaper_task = asyncio.create_task(self._reaper_loop())
+            elif session.worker_epoch != self.worker_epoch:
+                await self.close_session(session.id, tombstone_reason="worker_restarted")
+        # Always run it: a client may create a leased session even when the
+        # deployment-wide TTL is disabled and no warm executor is configured.
+        self._reaper_task = asyncio.create_task(self._reaper_loop())
 
     async def stop(self) -> None:
+        self.accepting = False
         try:
             if self._reaper_task is not None:
                 self._reaper_task.cancel()
@@ -214,6 +258,11 @@ class ApplicationRuntime:
                 reap_idle = getattr(self.sandbox, "reap_idle", None)
                 if self._warm_reaper_enabled() and callable(reap_idle):
                     await reap_idle(self.settings.sandbox_warm_idle_seconds)
+                tombstone_ttl = self.settings.session_tombstone_ttl_seconds
+                if tombstone_ttl > 0:
+                    self.store.reap_tombstones(
+                        before=utc_now() - timedelta(seconds=tombstone_ttl)
+                    )
             except Exception:
                 # One corrupt or concurrently removed session must not disable
                 # cleanup for every session created afterwards.
@@ -223,6 +272,153 @@ class ApplicationRuntime:
         event = {"type": event_type, "data": data}
         for queue in tuple(self.events[run_id]):
             await queue.put(event)
+
+    def environment_manifest(self) -> dict[str, Any]:
+        try:
+            package_version = importlib_metadata.version("opensac")
+        except importlib_metadata.PackageNotFoundError:
+            package_version = "0.1.0"
+        return {
+            "opensac_version": package_version,
+            "build_commit": self.settings.build_commit,
+            "sandbox_image": self.settings.sandbox_image,
+            "sandbox_image_digest": self.settings.sandbox_image_digest,
+            "sandbox_contract": 2,
+            "backend_revision": self.settings.backend_revision,
+            "backend_metadata_hash": self.settings.backend_metadata_hash,
+            "local_search_base_url": self.settings.local_search_base_url,
+        }
+
+    def process_snapshot(self) -> dict[str, float | int]:
+        rss_bytes = 0
+        statm = Path("/proc/self/statm")
+        if statm.exists():
+            try:
+                resident_pages = int(statm.read_text(encoding="utf-8").split()[1])
+                rss_bytes = resident_pages * os.sysconf("SC_PAGE_SIZE")
+            except (OSError, ValueError, IndexError):
+                rss_bytes = 0
+        if rss_bytes == 0:
+            max_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            rss_bytes = int(max_rss if sys.platform == "darwin" else max_rss * 1024)
+        fd_root = Path("/proc/self/fd")
+        if not fd_root.exists():
+            fd_root = Path("/dev/fd")
+        try:
+            fd_count = len(list(fd_root.iterdir()))
+        except OSError:
+            fd_count = -1
+        return {
+            "rss_bytes": rss_bytes,
+            "fd_count": fd_count,
+            "uptime_seconds": time.monotonic() - self.started_monotonic,
+        }
+
+    @staticmethod
+    def _session_request_hash(request: SessionCreate) -> str:
+        payload = request.model_dump(mode="json", exclude={"request_id"})
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+    def get_session(self, session_id: str) -> Session:
+        try:
+            session = self.store.get_session(session_id)
+        except KeyError:
+            tombstone = self.store.get_tombstone(session_id)
+            if tombstone is not None and tombstone.reason == "worker_restarted":
+                raise SessionLostError(
+                    f"Session '{session_id}' belonged to a prior worker epoch"
+                ) from None
+            if tombstone is not None and tombstone.reason == "session_expired":
+                raise SessionExpiredError(f"Session '{session_id}' lease expired") from None
+            raise
+        if session.worker_epoch and session.worker_epoch != self.worker_epoch:
+            raise SessionLostError(f"Session '{session_id}' belonged to a prior worker epoch")
+        if session.lease_expires_at is not None and session.lease_expires_at <= utc_now():
+            raise SessionExpiredError(f"Session '{session_id}' lease expired")
+        return session
+
+    async def create_session(self, request: SessionCreate) -> tuple[Session, bool]:
+        if not self.accepting:
+            raise WorkerDrainingError("Worker is draining")
+        request_hash = self._session_request_hash(request)
+        async with self.session_create_lock:
+            if not self.accepting:
+                raise WorkerDrainingError("Worker is draining")
+            if request.request_id is not None:
+                existing = self.store.find_session_by_request_id(request.request_id)
+                if existing is not None:
+                    if existing.request_hash != request_hash:
+                        raise SessionCreateConflictError(
+                            f"Session request id '{request.request_id}' was already used "
+                            "with a different payload"
+                        )
+                    if existing.worker_epoch != self.worker_epoch:
+                        raise SessionLostError(
+                            f"Session request id '{request.request_id}' belongs to "
+                            "a prior worker epoch"
+                        )
+                    if self._is_expired(existing, utc_now()):
+                        raise SessionExpiredError(
+                            f"Session request id '{request.request_id}' lease expired"
+                        )
+                    if existing.closing or existing.id in self.closing_sessions:
+                        raise SessionClosingError(f"Session '{existing.id}' is closing")
+                    return existing, False
+                tombstone = self.store.find_tombstone_by_request_id(request.request_id)
+                if tombstone is not None:
+                    if tombstone.request_hash != request_hash:
+                        raise SessionCreateConflictError(
+                            f"Session request id '{request.request_id}' was already used "
+                            "with a different payload"
+                        )
+                    if tombstone.reason == "worker_restarted":
+                        raise SessionLostError(
+                            f"Session request id '{request.request_id}' belongs to "
+                            "a prior worker epoch"
+                        )
+                    raise SessionExpiredError(
+                        f"Session request id '{request.request_id}' is no longer active"
+                    )
+            current_time = utc_now()
+            active = sum(
+                not session.closing and not self._is_expired(session, current_time)
+                for session in self.store.sessions()
+            )
+            if self.settings.max_active_sessions and active >= self.settings.max_active_sessions:
+                raise SessionCapacityError(
+                    f"Worker session capacity {self.settings.max_active_sessions} is full"
+                )
+            default_lease = (
+                self.settings.session_ttl_seconds
+                if self.settings.session_ttl_seconds > 0
+                else None
+            )
+            session = self.store.create_session(
+                request,
+                worker_id=self.worker_id,
+                worker_epoch=self.worker_epoch,
+                request_hash=request_hash,
+                default_lease_seconds=default_lease,
+                environment=self.environment_manifest(),
+            )
+            return session, True
+
+    async def renew_session(self, session_id: str) -> Session:
+        lock = self.session_locks[session_id]
+        async with lock:
+            session = self.get_session(session_id)
+            if session.closing or session_id in self.closing_sessions:
+                raise SessionClosingError(f"Session '{session_id}' is closing")
+            return self.store.touch_session(session_id)
+
+    @staticmethod
+    def session_state(session: Session) -> str:
+        if session.closing:
+            return "closing"
+        if session.terminal_reason:
+            return "exhausted"
+        return "active"
 
     def _reserve_session_task(self, session_id: str, task: asyncio.Task[Any]) -> None:
         self.session_tasks[session_id].add(task)
@@ -310,18 +506,39 @@ class ApplicationRuntime:
                 f"Sandbox cleanup failed for session '{session.id}'"
             ) from exc
 
+    def _session_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self.session_lifecycle_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.session_lifecycle_locks[session_id] = lock
+        return lock
+
     async def close_session(
         self,
         session_id: str,
         *,
-        idle_before: datetime | None = None,
+        expire_at: datetime | None = None,
+        tombstone_reason: str | None = None,
+    ) -> bool:
+        return await self._close_session_once(
+            session_id,
+            expire_at=expire_at,
+            tombstone_reason=tombstone_reason,
+        )
+
+    async def _close_session_once(
+        self,
+        session_id: str,
+        *,
+        expire_at: datetime | None = None,
+        tombstone_reason: str | None = None,
     ) -> bool:
         """Close one session after any execution already holding its lock.
 
         `closing` is persisted before waiting. New executions therefore fail
         rather than queueing behind DELETE, and a process restart completes the
-        cleanup during startup. `idle_before` makes the operation conditional
-        for the TTL reaper and is checked immediately before that transition.
+        cleanup during startup. ``expire_at`` makes the operation conditional
+        for the lease reaper and is checked immediately before that transition.
         """
         lock = self.session_locks[session_id]
         # Close the admission gate before inspecting the lock. An execution
@@ -330,13 +547,11 @@ class ApplicationRuntime:
         self.closing_sessions.add(session_id)
         try:
             admitted = self._active_session_tasks(session_id)
-            if idle_before is not None and (admitted or lock.locked()):
+            if expire_at is not None and (admitted or lock.locked()):
                 return False
             session = self.store.get_session(session_id)
-            if (
-                idle_before is not None
-                and not session.closing
-                and session.last_access > idle_before
+            if expire_at is not None and not session.closing and not self._is_expired(
+                session, expire_at
             ):
                 return False
             session = self.store.mark_session_closing(session_id)
@@ -346,10 +561,52 @@ class ApplicationRuntime:
             # may themselves be queued on that lock.
             if admitted:
                 await asyncio.gather(*admitted, return_exceptions=True)
-            async with lock:
-                # Reload after admitted work touched the session. A TTL close
-                # never gets here while a reservation or lock holder exists.
-                session = self.store.get_session(session_id)
+            async with self._session_lifecycle_lock(session_id), lock:
+                # Reload after admitted work touched the session. Another
+                # close or abort may already have completed while this
+                # caller waited; cleanup itself must run exactly once.
+                try:
+                    session = self.store.get_session(session_id)
+                except KeyError:
+                    return False
+                self.broker.unregister_session(session.token)
+                if tombstone_reason is not None:
+                    self.store.save_tombstone(session, tombstone_reason)
+                await self._close_sandbox_session(session)
+                self.store.delete_session(session_id)
+            return True
+        finally:
+            self.closing_sessions.discard(session_id)
+            if not lock.locked() and self.session_locks.get(session_id) is lock:
+                self.session_locks.pop(session_id, None)
+
+    async def abort_session(self, session_id: str) -> bool:
+        """Cancel admitted work and tear down an ephemeral rollout immediately."""
+
+        return await self._abort_session_once(session_id)
+
+    async def _abort_session_once(self, session_id: str) -> bool:
+        """Perform one abort while the session lifecycle lock is held."""
+
+        try:
+            session = self.store.get_session(session_id)
+        except KeyError:
+            return False
+        lock = self.session_locks[session_id]
+        self.closing_sessions.add(session_id)
+        try:
+            session = self.store.mark_session_closing(session_id)
+            admitted = self._active_session_tasks(session_id)
+            for task in admitted:
+                if not task.done():
+                    task.cancel()
+            if admitted:
+                await asyncio.gather(*admitted, return_exceptions=True)
+            async with self._session_lifecycle_lock(session_id), lock:
+                try:
+                    session = self.store.get_session(session_id)
+                except KeyError:
+                    return False
                 self.broker.unregister_session(session.token)
                 await self._close_sandbox_session(session)
                 self.store.delete_session(session_id)
@@ -361,16 +618,21 @@ class ApplicationRuntime:
 
     async def reap_expired_sessions(self, *, now: datetime | None = None) -> list[str]:
         """Reclaim idle sessions once; the background task calls this periodically."""
-        ttl = self.settings.session_ttl_seconds
-        if ttl <= 0:
+        if self.settings.session_ttl_seconds <= 0 and not any(
+            session.lease_expires_at is not None for session in self.store.sessions()
+        ):
             return []
-        cutoff = (now or utc_now()) - timedelta(seconds=ttl)
+        current_time = now or utc_now()
         removed: list[str] = []
         for session in self.store.sessions():
-            if not session.closing and session.last_access > cutoff:
+            if not session.closing and not self._is_expired(session, current_time):
                 continue
             try:
-                closed = await self.close_session(session.id, idle_before=cutoff)
+                closed = await self.close_session(
+                    session.id,
+                    expire_at=current_time,
+                    tombstone_reason="session_expired",
+                )
             except KeyError:
                 continue
             except Exception:
@@ -379,6 +641,12 @@ class ApplicationRuntime:
             if closed:
                 removed.append(session.id)
         return removed
+
+    def _is_expired(self, session: Session, now: datetime) -> bool:
+        if session.lease_expires_at is not None:
+            return session.lease_expires_at <= now
+        ttl = self.settings.session_ttl_seconds
+        return ttl > 0 and session.last_access <= now - timedelta(seconds=ttl)
 
     @contextmanager
     def _exec_workspace(self, session: Session) -> Iterator[Path]:
@@ -441,7 +709,7 @@ class ApplicationRuntime:
 
     async def execute_code(self, session_id: str, request: ExecCreate) -> ExecResult:
         """Run an exec as runtime-owned work, independent of its HTTP waiter."""
-        session = self.store.get_session(session_id)
+        session = self.get_session(session_id)
         if session.closing or session_id in self.closing_sessions:
             raise SessionClosingError(f"Session '{session_id}' is closing")
         request_hash = self._exec_request_hash(request)
@@ -487,7 +755,7 @@ class ApplicationRuntime:
         async with self.session_locks[session_id]:
             session_queue_seconds = time.monotonic() - session_queue_started
             prepare_started = time.monotonic()
-            session = self.store.get_session(session_id)
+            session = self.get_session(session_id)
             session = self.store.touch_session(session_id)
             if request.exec_id is not None:
                 previous = self.store.get_exec_record(session, request.exec_id)
@@ -504,6 +772,24 @@ class ApplicationRuntime:
                     if previous.result is None:
                         raise RuntimeError("Completed execution record has no result")
                     return previous.result
+
+            state = self.bind_session(session)
+            state.policy.require_active()
+            await state.policy.record_workspace_bytes(self.store.workspace_bytes(session))
+            state.policy.require_active()
+            await state.policy.record_exec()
+            sandbox_timeout = await state.policy.sandbox_timeout(
+                self.settings.sandbox_timeout_seconds
+            )
+            self.store.save_session_usage(
+                session.id,
+                state.policy.usage,
+                terminal_reason=state.policy.terminal_reason,
+                touch=False,
+            )
+            session = self.store.get_session(session_id)
+            state.session = session
+            if request.exec_id is not None:
                 self.store.save_exec_record(
                     session,
                     ExecRecord(
@@ -515,7 +801,6 @@ class ApplicationRuntime:
                     ),
                 )
 
-            state = self.bind_session(session)
             sequence, program_path = self.store.reserve_program(session, request.code)
             # An execution id is always minted, not only when the caller wants
             # the trace back: the per-program capability counts come from the
@@ -542,6 +827,7 @@ class ApplicationRuntime:
                                 session_token=session.token,
                                 session_id=session.id,
                                 execution_id=execution_id,
+                                timeout_seconds=sandbox_timeout,
                                 **request_names,
                             )
                         )
@@ -558,6 +844,14 @@ class ApplicationRuntime:
                     await state.policy.record_sandbox_seconds(result.duration_seconds)
                 trace = self.broker.take_trace(session.token, execution_id)
                 artifacts = self.store.artifacts(session, workspace)
+                workspace_bytes = self.store.workspace_bytes(session, workspace)
+
+            await state.policy.record_workspace_bytes(workspace_bytes)
+            persisted_session = self.store.save_session_usage(
+                session.id,
+                state.policy.usage,
+                terminal_reason=state.policy.terminal_reason,
+            )
 
             self.store.record_program(
                 session,
@@ -610,6 +904,9 @@ class ApplicationRuntime:
                     include_trace=request.include_trace,
                 ),
                 timings=timings,
+                session_state=self.session_state(persisted_session),
+                terminal_reason=state.policy.terminal_reason,
+                budget_remaining=state.policy.remaining(),
             )
             if request.exec_id is not None:
                 self.store.save_exec_record(
@@ -712,6 +1009,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="OpenSAC", version="0.1.0", lifespan=lifespan)
     app.state.runtime = runtime
 
+    @app.middleware("http")
+    async def worker_identity_header(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-OpenSAC-Worker-ID"] = runtime.worker_id
+        response.headers["X-OpenSAC-Worker-Epoch"] = runtime.worker_epoch
+        return response
+
+    def contract_error(
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+        headers: dict[str, str] | None = None,
+    ) -> HTTPException:
+        return HTTPException(
+            status_code=status_code,
+            detail={"code": code, "message": message, "retryable": retryable},
+            headers=headers,
+        )
+
     async def authorize(authorization: str | None = Header(default=None)) -> None:
         if not settings.api_key:
             return
@@ -720,7 +1038,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def get_session(session_id: str) -> Session:
         try:
-            return runtime.store.get_session(session_id)
+            return runtime.get_session(session_id)
+        except SessionLostError as exc:
+            raise contract_error(
+                410, "worker_restarted", str(exc), retryable=False
+            ) from exc
+        except SessionExpiredError as exc:
+            raise contract_error(
+                410, "session_expired", str(exc), retryable=False
+            ) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Session not found") from exc
 
@@ -730,12 +1056,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Run not found") from exc
 
+    async def renew_public_session(
+        session_id: str, *, allow_closing: bool = False
+    ) -> Session:
+        get_session(session_id)
+        try:
+            return await runtime.renew_session(session_id)
+        except SessionClosingError as exc:
+            if not allow_closing:
+                raise contract_error(
+                    409, "session_closing", str(exc), retryable=False
+                ) from exc
+            return get_session(session_id)
+        except (SessionLostError, SessionExpiredError, KeyError):
+            # The lease or lifecycle may have changed between the initial
+            # lookup and acquiring the session lock. Re-read through the
+            # public mapper so the caller still receives the stable contract.
+            return get_session(session_id)
+
     def public_session(session: Session) -> PublicSession:
         return PublicSession.model_validate(
             {
                 **session.model_dump(exclude={"token", "workspace"}),
                 "capabilities": session.mechanisms.capabilities(),
-                "features": ["idempotent_exec"],
+                "features": [
+                    "idempotent_exec",
+                    "worker_affinity",
+                    "idempotent_session_create",
+                    "leases",
+                    "resource_budgets",
+                    "abort_session",
+                ],
+                "budget_remaining": budget_remaining(session.budget, session.usage),
+                "state": runtime.session_state(session),
             }
         )
 
@@ -750,10 +1103,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict:
+        sessions = runtime.store.sessions()
+        current_time = utc_now()
+        active_sessions = [
+            item
+            for item in sessions
+            if not item.closing and not runtime._is_expired(item, current_time)
+        ]
+        warm_snapshot = getattr(runtime.sandbox, "snapshot", None)
         return {
             "status": "ok",
+            "worker_id": runtime.worker_id,
+            "worker_epoch": runtime.worker_epoch,
+            "state": "accepting" if runtime.accepting else "draining",
+            "accepting": runtime.accepting,
+            "build": runtime.environment_manifest(),
+            "process": runtime.process_snapshot(),
             "sandbox_mode": settings.sandbox_mode,
             "sandbox": runtime.sandbox_gate.snapshot(),
+            "warm": warm_snapshot() if callable(warm_snapshot) else None,
+            "broker": runtime.broker.capacity_gate.snapshot(),
+            "sessions": {
+                "capacity": settings.max_active_sessions,
+                "active": len(active_sessions),
+                "waiting": 0,
+                "leased": sum(item.lease_expires_at is not None for item in active_sessions),
+                "executing": sum(
+                    bool(runtime._active_session_tasks(item.id))
+                    for item in active_sessions
+                ),
+            },
             "inflight_execs": len(runtime.exec_tasks),
         }
 
@@ -776,7 +1155,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     f"{sorted(set(request.backends))}."
                 ),
             )
-        session = runtime.store.create_session(request)
+        try:
+            session, _ = await runtime.create_session(request)
+        except WorkerDrainingError as exc:
+            raise contract_error(
+                503, "worker_draining", str(exc), retryable=True
+            ) from exc
+        except SessionCapacityError as exc:
+            raise contract_error(
+                429,
+                "capacity_exhausted",
+                str(exc),
+                retryable=True,
+                headers={"Retry-After": "1"},
+            ) from exc
+        except SessionCreateConflictError as exc:
+            raise contract_error(
+                409, "session_request_conflict", str(exc), retryable=False
+            ) from exc
+        except SessionLostError as exc:
+            raise contract_error(
+                410, "worker_restarted", str(exc), retryable=False
+            ) from exc
+        except SessionExpiredError as exc:
+            raise contract_error(
+                410, "session_expired", str(exc), retryable=False
+            ) from exc
+        except SessionClosingError as exc:
+            raise contract_error(
+                409, "session_closing", str(exc), retryable=False
+            ) from exc
         return public_session(session)
 
     @app.get(
@@ -785,10 +1193,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dependencies=[Depends(authorize)],
     )
     async def read_session(session_id: str) -> PublicSession:
-        session = get_session(session_id)
-        if not session.closing:
-            session = runtime.store.touch_session(session_id)
-        return public_session(session)
+        return public_session(
+            await renew_public_session(session_id, allow_closing=True)
+        )
+
+    @app.post(
+        "/v1/sessions/{session_id}/heartbeat",
+        response_model=PublicSession,
+        dependencies=[Depends(authorize)],
+    )
+    async def heartbeat_session(session_id: str) -> PublicSession:
+        return public_session(await renew_public_session(session_id))
 
     @app.get(
         "/v1/sessions/{session_id}/workspace",
@@ -806,9 +1221,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         model: nothing here passes through an observation, which is why it is
         a separate request rather than a field on `ExecResult`.
         """
-        session = get_session(session_id)
-        if not session.closing:
-            session = runtime.store.touch_session(session_id)
+        session = await renew_public_session(session_id, allow_closing=True)
         return runtime.store.snapshot_workspace(
             session,
             max_total_bytes=max(max_total_bytes, 0),
@@ -818,12 +1231,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.delete("/v1/sessions/{session_id}", dependencies=[Depends(authorize)])
     async def delete_session(session_id: str) -> dict[str, str]:
         try:
-            await runtime.close_session(session_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Session not found") from exc
+            deleted = await runtime.close_session(session_id)
+        except KeyError:
+            deleted = False
         except SessionCleanupError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        return {"status": "deleted"}
+            raise contract_error(
+                503, "cleanup_failed", str(exc), retryable=True
+            ) from exc
+        return {"status": "deleted" if deleted else "gone"}
+
+    @app.post(
+        "/v1/sessions/{session_id}/abort",
+        dependencies=[Depends(authorize)],
+    )
+    async def abort_session(session_id: str) -> dict[str, str]:
+        try:
+            deleted = await runtime.abort_session(session_id)
+        except SessionCleanupError as exc:
+            raise contract_error(
+                503, "cleanup_failed", str(exc), retryable=True
+            ) from exc
+        return {"status": "aborted" if deleted else "gone"}
+
+    @app.post("/v1/admin/drain", dependencies=[Depends(authorize)])
+    async def drain_worker() -> dict[str, str]:
+        runtime.accepting = False
+        return {"status": "draining", "worker_id": runtime.worker_id}
 
     @app.post(
         "/v1/sessions/{session_id}/runs",
@@ -831,15 +1264,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dependencies=[Depends(authorize)],
     )
     async def create_run(session_id: str, request: RunCreate) -> PublicRun:
-        session = get_session(session_id)
-        if session.closing:
-            raise HTTPException(status_code=409, detail="Session is closing")
-        session = runtime.store.touch_session(session_id)
+        session = await renew_public_session(session_id)
         run = runtime.store.create_run(session_id, request)
         try:
             runtime.start_run_task(run, session)
         except SessionClosingError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise contract_error(
+                409, "session_closing", str(exc), retryable=False
+            ) from exc
         return public_run(run)
 
     @app.post(
@@ -857,12 +1289,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return await runtime.execute_code(session_id, request)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Session not found") from exc
+        except SessionLostError as exc:
+            raise contract_error(
+                410, "worker_restarted", str(exc), retryable=False
+            ) from exc
+        except SessionExpiredError as exc:
+            raise contract_error(
+                410, "session_expired", str(exc), retryable=False
+            ) from exc
         except SessionClosingError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise contract_error(
+                409, "session_closing", str(exc), retryable=False
+            ) from exc
         except ExecIdConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise contract_error(
+                409, "exec_id_conflict", str(exc), retryable=False
+            ) from exc
         except ExecIndeterminateError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise contract_error(
+                409, "exec_indeterminate", str(exc), retryable=False
+            ) from exc
+        except BudgetExceeded as exc:
+            raise contract_error(
+                409, "budget_exhausted", str(exc), retryable=False
+            ) from exc
 
     @app.get("/v1/runs/{run_id}", response_model=PublicRun, dependencies=[Depends(authorize)])
     async def read_run(run_id: str) -> PublicRun:

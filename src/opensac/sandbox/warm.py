@@ -37,6 +37,7 @@ class _WarmSession:
     container_id: str | None = None
     baseline_pids: frozenset[int] | None = None
     poisoned: bool = False
+    starting: bool = False
     leases: int = 0
     closing: bool = False
     execute_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -86,6 +87,7 @@ class WarmDockerSandbox:
         max_output_bytes: int = 1_000_000,
         startup_timeout_seconds: float = 60.0,
         idle_timeout_seconds: float = 300.0,
+        max_containers: int = 0,
     ) -> None:
         self.image = image
         self.broker_socket = broker_socket.resolve()
@@ -96,11 +98,30 @@ class WarmDockerSandbox:
         self.max_output_bytes = max_output_bytes
         self.startup_timeout_seconds = startup_timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
+        self.max_containers = max(0, int(max_containers))
         self._sessions: dict[str, _WarmSession] = {}
         self._closed_session_keys: set[str] = set()
         self._registry_lock = asyncio.Lock()
         self._closing_tasks: set[asyncio.Task[None]] = set()
         self._closed = False
+        self._capacity_changed = asyncio.Event()
+        self._capacity_changed.set()
+        self._capacity_waiting = 0
+
+    def snapshot(self) -> dict[str, int]:
+        containers = sum(
+            state.container_id is not None for state in self._sessions.values()
+        )
+        return {
+            "capacity": self.max_containers,
+            "active": containers,
+            "waiting": self._capacity_waiting,
+            "limit": self.max_containers,
+            "containers": containers,
+            "starting": sum(state.starting for state in self._sessions.values()),
+            "sessions": len(self._sessions),
+            "busy": sum(state.leases > 0 for state in self._sessions.values()),
+        }
 
     @property
     def owner_label(self) -> str:
@@ -357,8 +378,10 @@ class WarmDockerSandbox:
             state.leases -= 1
             if state.leases == 0:
                 state.no_leases.set()
+                self._capacity_changed.set()
 
     async def _start_container(self, state: _WarmSession, request: SandboxRequest) -> str:
+        await self._ensure_container_capacity(state)
         containers_dir = self.broker_socket.parent / "containers"
         containers_dir.mkdir(parents=True, exist_ok=True)
         cid_path = containers_dir / f"warm-{uuid.uuid4().hex}.cid"
@@ -436,6 +459,50 @@ class WarmDockerSandbox:
             return container_id
         finally:
             cid_path.unlink(missing_ok=True)
+            async with self._registry_lock:
+                state.starting = False
+                self._capacity_changed.set()
+
+    async def _ensure_container_capacity(self, current: _WarmSession) -> None:
+        """Bound warm namespaces, evicting only an idle least-recently-used one."""
+
+        if self.max_containers <= 0:
+            return
+        while True:
+            close_task: asyncio.Task[None] | None = None
+            waiter: asyncio.Event | None = None
+            async with self._registry_lock:
+                occupied = [
+                    state
+                    for state in self._sessions.values()
+                    if state.container_id is not None or state.starting
+                ]
+                if len(occupied) < self.max_containers:
+                    current.starting = True
+                    return
+                candidates = [
+                    state
+                    for state in occupied
+                    if state is not current
+                    and state.container_id is not None
+                    and not state.starting
+                    and not state.closing
+                    and state.leases == 0
+                ]
+                if candidates:
+                    victim = min(candidates, key=lambda state: state.last_used)
+                    close_task = self._start_close_locked(victim.key, victim)
+                else:
+                    self._capacity_changed.clear()
+                    self._capacity_waiting += 1
+                    waiter = self._capacity_changed
+            if close_task is not None:
+                await asyncio.shield(close_task)
+            elif waiter is not None:
+                try:
+                    await waiter.wait()
+                finally:
+                    self._capacity_waiting -= 1
 
     @staticmethod
     def _read_cid(cid_path: Path) -> str:
@@ -524,7 +591,12 @@ class WarmDockerSandbox:
                     captured = await read_bounded_process_output(
                         process,
                         max_output_bytes=self.max_output_bytes,
-                        timeout_seconds=self.timeout_seconds,
+                        timeout_seconds=min(
+                            self.timeout_seconds,
+                            request.timeout_seconds
+                            if request.timeout_seconds is not None
+                            else self.timeout_seconds,
+                        ),
                     )
                 except asyncio.CancelledError:
                     await self._discard_container(state)
@@ -626,6 +698,7 @@ class WarmDockerSandbox:
         state.container_id = None
         state.baseline_pids = None
         state.poisoned = False
+        self._capacity_changed.set()
 
     @staticmethod
     def _execution_launch_error(returncode: int | None, stderr: str) -> str | None:
@@ -657,6 +730,7 @@ class WarmDockerSandbox:
                 if self._sessions.get(key) is state:
                     self._sessions.pop(key, None)
                 state.closed.set()
+                self._capacity_changed.set()
 
     def _start_close_locked(
         self, key: str, state: _WarmSession

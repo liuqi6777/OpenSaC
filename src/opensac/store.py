@@ -4,7 +4,7 @@ import hashlib
 import secrets
 import shutil
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from opensac.models import (
@@ -12,8 +12,10 @@ from opensac.models import (
     ProgramRecord,
     Run,
     RunCreate,
+    RunUsage,
     Session,
     SessionCreate,
+    SessionTombstone,
     WorkspaceFile,
     WorkspaceSnapshot,
     utc_now,
@@ -28,10 +30,21 @@ class StateStore:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
 
-    def create_session(self, request: SessionCreate) -> Session:
+    def create_session(
+        self,
+        request: SessionCreate,
+        *,
+        worker_id: str = "",
+        worker_epoch: str = "",
+        request_hash: str | None = None,
+        default_lease_seconds: float | None = None,
+        environment: dict | None = None,
+    ) -> Session:
         session_id = f"sess_{uuid.uuid4().hex}"
         workspace = self.sessions_dir / session_id / "workspace"
         workspace.mkdir(parents=True)
+        lease_seconds = request.lease_seconds or default_lease_seconds
+        created_at = utc_now()
         session = Session(
             id=session_id,
             token=secrets.token_urlsafe(32),
@@ -42,6 +55,20 @@ class StateStore:
             # run belongs to has to stay recoverable from its own record after
             # the server has been restarted with a different configuration.
             mechanisms=request.mechanisms,
+            request_id=request.request_id,
+            request_hash=request_hash,
+            worker_id=worker_id,
+            worker_epoch=worker_epoch,
+            lease_seconds=lease_seconds,
+            lease_expires_at=(
+                created_at + timedelta(seconds=lease_seconds)
+                if lease_seconds is not None
+                else None
+            ),
+            budget=request.budget,
+            environment=environment or {},
+            created_at=created_at,
+            last_access=created_at,
         )
         self.save_session(session)
         return session
@@ -74,9 +101,39 @@ class StateStore:
             sessions.append(Session.model_validate_json(path.read_text(encoding="utf-8")))
         return sessions
 
+    def find_session_by_request_id(self, request_id: str) -> Session | None:
+        for session in self.sessions():
+            if session.request_id == request_id:
+                return session
+        return None
+
     def touch_session(self, session_id: str, *, at: datetime | None = None) -> Session:
         session = self.get_session(session_id)
         session.last_access = at or utc_now()
+        if session.lease_seconds is not None:
+            session.lease_expires_at = session.last_access + timedelta(
+                seconds=session.lease_seconds
+            )
+        self.save_session(session)
+        return session
+
+    def save_session_usage(
+        self,
+        session_id: str,
+        usage: RunUsage,
+        *,
+        terminal_reason: str | None = None,
+        touch: bool = True,
+    ) -> Session:
+        session = self.get_session(session_id)
+        session.usage = usage
+        session.terminal_reason = terminal_reason
+        if touch:
+            session.last_access = utc_now()
+            if session.lease_seconds is not None:
+                session.lease_expires_at = session.last_access + timedelta(
+                    seconds=session.lease_seconds
+                )
         self.save_session(session)
         return session
 
@@ -90,6 +147,66 @@ class StateStore:
     def delete_session(self, session_id: str) -> None:
         self.get_session(session_id)
         shutil.rmtree(self.sessions_dir / session_id)
+
+    @property
+    def tombstones_dir(self) -> Path:
+        path = self.data_dir / "tombstones"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def save_tombstone(self, session: Session, reason: str) -> SessionTombstone:
+        tombstone = SessionTombstone(
+            session_id=session.id,
+            reason=reason,
+            request_id=session.request_id,
+            request_hash=session.request_hash,
+            worker_id=session.worker_id,
+            worker_epoch=session.worker_epoch,
+        )
+        self._atomic_write_text(
+            self.tombstones_dir / f"{session.id}.json",
+            tombstone.model_dump_json(indent=2),
+        )
+        return tombstone
+
+    def get_tombstone(self, session_id: str) -> SessionTombstone | None:
+        path = self.tombstones_dir / f"{session_id}.json"
+        if not path.exists():
+            return None
+        return SessionTombstone.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def find_tombstone_by_request_id(self, request_id: str) -> SessionTombstone | None:
+        for path in self.tombstones_dir.glob("*.json"):
+            tombstone = SessionTombstone.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+            if tombstone.request_id == request_id:
+                return tombstone
+        return None
+
+    def reap_tombstones(self, *, before: datetime) -> int:
+        removed = 0
+        for path in self.tombstones_dir.glob("*.json"):
+            try:
+                tombstone = SessionTombstone.model_validate_json(
+                    path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                continue
+            if tombstone.deleted_at <= before:
+                path.unlink(missing_ok=True)
+                removed += 1
+        return removed
+
+    def workspace_bytes(self, session: Session, workspace: Path | None = None) -> int:
+        workspace = Path(workspace or session.workspace)
+        if not workspace.exists():
+            return 0
+        return sum(
+            path.stat().st_size
+            for path in workspace.rglob("*")
+            if path.is_file()
+        )
 
     def execs_dir(self, session: Session) -> Path:
         return self.sessions_dir / session.id / "execs"

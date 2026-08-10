@@ -320,6 +320,43 @@ async def test_reap_idle_uses_last_completed_execution(
     assert len(fake.operations("rm")) == 1
 
 
+async def test_warm_container_limit_evicts_only_idle_lru_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = asyncio.Event()
+    fake = _FakeDocker(exec_gates=[release, None])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
+    sandbox = _sandbox(tmp_path, max_containers=1)
+
+    first = asyncio.create_task(
+        sandbox.execute(_request(tmp_path, session_id="sess-1", sequence=1))
+    )
+    await fake.exec_started.wait()
+    second = asyncio.create_task(
+        sandbox.execute(_request(tmp_path, session_id="sess-2", sequence=2))
+    )
+    await asyncio.sleep(0)
+
+    assert len(fake.operations("run")) == 1
+    assert fake.operations("rm") == []
+    assert sandbox.snapshot()["containers"] == 1
+    assert sandbox.snapshot()["capacity"] == 1
+    assert sandbox.snapshot()["active"] == 1
+    assert sandbox.snapshot()["waiting"] == 1
+    release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert first_result.succeeded and second_result.succeeded
+    assert len(fake.operations("run")) == 2
+    assert [command[-1] for command in fake.operations("rm")] == [
+        "warm-container-1"
+    ]
+    assert sandbox.snapshot()["containers"] == 1
+    assert sandbox.snapshot()["limit"] == 1
+    assert sandbox.snapshot()["waiting"] == 0
+    await sandbox.close()
+
+
 async def test_background_descendant_poisons_container_and_next_exec_is_fresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

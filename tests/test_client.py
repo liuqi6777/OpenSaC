@@ -24,6 +24,15 @@ class ClientServer:
             return httpx.Response(200, json={"id": "sess-old"})
         if request.method == "POST" and request.url.path.endswith("/exec"):
             return httpx.Response(200, json={"succeeded": True})
+        if request.method == "POST" and request.url.path.endswith("/heartbeat"):
+            return httpx.Response(
+                200,
+                json={"id": "sess-new", "features": ["idempotent_exec"]},
+            )
+        if request.method == "POST" and request.url.path.endswith("/abort"):
+            return httpx.Response(200, json={"status": "aborted"})
+        if request.method == "POST" and request.url.path == "/v1/admin/drain":
+            return httpx.Response(200, json={"status": "draining"})
         if request.method == "DELETE":
             return httpx.Response(200)
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
@@ -51,6 +60,9 @@ def test_sync_client_negotiates_idempotency_and_preserves_explicit_options() -> 
         assert client.health() == {"status": "ok"}
         client.exec_code("sess-new", "pass\n", exec_id="logical-1")
         assert server.requests[-1][2]["exec_id"] == "logical-1"
+        assert client.heartbeat_session("sess-new")["id"] == "sess-new"
+        assert client.abort_session("sess-new") == {"status": "aborted"}
+        assert client.drain_worker() == {"status": "draining"}
 
         with pytest.raises(RuntimeError, match="does not advertise idempotent_exec"):
             client.exec_code("sess-old", "pass\n", exec_id="unsafe-retry")
@@ -68,7 +80,14 @@ async def test_async_client_negotiates_idempotency() -> None:
         transport=httpx.MockTransport(server),
     )
     try:
-        await client.create_session()
+        await client.create_session(
+            request_id="rollout-1",
+            lease_seconds=60,
+            budget={"max_exec_calls": 4},
+        )
+        assert server.requests[0][2]["request_id"] == "rollout-1"
+        assert server.requests[0][2]["lease_seconds"] == 60
+        assert server.requests[0][2]["budget"] == {"max_exec_calls": 4}
         await client.exec_code("sess-new", "pass\n", exec_id="logical-1")
         assert server.requests[-1][2]["exec_id"] == "logical-1"
 

@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from opensac.api.app import (
     ExecIndeterminateError,
     SessionCleanupError,
     SessionClosingError,
+    SessionExpiredError,
 )
 from opensac.config import Settings
 from opensac.models import (
@@ -29,6 +31,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         data_dir=tmp_path / "data",
         broker_socket=tmp_path / "broker.sock",
         api_key="public-secret",
+        backend_metadata_hash="sha256:index-manifest",
     )
     with TestClient(create_app(settings)) as client:
         unauthorized = client.post("/v1/sessions", json={})
@@ -44,9 +47,20 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["id"].startswith("sess_")
         assert "token" not in payload
         assert "workspace" not in payload
-        assert payload["features"] == ["idempotent_exec"]
+        assert set(payload["features"]) == {
+            "idempotent_exec",
+            "worker_affinity",
+            "idempotent_session_create",
+            "leases",
+            "resource_budgets",
+            "abort_session",
+        }
+        assert payload["worker_id"]
+        assert payload["worker_epoch"]
+        assert response.headers["X-OpenSAC-Worker-ID"] == payload["worker_id"]
         assert payload["closing"] is False
         assert payload["last_access"]
+        assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
 
 
 def test_public_session_api_rejects_unknown_backend(tmp_path) -> None:
@@ -72,6 +86,113 @@ def test_a_session_takes_exactly_one_search_backend(tmp_path) -> None:
         assert client.post("/v1/sessions", json={"backends": []}).status_code == 422
         # The default is one backend, so an omitted field stays valid.
         assert client.post("/v1/sessions", json={}).status_code == 200
+
+
+def test_session_create_is_idempotent_and_capacity_is_admitted_up_front(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        broker_socket=tmp_path / "broker.sock",
+        max_active_sessions=1,
+    )
+    with TestClient(create_app(settings)) as client:
+        request = {
+            "request_id": "rollout-7:attempt-1",
+            "lease_seconds": 60,
+            "budget": {"max_exec_calls": 2},
+        }
+        first = client.post("/v1/sessions", json=request)
+        retry = client.post("/v1/sessions", json=request)
+        conflict = client.post(
+            "/v1/sessions",
+            json={**request, "budget": {"max_exec_calls": 3}},
+        )
+        full = client.post(
+            "/v1/sessions",
+            json={"request_id": "rollout-8:attempt-1"},
+        )
+
+        assert first.status_code == retry.status_code == 200
+        assert first.json()["id"] == retry.json()["id"]
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"]["code"] == "session_request_conflict"
+        assert full.status_code == 429
+        assert full.json()["detail"] == {
+            "code": "capacity_exhausted",
+            "message": "Worker session capacity 1 is full",
+            "retryable": True,
+        }
+        assert full.headers["Retry-After"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_session_create_request_id_produces_one_directory(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    request = SessionCreate(request_id="same-rollout", backends=["local"])
+    try:
+        results = await asyncio.gather(
+            *(runtime.create_session(request) for _ in range(20))
+        )
+        assert {session.id for session, _ in results} == {results[0][0].id}
+        assert sum(created for _, created in results) == 1
+        assert len(runtime.store.sessions()) == 1
+    finally:
+        await runtime.model_client.close()
+
+
+def test_heartbeat_renews_lease_and_drain_rejects_only_new_sessions(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/v1/sessions",
+            json={"request_id": "leased", "lease_seconds": 30},
+        ).json()
+        time.sleep(0.01)
+        heartbeat = client.post(f"/v1/sessions/{created['id']}/heartbeat")
+        assert heartbeat.status_code == 200
+        assert heartbeat.json()["lease_expires_at"] > created["lease_expires_at"]
+
+        drained = client.post("/v1/admin/drain")
+        assert drained.json()["status"] == "draining"
+        assert client.get("/healthz").json()["accepting"] is False
+        assert client.get(f"/v1/sessions/{created['id']}").status_code == 200
+        rejected = client.post("/v1/sessions", json={"request_id": "new"})
+        assert rejected.status_code == 503
+        assert rejected.json()["detail"]["code"] == "worker_draining"
+
+
+def test_worker_restart_invalidates_old_epoch_sessions(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        broker_socket=tmp_path / "broker.sock",
+        worker_id="worker-a",
+    )
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/v1/sessions", json={"request_id": "restart-me"}
+        ).json()
+        old_epoch = created["worker_epoch"]
+
+    with TestClient(create_app(settings)) as restarted:
+        health = restarted.get("/healthz").json()
+        response = restarted.get(f"/v1/sessions/{created['id']}")
+        create_retry = restarted.post(
+            "/v1/sessions", json={"request_id": "restart-me"}
+        )
+        create_conflict = restarted.post(
+            "/v1/sessions",
+            json={"request_id": "restart-me", "lease_seconds": 60},
+        )
+
+    assert health["worker_id"] == "worker-a"
+    assert health["worker_epoch"] != old_epoch
+    assert response.status_code == 410
+    assert response.json()["detail"]["code"] == "worker_restarted"
+    assert create_retry.status_code == 410
+    assert create_retry.json()["detail"]["code"] == "worker_restarted"
+    assert create_conflict.status_code == 409
+    assert create_conflict.json()["detail"]["code"] == "session_request_conflict"
 
 
 class RecordingSandbox:
@@ -131,6 +252,19 @@ class RetryingCloseSandbox(RecordingSandbox):
         self.close_calls.append(session.id)
         if self.fail:
             raise RuntimeError("docker rm failed")
+
+
+class BlockingCloseSandbox(RecordingSandbox):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.close_calls: list[str] = []
+
+    async def close_session(self, session) -> None:
+        self.close_calls.append(session.id)
+        self.started.set()
+        await self.release.wait()
 
 
 class BlockingController:
@@ -206,6 +340,13 @@ def test_health_reports_capacity_and_warm_mode_is_selectable(
         "waiting": 0,
         "admitted": 0,
     }
+    assert payload["broker"]["capacity"] == settings.max_concurrency
+    assert payload["warm"]["limit"] == 0
+    assert payload["warm"]["capacity"] == 0
+    assert payload["warm"]["active"] == 0
+    assert payload["warm"]["waiting"] == 0
+    assert payload["sessions"]["waiting"] == 0
+    assert payload["state"] == "accepting"
 
 
 def test_exec_id_retries_return_the_persisted_result_and_conflicts_are_409(tmp_path) -> None:
@@ -225,7 +366,62 @@ def test_exec_id_retries_return_the_persisted_result_and_conflicts_are_409(tmp_p
         assert retry.json() == first.json()
         assert len(sandbox.requests) == 1
         assert conflict.status_code == 409
-        assert "different payload" in conflict.json()["detail"]
+        assert conflict.json()["detail"]["code"] == "exec_id_conflict"
+        assert "different payload" in conflict.json()["detail"]["message"]
+
+
+def test_exec_budget_is_hard_and_idempotent_replay_is_not_charged(tmp_path) -> None:
+    sandbox = RecordingSandbox()
+    with exec_client(tmp_path, sandbox) as client:
+        session = client.post(
+            "/v1/sessions",
+            json={
+                "request_id": "budgeted-rollout",
+                "budget": {"max_exec_calls": 1},
+            },
+        ).json()
+        request = {"exec_id": "turn-1", "code": "pass\n"}
+        first = client.post(f"/v1/sessions/{session['id']}/exec", json=request)
+        replay = client.post(f"/v1/sessions/{session['id']}/exec", json=request)
+        blocked = client.post(
+            f"/v1/sessions/{session['id']}/exec",
+            json={"exec_id": "turn-2", "code": "pass\n"},
+        )
+
+        assert first.status_code == replay.status_code == 200
+        assert replay.json() == first.json()
+        assert first.json()["usage"]["exec_calls"] == 1
+        assert first.json()["session_state"] == "exhausted"
+        assert first.json()["budget_remaining"]["max_exec_calls"] == 0
+        assert blocked.status_code == 409
+        assert blocked.json()["detail"]["code"] == "budget_exhausted"
+        assert len(sandbox.requests) == 1
+
+
+def test_workspace_and_sandbox_budgets_are_reported_on_the_exec_result(tmp_path) -> None:
+    sandbox = RecordingSandbox()
+    with exec_client(tmp_path, sandbox) as client:
+        session = client.post(
+            "/v1/sessions",
+            json={
+                "budget": {
+                    "max_sandbox_seconds": 0.5,
+                    "max_workspace_bytes": 1,
+                }
+            },
+        ).json()
+        response = client.post(
+            f"/v1/sessions/{session['id']}/exec",
+            json={"code": "pass\n"},
+        )
+
+        assert response.status_code == 200
+        assert sandbox.requests[0].timeout_seconds == 0.5
+        assert response.json()["usage"]["workspace_bytes"] == 3
+        assert response.json()["session_state"] == "exhausted"
+        assert response.json()["terminal_reason"] == (
+            "budget_exhausted:max_workspace_bytes"
+        )
 
 
 @pytest.mark.asyncio
@@ -420,6 +616,90 @@ async def test_delete_marks_closing_waits_for_inflight_exec_and_rejects_new_work
 
 
 @pytest.mark.asyncio
+async def test_abort_cancels_inflight_exec_and_is_idempotent(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    sandbox = BlockingSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    running = asyncio.create_task(
+        runtime.execute_code(
+            session.id,
+            ExecCreate(exec_id="abort-me", code="print('running')\n"),
+        )
+    )
+    try:
+        await sandbox.started.wait()
+        assert await runtime.abort_session(session.id) is True
+        assert running.cancelled()
+        assert sandbox.close_calls == [session.id]
+        assert await runtime.abort_session(session.id) is False
+        with pytest.raises(KeyError):
+            runtime.store.get_session(session.id)
+    finally:
+        sandbox.release.set()
+        await asyncio.gather(running, return_exceptions=True)
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_delete_and_abort_share_one_lifecycle_transition(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    sandbox = BlockingCloseSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    deleting = asyncio.create_task(runtime.close_session(session.id))
+    try:
+        await sandbox.started.wait()
+        aborting = asyncio.create_task(runtime.abort_session(session.id))
+        await asyncio.sleep(0)
+        assert aborting.done() is False
+
+        sandbox.release.set()
+        assert await deleting is True
+        assert await aborting is False
+        assert sandbox.close_calls == [session.id]
+        with pytest.raises(KeyError):
+            runtime.store.get_session(session.id)
+    finally:
+        sandbox.release.set()
+        await asyncio.gather(deleting, return_exceptions=True)
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_abort_preempts_graceful_delete_waiting_for_exec(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    sandbox = BlockingSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    running = asyncio.create_task(
+        runtime.execute_code(session.id, ExecCreate(code="print('running')\n"))
+    )
+    await sandbox.started.wait()
+    deleting = asyncio.create_task(runtime.close_session(session.id))
+    try:
+        await asyncio.sleep(0)
+        assert deleting.done() is False
+
+        aborted, deleted = await asyncio.gather(
+            runtime.abort_session(session.id), deleting
+        )
+        assert running.cancelled()
+        assert sorted((aborted, deleted)) == [False, True]
+        assert sandbox.close_calls == [session.id]
+    finally:
+        sandbox.release.set()
+        await asyncio.gather(running, deleting, return_exceptions=True)
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_failure_revokes_token_but_keeps_durable_closing_session(
     tmp_path,
 ) -> None:
@@ -590,6 +870,24 @@ async def test_ttl_reaper_removes_only_idle_sessions_and_cleans_broker_state(tmp
         assert runtime.store.get_session(fresh.id).id == fresh.id
         with pytest.raises(KeyError):
             runtime.store.get_session(stale.id)
+    finally:
+        await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_per_session_lease_expires_without_global_ttl(tmp_path) -> None:
+    now = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    session, _ = await runtime.create_session(
+        SessionCreate(backends=["local"], lease_seconds=30)
+    )
+    runtime.store.touch_session(session.id, at=now - timedelta(seconds=31))
+    try:
+        assert await runtime.reap_expired_sessions(now=now) == [session.id]
+        with pytest.raises(SessionExpiredError):
+            runtime.get_session(session.id)
     finally:
         await runtime.model_client.close()
 

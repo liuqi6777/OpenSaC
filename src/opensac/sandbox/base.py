@@ -25,6 +25,8 @@ class SandboxRequest:
     # sandboxes therefore use this id for lifecycle/reuse when the caller can
     # provide it, and fall back to the token for older callers.
     session_id: str | None = None
+    # A session budget may lower the deployment-wide timeout for this call.
+    timeout_seconds: float | None = None
 
 
 @dataclass

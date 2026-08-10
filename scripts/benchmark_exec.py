@@ -12,6 +12,7 @@ import statistics
 import time
 import uuid
 from collections import defaultdict
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -49,8 +50,31 @@ def _parse_concurrency(value: str) -> list[int]:
     return levels
 
 
-async def _create_session(client: httpx.AsyncClient, backend: str) -> str:
-    response = await client.post("/v1/sessions", json={"backends": [backend]})
+def _health_metrics(payload: dict[str, Any]) -> dict[str, float]:
+    process = payload.get("process") or {}
+    sandbox = payload.get("sandbox") or {}
+    broker = payload.get("broker") or {}
+    warm = payload.get("warm") or {}
+    sessions = payload.get("sessions") or {}
+    return {
+        "process.rss_bytes": float(process.get("rss_bytes", 0)),
+        "process.fd_count": float(process.get("fd_count", 0)),
+        "sandbox.active": float(sandbox.get("active", 0)),
+        "sandbox.waiting": float(sandbox.get("waiting", 0)),
+        "broker.active": float(broker.get("active", 0)),
+        "broker.waiting": float(broker.get("waiting", 0)),
+        "warm.active": float(warm.get("active", warm.get("containers", 0))),
+        "warm.waiting": float(warm.get("waiting", 0)),
+        "sessions.active": float(sessions.get("active", 0)),
+        "sessions.executing": float(sessions.get("executing", 0)),
+    }
+
+
+async def _create_session(client: httpx.AsyncClient, backend: str, request_id: str) -> str:
+    response = await client.post(
+        "/v1/sessions",
+        json={"backends": [backend], "request_id": request_id},
+    )
     response.raise_for_status()
     return str(response.json()["id"])
 
@@ -114,14 +138,33 @@ async def _run_level(
     backend: str,
     code: str,
     include_trace: bool,
+    duration_seconds: float = 0.0,
+    sample_health: bool = False,
 ) -> dict[str, Any]:
-    worker_count = min(concurrency, requests)
-    sessions = await asyncio.gather(
-        *(_create_session(client, backend) for _ in range(worker_count))
-    )
+    worker_count = concurrency if duration_seconds > 0 else min(concurrency, requests)
     run_token = uuid.uuid4().hex
+    sessions = await asyncio.gather(
+        *(
+            _create_session(client, backend, f"bench-{run_token}-worker-{index}")
+            for index in range(worker_count)
+        )
+    )
     records: list[dict[str, Any]] = []
     warmup_failures = 0
+    health_samples: list[dict[str, float]] = []
+    health_failures: list[str] = []
+    monitor_stop = asyncio.Event()
+
+    async def monitor_health() -> None:
+        while not monitor_stop.is_set():
+            try:
+                response = await client.get("/healthz")
+                response.raise_for_status()
+                health_samples.append(_health_metrics(response.json()))
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                health_failures.append(f"{type(exc).__name__}: {exc}")
+            with suppress(TimeoutError):
+                await asyncio.wait_for(monitor_stop.wait(), timeout=1.0)
 
     async def warm_worker(worker_index: int) -> None:
         nonlocal warmup_failures
@@ -137,8 +180,23 @@ async def _run_level(
             if not record.get("request_ok", False):
                 warmup_failures += 1
 
+    measurement_started = 0.0
+
     async def worker(worker_index: int) -> None:
         session_id = sessions[worker_index]
+        if duration_seconds > 0:
+            request_index = worker_index
+            while time.monotonic() - measurement_started < duration_seconds:
+                record = await _exec(
+                    client,
+                    session_id,
+                    code,
+                    f"bench-{run_token}-{request_index}",
+                    include_trace=include_trace,
+                )
+                records.append(record)
+                request_index += worker_count
+            return
         for request_index in range(worker_index, requests, worker_count):
             record = await _exec(
                 client,
@@ -149,12 +207,19 @@ async def _run_level(
             )
             records.append(record)
 
+    monitor_task: asyncio.Task[None] | None = None
     try:
         await asyncio.gather(*(warm_worker(index) for index in range(worker_count)))
         started = time.monotonic()
+        measurement_started = started
+        if sample_health:
+            monitor_task = asyncio.create_task(monitor_health())
         await asyncio.gather(*(worker(index) for index in range(worker_count)))
         elapsed = time.monotonic() - started
     finally:
+        monitor_stop.set()
+        if monitor_task is not None:
+            await monitor_task
         cleanup_results = await asyncio.gather(
             *(_delete_session(client, session_id) for session_id in sessions),
         )
@@ -183,11 +248,20 @@ async def _run_level(
     return {
         "requested_concurrency": concurrency,
         "effective_concurrency": worker_count,
+        "requested_duration_seconds": duration_seconds,
         "attempted_requests": len(records),
         "request_failures": request_failures,
         "program_failures": program_failures,
         "warmup_failures": warmup_failures,
         "cleanup_failures": [error for error in cleanup_results if error is not None],
+        "health_sample_count": len(health_samples),
+        "health_sample_failures": health_failures,
+        "resource_peaks": {
+            name: max(sample[name] for sample in health_samples)
+            for name in health_samples[0]
+        }
+        if health_samples
+        else {},
         "elapsed_seconds": elapsed,
         "throughput_requests_per_second": len(records) / elapsed if elapsed else 0.0,
         "successful_requests_per_second": (
@@ -217,17 +291,22 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
         health = health_response.json()
         levels = []
         for concurrency in args.concurrency:
-            levels.append(
-                await _run_level(
-                    client,
-                    concurrency=concurrency,
-                    requests=args.requests,
-                    warmup_per_worker=args.warmup_per_worker,
-                    backend=args.backend,
-                    code=args.code,
-                    include_trace=args.include_trace,
-                )
+            before = (await client.get("/healthz")).json()
+            level = await _run_level(
+                client,
+                concurrency=concurrency,
+                requests=args.requests,
+                warmup_per_worker=args.warmup_per_worker,
+                backend=args.backend,
+                code=args.code,
+                include_trace=args.include_trace,
+                duration_seconds=args.duration_seconds,
+                sample_health=True,
             )
+            after = (await client.get("/healthz")).json()
+            level["health_before"] = before
+            level["health_after"] = after
+            levels.append(level)
     return {
         "base_url": args.base_url,
         "backend": args.backend,
@@ -235,6 +314,7 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
         "code_sha256": hashlib.sha256(args.code.encode("utf-8")).hexdigest(),
         "include_trace": args.include_trace,
         "requests_per_level": args.requests,
+        "duration_seconds_per_level": args.duration_seconds,
         "warmup_per_worker": args.warmup_per_worker,
         "levels": levels,
     }
@@ -247,6 +327,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--backend", choices=("local", "web"), default="local")
     parser.add_argument("--concurrency", type=_parse_concurrency, default=[1, 4, 8, 16])
     parser.add_argument("--requests", type=int, default=32)
+    parser.add_argument(
+        "--duration-seconds",
+        type=float,
+        default=0.0,
+        help="Run each concurrency level for this long; when set, --requests is ignored.",
+    )
     parser.add_argument("--warmup-per-worker", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=600.0)
     parser.add_argument("--include-trace", action=argparse.BooleanOptionalAction, default=True)
@@ -257,6 +343,8 @@ def _arguments() -> argparse.Namespace:
     args = parser.parse_args()
     if args.requests < 1:
         parser.error("--requests must be at least 1")
+    if args.duration_seconds < 0:
+        parser.error("--duration-seconds must be non-negative")
     if args.warmup_per_worker < 0:
         parser.error("--warmup-per-worker must be non-negative")
     if args.code_file is not None:

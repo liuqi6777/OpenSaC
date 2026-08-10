@@ -17,6 +17,7 @@ from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
 from opensac.backends.base import BatchSearchBackend, ClosableSearchBackend, SearchBackend
 from opensac.broker.policy import CapabilityPolicy, MechanismDisabled
+from opensac.metrics import CapacityGate
 from opensac.models import CAPABILITY_METHODS, CapabilityEvent, HitRecord, Mechanisms, Session
 
 _EVENT_MODEL_TOKENS: ContextVar[int] = ContextVar(
@@ -149,7 +150,7 @@ class BrokerService:
         self.model_client = model_client
         self.extraction_model = extraction_model
         self.sessions: dict[str, BrokerSession] = {}
-        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self.capacity_gate = CapacityGate(max_concurrency)
         self.max_context_payload_bytes = max_context_payload_bytes
         self.session_content_cache_bytes = session_content_cache_bytes
         retrieval_limits = {
@@ -178,7 +179,12 @@ class BrokerService:
     def register_session(self, session: Session, *, token: str | None = None) -> BrokerSession:
         state = BrokerSession(
             session=session,
-            policy=CapabilityPolicy(set(session.backends)),
+            policy=CapabilityPolicy(
+                set(session.backends),
+                usage=session.usage,
+                budget=session.budget,
+                terminal_reason=session.terminal_reason,
+            ),
         )
         self.sessions[token or session.token] = state
         return state
@@ -475,7 +481,7 @@ class BrokerService:
         state.policy.require_backend(backend_name)
         await state.policy.record_search()
         _, backend, query, domains, limit, offset = self._prepare_search(state, params)
-        async with self._semaphore:
+        async with self.capacity_gate.slot():
             hits = await backend.search(
                 query,
                 limit=limit,
@@ -650,7 +656,7 @@ class BrokerService:
             assert batch_options is not None
             limit, offset, domains = batch_options
             try:
-                async with self._semaphore:
+                async with self.capacity_gate.slot():
                     returned = await backend.search_many(
                         valid_queries,
                         limit=limit,
@@ -755,10 +761,9 @@ class BrokerService:
     ) -> dict[str, Any]:
         """What this session has spent so far.
 
-        Nothing here is a ceiling. The broker does not ration retrieval, so
-        these are the numbers a program throttles itself by if it chooses to --
-        which is the point: a policy the program applies can be read off its
-        code and measured, and one the broker imposes can only be hit.
+        Evaluation sessions omit a budget and retain measurement-only behaviour.
+        RL sessions additionally receive their remaining hard allowances and a
+        typed terminal reason.
 
         Counted as a capability call like any other. An exception for it would
         make the trace stop being a complete record of what the program asked
@@ -768,6 +773,8 @@ class BrokerService:
         return {
             **state.policy.usage.model_dump(mode="json"),
             "documents_seen": len(state.references),
+            "budget_remaining": state.policy.remaining(),
+            "terminal_reason": state.policy.terminal_reason,
         }
 
     async def _resolve_citations(
@@ -1049,7 +1056,7 @@ class BrokerService:
             backend = self.backends.get(name)
             if backend is None:
                 raise RuntimeError(f"Backend '{name}' is not configured")
-            async with self._semaphore:
+            async with self.capacity_gate.slot():
                 return await backend.content(backend_hits, query=query)
 
         chunks = await asyncio.gather(*(fetch(name, rows) for name, rows in grouped.items()))
@@ -1122,7 +1129,7 @@ class BrokerService:
             options["max_completion_tokens"] = max_tokens
         if json_object:
             options["response_format"] = {"type": "json_object"}
-        async with self._semaphore:
+        async with self.capacity_gate.slot():
             response = await self.model_client.chat.completions.create(
                 model=self.extraction_model,
                 messages=messages,
@@ -1151,13 +1158,16 @@ class BrokerService:
         prompt = str(params.get("prompt", "")).strip()
         if not prompt:
             raise ValueError("prompt must not be empty")
-        await state.policy.record_llm(1)
+        max_tokens = await state.policy.reserve_llm(
+            1,
+            max_tokens=self._clamp_max_tokens(params.get("max_tokens")),
+        )
         system = params.get("system")
         answer, tokens = await self._chat(
             prompt,
             system=str(system) if system else None,
             temperature=self._clamp_temperature(params.get("temperature", 0.2)),
-            max_tokens=self._clamp_max_tokens(params.get("max_tokens")),
+            max_tokens=max_tokens,
         )
         await state.policy.record_pipeline_model_tokens(tokens)
         _EVENT_MODEL_TOKENS.set(_EVENT_MODEL_TOKENS.get() + tokens)
@@ -1173,10 +1183,12 @@ class BrokerService:
         # The whole fan-out is counted before it runs, so a batch that dies
         # partway is still reported at the size it was dispatched at rather than
         # at however far it got.
-        await state.policy.record_llm(len(prompts))
+        max_tokens = await state.policy.reserve_llm(
+            len(prompts),
+            max_tokens=self._clamp_max_tokens(params.get("max_tokens")),
+        )
         system = params.get("system")
         temperature = self._clamp_temperature(params.get("temperature", 0.2))
-        max_tokens = self._clamp_max_tokens(params.get("max_tokens"))
         concurrency = min(max(int(params.get("concurrency", 4)), 1), 12)
         gate = asyncio.Semaphore(concurrency)
 
@@ -1202,7 +1214,12 @@ class BrokerService:
     ) -> list[dict[str, Any]]:
         self._require_model()
         items = params.get("items", [])
-        await state.policy.record_llm(len(items))
+        if not items:
+            return []
+        max_tokens = await state.policy.reserve_llm(
+            len(items),
+            max_tokens=self._clamp_max_tokens(params.get("max_tokens")),
+        )
         schema = params.get("schema", {})
         instruction = str(params.get("instruction", ""))
         concurrency = min(max(int(params.get("concurrency", 4)), 1), 12)
@@ -1215,7 +1232,11 @@ class BrokerService:
                 "Return only one JSON object."
             )
             async with gate:
-                content, tokens = await self._chat(prompt, json_object=True)
+                content, tokens = await self._chat(
+                    prompt,
+                    max_tokens=max_tokens,
+                    json_object=True,
+                )
             return content, tokens
 
         results = await asyncio.gather(*(extract(item) for item in items))

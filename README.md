@@ -88,8 +88,11 @@ The API exposes:
 POST   /v1/sessions
 GET    /v1/sessions/{session_id}
 DELETE /v1/sessions/{session_id}
+POST   /v1/sessions/{session_id}/heartbeat
+POST   /v1/sessions/{session_id}/abort
 POST   /v1/sessions/{session_id}/runs
 POST   /v1/sessions/{session_id}/exec
+POST   /v1/admin/drain
 GET    /v1/runs/{run_id}
 GET    /v1/runs/{run_id}/events
 POST   /v1/runs/{run_id}/cancel
@@ -108,7 +111,17 @@ intermediate results in one turn and resolve their refs several turns later.
 from opensac import OpenSAC
 
 with OpenSAC(api_key="...") as client:
-    session = client.create_session(backends=["local"])
+    session = client.create_session(
+        backends=["local"],
+        request_id="rollout-17:attempt-1",
+        lease_seconds=600,
+        budget={
+            "max_exec_calls": 16,
+            "max_search_queries": 128,
+            "max_content_fetches": 256,
+            "max_sandbox_seconds": 300,
+        },
+    )
     result = client.exec_code(
         session["id"],
         "from opensac_sdk import sdk\n...",
@@ -129,7 +142,33 @@ containers orphaned by a prior crash without touching other instances on the hos
 
 `exec_id` is an idempotency key. A retry with the same payload returns the durable original
 response; reusing it for different code returns 409. The session manifest advertises
-`features: ["idempotent_exec"]`, allowing older clients and servers to negotiate retries safely.
+an explicit feature list, allowing older clients and servers to negotiate retries safely. RL
+workers advertise worker affinity, idempotent session creation, leases, resource budgets, and
+abort in addition to idempotent execution.
+
+## RL environment workers
+
+OpenSAC is intentionally a node-local, single-process environment worker. An external trainer
+or rollout scheduler stores `{endpoint, worker_id, worker_epoch, session_id}` and keeps every
+request for that session on the same endpoint. A worker restart changes `worker_epoch`; old
+sessions return `410 worker_restarted` because their in-memory reference table cannot be
+reconstructed safely. The scheduler starts that rollout attempt again on a healthy worker.
+
+`request_id` makes session creation safe to retry on the same worker. A lease is renewed by
+successful session operations or explicitly through `heartbeat`; `abort` cancels admitted work
+and removes its container immediately. `drain` rejects new sessions while existing sessions can
+finish. Capacity and process RSS/FD snapshots are reported by `/healthz` for external placement.
+
+Resource ceilings are opt-in and enforced per session. Discrete calls are reserved before the
+backend side effect, failed calls remain charged, and an idempotent `/exec` replay is not charged
+twice. A result that reaches its final allowance returns `session_state="exhausted"`; subsequent
+new executions receive the machine-readable `409 budget_exhausted` response. Workspace bytes are
+checked at admission and audited after each execution; because the workspace is a portable Docker
+bind mount, deployments that must prevent a transient single-exec disk burst also need a
+filesystem/project quota on each worker data directory.
+
+See [RL worker deployment](docs/rl-environment-workers.md) for multi-instance configuration and
+the scheduler failure contract.
 
 ## Throughput tuning
 
@@ -139,6 +178,8 @@ per session while each program still runs in a fresh `python -I` child process:
 ```bash
 OPENSAC_SANDBOX_MODE=warm \
 OPENSAC_SANDBOX_WARM_IDLE_SECONDS=300 \
+OPENSAC_SANDBOX_MAX_WARM_CONTAINERS=32 \
+OPENSAC_MAX_ACTIVE_SESSIONS=128 \
 OPENSAC_SESSION_TTL_SECONDS=3600 \
 uv run opensac serve
 ```
@@ -149,7 +190,7 @@ and waiting sandbox work. Measure cold and warm on the target Docker host with:
 
 ```bash
 uv run python scripts/benchmark_exec.py \
-  --concurrency 1,4,8,16 --requests 64 --output benchmark.json
+  --concurrency 16,32,64,128 --duration-seconds 3600 --output soak.json
 ```
 
 For a retrieval workload, pass `--code-file program.py`; capability latency is aggregated from

@@ -39,6 +39,27 @@ class RunLimits(BaseModel):
     timeout_seconds: int = Field(default=300, ge=1, le=3600)
 
 
+class ResourceBudget(BaseModel):
+    """Optional hard ceilings for an externally-driven environment session.
+
+    ``None`` means unbounded and preserves the historical evaluation behaviour.
+    Discrete resources are reserved before their side effect.  Output tokens are
+    reservations rather than observed usage, so concurrent fan-out cannot spend
+    more than the caller authorised.
+    """
+
+    max_exec_calls: int | None = Field(default=None, ge=0)
+    max_search_queries: int | None = Field(default=None, ge=0)
+    max_content_fetches: int | None = Field(default=None, ge=0)
+    max_pipeline_llm_calls: int | None = Field(default=None, ge=0)
+    max_pipeline_output_tokens: int | None = Field(default=None, ge=0)
+    max_sandbox_seconds: float | None = Field(default=None, ge=0.0)
+    max_workspace_bytes: int | None = Field(default=None, ge=0)
+
+    def configured(self) -> bool:
+        return any(value is not None for value in self.model_dump().values())
+
+
 # Every capability the broker dispatches, in one place. The broker asserts its
 # handler table against this tuple, so a capability cannot be added on one side
 # only: a method missing here would be invisible to the session manifest (and
@@ -156,6 +177,9 @@ class SessionCreate(BaseModel):
     backends: list[str] = Field(default_factory=lambda: ["local"])
     limits: RunLimits = Field(default_factory=RunLimits)
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
+    request_id: str | None = Field(default=None, min_length=1, max_length=256)
+    lease_seconds: float | None = Field(default=None, gt=0.0, le=86_400.0)
+    budget: ResourceBudget = Field(default_factory=ResourceBudget)
 
 
 class Session(BaseModel):
@@ -165,6 +189,16 @@ class Session(BaseModel):
     limits: RunLimits
     workspace: str
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
+    request_id: str | None = None
+    request_hash: str | None = None
+    worker_id: str = ""
+    worker_epoch: str = ""
+    lease_seconds: float | None = None
+    lease_expires_at: datetime | None = None
+    budget: ResourceBudget = Field(default_factory=ResourceBudget)
+    usage: RunUsage = Field(default_factory=lambda: RunUsage())
+    terminal_reason: str | None = None
+    environment: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
     # Updated by every operation that keeps the session alive. Kept beside the
     # session rather than in process memory so a restarted reaper does not make
@@ -185,8 +219,12 @@ class RunCreate(BaseModel):
 
 
 class RunUsage(BaseModel):
+    exec_calls: int = 0
     model_tokens: int = 0
     pipeline_model_tokens: int = 0
+    # Reserved maximum completion tokens.  Kept separate from actual provider
+    # usage because it is the value a hard fan-out budget can enforce up front.
+    pipeline_output_tokens_reserved: int = 0
     search_calls: int = 0
     # Documents the program asked for, counting every request including the ones
     # a session cache served.
@@ -200,6 +238,41 @@ class RunUsage(BaseModel):
     content_backend_fetches: int = 0
     llm_calls: int = 0
     sandbox_seconds: float = 0.0
+    workspace_bytes: int = 0
+
+
+_BUDGET_USAGE_FIELDS: dict[str, str] = {
+    "max_exec_calls": "exec_calls",
+    "max_search_queries": "search_calls",
+    "max_content_fetches": "content_fetches",
+    "max_pipeline_llm_calls": "llm_calls",
+    "max_pipeline_output_tokens": "pipeline_output_tokens_reserved",
+    "max_sandbox_seconds": "sandbox_seconds",
+    "max_workspace_bytes": "workspace_bytes",
+}
+
+
+def budget_remaining(
+    budget: ResourceBudget,
+    usage: RunUsage,
+) -> dict[str, float | int | None]:
+    remaining: dict[str, float | int | None] = {}
+    for budget_field, usage_field in _BUDGET_USAGE_FIELDS.items():
+        ceiling = getattr(budget, budget_field)
+        remaining[budget_field] = (
+            None if ceiling is None else max(ceiling - getattr(usage, usage_field), 0)
+        )
+    return remaining
+
+
+class SessionTombstone(BaseModel):
+    session_id: str
+    reason: str
+    request_id: str | None = None
+    request_hash: str | None = None
+    worker_id: str = ""
+    worker_epoch: str = ""
+    deleted_at: datetime = Field(default_factory=utc_now)
 
 
 class ExecCreate(BaseModel):
@@ -319,6 +392,9 @@ class ExecResult(BaseModel):
     artifacts: list[str] = Field(default_factory=list)
     trace: list[CapabilityEvent] = Field(default_factory=list)
     timings: dict[str, float] = Field(default_factory=dict)
+    session_state: str = "active"
+    terminal_reason: str | None = None
+    budget_remaining: dict[str, float | int | None] = Field(default_factory=dict)
 
 
 class ExecRecord(BaseModel):
@@ -404,6 +480,17 @@ class PublicSession(BaseModel):
     # Feature negotiation for transport behaviour. In particular, a host must
     # not retry `/exec` against an older server that silently ignores `exec_id`.
     features: list[str] = Field(default_factory=list)
+    worker_id: str = ""
+    worker_epoch: str = ""
+    request_id: str | None = None
+    lease_seconds: float | None = None
+    lease_expires_at: datetime | None = None
+    budget: ResourceBudget = Field(default_factory=ResourceBudget)
+    usage: RunUsage = Field(default_factory=RunUsage)
+    budget_remaining: dict[str, float | int | None] = Field(default_factory=dict)
+    state: str = "active"
+    terminal_reason: str | None = None
+    environment: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     last_access: datetime
     closing: bool

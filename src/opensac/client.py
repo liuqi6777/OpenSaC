@@ -25,14 +25,24 @@ class OpenSAC:
         backends: list[str] | None = None,
         limits: dict[str, Any] | None = None,
         mechanisms: dict[str, Any] | None = None,
+        request_id: str | None = None,
+        lease_seconds: float | None = None,
+        budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "backends": ["local"] if backends is None else backends,
+            "limits": limits or {},
+            "mechanisms": mechanisms or {},
+        }
+        if budget is not None:
+            payload["budget"] = budget
+        if request_id is not None:
+            payload["request_id"] = request_id
+        if lease_seconds is not None:
+            payload["lease_seconds"] = lease_seconds
         response = self._client.post(
             "/v1/sessions",
-            json={
-                "backends": ["local"] if backends is None else backends,
-                "limits": limits or {},
-                "mechanisms": mechanisms or {},
-            },
+            json=payload,
         )
         response.raise_for_status()
         session = response.json()
@@ -95,6 +105,24 @@ class OpenSAC:
         self._client.delete(f"/v1/sessions/{session_id}").raise_for_status()
         self._session_features.pop(session_id, None)
 
+    def heartbeat_session(self, session_id: str) -> dict[str, Any]:
+        response = self._client.post(f"/v1/sessions/{session_id}/heartbeat")
+        response.raise_for_status()
+        session = response.json()
+        self._remember_features(session)
+        return session
+
+    def abort_session(self, session_id: str) -> dict[str, Any]:
+        response = self._client.post(f"/v1/sessions/{session_id}/abort")
+        response.raise_for_status()
+        self._session_features.pop(session_id, None)
+        return response.json()
+
+    def drain_worker(self) -> dict[str, Any]:
+        response = self._client.post("/v1/admin/drain")
+        response.raise_for_status()
+        return response.json()
+
     def create_and_wait(
         self,
         session_id: str,
@@ -137,14 +165,24 @@ class AsyncOpenSAC:
         backends: list[str] | None = None,
         limits: dict[str, Any] | None = None,
         mechanisms: dict[str, Any] | None = None,
+        request_id: str | None = None,
+        lease_seconds: float | None = None,
+        budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "backends": ["local"] if backends is None else backends,
+            "limits": limits or {},
+            "mechanisms": mechanisms or {},
+        }
+        if budget is not None:
+            payload["budget"] = budget
+        if request_id is not None:
+            payload["request_id"] = request_id
+        if lease_seconds is not None:
+            payload["lease_seconds"] = lease_seconds
         response = await self._client.post(
             "/v1/sessions",
-            json={
-                "backends": ["local"] if backends is None else backends,
-                "limits": limits or {},
-                "mechanisms": mechanisms or {},
-            },
+            json=payload,
         )
         response.raise_for_status()
         session = response.json()
@@ -208,6 +246,24 @@ class AsyncOpenSAC:
     async def delete_session(self, session_id: str) -> None:
         (await self._client.delete(f"/v1/sessions/{session_id}")).raise_for_status()
         self._session_features.pop(session_id, None)
+
+    async def heartbeat_session(self, session_id: str) -> dict[str, Any]:
+        response = await self._client.post(f"/v1/sessions/{session_id}/heartbeat")
+        response.raise_for_status()
+        session = response.json()
+        self._remember_features(session)
+        return session
+
+    async def abort_session(self, session_id: str) -> dict[str, Any]:
+        response = await self._client.post(f"/v1/sessions/{session_id}/abort")
+        response.raise_for_status()
+        self._session_features.pop(session_id, None)
+        return response.json()
+
+    async def drain_worker(self) -> dict[str, Any]:
+        response = await self._client.post("/v1/admin/drain")
+        response.raise_for_status()
+        return response.json()
 
     async def create_and_wait(
         self,

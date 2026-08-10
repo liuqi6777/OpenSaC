@@ -222,7 +222,12 @@ class DockerSandbox:
             captured = await read_bounded_process_output(
                 process,
                 max_output_bytes=self.max_output_bytes,
-                timeout_seconds=self.timeout_seconds,
+                timeout_seconds=min(
+                    self.timeout_seconds,
+                    request.timeout_seconds
+                    if request.timeout_seconds is not None
+                    else self.timeout_seconds,
+                ),
             )
         except asyncio.CancelledError:
             await self._remove_container(cid_path)

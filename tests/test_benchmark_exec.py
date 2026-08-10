@@ -75,3 +75,21 @@ async def test_benchmark_level_isolates_warmup_and_records_failures() -> None:
 def test_parse_concurrency_rejects_non_positive_levels() -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         benchmark_exec._parse_concurrency("1,0,4")
+
+
+def test_health_metrics_extract_resource_peaks() -> None:
+    metrics = benchmark_exec._health_metrics(
+        {
+            "process": {"rss_bytes": 1000, "fd_count": 12},
+            "sandbox": {"active": 3, "waiting": 4},
+            "broker": {"active": 5, "waiting": 6},
+            "warm": {"active": 7, "waiting": 8},
+            "sessions": {"active": 9, "executing": 10},
+        }
+    )
+
+    assert metrics["process.rss_bytes"] == 1000
+    assert metrics["sandbox.waiting"] == 4
+    assert metrics["broker.active"] == 5
+    assert metrics["warm.waiting"] == 8
+    assert metrics["sessions.executing"] == 10

@@ -3,7 +3,28 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
-from opensac.models import RunUsage
+from opensac.models import ResourceBudget, RunUsage, budget_remaining
+
+
+class BudgetExceeded(RuntimeError):
+    """A non-retryable session resource ceiling was reached."""
+
+    def __init__(
+        self,
+        resource: str,
+        *,
+        limit: float | int,
+        used: float | int,
+        requested: float | int,
+    ) -> None:
+        self.resource = resource
+        self.limit = limit
+        self.used = used
+        self.requested = requested
+        super().__init__(
+            f"Session budget exhausted for {resource}: limit={limit}, "
+            f"used={used}, requested={requested}"
+        )
 
 
 class MechanismDisabled(RuntimeError):
@@ -21,30 +42,75 @@ class MechanismDisabled(RuntimeError):
 class CapabilityPolicy:
     """What a session is allowed to reach, and what it has spent.
 
-    Two jobs that look similar and are not. `require_backend` is a boundary:
-    refusing it is the point, and a session that reaches past it is a bug.
-    Everything else here only counts.
-
-    There is deliberately no ceiling on the counts. A hard cap in a research
-    harness has two possible fates and neither is useful: set high enough not to
-    interfere it is dead code, and set low enough to bind it converts a question
-    into a zero that reads afterwards as a model failure rather than as the
-    budget it was. The numbers are instead handed to the program through
-    `session.usage`, so a policy that wants to ration retrieval can be written
-    and measured rather than imposed.
+    Backend permissions are unconditional boundaries. Resource ceilings are
+    opt-in: the default empty budget retains the original measurement-only
+    research harness, while an RL environment can reserve discrete work before
+    its side effect and expose a typed terminal reason when the allowance ends.
     """
 
     allowed_backends: set[str]
     usage: RunUsage = field(default_factory=RunUsage)
+    budget: ResourceBudget = field(default_factory=ResourceBudget)
+    terminal_reason: str | None = None
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def _charge(
+        self,
+        budget_field: str,
+        usage_field: str,
+        amount: float | int,
+    ) -> None:
+        ceiling = getattr(self.budget, budget_field)
+        used = getattr(self.usage, usage_field)
+        if ceiling is not None and used + amount > ceiling:
+            self.terminal_reason = f"budget_exhausted:{budget_field}"
+            raise BudgetExceeded(
+                budget_field,
+                limit=ceiling,
+                used=used,
+                requested=amount,
+            )
+        setattr(self.usage, usage_field, used + amount)
+        if ceiling is not None and used + amount >= ceiling:
+            self.terminal_reason = f"budget_exhausted:{budget_field}"
 
     async def record_search(self, amount: int = 1) -> None:
         async with self._lock:
-            self.usage.search_calls += amount
+            self._charge("max_search_queries", "search_calls", amount)
 
-    async def record_llm(self, amount: int = 1) -> None:
+    async def record_exec(self) -> None:
         async with self._lock:
-            self.usage.llm_calls += amount
+            self._charge("max_exec_calls", "exec_calls", 1)
+
+    async def reserve_llm(
+        self,
+        amount: int = 1,
+        *,
+        max_tokens: int | None = None,
+    ) -> int | None:
+        async with self._lock:
+            self._charge("max_pipeline_llm_calls", "llm_calls", amount)
+            ceiling = self.budget.max_pipeline_output_tokens
+            if ceiling is None:
+                return max_tokens
+            remaining = ceiling - self.usage.pipeline_output_tokens_reserved
+            if amount <= 0:
+                return max_tokens
+            per_call = min(max_tokens or 32_000, remaining // amount)
+            if per_call < 1:
+                self.terminal_reason = "budget_exhausted:max_pipeline_output_tokens"
+                raise BudgetExceeded(
+                    "max_pipeline_output_tokens",
+                    limit=ceiling,
+                    used=self.usage.pipeline_output_tokens_reserved,
+                    requested=max(amount, 1),
+                )
+            self._charge(
+                "max_pipeline_output_tokens",
+                "pipeline_output_tokens_reserved",
+                per_call * amount,
+            )
+            return per_call
 
     async def record_content_fetches(self, requested: int, from_backend: int) -> None:
         """Charge one ``content.*`` call against both fetch counters.
@@ -54,7 +120,7 @@ class CapabilityPolicy:
         stop being the same number the moment a document is read twice.
         """
         async with self._lock:
-            self.usage.content_fetches += requested
+            self._charge("max_content_fetches", "content_fetches", requested)
             self.usage.content_backend_fetches += from_backend
 
     async def record_pipeline_model_tokens(self, amount: int) -> None:
@@ -64,6 +130,51 @@ class CapabilityPolicy:
     async def record_sandbox_seconds(self, amount: float) -> None:
         async with self._lock:
             self.usage.sandbox_seconds += amount
+            ceiling = self.budget.max_sandbox_seconds
+            if ceiling is not None and self.usage.sandbox_seconds >= ceiling:
+                self.terminal_reason = "budget_exhausted:max_sandbox_seconds"
+
+    async def record_workspace_bytes(self, amount: int) -> None:
+        async with self._lock:
+            self.usage.workspace_bytes = amount
+            ceiling = self.budget.max_workspace_bytes
+            if ceiling is not None and amount > ceiling:
+                self.terminal_reason = "budget_exhausted:max_workspace_bytes"
+
+    def require_active(self) -> None:
+        if self.terminal_reason:
+            resource = self.terminal_reason.partition(":")[2] or "session"
+            ceiling = getattr(self.budget, resource, 0) or 0
+            usage_field = {
+                "max_exec_calls": "exec_calls",
+                "max_search_queries": "search_calls",
+                "max_content_fetches": "content_fetches",
+                "max_pipeline_llm_calls": "llm_calls",
+                "max_pipeline_output_tokens": "pipeline_output_tokens_reserved",
+                "max_sandbox_seconds": "sandbox_seconds",
+                "max_workspace_bytes": "workspace_bytes",
+            }.get(resource, "exec_calls")
+            used = getattr(self.usage, usage_field)
+            raise BudgetExceeded(resource, limit=ceiling, used=used, requested=0)
+
+    async def sandbox_timeout(self, deployment_timeout: float) -> float:
+        async with self._lock:
+            ceiling = self.budget.max_sandbox_seconds
+            if ceiling is None:
+                return deployment_timeout
+            remaining = ceiling - self.usage.sandbox_seconds
+            if remaining <= 0:
+                self.terminal_reason = "budget_exhausted:max_sandbox_seconds"
+                raise BudgetExceeded(
+                    "max_sandbox_seconds",
+                    limit=ceiling,
+                    used=self.usage.sandbox_seconds,
+                    requested=deployment_timeout,
+                )
+            return min(deployment_timeout, remaining)
+
+    def remaining(self) -> dict[str, float | int | None]:
+        return budget_remaining(self.budget, self.usage)
 
     def require_backend(self, backend: str) -> None:
         if backend not in self.allowed_backends:

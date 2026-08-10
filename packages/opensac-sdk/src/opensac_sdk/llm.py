@@ -62,13 +62,14 @@ class LLMResource:
         instruction: str,
         schema: dict[str, Any],
         concurrency: int = 4,
+        max_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
-        return self._transport.call(
-            "llm.extract_many",
-            {
-                "items": items,
-                "instruction": instruction,
-                "schema": schema,
-                "concurrency": concurrency,
-            },
-        )
+        params = {
+            "items": items,
+            "instruction": instruction,
+            "schema": schema,
+            "concurrency": concurrency,
+        }
+        if max_tokens is not None:
+            params["max_tokens"] = max_tokens
+        return self._transport.call("llm.extract_many", params)

@@ -15,11 +15,20 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     api_key: str = ""
+    # Stable across restarts for scheduler affinity.  Empty derives a stable
+    # value from hostname and data_dir; every process still gets a fresh epoch.
+    worker_id: str = ""
+    build_commit: str = ""
+    sandbox_image_digest: str = ""
+    backend_revision: str = ""
+    backend_metadata_hash: str = ""
+    max_active_sessions: int = Field(default=0, ge=0)
     # Zero preserves the original explicit-lifecycle behaviour. Deployments
     # serving ephemeral rollout workers can opt into lease-style cleanup; the
     # reaper never removes a session with an execution holding its session lock.
     session_ttl_seconds: float = Field(default=0.0, ge=0.0)
     session_reaper_interval_seconds: float = Field(default=60.0, gt=0.0)
+    session_tombstone_ttl_seconds: float = Field(default=86_400.0, ge=0.0)
 
     model_api_key: str = ""
     model_base_url: str | None = None
@@ -56,6 +65,9 @@ class Settings(BaseSettings):
     # for every program.
     sandbox_mode: Literal["cold", "warm"] = "cold"
     sandbox_warm_idle_seconds: float = Field(default=300.0, ge=0.0)
+    # Zero preserves the previous unbounded warm registry.  RL deployments set
+    # this below max_active_sessions and let idle namespaces be recreated.
+    sandbox_max_warm_containers: int = Field(default=0, ge=0)
     sandbox_timeout_seconds: int = 120
     sandbox_memory: str = "512m"
     sandbox_cpus: float = 1.0

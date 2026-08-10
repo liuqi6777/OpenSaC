@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,9 +8,15 @@ from types import SimpleNamespace
 import pytest
 from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
-from opensac.broker.policy import MechanismDisabled
+from opensac.broker.policy import BudgetExceeded, MechanismDisabled
 from opensac.broker.service import BrokerService
-from opensac.models import CAPABILITY_METHODS, Mechanisms, RunLimits, Session
+from opensac.models import (
+    CAPABILITY_METHODS,
+    Mechanisms,
+    ResourceBudget,
+    RunLimits,
+    Session,
+)
 
 
 class FakeBackend:
@@ -63,7 +70,7 @@ class BrokenBackend:
         raise RuntimeError("backend exploded")
 
 
-def make_session(*, backends=None, mechanisms=None):
+def make_session(*, backends=None, mechanisms=None, budget=None):
     return Session(
         id="sess_test",
         token="token",
@@ -71,6 +78,7 @@ def make_session(*, backends=None, mechanisms=None):
         limits=RunLimits(),
         workspace="/tmp/session",
         mechanisms=mechanisms or Mechanisms(),
+        budget=budget or ResourceBudget(),
     )
 
 
@@ -101,6 +109,61 @@ async def test_search_fails_loudly_when_the_session_backend_is_not_configured() 
     service.register_session(make_session(backends=["web"]))
     with pytest.raises(RuntimeError, match="exactly one configured search backend"):
         await service.call("token", "search.query", {"query": "query"})
+
+
+async def test_failed_search_consumes_hard_budget_before_backend_side_effect() -> None:
+    service = BrokerService({"web": BrokenBackend()})
+    state = service.register_session(
+        make_session(budget=ResourceBudget(max_search_queries=1))
+    )
+
+    with pytest.raises(RuntimeError, match="backend exploded"):
+        await service.call(
+            "token", "search.query", {"query": "first"}, execution_id="exec-1"
+        )
+    with pytest.raises(BudgetExceeded, match="max_search_queries"):
+        await service.call(
+            "token", "search.query", {"query": "retry"}, execution_id="exec-1"
+        )
+
+    assert state.policy.usage.search_calls == 1
+    assert state.policy.remaining()["max_search_queries"] == 0
+    assert state.policy.terminal_reason == "budget_exhausted:max_search_queries"
+    trace = service.take_trace("token", "exec-1")
+    assert [event.error_type for event in trace] == ["RuntimeError", "BudgetExceeded"]
+
+
+async def test_concurrent_search_budget_reservations_never_overspend() -> None:
+    class CountingBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__("web")
+            self.calls = 0
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            self.calls += 1
+            await asyncio.sleep(0)
+            return await super().search(
+                query, limit=limit, offset=offset, domains=domains
+            )
+
+    backend = CountingBackend()
+    service = BrokerService({"web": backend})
+    state = service.register_session(
+        make_session(budget=ResourceBudget(max_search_queries=1))
+    )
+
+    results = await asyncio.gather(
+        *(
+            service.call("token", "search.query", {"query": f"query-{index}"})
+            for index in range(8)
+        ),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(result, list) for result in results) == 1
+    assert sum(isinstance(result, BudgetExceeded) for result in results) == 7
+    assert backend.calls == 1
+    assert state.policy.usage.search_calls == 1
 
 
 async def test_search_refuses_a_domain_filter_the_backend_cannot_honour() -> None:
@@ -342,6 +405,30 @@ async def test_llm_complete_passes_system_prompt_and_charges_one_call() -> None:
     assert "response_format" not in client.calls[0]
     assert service.sessions["token"].policy.usage.llm_calls == 1
     assert service.sessions["token"].policy.usage.pipeline_model_tokens == 11
+
+
+async def test_pipeline_output_budget_clamps_and_reserves_before_call() -> None:
+    client = FakeModelClient()
+    service = BrokerService(
+        {"web": FakeBackend("web")},
+        model_client=client,
+        extraction_model="test-model",
+    )
+    state = service.register_session(
+        make_session(budget=ResourceBudget(max_pipeline_output_tokens=5))
+    )
+
+    await service.call(
+        "token",
+        "llm.complete",
+        {"prompt": "bounded", "max_tokens": 100},
+    )
+
+    assert client.calls[0]["max_completion_tokens"] == 5
+    assert state.policy.usage.pipeline_output_tokens_reserved == 5
+    assert state.policy.usage.pipeline_model_tokens == 11
+    with pytest.raises(BudgetExceeded, match="max_pipeline_output_tokens"):
+        await service.call("token", "llm.complete", {"prompt": "again"})
 
 
 async def test_capability_trace_records_compact_inputs_results_and_errors() -> None:
