@@ -39,6 +39,34 @@ BLOCKED_CALLS = {"__import__", "breakpoint", "compile", "eval", "exec", "help", 
 ALLOWED_DUNDER_ATTRIBUTES = {"__name__", "__doc__"}
 
 
+def _repair_hint(source: str) -> str:
+    """Name the one rejection that keeps happening, in the form that fixes it.
+
+    The caret shows *where*, and for this error that was not enough: rejections
+    rose after it landed, and 83% of them stayed this single message. The line
+    it points at is always a phrase query written into a double-quoted Python
+    string with the opening quote dropped --
+
+        \\"Urraca\\" of Leon and Castile queen regnant book",
+
+    -- because writing it correctly opens the line with three quote characters
+    in a row and one goes missing. Pointing at the backslash invites the model
+    to fix the escape; what it should do is stop escaping. A single-quoted
+    Python string carries the phrase with no backslash at all, so this says so,
+    with the offending text already rewritten.
+    """
+    stripped = source.strip()
+    if not stripped.startswith('\\"'):
+        return ""
+    phrase = stripped.rstrip(",").rstrip()
+    if phrase.endswith('"') and not phrase.endswith('\\"'):
+        phrase = phrase[:-1]
+    return (
+        "\n  A phrase query needs no backslashes if the Python string is "
+        "single-quoted:\n    " + "'" + phrase.replace('\\"', '"') + "'"
+    )
+
+
 def _point_at(code: str, exc: SyntaxError) -> str:
     """The offending line with a caret under it.
 
@@ -62,7 +90,8 @@ def _point_at(code: str, exc: SyntaxError) -> str:
     stripped = source.lstrip()
     indent = len(source) - len(stripped)
     label = f"line {lineno}: "
-    return f"\n  {label}{stripped}\n  {' ' * (len(label) + column - 1 - indent)}^"
+    caret = f"\n  {label}{stripped}\n  {' ' * (len(label) + column - 1 - indent)}^"
+    return caret + _repair_hint(source)
 
 
 def validate_code(code: str) -> None:

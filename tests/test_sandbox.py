@@ -147,10 +147,41 @@ def test_a_syntax_rejection_points_at_the_line_instead_of_naming_it() -> None:
     message = str(caught.value)
     # The original message is kept verbatim; the pointer is added after it.
     assert "Generated code is invalid Python:" in message
-    assert 'line 3: \\"Spokane business",' in message
-    caret = message.splitlines()[-1]
+    lines = message.splitlines()
+    source = next(i for i, line in enumerate(lines) if 'line 3: \\"Spokane business",' in line)
+    caret = lines[source + 1]
     assert caret.strip() == "^"
-    assert caret.index("^") == message.splitlines()[-2].index('\\"') + 1
+    assert caret.index("^") == lines[source].index('\\"') + 1
+
+
+def test_the_rejection_that_keeps_happening_is_answered_with_the_line_that_works() -> None:
+    """83% of a run's rejections were this one message, and the caret alone did not stop it.
+
+    The pointed-at line is always a phrase query written into a double-quoted
+    Python string with the opening quote dropped, because writing it correctly
+    starts the line with three quote characters and one goes missing. A caret
+    on the backslash invites a fix to the escape. The fix is to stop escaping:
+    single quotes carry the phrase with no backslash to lose, so the rejection
+    hands back the corrected line rather than describing it.
+    """
+    code = 'queries = [\n    \\"Urraca\\" of Leon queen regnant book",\n]\n'
+    with pytest.raises(UnsafeCodeError) as caught:
+        validate_code(code)
+
+    assert "'\"Urraca\" of Leon queen regnant book'" in str(caught.value)
+
+
+def test_the_hint_stays_out_of_rejections_it_does_not_explain() -> None:
+    """A repair suggested for the wrong error is worse than none.
+
+    It is one shape of one message, so it fires on that shape only. The last
+    case is the closest neighbour: the same "line continuation character"
+    error, from a backslash that has nothing to do with a quoted phrase.
+    """
+    for code in ('x = "unterminated\n', "def f(:\n    pass\n", "x = 1\n\\y = 2\n"):
+        with pytest.raises(UnsafeCodeError) as caught:
+            validate_code(code)
+        assert "single-quoted" not in str(caught.value)
 
 
 def test_a_syntax_rejection_survives_a_line_number_it_cannot_use() -> None:
