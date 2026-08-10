@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from opensac_sdk.models import ContentSnippet
+from opensac_sdk.models import ContentSnippet, SearchHit
 from opensac_sdk.output import OutputResource
 from opensac_sdk.search import SearchResource
 from opensac_sdk.state import StateResource
@@ -95,6 +95,68 @@ def test_state_accumulates_across_calls_without_rewriting(tmp_path) -> None:
     # A whole-file write still replaces, so the two are distinguishable.
     state.write_jsonl("evidence.jsonl", [{"n": 9}])
     assert state.read_jsonl("evidence.jsonl") == [{"n": 9}]
+
+
+def test_state_merge_upserts_a_pool_across_turns(tmp_path) -> None:
+    """The same call on turn 1 and turn 20, which is the whole point.
+
+    A pool kept with ``write_jsonl`` is a snapshot and a pool kept with
+    ``append_jsonl`` grows a duplicate per query, so carrying candidates
+    forward previously required an ``exists`` guard, a read, a dict merge and
+    a write -- in a first turn that has nothing to read. Programs answered that
+    by writing ``pool2.jsonl`` instead, which is why this exists.
+    """
+    state = StateResource(str(tmp_path))
+    # No file yet: an absent pool is an empty one, so nothing branches.
+    assert state.merge_jsonl("pool.jsonl", [{"ref": "a", "n": 1}, {"ref": "b", "n": 1}]) == 2
+    # A document a second query returned replaces its row in place rather than
+    # adding a second one, and does not move ahead of documents found later.
+    assert state.merge_jsonl("pool.jsonl", [{"ref": "c", "n": 1}, {"ref": "a", "n": 2}]) == 3
+    assert state.read_jsonl("pool.jsonl") == [
+        {"ref": "a", "n": 2},
+        {"ref": "b", "n": 1},
+        {"ref": "c", "n": 1},
+    ]
+    # Any field can be the identity; ``ref`` is only the common one.
+    state.merge_jsonl("docs.jsonl", [{"docid": "7", "seen": 1}], key="docid")
+    assert state.merge_jsonl("docs.jsonl", [{"docid": "7", "seen": 2}], key="docid") == 1
+
+
+def test_state_merge_refuses_rows_it_cannot_deduplicate(tmp_path) -> None:
+    """Silent duplication is the failure this call exists to prevent.
+
+    Appending a keyless row would make the file grow exactly the way the
+    caller reached for ``merge_jsonl`` to avoid, and nothing downstream would
+    show it. The message names the field and the alternative because the
+    program has one turn to fix it.
+    """
+    state = StateResource(str(tmp_path))
+    with pytest.raises(ValueError, match="append_jsonl"):
+        state.merge_jsonl("pool.jsonl", [{"title": "no identity here"}])
+    assert state.exists("pool.jsonl") is False
+
+
+def test_state_merge_keeps_rows_it_did_not_write(tmp_path) -> None:
+    """A file written by an earlier, differently-shaped program is not data to drop."""
+    state = StateResource(str(tmp_path))
+    state.write_jsonl("pool.jsonl", [{"note": "from an earlier turn"}, {"ref": "a"}])
+    assert state.merge_jsonl("pool.jsonl", [{"ref": "a", "n": 2}]) == 2
+    assert state.read_jsonl("pool.jsonl") == [
+        {"note": "from an earlier turn"},
+        {"ref": "a", "n": 2},
+    ]
+
+
+def test_state_merge_accepts_a_search_hit_directly(tmp_path) -> None:
+    """Same contract as ``write_jsonl``: no ``.model_dump()`` at the call site."""
+    state = StateResource(str(tmp_path))
+    hit = SearchHit(
+        ref="ref_1", backend="local", title="t", url=None, docid="7", domain=None,
+        date=None, snippet="s", score=1.0, rank=1,
+    )
+    assert state.merge_jsonl("pool.jsonl", [hit]) == 1
+    assert state.merge_jsonl("pool.jsonl", [hit]) == 1
+    assert state.read_jsonl("pool.jsonl")[0].docid == "7"
 
 
 def test_state_can_be_asked_what_is_there(tmp_path) -> None:
