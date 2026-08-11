@@ -27,6 +27,7 @@ def build_sandbox() -> None:
     """Build the hardened sandbox image with Docker."""
     settings = Settings()
     wheels_dir = "_sandbox_wheel"
+    subprocess.run(["rm", "-rf", wheels_dir], check=True)
     subprocess.run(
         [
             "pip", "wheel", "--no-deps", "--no-build-isolation", 
