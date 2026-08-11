@@ -53,7 +53,11 @@ Configure `OPENSAC_MODEL_API_KEY`, `OPENSAC_MODEL_NAME`, and optionally
 
 For local retrieval, run the compatible DeepResearch endpoint at
 `OPENSAC_LOCAL_SEARCH_BASE_URL`. It must expose `POST /search`, `POST /search_many`,
-and `POST /get_document`.
+and `POST /get_document`. Search hits provide a server-shaped `snippet`; modes that extract
+document metadata also provide `title` and `date`. OpenSAC consumes those fields without
+extracting or truncating the snippet again. Configure `full`, `compact`, or `query_aware`
+result mode on the DeepResearch search server, not in OpenSAC. Programs can fetch the complete
+document separately through the content SDK, which uses `/get_document`.
 
 For web retrieval, set a [Serper](https://serper.dev) API key. No extra dependency is needed --
 the backend talks to Serper's search and scrape endpoints over plain HTTP:

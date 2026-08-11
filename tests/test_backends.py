@@ -11,9 +11,8 @@ from opensac.backends import serper as serper_module
 from opensac.backends.local_http import LocalSearchBackend, parse_document_frontmatter
 from opensac.backends.serper import SerperBackend
 
-# What the retrieval service actually returns: the document's YAML header is
-# inside `snippet`, and the body then repeats the title as its first line.
-SNIPPET = (
+# What `/get_document` returns: the full document, including its YAML header.
+DOCUMENT_TEXT = (
     "---\n"
     "title: Royal Rumble (2020) - Wikipedia\n"
     "date: 2018-11-19\n"
@@ -78,7 +77,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> type[FakeClient]:
 
 
 def test_frontmatter_is_parsed_leniently() -> None:
-    fields, body = parse_document_frontmatter(SNIPPET)
+    fields, body = parse_document_frontmatter(DOCUMENT_TEXT)
     assert fields["title"] == "Royal Rumble (2020) - Wikipedia"
     assert fields["date"] == "2018-11-19"
     assert body.startswith("Royal Rumble (2020) - Wikipedia\n")
@@ -86,25 +85,38 @@ def test_frontmatter_is_parsed_leniently() -> None:
     assert parse_document_frontmatter("plain body") == ({}, "plain body")
 
 
-async def test_search_lifts_title_and_date_out_of_the_snippet(client) -> None:
-    """The cheapest triage a program can do must not return a column of blanks.
-
-    Printing candidate titles is the first thing a program writes. With
-    `SearchHit.title` falling through to its empty default, that print came
-    back as `- [74492]` for every row, and the only ways forward were dumping
-    raw snippets (which fills the output budget) or searching again.
-    """
-    client.search_hits = [{"docid": 74492, "snippet": SNIPPET, "score": 0.8, "rank": 1}]
+async def test_search_uses_server_shaped_fields_without_reprocessing(client) -> None:
+    client.search_hits = [
+        {
+            "docid": 74492,
+            "title": "Royal Rumble (2020) - Wikipedia",
+            "date": "2018-11-19",
+            "snippet": "The server-selected passage about the 33rd Royal Rumble.",
+            "score": 0.8,
+            "rank": 1,
+            "retrieval_debug": "dense",
+        }
+    ]
     hits = await LocalSearchBackend("http://localhost:8081").search("rumble", limit=5)
 
     assert hits[0].title == "Royal Rumble (2020) - Wikipedia"
     assert hits[0].date == "2018-11-19"
     assert hits[0].docid == "74492"
-    # Everything else the header declared stays reachable without a schema change.
-    assert hits[0].metadata["author"] == "Contributors"
-    # The header and the duplicated title line are gone from the snippet: both
-    # are now carried as fields, and snippet space is the scarce resource.
-    assert hits[0].snippet == "The 2020 Royal Rumble was the 33rd Royal Rumble."
+    assert hits[0].snippet == "The server-selected passage about the 33rd Royal Rumble."
+    assert hits[0].metadata == {"retrieval_debug": "dense"}
+
+
+async def test_search_does_not_parse_a_full_mode_snippet(client) -> None:
+    """Even a frontmatter-looking snippet remains owned by the search server."""
+    client.search_hits = [
+        {"docid": 74492, "snippet": DOCUMENT_TEXT, "score": 0.8, "rank": 1}
+    ]
+
+    hits = await LocalSearchBackend("http://localhost:8081").search("rumble", limit=5)
+
+    assert hits[0].title == ""
+    assert hits[0].date is None
+    assert hits[0].snippet == DOCUMENT_TEXT
 
 
 async def test_offset_deepens_the_request_and_keeps_ranks_absolute(client) -> None:
@@ -125,7 +137,18 @@ async def test_offset_deepens_the_request_and_keeps_ranks_absolute(client) -> No
 
 async def test_local_search_many_uses_one_request_and_preserves_order(client) -> None:
     client.batch_results = [
-        {"query": "beta", "hits": [{"docid": "2", "snippet": "beta", "rank": 1}]},
+        {
+            "query": "beta",
+            "hits": [
+                {
+                    "docid": "2",
+                    "title": "Beta title",
+                    "date": "2026-08-11",
+                    "snippet": "beta",
+                    "rank": 1,
+                }
+            ],
+        },
         {"query": "alpha", "hits": [{"docid": "1", "snippet": "alpha", "rank": 1}]},
         {"query": "beta", "hits": [{"docid": "3", "snippet": "beta 2", "rank": 1}]},
     ]
@@ -135,6 +158,9 @@ async def test_local_search_many_uses_one_request_and_preserves_order(client) ->
 
     assert [batch.query for batch in batches] == ["beta", "alpha", "beta"]
     assert [batch.hits[0].docid for batch in batches] == ["2", "1", "3"]
+    assert batches[0].hits[0].title == "Beta title"
+    assert batches[0].hits[0].date == "2026-08-11"
+    assert batches[0].hits[0].snippet == "beta"
     assert len(client.requests) == 1
     assert client.requests[0][0].endswith("/search_many")
     assert client.requests[0][1] == {
@@ -158,11 +184,11 @@ async def test_local_backend_reuses_and_closes_one_http_client(client) -> None:
 
 async def test_content_keeps_the_header_in_the_text(client) -> None:
     """`content.read` addresses lines, so nothing may silently delete one."""
-    client.document_text = SNIPPET
+    client.document_text = DOCUMENT_TEXT
     hit = SearchHit(ref="ref_x", backend="local", docid="1", title="", rank=1)
     rows = await LocalSearchBackend("http://localhost:8081").content([hit])
 
-    assert rows[0].text == SNIPPET
+    assert rows[0].text == DOCUMENT_TEXT
     # A hit whose own title was empty still renders one, recovered from the body.
     assert rows[0].title == "Royal Rumble (2020) - Wikipedia"
     assert rows[0].metadata["date"] == "2018-11-19"
