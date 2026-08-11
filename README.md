@@ -5,8 +5,9 @@ agent generates Python, a locked-down Docker sandbox executes it, and an embedde
 search primitives through a host-side capability broker.
 
 See [the design goals and capability roadmap](docs/design.md) for the intended system
-properties and primitive-selection criteria. The implemented 0.3 reliability contract and
-release gates are recorded in the
+properties and primitive-selection criteria. See the
+[OpenSAC 0.4 release notes](docs/opensac-0.4.md) for the compact agent contract and migration
+guide. The underlying reliability design is recorded in the
 [OpenSAC 0.3 high-fan-out reliability plan](docs/opensac-0.3-plan.md).
 
 ## Architecture
@@ -99,7 +100,7 @@ POST   /v1/sessions/{session_id}/exec
 POST   /v1/admin/drain
 ```
 
-## OpenSAC 0.3 primitives
+## OpenSAC 0.4 agent surface
 
 Multi-query fusion is a local SDK operation: it preserves every query/rank source and does not
 make a broker call or consume capability budget.
@@ -133,9 +134,9 @@ rows = sdk.llm.extract_many(
 valid = [row.data for row in rows if row.data is not None]
 ```
 
-Search and content batch rows now expose typed provider failures. `failure` is authoritative;
-the old `SearchBatch.error` and `ContentSnippet.metadata["fetch_error"]` fields remain message
-mirrors during 0.3. Empty search hits are a successful result, not a failure.
+Search and content batch rows expose one typed `failure` field. The 0.4 contract removes the
+duplicate `SearchBatch.error` and `ContentSnippet.metadata["fetch_error"]` mirrors. Empty search
+hits are a successful result, not a failure.
 
 ```python
 batches = sdk.search.many(["query one", "query two"])
@@ -185,13 +186,18 @@ full, content still returns the passage with `locator=None` and
 pass explicit `locator: null` or manufacture a locator. A ref-only citation is an intentional
 search-preview citation, never an implicit fallback for selected evidence.
 
-The session manifest reports capability contract `2`, sandbox contract `4`, feature flags,
+The session manifest reports capability contract `3`, sandbox contract `5`, feature flags,
 content/evidence limits, and the effective policy for `local.search`, `local.document`,
 `web.search`, and `web.scrape`. Sessions without a configured pipeline model do not advertise
 `llm.*` methods. Retry and rate limits are deployment policy rather than per-call SDK options;
 the default retry profile remains `none`. Intra-call dedupe preserves logical rows and usage.
-OpenSAC 0.3.1 can additionally enable session-local in-flight coalescing; it is disabled by
-default and does not change the wire model or agent-facing call shape.
+Session-local in-flight coalescing remains optional and disabled by default.
+
+Sandbox programs see a compact `sdk.session.usage()` view containing strategy counts,
+`documents_seen`, `budget_remaining`, and terminal state. Provider attempts, retries, queueing,
+cache effects, coalescing, and evidence-registry measurements remain available to the external
+harness through session usage and capability trace rather than entering normal agent control
+flow.
 
 ## External Control Model
 

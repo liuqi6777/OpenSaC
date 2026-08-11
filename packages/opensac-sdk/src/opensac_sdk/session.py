@@ -18,11 +18,10 @@ class SessionResource:
         self._transport = transport
 
     def usage(self) -> dict[str, Any]:
-        """Spend and ceilings together.
+        """Return strategy spend, remaining hard allowances, and terminal state.
 
-        Returns `search_calls`, `llm_calls`, `content_fetches`,
-        `content_backend_fetches`, `pipeline_model_tokens`, `sandbox_seconds`,
-        `documents_seen`, and the `max_search_calls` / `max_llm_calls` they are
-        measured against.
+        Provider attempts, queueing, retries, cache effects, and evidence
+        registry measurements belong to the host trace rather than the agent's
+        decision surface.
         """
         return self._transport.call("session.usage", {})

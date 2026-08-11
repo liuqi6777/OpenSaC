@@ -108,12 +108,11 @@ class SearchResource:
         for batch_index, (batch, weight) in enumerate(
             zip(parsed_batches, normalized_weights, strict=True)
         ):
-            if batch.failure is not None or batch.error is not None:
+            if batch.failure is not None:
                 batch_errors.append(
                     FusionBatchError(
                         batch_index=batch_index,
                         query=batch.query,
-                        error=batch.error or batch.failure.message,
                         failure=batch.failure,
                     )
                 )
@@ -138,8 +137,6 @@ class SearchResource:
                     backend=hit.backend,
                     rank=hit.rank,
                     score=hit.score,
-                    retrieval=hit.retrieval,
-                    request=batch.request,
                 )
                 representative_key = (hit.rank, batch_index, hit_index)
                 candidate = candidates.get(hit.ref)
@@ -157,9 +154,7 @@ class SearchResource:
                 candidate["sources"].append(source)
                 candidate["fused_score"] += weight / (k + hit.rank)
                 candidate["best_rank"] = min(candidate["best_rank"], hit.rank)
-                candidate["earliest_batch"] = min(
-                    candidate["earliest_batch"], batch_index
-                )
+                candidate["earliest_batch"] = min(candidate["earliest_batch"], batch_index)
                 if representative_key < candidate["representative_key"]:
                     candidate["hit"] = hit
                     candidate["representative_key"] = representative_key

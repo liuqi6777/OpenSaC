@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_built_image_exposes_contract_4_and_local_rrf() -> None:
+def test_built_image_exposes_contract_5_and_local_rrf() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     image = f"opensac-sandbox-e2e:{os.getpid()}"
     environment = {**os.environ, "OPENSAC_SANDBOX_IMAGE": image}
@@ -39,7 +39,7 @@ def test_built_image_exposes_contract_4_and_local_rrf() -> None:
             capture_output=True,
             text=True,
         )
-        assert inspected.stdout.strip() == "4"
+        assert inspected.stdout.strip() == "5"
 
         script = (
             "import json; "

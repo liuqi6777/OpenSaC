@@ -199,11 +199,11 @@ def _run_pattern(
     return sdk, content, output, printed.getvalue()
 
 
-def test_pattern_is_bounded_and_teaches_the_03_contract() -> None:
+def test_pattern_is_bounded_and_teaches_the_04_contract() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
     pattern = _pattern()
 
-    assert len(skill) < 12_000
+    assert len(skill) < 8_000
     compile(pattern, "<search-as-code-skill>", "exec")
     validate_code(pattern)
     assert "sdk.search.fuse_rrf(batches, k=60)" in pattern
@@ -212,9 +212,12 @@ def test_pattern_is_bounded_and_teaches_the_03_contract() -> None:
     assert "sdk.content.grep_report(list(pool)" in pattern
     assert "failed.failure.code" in pattern
     assert "passage.locator_error" in pattern
-    assert '"id": passage.locator.id' in pattern
-    assert 'key="evidence_key"' in pattern
-    assert "model_dump" not in pattern
+    assert 'row["score"] = max(row["score"], candidate.fused_score)' in pattern
+    assert 'if not pool:' in pattern
+    assert 'sdk.state.write_json("evidence.json", evidence)' in pattern
+    assert '"locator": passage.locator.model_dump(mode="json")' in pattern
+    assert "evidence_key" not in pattern
+    assert "evidence.jsonl" not in pattern
 
 
 def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -> None:
@@ -223,8 +226,9 @@ def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -
     pool = sdk.state.read_jsonl("pool.jsonl")
     consensus = next(row for row in pool if row.ref == "ref_consensus")
     assert len(pool) == 3
-    assert consensus.queries == 4
-    assert content.grep_widths == [3, 3, 3, 3]
+    assert set(consensus) == {"ref", "title", "date", "score"}
+    assert consensus.score > 0
+    assert content.grep_widths == [3, 3]
     assert printed.splitlines()[1].endswith("consensus")
     assert len(output.submissions) == 2
     assert all(
@@ -235,19 +239,32 @@ def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -
     )
 
 
+def test_pattern_pool_score_is_idempotent_across_replayed_turns(tmp_path: Path) -> None:
+    sdk, _, _, _ = _run_pattern(tmp_path, turns=1)
+    first = {row.ref: row.score for row in sdk.state.read_jsonl("pool.jsonl")}
+
+    sdk, _, _, _ = _run_pattern(tmp_path, turns=2)
+    replayed = {row.ref: row.score for row in sdk.state.read_jsonl("pool.jsonl")}
+
+    assert replayed == first
+
+
 def test_pattern_does_not_submit_with_an_unsupported_constraint(tmp_path: Path) -> None:
     _, _, output, printed = _run_pattern(tmp_path, missing_year=True)
 
-    assert "unsupported: ['year']" in printed
+    assert "unverified: ['year']" in printed
     assert not output.submissions
 
 
 def test_pattern_verifies_far_apart_constraints_in_the_same_document(tmp_path: Path) -> None:
     sdk, _, output, _ = _run_pattern(tmp_path, same_ref=True)
 
-    ledger = sdk.state.read_jsonl("evidence.jsonl")
-    assert {row.constraint for row in ledger} == {"phrase", "year"}
-    assert len({row.line for row in ledger}) == 2
+    ledger = sdk.state.read_json("evidence.json")
+    assert set(ledger) == {"phrase", "year"}
+    assert all(
+        set(row) == {"pattern", "ref", "text", "locator"}
+        for row in ledger.values()
+    )
     assert len(output.submissions) == 1
     _, citations = output.submissions[0]
     assert len(citations) == 2
@@ -257,15 +274,12 @@ def test_pattern_verifies_far_apart_constraints_in_the_same_document(tmp_path: P
 def test_pattern_unions_evidence_across_turns_before_submitting(tmp_path: Path) -> None:
     sdk, _, output, printed = _run_pattern(tmp_path, year_from_turn=2, turns=2)
 
-    assert "unsupported: ['year']" in printed
+    assert "unverified: ['year']" in printed
     assert len(output.submissions) == 1
     submitted, citations = output.submissions[0]
     assert {row["constraint"] for row in submitted["evidence"]} == {"phrase", "year"}
     assert len(citations) == 2
-    assert {row.constraint for row in sdk.state.read_jsonl("evidence.jsonl")} == {
-        "phrase",
-        "year",
-    }
+    assert set(sdk.state.read_json("evidence.json")) == {"phrase", "year"}
 
 
 def test_pattern_reports_typed_partial_fetch_failure_and_keeps_matches(
@@ -273,7 +287,7 @@ def test_pattern_reports_typed_partial_fetch_failure_and_keeps_matches(
 ) -> None:
     _, _, output, printed = _run_pattern(tmp_path, partial_failure=True)
 
-    assert "code=provider_timeout attempts=3" in printed
+    assert "code=provider_timeout" in printed
     assert len(output.submissions) == 1
 
 
@@ -283,4 +297,30 @@ def test_pattern_never_cites_locator_capacity_exhausted_text(tmp_path: Path) -> 
     assert "locator unavailable: evidence_capacity_exhausted" in printed
     assert "unverified: ['phrase', 'year']" in printed
     assert not output.submissions
-    assert not sdk.state.exists("evidence.jsonl")
+    assert not sdk.state.exists("evidence.json")
+
+
+def test_pattern_invalidates_evidence_when_constraint_pattern_changes(
+    tmp_path: Path,
+) -> None:
+    state = StateResource(str(tmp_path))
+    state.write_json(
+        "evidence.json",
+        {
+            "year": {
+                "pattern": "stale pattern",
+                "ref": "ref_stale",
+                "text": "stale evidence",
+                "locator": {
+                    "id": "stale",
+                    "ref": "ref_stale",
+                    "kind": "selected_passage",
+                },
+            }
+        },
+    )
+
+    sdk, _, output, _ = _run_pattern(tmp_path, missing_year=True)
+
+    assert not output.submissions
+    assert set(sdk.state.read_json("evidence.json")) == {"phrase"}

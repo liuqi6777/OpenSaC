@@ -308,9 +308,9 @@ async def test_search_many_tolerates_partial_failure() -> None:
     # An empty query is rejected by the broker while the other one succeeds.
     batches = await service.call("token", "search.query_many", {"queries": ["ok", ""]})
     assert len(batches[0]["hits"]) == 1
-    assert batches[0]["error"] is None
+    assert batches[0]["failure"] is None
     assert batches[1]["hits"] == []
-    assert "must not be empty" in batches[1]["error"]
+    assert "must not be empty" in batches[1]["failure"]["message"]
     assert batches[1]["failure"] == {
         "code": "invalid_request",
         "message": "query must not be empty",
@@ -392,7 +392,7 @@ async def test_local_search_many_prefers_backend_batch_and_preserves_order() -> 
         "second",
         "first",
     ]
-    assert "must not be empty" in batches[1]["error"]
+    assert "must not be empty" in batches[1]["failure"]["message"]
     assert state.policy.usage.search_calls == 3
 
 
@@ -1527,7 +1527,7 @@ async def test_every_requested_document_comes_back_in_order() -> None:
     rows = await service.call("token", "content.get_many", {"refs": refs})
 
     assert [row["ref"] for row in rows] == refs
-    assert rows[1]["metadata"]["fetch_error"] == "Provider rejected one document."
+    assert rows[1]["failure"]["message"] == "Provider rejected one document."
     assert "HTTPError" not in json.dumps(rows[1])
     assert rows[1]["text"] == ""
     # A failure is not cached: a transient timeout must not be frozen for the
@@ -1551,7 +1551,7 @@ async def test_all_permanent_document_failures_remain_typed_aligned_rows() -> No
         "provider_rejected",
     ]
     assert all(row["text"] == "" and row.get("locator") is None for row in rows)
-    assert [row["metadata"]["fetch_error"] for row in rows] == [
+    assert [row["failure"]["message"] for row in rows] == [
         "Provider rejected one document.",
         "Provider rejected one document.",
     ]
@@ -1618,6 +1618,16 @@ async def test_a_program_can_read_what_it_has_spent() -> None:
     assert usage["content_fetches"] == 1
     assert usage["documents_seen"] == 2
     assert "max_search_calls" not in usage
+    assert set(usage) == {
+        "exec_calls",
+        "search_calls",
+        "content_fetches",
+        "llm_calls",
+        "pipeline_model_tokens",
+        "documents_seen",
+        "budget_remaining",
+        "terminal_reason",
+    }
 
 
 def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:
@@ -2424,7 +2434,15 @@ async def test_local_partial_batch_attempt_is_sanitized_and_traced_as_partial() 
         async def search_many(self, queries, *, limit, offset=0, domains=None):
             return [
                 self._batch(queries[0]),
-                SearchBatch(query=queries[1], error="secret provider response body"),
+                SearchBatch(
+                    query=queries[1],
+                    failure={
+                        "code": "provider_rejected",
+                        "message": "secret provider response body",
+                        "retryable": False,
+                        "attempts": 1,
+                    },
+                ),
             ]
 
     backend = PartialBackend()

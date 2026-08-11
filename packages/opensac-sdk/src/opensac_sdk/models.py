@@ -100,18 +100,17 @@ class CapabilityFailure(SubscriptableModel):
 
 
 class SearchBatch(SubscriptableModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str
     hits: list[SearchHit] = Field(default_factory=list)
-    error: str | None = None
     failure: CapabilityFailure | None = None
     request: SearchRequestInfo | None = None
 
     @model_validator(mode="after")
-    def _mirror_typed_failure(self) -> Self:
-        if self.failure is not None:
-            if self.hits:
-                raise ValueError("a failed search batch cannot contain hits")
-            self.error = self.failure.message
+    def _validate_failure(self) -> Self:
+        if self.failure is not None and self.hits:
+            raise ValueError("a failed search batch cannot contain hits")
         return self
 
 
@@ -121,8 +120,6 @@ class CandidateSource(SubscriptableModel):
     backend: str
     rank: int
     score: float | None = None
-    retrieval: RetrievalMetadata | None = None
-    request: SearchRequestInfo | None = None
 
 
 class SearchCandidate(SearchHit):
@@ -134,14 +131,7 @@ class SearchCandidate(SearchHit):
 class FusionBatchError(SubscriptableModel):
     batch_index: int
     query: str
-    error: str
-    failure: CapabilityFailure | None = None
-
-    @model_validator(mode="after")
-    def _mirror_typed_failure(self) -> Self:
-        if self.failure is not None:
-            self.error = self.failure.message
-        return self
+    failure: CapabilityFailure
 
 
 class FusionResult(SubscriptableModel):
@@ -170,13 +160,13 @@ class ContentSnippet(SubscriptableModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def _mirror_typed_failure(self) -> Self:
-        if self.failure is not None:
-            if self.text or self.locator is not None or self.locator_error is not None:
-                raise ValueError(
-                    "a failed content row must have empty text and no locator state"
-                )
-            self.metadata = {**self.metadata, "fetch_error": self.failure.message}
+    def _validate_failure(self) -> Self:
+        if self.failure is not None and (
+            self.text or self.locator is not None or self.locator_error is not None
+        ):
+            raise ValueError(
+                "a failed content row must have empty text and no locator state"
+            )
         return self
 
 

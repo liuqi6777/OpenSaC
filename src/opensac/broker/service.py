@@ -342,7 +342,7 @@ class BrokerSession:
         """
         ref = str(row.get("ref") or "")
         text = row.get("text") or ""
-        if not ref or ref in self.content_cache or row.get("metadata", {}).get("fetch_error"):
+        if not ref or ref in self.content_cache or row.get("failure") is not None:
             return
         size = len(str(text).encode("utf-8"))
         if self.content_cache_bytes + size > budget:
@@ -1922,13 +1922,12 @@ class BrokerService:
         rows: dict[int, SearchBatch] = {}
         for index, batch in zip(leaders, returned, strict=True):
             failure = batch.failure
-            if failure is None and batch.error:
-                failure = {
-                    "code": "provider_rejected",
-                    "message": "Provider rejected one search item.",
-                    "retryable": False,
-                    "attempts": attempts,
-                }
+            if failure is not None:
+                failure = failure.model_copy(update={"attempts": attempts})
+                if failure.code == "provider_rejected":
+                    failure = failure.model_copy(
+                        update={"message": "Provider rejected one search item."}
+                    )
             rows[index] = SearchBatch(
                 query=queries[index],
                 hits=list(batch.hits) if failure is None else [],
@@ -2045,15 +2044,14 @@ class BrokerService:
         for.
         """
         del params
+        usage = state.policy.usage
         return {
-            **state.policy.usage.model_dump(mode="json"),
+            "exec_calls": usage.exec_calls,
+            "search_calls": usage.search_calls,
+            "content_fetches": usage.content_fetches,
+            "llm_calls": usage.llm_calls,
+            "pipeline_model_tokens": usage.pipeline_model_tokens,
             "documents_seen": len(state.references),
-            "evidence_records_remaining": max(
-                self.max_evidence_records - len(state.evidence), 0
-            ),
-            "evidence_passage_bytes_remaining": max(
-                self.max_evidence_passage_bytes - state.evidence_passage_bytes, 0
-            ),
             "budget_remaining": state.policy.remaining(),
             "terminal_reason": state.policy.terminal_reason,
         }

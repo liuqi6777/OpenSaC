@@ -6,7 +6,13 @@ from typing import Any
 from urllib.parse import urljoin
 
 import httpx
-from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
+from opensac_sdk.models import (
+    CapabilityFailure,
+    ContentSnippet,
+    RetrievalMetadata,
+    SearchBatch,
+    SearchHit,
+)
 
 from opensac.provider import ProviderRequestError, invalid_provider_response
 
@@ -190,8 +196,17 @@ class LocalSearchBackend:
                 batches.append(
                     SearchBatch(
                         query=query,
-                        hits=hits,
-                        error="Provider rejected one search item." if error else None,
+                        hits=[] if error else hits,
+                        failure=(
+                            CapabilityFailure(
+                                code="provider_rejected",
+                                message="Provider rejected one search item.",
+                                retryable=False,
+                                attempts=1,
+                            )
+                            if error
+                            else None
+                        ),
                     )
                 )
             except (TypeError, ValueError) as exc:

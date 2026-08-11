@@ -132,7 +132,7 @@ def test_search_many_attaches_the_effective_request_to_each_batch() -> None:
         def call(self, method, params):
             assert method == "search.query_many"
             return [
-                {"query": query, "hits": [], "error": None}
+                {"query": query, "hits": []}
                 for query in params["queries"]
             ]
 
@@ -180,7 +180,15 @@ def test_search_rrf_fuses_refs_locally_and_preserves_provenance() -> None:
             hits=[_hit("b", 1), _hit("a", 2)],
             request=SearchRequestInfo(limit=2, offset=10),
         ),
-        SearchBatch(query="failed", hits=[_hit("ignored", 1)], error="timeout"),
+        SearchBatch(
+            query="failed",
+            failure=CapabilityFailure(
+                code="provider_timeout",
+                message="Provider request timed out",
+                retryable=True,
+                attempts=1,
+            ),
+        ),
     ]
 
     result = search.fuse_rrf(batches, weights=[1, 2, 1])
@@ -194,17 +202,26 @@ def test_search_rrf_fuses_refs_locally_and_preserves_provenance() -> None:
     assert result.batch_errors[0].model_dump() == {
         "batch_index": 2,
         "query": "failed",
-        "error": "timeout",
-        "failure": None,
+        "failure": {
+            "code": "provider_timeout",
+            "message": "Provider request timed out",
+            "retryable": True,
+            "attempts": 1,
+            "provider_status": None,
+            "retry_after_seconds": None,
+        },
     }
 
     candidate_a = result.candidates[1]
     assert candidate_a.rank == 1
     assert len(candidate_a.sources) == 2
-    assert candidate_a.sources[0].request is not None
-    assert candidate_a.sources[0].request.domains == ["example.com"]
-    assert candidate_a.sources[0].retrieval is not None
-    assert candidate_a.sources[0].retrieval.mode == "dense"
+    assert candidate_a.sources[0].model_dump() == {
+        "batch_index": 0,
+        "query": "alpha",
+        "backend": "local",
+        "rank": 1,
+        "score": 0.9,
+    }
 
 
 def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
@@ -272,10 +289,15 @@ def test_typed_batch_failure_is_preserved_by_rrf() -> None:
 
     result = SearchResource(FakeTransport()).fuse_rrf([batch])
 
-    assert batch.error == failure.message
     assert result.candidates == []
-    assert result.batch_errors[0].error == failure.message
     assert result.batch_errors[0].failure == failure
+
+
+def test_search_batch_rejects_removed_legacy_error_field() -> None:
+    with pytest.raises(ValidationError, match="error"):
+        SearchBatch.model_validate(
+            {"query": "legacy", "hits": [], "error": "string failure"}
+        )
 
 
 def test_content_failure_models_are_additive_and_json_round_trip() -> None:
@@ -295,10 +317,7 @@ def test_content_failure_models_are_additive_and_json_round_trip() -> None:
     parsed = ContentSnippet.model_validate_json(snippet.model_dump_json())
 
     assert parsed.failure == failure
-    assert parsed.metadata == {
-        "backend": "web",
-        "fetch_error": "Provider request timed out",
-    }
+    assert parsed.metadata == {"backend": "web"}
 
 
 def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:

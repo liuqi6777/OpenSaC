@@ -71,7 +71,7 @@ class _FakeDocker:
         top_outputs: list[bytes] | None = None,
         ps_outputs: list[bytes] | None = None,
         rm_results: list[tuple[int, bytes]] | None = None,
-        image_contract: bytes = b"4\n",
+        image_contract: bytes = b"5\n",
     ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.exec_gates = list(exec_gates or [])
@@ -227,7 +227,7 @@ async def test_warm_sandbox_reports_stale_image_as_launch_error(
     result = await sandbox.execute(_request(tmp_path))
 
     assert result.exit_code == 125
-    assert "has contract '2'; expected 4" in (result.launch_error or "")
+    assert "has contract '2'; expected 5" in (result.launch_error or "")
     assert fake.operations("run") == []
 
 

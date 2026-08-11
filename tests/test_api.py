@@ -50,7 +50,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v2",
+            "capability_contract_v3",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
             "content_grep_report_v1",
@@ -70,8 +70,8 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["closing"] is False
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
-        assert payload["environment"]["sandbox_contract"] == 4
-        assert payload["environment"]["capability_contract"] == 2
+        assert payload["environment"]["sandbox_contract"] == 5
+        assert payload["environment"]["capability_contract"] == 3
         capability_limits = payload["environment"]["capability_limits"]
         assert capability_limits["extract_many"]["max_items"] == 12
         assert capability_limits["evidence"]["max_chars"] == 4096
@@ -135,7 +135,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.3.1"
+    assert schema["info"]["version"] == "0.4.0"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
