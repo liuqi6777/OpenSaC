@@ -12,7 +12,17 @@ from opensac.sandbox import (
     UnsafeCodeError,
     validate_code,
 )
-from opensac.sandbox.docker import read_bounded_process_output
+from opensac.sandbox.docker import DockerImageContractVerifier, read_bounded_process_output
+
+
+class _CompletedProcess:
+    def __init__(self, *, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""):
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
 
 
 def test_validator_accepts_sdk_orchestration() -> None:
@@ -73,6 +83,50 @@ def test_docker_command_has_security_boundaries(tmp_path) -> None:
     assert "OPENSAC_READY_PATH=/workspace/.opensac-output.json.ready" in joined
     assert str(socket.resolve()) in joined
     assert str(workspace.resolve() / ".opensac-container-id") not in joined
+
+
+async def test_sandbox_image_contract_is_inspected_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def create_process(*command: str, **_: object) -> _CompletedProcess:
+        calls.append(command)
+        return _CompletedProcess(stdout=b"3\n")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    verifier = DockerImageContractVerifier("opensac-test")
+
+    await asyncio.gather(verifier.ensure_compatible(), verifier.ensure_compatible())
+    await verifier.ensure_compatible()
+
+    assert len(calls) == 1
+    assert calls[0][:3] == ("docker", "image", "inspect")
+    assert calls[0][-1] == "opensac-test"
+
+
+async def test_cold_sandbox_rejects_stale_image_before_workspace_setup(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def create_process(*command: str, **_: object) -> _CompletedProcess:
+        calls.append(command)
+        return _CompletedProcess(stdout=b"2\n")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    socket = tmp_path / "broker.sock"
+    socket.touch()
+    workspace = tmp_path / "workspace"
+    sandbox = DockerSandbox(image="opensac-stale", broker_socket=socket)
+
+    result = await sandbox.execute(SandboxRequest("pass", workspace, "secret"))
+
+    assert result.exit_code == 125
+    assert "has contract '2'; expected 3" in (result.launch_error or "")
+    assert not workspace.exists()
+    assert len(calls) == 1
+    assert calls[0][1:3] == ("image", "inspect")
 
 
 def test_startup_marker_is_converted_to_a_bounded_duration(tmp_path) -> None:

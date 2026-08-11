@@ -71,6 +71,7 @@ class _FakeDocker:
         top_outputs: list[bytes] | None = None,
         ps_outputs: list[bytes] | None = None,
         rm_results: list[tuple[int, bytes]] | None = None,
+        image_contract: bytes = b"3\n",
     ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.exec_gates = list(exec_gates or [])
@@ -82,10 +83,14 @@ class _FakeDocker:
         self.exec_outputs = list(exec_outputs or [])
         self.ps_outputs = list(ps_outputs or [])
         self.rm_results = list(rm_results or [])
+        self.image_contract = image_contract
 
     async def __call__(self, *command: str, **_: Any) -> _FakeProcess:
         self.calls.append(command)
         operation = command[1]
+        if operation == "image":
+            assert command[2] == "inspect"
+            return _FakeProcess(stdout=self.image_contract)
         if operation == "run":
             self.container_count += 1
             container_id = f"warm-container-{self.container_count}"
@@ -201,6 +206,7 @@ async def test_container_is_lazy_reused_by_session_id_and_closed_with_session_ob
     second = await sandbox.execute(_request(tmp_path, token="run-token-2", sequence=2))
 
     assert first.succeeded and second.succeeded
+    assert len(fake.operations("image")) == 1
     assert len(fake.operations("run")) == 1
     assert len(fake.operations("exec")) == 2
     assert "OPENSAC_SESSION_TOKEN=run-token-1" in fake.operations("exec")[0]
@@ -209,6 +215,20 @@ async def test_container_is_lazy_reused_by_session_id_and_closed_with_session_ob
     session = SimpleNamespace(id="sess-1", token="run-token-2", workspace=str(tmp_path))
     await sandbox.close_session(session)
     assert len(fake.operations("rm")) == 1
+
+
+async def test_warm_sandbox_reports_stale_image_as_launch_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDocker(image_contract=b"2\n")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
+    sandbox = _sandbox(tmp_path)
+
+    result = await sandbox.execute(_request(tmp_path))
+
+    assert result.exit_code == 125
+    assert "has contract '2'; expected 3" in (result.launch_error or "")
+    assert fake.operations("run") == []
 
 
 async def test_same_session_executes_serially_and_starts_only_one_container(

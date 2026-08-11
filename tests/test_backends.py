@@ -41,6 +41,8 @@ class FakeClient:
     search_hits: list[dict[str, Any]] = []
     batch_results: list[dict[str, Any]] = []
     document_text: str = ""
+    retrieval_backend: str = "dense"
+    result_mode: str = "query_aware"
     instances: list[FakeClient] = []
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -59,9 +61,21 @@ class FakeClient:
     async def post(self, url: str, *, json: dict[str, Any]) -> FakeResponse:
         type(self).requests.append((url, json))
         if url.endswith("search_many"):
-            return FakeResponse({"results": self.batch_results})
+            return FakeResponse(
+                {
+                    "backend": self.retrieval_backend,
+                    "result_mode": self.result_mode,
+                    "results": self.batch_results,
+                }
+            )
         if url.endswith("search"):
-            return FakeResponse({"results": [{"hits": self.search_hits}]})
+            return FakeResponse(
+                {
+                    "backend": self.retrieval_backend,
+                    "result_mode": self.result_mode,
+                    "results": [{"hits": self.search_hits}],
+                }
+            )
         return FakeResponse({"text": self.document_text})
 
 
@@ -71,6 +85,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> type[FakeClient]:
     FakeClient.search_hits = []
     FakeClient.batch_results = []
     FakeClient.document_text = ""
+    FakeClient.retrieval_backend = "dense"
+    FakeClient.result_mode = "query_aware"
     FakeClient.instances = []
     monkeypatch.setattr(local_http.httpx, "AsyncClient", FakeClient)
     return FakeClient
@@ -104,6 +120,11 @@ async def test_search_uses_server_shaped_fields_without_reprocessing(client) -> 
     assert hits[0].docid == "74492"
     assert hits[0].snippet == "The server-selected passage about the 33rd Royal Rumble."
     assert hits[0].metadata == {"retrieval_debug": "dense"}
+    assert hits[0].retrieval is not None
+    assert hits[0].retrieval.mode == "dense"
+    assert hits[0].retrieval.result_mode == "query_aware"
+    assert hits[0].retrieval.higher_is_better is True
+    assert hits[0].retrieval.comparable_across_queries is False
 
 
 async def test_search_does_not_parse_a_full_mode_snippet(client) -> None:
@@ -161,6 +182,8 @@ async def test_local_search_many_uses_one_request_and_preserves_order(client) ->
     assert batches[0].hits[0].title == "Beta title"
     assert batches[0].hits[0].date == "2026-08-11"
     assert batches[0].hits[0].snippet == "beta"
+    assert batches[0].hits[0].retrieval is not None
+    assert batches[0].hits[0].retrieval.mode == "dense"
     assert len(client.requests) == 1
     assert client.requests[0][0].endswith("/search_many")
     assert client.requests[0][1] == {
@@ -297,6 +320,8 @@ async def test_serper_reuses_and_closes_one_http_client(monkeypatch) -> None:
     backend = SerperBackend("key")
 
     hits = await backend.search("query", limit=1)
+    assert hits[0].retrieval is not None
+    assert hits[0].retrieval.mode == "organic"
     await backend.content(hits)
 
     assert len(RecordingClient.instances) == 1

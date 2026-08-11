@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -12,13 +13,22 @@ from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
+from jsonschema import Draft202012Validator
 from openai import AsyncOpenAI
 from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
 from opensac.backends.base import BatchSearchBackend, ClosableSearchBackend, SearchBackend
 from opensac.broker.policy import CapabilityPolicy, MechanismDisabled
 from opensac.metrics import CapacityGate
-from opensac.models import CAPABILITY_METHODS, CapabilityEvent, HitRecord, Mechanisms, Session
+from opensac.models import (
+    CAPABILITY_METHODS,
+    CapabilityEvent,
+    EvidenceTraceRecord,
+    HitRecord,
+    Mechanisms,
+    ModelAttemptRecord,
+    Session,
+)
 
 _EVENT_MODEL_TOKENS: ContextVar[int] = ContextVar(
     "opensac_event_model_tokens", default=0
@@ -33,6 +43,12 @@ _EVENT_MODEL_TOKENS: ContextVar[int] = ContextVar(
 # append to one process-global list that nothing ever drains.
 _EVENT_HITS: ContextVar[list[HitRecord] | None] = ContextVar(
     "opensac_event_hits", default=None
+)
+_EVENT_MODEL_ATTEMPTS: ContextVar[list[ModelAttemptRecord] | None] = ContextVar(
+    "opensac_event_model_attempts", default=None
+)
+_EVENT_EVIDENCE: ContextVar[list[EvidenceTraceRecord] | None] = ContextVar(
+    "opensac_event_evidence", default=None
 )
 
 # Query parameters that identify a referrer rather than a document. Stripping
@@ -56,6 +72,50 @@ _TRACKING_PARAMS = frozenset(
         "spm",
     }
 )
+
+
+class ExtractionInfrastructureError(RuntimeError):
+    """Every item failed before the provider produced an extraction output."""
+
+    code = "extraction_provider_unavailable"
+    retryable = True
+
+    def __init__(self) -> None:
+        # Provider exception strings may contain response bodies. The public
+        # error deliberately carries only a stable, actionable classification.
+        super().__init__("The extraction provider failed for every item; retry the call.")
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    ref: str
+    kind: str
+    text: str
+    coordinates: dict[str, Any]
+    document_fingerprint: str
+    passage_fingerprint: str
+
+
+@dataclass(frozen=True)
+class _ExtractionError:
+    code: str
+    message: str
+    retryable: bool = False
+
+    def wire(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+        }
+
+
+@dataclass(frozen=True)
+class _ModelOutput:
+    content: str | None
+    tokens: int
+    duration_seconds: float
+    provider_failed: bool = False
 
 
 @dataclass
@@ -87,6 +147,7 @@ class BrokerSession:
     # failed once is exactly what a program should be allowed to do.
     content_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
     content_cache_bytes: int = 0
+    evidence: dict[str, EvidenceRecord] = field(default_factory=dict)
     traces: dict[str, list[CapabilityEvent]] = field(default_factory=dict)
     trace_sequence: int = 0
 
@@ -145,6 +206,14 @@ class BrokerService:
         max_search_queries_per_request: int = 64,
         max_search_query_chars: int = 4096,
         max_search_top_k: int = 600,
+        max_extract_items: int = 256,
+        max_extract_instruction_bytes: int = 16_384,
+        max_extract_schema_bytes: int = 65_536,
+        max_extract_item_bytes: int = 65_536,
+        max_extract_total_item_bytes: int = 2_097_152,
+        max_extract_schema_depth: int = 8,
+        max_extract_repair_attempts: int = 1,
+        max_evidence_chars: int = 16_000,
     ) -> None:
         self.backends = backends
         self.model_client = model_client
@@ -164,6 +233,22 @@ class BrokerService:
         self.max_search_queries_per_request = int(max_search_queries_per_request)
         self.max_search_query_chars = int(max_search_query_chars)
         self.max_search_top_k = int(max_search_top_k)
+        extraction_limits = {
+            "max_extract_items": max_extract_items,
+            "max_extract_instruction_bytes": max_extract_instruction_bytes,
+            "max_extract_schema_bytes": max_extract_schema_bytes,
+            "max_extract_item_bytes": max_extract_item_bytes,
+            "max_extract_total_item_bytes": max_extract_total_item_bytes,
+            "max_extract_schema_depth": max_extract_schema_depth,
+            "max_evidence_chars": max_evidence_chars,
+        }
+        for name, value in extraction_limits.items():
+            if int(value) < 1:
+                raise ValueError(f"{name} must be at least 1")
+            setattr(self, name, int(value))
+        if int(max_extract_repair_attempts) not in {0, 1}:
+            raise ValueError("max_extract_repair_attempts must be 0 or 1")
+        self.max_extract_repair_attempts = int(max_extract_repair_attempts)
 
     async def aclose(self) -> None:
         """Close backend-owned connection pools once the broker stops."""
@@ -229,6 +314,8 @@ class BrokerService:
         started = time.monotonic()
         token_context = _EVENT_MODEL_TOKENS.set(0)
         hits_context = _EVENT_HITS.set([])
+        attempts_context = _EVENT_MODEL_ATTEMPTS.set([])
+        evidence_context = _EVENT_EVIDENCE.set([])
         try:
             # Mechanism gates sit inside the traced region on purpose: an arm
             # that disables a capability wants to know how often the model kept
@@ -252,6 +339,8 @@ class BrokerService:
                     input_count=self._trace_input_count(method, params),
                     hits=list(_EVENT_HITS.get() or []),
                     model_tokens=_EVENT_MODEL_TOKENS.get(),
+                    model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
+                    evidence_records=list(_EVENT_EVIDENCE.get() or []),
                     error_type=type(exc).__name__,
                     error=self._trace_error_message(exc),
                 ),
@@ -272,6 +361,8 @@ class BrokerService:
                     result_count=self._trace_result_count(method, result),
                     hits=list(_EVENT_HITS.get() or []),
                     model_tokens=_EVENT_MODEL_TOKENS.get(),
+                    model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
+                    evidence_records=list(_EVENT_EVIDENCE.get() or []),
                     result_payload=payload,
                     result_payload_truncated=truncated,
                 ),
@@ -280,6 +371,8 @@ class BrokerService:
         finally:
             _EVENT_MODEL_TOKENS.reset(token_context)
             _EVENT_HITS.reset(hits_context)
+            _EVENT_MODEL_ATTEMPTS.reset(attempts_context)
+            _EVENT_EVIDENCE.reset(evidence_context)
 
     def _context_payload(self, state: BrokerSession, result: Any) -> tuple[Any, bool]:
         """The result echoed back for a session that disables context decoupling.
@@ -333,6 +426,8 @@ class BrokerService:
     def _trace_input_count(method: str, params: dict[str, Any]) -> int:
         if method.startswith("search."):
             return len(params.get("queries", [])) if method.endswith("_many") else 1
+        if method == "citations.resolve" and "requests" in params:
+            return len(params.get("requests", []))
         if method.startswith("content.") or method == "citations.resolve":
             return len(params.get("refs", []))
         if method in {"llm.complete_many", "llm.extract_many"}:
@@ -460,6 +555,8 @@ class BrokerService:
         self,
         state: BrokerSession,
         hits: list[SearchHit],
+        *,
+        query_index: int | None = None,
     ) -> list[dict[str, Any]]:
         recorded = _EVENT_HITS.get()
         for hit in hits:
@@ -468,26 +565,49 @@ class BrokerService:
             state.remember(hit)
             if recorded is not None:
                 recorded.append(
-                    HitRecord(identity=identity, rank=hit.rank, score=hit.score)
+                    HitRecord(
+                        identity=identity,
+                        rank=hit.rank,
+                        score=hit.score,
+                        query_index=query_index,
+                        retrieval_mode=self._effective_retrieval_mode(hit),
+                    )
                 )
         return [hit.model_dump(mode="json") for hit in hits]
+
+    @staticmethod
+    def _effective_retrieval_mode(hit: SearchHit) -> str | None:
+        retrieval = getattr(hit, "retrieval", None)
+        if retrieval is None:
+            return None
+        if isinstance(retrieval, dict):
+            return retrieval.get("mode") or retrieval.get("result_mode")
+        return getattr(retrieval, "mode", None) or getattr(retrieval, "result_mode", None)
+
+    async def _retrieve_search(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> list[SearchHit]:
+        """Execute one search without mutating the session reference table."""
+        backend_name, _ = self._search_backend(state)
+        state.policy.require_backend(backend_name)
+        await state.policy.record_search()
+        _, backend, query, domains, limit, offset = self._prepare_search(state, params)
+        async with self.capacity_gate.slot():
+            return await backend.search(
+                query,
+                limit=limit,
+                offset=offset,
+                domains=domains,
+            )
 
     async def _search(
         self,
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        backend_name, _ = self._search_backend(state)
-        state.policy.require_backend(backend_name)
-        await state.policy.record_search()
-        _, backend, query, domains, limit, offset = self._prepare_search(state, params)
-        async with self.capacity_gate.slot():
-            hits = await backend.search(
-                query,
-                limit=limit,
-                offset=offset,
-                domains=domains,
-            )
+        hits = await self._retrieve_search(state, params)
         return self._record_search_hits(state, hits)
 
     @staticmethod
@@ -588,10 +708,10 @@ class BrokerService:
         else:
             gate = asyncio.Semaphore(concurrency)
 
-            async def one(query: str) -> SearchBatch:
+            async def one(query: str) -> tuple[list[SearchHit], str | None]:
                 async with gate:
                     try:
-                        hits = await self._search(
+                        hits = await self._retrieve_search(
                             state,
                             {
                                 "query": query,
@@ -600,11 +720,21 @@ class BrokerService:
                                 "domains": params.get("domains"),
                             },
                         )
-                        return SearchBatch(query=query, hits=hits)
+                        return hits, None
                     except Exception as exc:
-                        return SearchBatch(query=query, error=str(exc))
+                        return [], str(exc)
 
-            batches = await asyncio.gather(*(one(query) for query in queries))
+            # Retrieval may finish in any order, but refs, representative hits,
+            # and trace rows are registered only after every task has settled,
+            # in input-query order. Provider latency therefore cannot change a
+            # replay's provenance.
+            returned = await asyncio.gather(*(one(query) for query in queries))
+            batches = []
+            for index, (query, (hits, error)) in enumerate(zip(queries, returned, strict=True)):
+                recorded = (
+                    self._record_search_hits(state, hits, query_index=index) if not error else []
+                )
+                batches.append(SearchBatch(query=query, hits=recorded, error=error))
         # Partial failures stay in batch.error so the program can degrade
         # gracefully, but a wholesale failure (missing backend, bad credentials,
         # rate limit) must not be reported as an empty result set.
@@ -673,7 +803,11 @@ class BrokerService:
                     batches[index] = SearchBatch(query=queries[index], error=str(exc))
             else:
                 for index, batch in zip(valid_indices, returned, strict=True):
-                    hits = self._record_search_hits(state, list(batch.hits))
+                    hits = self._record_search_hits(
+                        state,
+                        list(batch.hits),
+                        query_index=index,
+                    )
                     batches[index] = SearchBatch(
                         query=queries[index],
                         hits=hits,
@@ -782,18 +916,174 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        hits = self._resolve_refs(state, params.get("refs", []))
-        return [
+        if "requests" in params:
+            raw_requests = params.get("requests")
+            if not isinstance(raw_requests, list):
+                raise ValueError("citation requests must be a list")
+            requests = raw_requests
+        else:
+            raw_refs = params.get("refs", [])
+            if isinstance(raw_refs, str):
+                raw_refs = [raw_refs]
+            if not isinstance(raw_refs, list):
+                raise ValueError("citation refs must be a list")
+            requests = [{"ref": ref} for ref in raw_refs]
+
+        resolved: list[dict[str, Any]] = []
+        for request in requests:
+            if not isinstance(request, dict):
+                raise ValueError("Each citation request must be an object")
+            if set(request) - {"ref", "locator"}:
+                raise ValueError("Citation requests accept only ref and locator")
+            handle = request.get("ref")
+            if not isinstance(handle, str) or not handle:
+                raise ValueError("Every citation request must contain a non-empty ref")
+            hit = self._resolve_refs(state, [handle])[0]
+            locator = request.get("locator")
+            if locator is None:
+                resolved.append(self._citation_wire(hit, hit.snippet, "search_preview"))
+                continue
+            record = self._verify_evidence_locator(state, hit.ref, locator)
+            citation = self._citation_wire(hit, record.text, record.kind)
+            citation["locator"] = locator
+            resolved.append(citation)
+        return resolved
+
+    @staticmethod
+    def _citation_wire(
+        hit: SearchHit,
+        evidence: str,
+        evidence_kind: str,
+    ) -> dict[str, Any]:
+        return {
+            "ref": hit.ref,
+            "title": hit.title,
+            "url": hit.url,
+            "docid": hit.docid,
+            "evidence": evidence,
+            "evidence_kind": evidence_kind,
+            "backend": hit.backend,
+        }
+
+    def _verify_evidence_locator(
+        self,
+        state: BrokerSession,
+        ref: str,
+        locator: Any,
+    ) -> EvidenceRecord:
+        locator_id = locator.get("id") if isinstance(locator, dict) else None
+        registered = (
+            state.evidence.get(locator_id) if isinstance(locator_id, str) else None
+        )
+
+        def reject(message: str, code: str) -> None:
+            self._record_evidence_trace(
+                locator_id=locator_id if isinstance(locator_id, str) else None,
+                ref=ref,
+                action="validate",
+                status="error",
+                record=registered,
+                error_code=code,
+            )
+            raise ValueError(message)
+
+        if not isinstance(locator, dict) or set(locator) != {"id", "ref", "kind"}:
+            reject(
+                "Evidence locator must contain exactly id, ref, and kind",
+                "invalid_locator",
+            )
+        if not all(isinstance(locator[key], str) for key in ("id", "ref", "kind")):
+            reject("Evidence locator fields must be strings", "invalid_locator")
+        if locator["kind"] != "selected_passage":
+            reject("Unsupported evidence locator kind", "invalid_locator_kind")
+        if locator["ref"] != ref:
+            reject(
+                "Evidence locator does not belong to the requested ref",
+                "locator_ref_mismatch",
+            )
+        if registered is None:
+            reject("Unknown evidence locator", "unknown_locator")
+        assert registered is not None
+        if registered.ref != locator["ref"] or registered.kind != locator["kind"]:
+            reject("Evidence locator has been altered", "altered_locator")
+        self._record_evidence_trace(
+            locator_id=locator["id"],
+            ref=ref,
+            action="validate",
+            status="ok",
+            record=registered,
+        )
+        return registered
+
+    @staticmethod
+    def _record_evidence_trace(
+        *,
+        locator_id: str | None,
+        ref: str,
+        action: str,
+        status: str,
+        record: EvidenceRecord | None,
+        error_code: str | None = None,
+    ) -> None:
+        traced = _EVENT_EVIDENCE.get()
+        if traced is None:
+            return
+        traced.append(
+            EvidenceTraceRecord(
+                locator_id=locator_id[:128] if locator_id else None,
+                ref=ref,
+                action=action,
+                status=status,
+                coordinates=dict(record.coordinates) if record else {},
+                document_fingerprint=record.document_fingerprint if record else None,
+                passage_fingerprint=record.passage_fingerprint if record else None,
+                error_code=error_code,
+            )
+        )
+
+    def _register_evidence(
+        self,
+        state: BrokerSession,
+        *,
+        ref: str,
+        text: str,
+        document_text: str,
+        coordinates: dict[str, Any],
+    ) -> dict[str, str] | None:
+        if not text or len(text) > self.max_evidence_chars:
+            return None
+        document_fingerprint = hashlib.sha256(document_text.encode()).hexdigest()
+        passage_fingerprint = hashlib.sha256(text.encode()).hexdigest()
+        material = json.dumps(
             {
-                "ref": hit.ref,
-                "title": hit.title,
-                "url": hit.url,
-                "docid": hit.docid,
-                "evidence": hit.snippet,
-                "backend": hit.backend,
-            }
-            for hit in hits
-        ]
+                "ref": ref,
+                "kind": "selected_passage",
+                "coordinates": coordinates,
+                "document_fingerprint": document_fingerprint,
+                "passage_fingerprint": passage_fingerprint,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        locator_id = "evidence_" + hashlib.sha256(
+            f"{state.session.token}\0{material}".encode()
+        ).hexdigest()[:24]
+        state.evidence[locator_id] = EvidenceRecord(
+            ref=ref,
+            kind="selected_passage",
+            text=text,
+            coordinates=dict(coordinates),
+            document_fingerprint=document_fingerprint,
+            passage_fingerprint=passage_fingerprint,
+        )
+        self._record_evidence_trace(
+            locator_id=locator_id,
+            ref=ref,
+            action="issue",
+            status="ok",
+            record=state.evidence[locator_id],
+        )
+        return {"id": locator_id, "ref": ref, "kind": "selected_passage"}
 
     async def _content_get_many(
         self,
@@ -815,18 +1105,36 @@ class BrokerService:
         total_chars = max(int(params.get("max_tokens", 4000)), 1) * 4
         used = 0
         for row in rows:
-            text, metadata = self._select_passage(row["text"], query, per_page_chars)
-            row["text"] = text
+            document_text = row["text"]
+            text, metadata = self._select_passage(document_text, query, per_page_chars)
             row["metadata"] = {**row.get("metadata", {}), **metadata}
-            if used + len(row["text"]) > total_chars:
-                row["text"] = row["text"][: max(total_chars - used, 0)]
+            remaining = max(total_chars - used, 0)
+            if len(text) > remaining:
+                text = text[:remaining]
                 row["metadata"]["truncated_by_total_budget"] = True
-            used += len(row["text"])
-        # An empty passage is dropped -- that is the budget doing its job -- but
-        # a document that could not be retrieved is kept, because "nothing
-        # relevant on this page" and "nobody could read this page" lead to
-        # different next moves and both arrive here as empty text.
-        return [row for row in rows if row["text"] or row["metadata"].get("fetch_error")]
+                if not text:
+                    row["metadata"]["omitted_by_total_budget"] = True
+            start = int(row["metadata"].get("passage_start", 0))
+            row["metadata"]["passage_end"] = start + len(text)
+            row["text"] = text
+            used += len(text)
+            locator = self._register_evidence(
+                state,
+                ref=str(row.get("ref") or ""),
+                text=text,
+                document_text=self._normalize_text(document_text),
+                coordinates={
+                    "type": "characters",
+                    "basis": "normalized_text",
+                    "start": start,
+                    "end": start + len(text),
+                },
+            )
+            if locator is not None:
+                row["locator"] = locator
+        # Positional alignment is part of the batch contract. A page which lost
+        # its passage to the total budget remains as an explicit empty row.
+        return rows
 
     # Documents in a research corpus are mostly longer than any budget that can
     # be handed to a control model -- median ~9k characters, p90 ~62k -- so
@@ -866,6 +1174,7 @@ class BrokerService:
         max_chars = min(max(int(params.get("max_chars", 100_000)), 1), 400_000)
         windows: list[dict[str, Any]] = []
         for row in rows:
+            document_text = str(row.get("text") or "")
             lines = self._document_lines(row)
             total = len(lines)
             window = lines[offset - 1 : offset - 1 + limit]
@@ -875,7 +1184,11 @@ class BrokerService:
             while window and len("\n".join(window)) > max_chars and len(window) > 1:
                 window.pop()
                 clipped = True
-            text = "\n".join(window)[:max_chars]
+            text = "\n".join(window)
+            partial_line = len(window) == 1 and len(text) > max_chars
+            if partial_line:
+                text = text[:max_chars]
+                clipped = True
             end = offset - 1 + len(window)
             metadata = {
                 **row.get("metadata", {}),
@@ -888,7 +1201,38 @@ class BrokerService:
             }
             if clipped:
                 metadata["truncated_by_max_chars"] = True
-            windows.append({**row, "text": text, "metadata": metadata})
+            if partial_line:
+                # The public read coordinate is line-based, so a single line
+                # cannot be resumed mid-line. Report the partial window
+                # explicitly and bind its locator with character coordinates
+                # instead of claiming the prefix represents the whole line.
+                metadata["truncated_mid_line"] = True
+                metadata["partial_line_remaining_chars"] = len(window[0]) - len(text)
+            result = {**row, "text": text, "metadata": metadata}
+            coordinates = (
+                {
+                    "type": "line_characters",
+                    "line": metadata["start_line"],
+                    "start_character": 0,
+                    "end_character": len(text),
+                }
+                if partial_line
+                else {
+                    "type": "lines",
+                    "start_line": metadata["start_line"],
+                    "end_line": metadata["end_line"],
+                }
+            )
+            locator = self._register_evidence(
+                state,
+                ref=str(row.get("ref") or ""),
+                text=text,
+                document_text=document_text,
+                coordinates=coordinates,
+            )
+            if locator is not None:
+                result["locator"] = locator
+            windows.append(result)
         return windows
 
     @staticmethod
@@ -930,18 +1274,34 @@ class BrokerService:
                 if not regex.search(line):
                     continue
                 found += 1
-                matches.append(
-                    {
-                        "ref": row.get("ref", ""),
-                        "docid": metadata.get("docid"),
-                        "url": row.get("url"),
-                        "title": row.get("title", ""),
-                        "line": index + 1,
-                        "text": line,
-                        "before": lines[max(0, index - context) : index] if context else [],
-                        "after": lines[index + 1 : index + 1 + context] if context else [],
-                    }
+                before = lines[max(0, index - context) : index] if context else []
+                after = lines[index + 1 : index + 1 + context] if context else []
+                match = {
+                    "ref": row.get("ref", ""),
+                    "docid": metadata.get("docid"),
+                    "url": row.get("url"),
+                    "title": row.get("title", ""),
+                    "line": index + 1,
+                    "text": line,
+                    "before": before,
+                    "after": after,
+                }
+                evidence = "\n".join([*before, line, *after])
+                locator = self._register_evidence(
+                    state,
+                    ref=str(row.get("ref") or ""),
+                    text=evidence,
+                    document_text=str(row.get("text") or ""),
+                    coordinates={
+                        "type": "lines",
+                        "start_line": index + 1 - len(before),
+                        "end_line": index + 1 + len(after),
+                        "match_line": index + 1,
+                    },
                 )
+                if locator is not None:
+                    match["locator"] = locator
+                matches.append(match)
         return matches
 
     @staticmethod
@@ -1207,40 +1567,472 @@ class BrokerService:
         _EVENT_MODEL_TOKENS.set(_EVENT_MODEL_TOKENS.get() + total_tokens)
         return [answer for answer, _ in results]
 
-    async def _extract_many(
-        self,
-        state: BrokerSession,
-        params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        self._require_model()
-        items = params.get("items", [])
-        if not items:
-            return []
-        max_tokens = await state.policy.reserve_llm(
-            len(items),
-            max_tokens=self._clamp_max_tokens(params.get("max_tokens")),
-        )
-        schema = params.get("schema", {})
-        instruction = str(params.get("instruction", ""))
-        concurrency = min(max(int(params.get("concurrency", 4)), 1), 12)
-        gate = asyncio.Semaphore(concurrency)
+    _SCHEMA_KEYWORDS = frozenset(
+        {
+            "$schema",
+            "type",
+            "properties",
+            "required",
+            "additionalProperties",
+            "items",
+            "enum",
+            "description",
+        }
+    )
+    _SCHEMA_TYPES = frozenset(
+        {"object", "array", "string", "integer", "number", "boolean", "null"}
+    )
+    _REPAIRABLE_EXTRACTION_ERRORS = frozenset(
+        {"empty_output", "invalid_json", "non_object", "schema_mismatch"}
+    )
 
-        async def extract(item: Any) -> tuple[str, int]:
-            prompt = (
-                f"{instruction}\n\nJSON schema:\n{json.dumps(schema)}\n\n"
-                f"Input:\n{json.dumps(item, ensure_ascii=False, default=str)}\n\n"
-                "Return only one JSON object."
+    @staticmethod
+    def _json_payload(value: Any, label: str) -> str:
+        try:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
             )
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} must contain only JSON-serializable values") from None
+
+    def _validate_schema_subset(self, schema: Any) -> Draft202012Validator:
+        if not isinstance(schema, dict):
+            raise ValueError("schema must be a JSON object")
+        if schema.get("type") != "object":
+            raise ValueError("schema root must declare type 'object'")
+
+        def visit(node: Any, *, depth: int, path: str) -> None:
+            if not isinstance(node, dict):
+                raise ValueError(f"schema node at {path} must be an object")
+            if depth > self.max_extract_schema_depth:
+                raise ValueError(
+                    f"schema nesting exceeds maximum depth {self.max_extract_schema_depth}"
+                )
+            unknown = sorted(set(node) - self._SCHEMA_KEYWORDS)
+            if unknown:
+                raise ValueError(
+                    f"schema keyword '{unknown[0]}' at {path} is not supported"
+                )
+            declared_type = node.get("type")
+            base_type: str | None = None
+            if declared_type is not None:
+                if isinstance(declared_type, str):
+                    if declared_type not in self._SCHEMA_TYPES:
+                        raise ValueError(
+                            f"schema type '{declared_type}' at {path} is not supported"
+                        )
+                    base_type = declared_type
+                elif isinstance(declared_type, list):
+                    if (
+                        len(declared_type) != 2
+                        or any(
+                            not isinstance(item, str) or item not in self._SCHEMA_TYPES
+                            for item in declared_type
+                        )
+                        or len(set(declared_type)) != 2
+                        or "null" not in declared_type
+                    ):
+                        raise ValueError(
+                            f"schema type list at {path} must contain one type plus null"
+                        )
+                    base_type = next(item for item in declared_type if item != "null")
+                else:
+                    raise ValueError(f"schema type at {path} must be a string or list")
+
+            if "$schema" in node:
+                dialect = node["$schema"]
+                if dialect not in {
+                    "https://json-schema.org/draft/2020-12/schema",
+                    "https://json-schema.org/draft/2020-12/schema#",
+                }:
+                    raise ValueError("only JSON Schema Draft 2020-12 is supported")
+            if "description" in node and not isinstance(node["description"], str):
+                raise ValueError(f"schema description at {path} must be a string")
+            if "enum" in node and (
+                not isinstance(node["enum"], list) or not node["enum"]
+            ):
+                raise ValueError(f"schema enum at {path} must be a non-empty list")
+
+            object_keys = {"properties", "required", "additionalProperties"} & set(node)
+            if object_keys and base_type not in {None, "object"}:
+                raise ValueError(f"object keywords at {path} require type 'object'")
+            properties = node.get("properties")
+            if properties is not None:
+                if not isinstance(properties, dict):
+                    raise ValueError(f"schema properties at {path} must be an object")
+                for name, child in properties.items():
+                    if not isinstance(name, str):
+                        raise ValueError(f"schema property names at {path} must be strings")
+                    visit(child, depth=depth + 1, path=f"{path}.properties.{name}")
+            if "required" in node:
+                required = node["required"]
+                if not isinstance(required, list) or any(
+                    not isinstance(item, str) for item in required
+                ):
+                    raise ValueError(f"schema required at {path} must be a list of strings")
+            if "additionalProperties" in node and not isinstance(
+                node["additionalProperties"], bool
+            ):
+                raise ValueError(
+                    f"schema additionalProperties at {path} must be a boolean"
+                )
+
+            if "items" in node:
+                if base_type not in {None, "array"}:
+                    raise ValueError(f"schema items at {path} requires type 'array'")
+                visit(node["items"], depth=depth + 1, path=f"{path}.items")
+
+        visit(schema, depth=1, path="$")
+        try:
+            Draft202012Validator.check_schema(schema)
+        except Exception as exc:
+            raise ValueError(f"invalid JSON Schema: {self._trace_error_message(exc)}") from None
+        return Draft202012Validator(schema)
+
+    def _prepare_extraction(
+        self,
+        params: dict[str, Any],
+    ) -> tuple[list[Any], list[str], str, str, Draft202012Validator, int, int]:
+        items = params.get("items", [])
+        if not isinstance(items, list):
+            raise ValueError("items must be a list")
+        if len(items) > self.max_extract_items:
+            raise ValueError(
+                f"extract_many contains {len(items)} items, exceeding the broker maximum "
+                f"of {self.max_extract_items}"
+            )
+        instruction = params.get("instruction", "")
+        if not isinstance(instruction, str):
+            raise ValueError("instruction must be a string")
+        instruction_bytes = len(instruction.encode("utf-8"))
+        if instruction_bytes > self.max_extract_instruction_bytes:
+            raise ValueError(
+                f"instruction is {instruction_bytes} bytes, exceeding the broker maximum "
+                f"of {self.max_extract_instruction_bytes}"
+            )
+
+        schema = params.get("schema", {})
+        schema_json = self._json_payload(schema, "schema")
+        schema_bytes = len(schema_json.encode("utf-8"))
+        if schema_bytes > self.max_extract_schema_bytes:
+            raise ValueError(
+                f"schema is {schema_bytes} bytes, exceeding the broker maximum "
+                f"of {self.max_extract_schema_bytes}"
+            )
+        validator = self._validate_schema_subset(schema)
+
+        item_json: list[str] = []
+        total_item_bytes = 0
+        for index, item in enumerate(items):
+            encoded = self._json_payload(item, f"item at index {index}")
+            size = len(encoded.encode("utf-8"))
+            if size > self.max_extract_item_bytes:
+                raise ValueError(
+                    f"item at index {index} is {size} bytes, exceeding the broker maximum "
+                    f"of {self.max_extract_item_bytes}"
+                )
+            total_item_bytes += size
+            item_json.append(encoded)
+        if total_item_bytes > self.max_extract_total_item_bytes:
+            raise ValueError(
+                f"items total {total_item_bytes} bytes, exceeding the broker maximum "
+                f"of {self.max_extract_total_item_bytes}"
+            )
+
+        repair_attempts = params.get("repair_attempts", 0)
+        if isinstance(repair_attempts, bool) or not isinstance(repair_attempts, int):
+            raise ValueError("repair_attempts must be 0 or 1")
+        if repair_attempts not in {0, 1}:
+            raise ValueError("repair_attempts must be 0 or 1")
+        if repair_attempts > self.max_extract_repair_attempts:
+            raise ValueError(
+                f"repair_attempts exceeds the broker maximum of "
+                f"{self.max_extract_repair_attempts}"
+            )
+        try:
+            concurrency = int(params.get("concurrency", 4))
+        except (TypeError, ValueError):
+            raise ValueError("concurrency must be an integer") from None
+        concurrency = min(max(concurrency, 1), 12)
+        return (
+            items,
+            item_json,
+            instruction,
+            schema_json,
+            validator,
+            repair_attempts,
+            concurrency,
+        )
+
+    async def _model_output(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int | None,
+        gate: asyncio.Semaphore,
+    ) -> _ModelOutput:
+        started = time.monotonic()
+        try:
             async with gate:
                 content, tokens = await self._chat(
                     prompt,
                     max_tokens=max_tokens,
                     json_object=True,
                 )
-            return content, tokens
+        except Exception:
+            return _ModelOutput(
+                content=None,
+                tokens=0,
+                duration_seconds=time.monotonic() - started,
+                provider_failed=True,
+            )
+        return _ModelOutput(
+            content=content,
+            tokens=tokens,
+            duration_seconds=time.monotonic() - started,
+        )
 
-        results = await asyncio.gather(*(extract(item) for item in items))
-        total_tokens = sum(tokens for _, tokens in results)
+    @staticmethod
+    def _strict_json_object(
+        content: str | None,
+    ) -> tuple[dict[str, Any] | None, _ExtractionError | None]:
+        if content is None or not content.strip():
+            return None, _ExtractionError("empty_output", "Model returned an empty output")
+
+        def reject_constant(_: str) -> Any:
+            raise ValueError("non-finite number")
+
+        def finite_float(value: str) -> float:
+            parsed = float(value)
+            if not math.isfinite(parsed):
+                raise ValueError("non-finite number")
+            return parsed
+
+        def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate object key")
+                result[key] = value
+            return result
+
+        try:
+            parsed = json.loads(
+                content,
+                parse_constant=reject_constant,
+                parse_float=finite_float,
+                object_pairs_hook=unique_object,
+            )
+        except (json.JSONDecodeError, ValueError):
+            return None, _ExtractionError(
+                "invalid_json",
+                "Model returned invalid strict JSON",
+            )
+        if not isinstance(parsed, dict):
+            return None, _ExtractionError(
+                "non_object",
+                "Model output must be one JSON object",
+            )
+        return parsed, None
+
+    @classmethod
+    def _checked_extraction(
+        cls,
+        content: str | None,
+        validator: Draft202012Validator,
+    ) -> tuple[dict[str, Any] | None, _ExtractionError | None]:
+        data, error = cls._strict_json_object(content)
+        if error is not None:
+            return None, error
+        assert data is not None
+        failures = sorted(validator.iter_errors(data), key=lambda item: list(item.path))
+        if failures:
+            first = failures[0]
+            location = "$" + "".join(
+                f"[{part}]" if isinstance(part, int) else f".{part}" for part in first.path
+            )
+            return None, _ExtractionError(
+                "schema_mismatch",
+                f"Model output does not match schema at {location} ({first.validator})",
+            )
+        return data, None
+
+    async def _record_model_tokens(
+        self,
+        state: BrokerSession,
+        outputs: list[_ModelOutput],
+    ) -> None:
+        total_tokens = sum(output.tokens for output in outputs)
         await state.policy.record_pipeline_model_tokens(total_tokens)
         _EVENT_MODEL_TOKENS.set(_EVENT_MODEL_TOKENS.get() + total_tokens)
-        return [json.loads(content or "{}") for content, _ in results]
+
+    @staticmethod
+    def _append_model_attempts(
+        indexes: list[int],
+        phase: str,
+        outputs: list[_ModelOutput],
+        errors: list[_ExtractionError | None],
+    ) -> None:
+        recorded = _EVENT_MODEL_ATTEMPTS.get()
+        if recorded is None:
+            return
+        for index, output, error in zip(indexes, outputs, errors, strict=True):
+            code = "provider_error" if output.provider_failed else error.code if error else None
+            recorded.append(
+                ModelAttemptRecord(
+                    index=index,
+                    phase=phase,
+                    status="error" if code else "ok",
+                    duration_seconds=output.duration_seconds,
+                    model_tokens=output.tokens,
+                    error_code=code,
+                )
+            )
+
+    async def _extract_many(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        (
+            items,
+            item_json,
+            instruction,
+            schema_json,
+            validator,
+            repair_attempts,
+            concurrency,
+        ) = self._prepare_extraction(params)
+        self._require_model()
+        if not items:
+            return []
+        requested_max_tokens = self._clamp_max_tokens(params.get("max_tokens"))
+        max_tokens = await state.policy.reserve_llm(
+            len(items),
+            max_tokens=requested_max_tokens,
+        )
+        gate = asyncio.Semaphore(concurrency)
+
+        def initial_prompt(index: int) -> str:
+            prompt = (
+                f"{instruction}\n\nJSON schema:\n{schema_json}\n\n"
+                f"Input:\n{item_json[index]}\n\n"
+                "Return only one JSON object."
+            )
+            return prompt
+
+        initial_outputs = await asyncio.gather(
+            *(
+                self._model_output(initial_prompt(index), max_tokens=max_tokens, gate=gate)
+                for index in range(len(items))
+            )
+        )
+        await self._record_model_tokens(state, initial_outputs)
+
+        checked: list[tuple[dict[str, Any] | None, _ExtractionError | None]] = []
+        for output in initial_outputs:
+            if output.provider_failed:
+                checked.append(
+                    (
+                        None,
+                        _ExtractionError(
+                            "provider_error",
+                            "Extraction provider request failed",
+                            retryable=True,
+                        ),
+                    )
+                )
+            else:
+                checked.append(self._checked_extraction(output.content, validator))
+        self._append_model_attempts(
+            list(range(len(items))),
+            "initial",
+            initial_outputs,
+            [error for _, error in checked],
+        )
+
+        if all(output.provider_failed for output in initial_outputs):
+            raise ExtractionInfrastructureError()
+
+        results = [
+            {
+                "index": index,
+                "data": data,
+                "error": error.wire() if error else None,
+                "attempts": 1,
+            }
+            for index, (data, error) in enumerate(checked)
+        ]
+        repair_indexes = [
+            index
+            for index, (_, error) in enumerate(checked)
+            if repair_attempts
+            and error is not None
+            and error.code in self._REPAIRABLE_EXTRACTION_ERRORS
+        ]
+        if not repair_indexes:
+            return results
+
+        # Reserve the complete, index-ordered repair set before dispatching any
+        # second attempt. A tight budget cannot make completion order decide
+        # which malformed rows get repaired.
+        repair_max_tokens = await state.policy.reserve_llm(
+            len(repair_indexes),
+            max_tokens=requested_max_tokens,
+        )
+
+        def repair_prompt(index: int) -> str:
+            assert initial_outputs[index].content is not None
+            error = checked[index][1]
+            assert error is not None
+            return (
+                f"{instruction}\n\nJSON schema:\n{schema_json}\n\n"
+                f"Input:\n{item_json[index]}\n\n"
+                f"Previous invalid output:\n{initial_outputs[index].content}\n\n"
+                f"Validation error:\n{error.code}: {error.message}\n\n"
+                "Repair the output. Return only one JSON object matching the schema."
+            )
+
+        repair_outputs = await asyncio.gather(
+            *(
+                self._model_output(
+                    repair_prompt(index),
+                    max_tokens=repair_max_tokens,
+                    gate=gate,
+                )
+                for index in repair_indexes
+            )
+        )
+        await self._record_model_tokens(state, repair_outputs)
+        repair_checked: list[tuple[dict[str, Any] | None, _ExtractionError | None]] = []
+        for output in repair_outputs:
+            if output.provider_failed:
+                repair_checked.append(
+                    (
+                        None,
+                        _ExtractionError(
+                            "provider_error",
+                            "Extraction provider request failed",
+                            retryable=True,
+                        ),
+                    )
+                )
+            else:
+                repair_checked.append(self._checked_extraction(output.content, validator))
+        self._append_model_attempts(
+            repair_indexes,
+            "repair",
+            repair_outputs,
+            [error for _, error in repair_checked],
+        )
+        for index, (data, error) in zip(repair_indexes, repair_checked, strict=True):
+            results[index] = {
+                "index": index,
+                "data": data,
+                "error": error.wire() if error else None,
+                "attempts": 2,
+            }
+        return results

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _MISSING = object()
 
@@ -46,6 +46,24 @@ class SubscriptableModel(BaseModel):
         return type(self).model_fields.keys()
 
 
+class RetrievalMetadata(SubscriptableModel):
+    """The retrieval and scoring semantics reported by a search backend."""
+
+    mode: str | None = None
+    result_mode: str | None = None
+    score_name: str | None = None
+    higher_is_better: bool | None = None
+    comparable_across_queries: bool | None = None
+
+
+class SearchRequestInfo(SubscriptableModel):
+    """The request window that produced one search batch."""
+
+    limit: int | None = None
+    offset: int = 0
+    domains: list[str] | None = None
+
+
 class SearchHit(SubscriptableModel):
     ref: str
     backend: str
@@ -62,6 +80,7 @@ class SearchHit(SubscriptableModel):
     snippet: str = ""
     score: float | None = None
     rank: int
+    retrieval: RetrievalMetadata | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -69,6 +88,37 @@ class SearchBatch(SubscriptableModel):
     query: str
     hits: list[SearchHit] = Field(default_factory=list)
     error: str | None = None
+    request: SearchRequestInfo | None = None
+
+
+class CandidateSource(SubscriptableModel):
+    batch_index: int
+    query: str
+    backend: str
+    rank: int
+    score: float | None = None
+    retrieval: RetrievalMetadata | None = None
+    request: SearchRequestInfo | None = None
+
+
+class SearchCandidate(SearchHit):
+    sources: list[CandidateSource] = Field(default_factory=list)
+    fused_score: float
+    fused_rank: int
+
+
+class FusionBatchError(SubscriptableModel):
+    batch_index: int
+    query: str
+    error: str
+
+
+class FusionResult(SubscriptableModel):
+    candidates: list[SearchCandidate] = Field(default_factory=list)
+    input_count: int
+    unique_count: int
+    duplicate_count: int
+    batch_errors: list[FusionBatchError] = Field(default_factory=list)
 
 
 class ContentSnippet(SubscriptableModel):
@@ -83,6 +133,7 @@ class ContentSnippet(SubscriptableModel):
     # `url` but no `date` reads like an oversight, and a program written on
     # that assumption dies on `AttributeError` rather than missing a filter.
     date: str | None = None
+    locator: EvidenceLocator | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -106,6 +157,41 @@ class ContentMatch(SubscriptableModel):
     # so a program can tell which side of the match a line came from.
     before: list[str] = Field(default_factory=list)
     after: list[str] = Field(default_factory=list)
+    locator: EvidenceLocator | None = None
+
+
+class ExtractionError(SubscriptableModel):
+    code: str
+    message: str
+    retryable: bool
+
+
+class ExtractionResult(SubscriptableModel):
+    index: int
+    data: dict[str, Any] | None = None
+    error: ExtractionError | None = None
+    attempts: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _has_data_or_error(self) -> Self:
+        if (self.data is None) == (self.error is None):
+            raise ValueError("exactly one of data or error must be set")
+        return self
+
+
+class EvidenceLocator(SubscriptableModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    ref: str
+    kind: Literal["selected_passage"]
+
+
+class CitationRequest(SubscriptableModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str
+    locator: EvidenceLocator | None = None
 
 
 class RpcRequest(BaseModel):
@@ -113,10 +199,18 @@ class RpcRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
+class RpcError(BaseModel):
+    code: str
+    message: str
+    retryable: bool
+
+
 class RpcResponse(BaseModel):
     ok: bool
     result: Any = None
-    error: str | None = None
+    # Accept the pre-v1 string form so a newer SDK can still explain an error
+    # from an old broker. Contract-v1 brokers always send ``RpcError``.
+    error: RpcError | str | None = None
 
 
 class SubmittedOutput(BaseModel):

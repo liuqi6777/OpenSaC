@@ -1,9 +1,31 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, Header, HTTPException
-from opensac_sdk.models import RpcRequest, RpcResponse
+from opensac_sdk.models import RpcError, RpcRequest, RpcResponse
 
+from opensac.broker.policy import BudgetExceeded, MechanismDisabled
 from opensac.broker.service import BrokerService
+
+
+def _rpc_error(exc: Exception) -> RpcError:
+    """Translate broker exceptions into the contract-v1 wire shape."""
+    code = getattr(exc, "code", None)
+    retryable = getattr(exc, "retryable", None)
+    if isinstance(code, str) and isinstance(retryable, bool):
+        return RpcError(code=code, message=str(exc), retryable=retryable)
+    if isinstance(exc, BudgetExceeded):
+        return RpcError(code="budget_exhausted", message=str(exc), retryable=False)
+    if isinstance(exc, MechanismDisabled):
+        return RpcError(code="capability_disabled", message=str(exc), retryable=False)
+    if isinstance(exc, ValueError):
+        return RpcError(code="invalid_request", message=str(exc), retryable=False)
+    if isinstance(exc, RuntimeError):
+        return RpcError(code="capability_error", message=str(exc), retryable=False)
+    return RpcError(
+        code="internal_error",
+        message="The capability broker failed unexpectedly.",
+        retryable=True,
+    )
 
 
 def create_broker_app(service: BrokerService) -> FastAPI:
@@ -31,8 +53,15 @@ def create_broker_app(service: BrokerService) -> FastAPI:
             )
             return RpcResponse(ok=True, result=result)
         except PermissionError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
+            return RpcResponse(
+                ok=False,
+                error=RpcError(
+                    code="permission_denied",
+                    message=str(exc),
+                    retryable=False,
+                ),
+            )
         except Exception as exc:
-            return RpcResponse(ok=False, error=str(exc))
+            return RpcResponse(ok=False, error=_rpc_error(exc))
 
     return app

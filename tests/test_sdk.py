@@ -5,11 +5,23 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from opensac_sdk.models import ContentSnippet, SearchHit
+from opensac_sdk.llm import LLMResource
+from opensac_sdk.models import (
+    ContentMatch,
+    ContentSnippet,
+    EvidenceLocator,
+    ExtractionError,
+    ExtractionResult,
+    RetrievalMetadata,
+    SearchBatch,
+    SearchHit,
+    SearchRequestInfo,
+)
 from opensac_sdk.output import OutputResource
 from opensac_sdk.search import SearchResource
 from opensac_sdk.state import StateResource
-from opensac_sdk.transport import UnixSocketTransport
+from opensac_sdk.transport import BrokerError, UnixSocketTransport
+from pydantic import ValidationError
 
 
 class FakeTransport:
@@ -19,7 +31,9 @@ class FakeTransport:
     def call(self, method, params):
         self.calls.append((method, params))
         if method == "citations.resolve":
-            return [{"ref": params["refs"][0], "url": "https://example.com"}]
+            requested = params.get("requests")
+            ref = requested[0]["ref"] if requested else params["refs"][0]
+            return [{"ref": ref, "url": "https://example.com"}]
         return [
             {
                 "ref": "ref_1",
@@ -64,6 +78,34 @@ def test_unix_transport_reuses_one_http_client_for_all_calls() -> None:
     assert fake.closed == 1
 
 
+def test_unix_transport_exposes_typed_broker_errors() -> None:
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "http://opensac/v1/call"),
+        json={
+            "ok": False,
+            "result": None,
+            "error": {
+                "code": "provider_unavailable",
+                "message": "model service is unavailable",
+                "retryable": True,
+            },
+        },
+    )
+
+    class FakeClient:
+        def post(self, *_args, **_kwargs):
+            return response
+
+    with patch("opensac_sdk.transport.httpx.Client", return_value=FakeClient()):
+        transport = UnixSocketTransport("/tmp/broker.sock", "token")
+        with pytest.raises(BrokerError, match="model service") as raised:
+            transport.call("llm.complete", {"prompt": "hello"})
+
+    assert raised.value.code == "provider_unavailable"
+    assert raised.value.retryable is True
+
+
 def test_search_resource_returns_typed_hits() -> None:
     transport = FakeTransport()
     hits = SearchResource(transport)("query", limit=3)
@@ -71,6 +113,221 @@ def test_search_resource_returns_typed_hits() -> None:
     assert transport.calls == [
         ("search.query", {"query": "query", "limit": 3, "offset": 0, "domains": None})
     ]
+
+
+def test_search_many_attaches_the_effective_request_to_each_batch() -> None:
+    class ManyTransport:
+        def call(self, method, params):
+            assert method == "search.query_many"
+            return [
+                {"query": query, "hits": [], "error": None}
+                for query in params["queries"]
+            ]
+
+    batches = SearchResource(ManyTransport()).many(
+        ["one", "two"],
+        limit_per_query=12,
+        offset=4,
+        domains=["example.com"],
+    )
+
+    assert [batch.request.model_dump() for batch in batches if batch.request] == [
+        {"limit": 12, "offset": 4, "domains": ["example.com"]},
+        {"limit": 12, "offset": 4, "domains": ["example.com"]},
+    ]
+
+
+def _hit(ref: str, rank: int, *, backend: str = "local", score: float | None = None):
+    return SearchHit(
+        ref=ref,
+        backend=backend,
+        title=ref,
+        rank=rank,
+        score=score,
+        retrieval=RetrievalMetadata(
+            mode="dense",
+            result_mode="query_aware",
+            score_name="backend_score",
+            higher_is_better=True,
+            comparable_across_queries=False,
+        ),
+    )
+
+
+def test_search_rrf_fuses_refs_locally_and_preserves_provenance() -> None:
+    transport = FakeTransport()
+    search = SearchResource(transport)
+    batches = [
+        SearchBatch(
+            query="alpha",
+            hits=[_hit("a", 1, score=0.9), _hit("a", 3), _hit("b", 2)],
+            request=SearchRequestInfo(limit=3, offset=0, domains=["example.com"]),
+        ),
+        SearchBatch(
+            query="beta",
+            hits=[_hit("b", 1), _hit("a", 2)],
+            request=SearchRequestInfo(limit=2, offset=10),
+        ),
+        SearchBatch(query="failed", hits=[_hit("ignored", 1)], error="timeout"),
+    ]
+
+    result = search.fuse_rrf(batches, weights=[1, 2, 1])
+
+    assert transport.calls == []
+    assert [candidate.ref for candidate in result.candidates] == ["b", "a"]
+    assert [candidate.fused_rank for candidate in result.candidates] == [1, 2]
+    assert result.input_count == 5
+    assert result.unique_count == 2
+    assert result.duplicate_count == 3
+    assert result.batch_errors[0].model_dump() == {
+        "batch_index": 2,
+        "query": "failed",
+        "error": "timeout",
+    }
+
+    candidate_a = result.candidates[1]
+    assert candidate_a.rank == 1
+    assert len(candidate_a.sources) == 2
+    assert candidate_a.sources[0].request is not None
+    assert candidate_a.sources[0].request.domains == ["example.com"]
+    assert candidate_a.sources[0].retrieval is not None
+    assert candidate_a.sources[0].retrieval.mode == "dense"
+
+
+def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
+    search = SearchResource(FakeTransport())
+    tied = search.fuse_rrf(
+        [
+            SearchBatch(query="first", hits=[_hit("z", 1)]),
+            SearchBatch(query="second", hits=[_hit("a", 1)]),
+        ],
+        limit=1,
+    )
+    assert [candidate.ref for candidate in tied.candidates] == ["z"]
+    assert tied.unique_count == 2
+
+    empty = search.fuse_rrf([])
+    assert empty.candidates == []
+    assert empty.model_dump(exclude={"candidates", "batch_errors"}) == {
+        "input_count": 0,
+        "unique_count": 0,
+        "duplicate_count": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"weights": [1]}, "align"),
+        ({"weights": [0, 0]}, "greater than zero"),
+        ({"weights": [1, -1]}, "non-negative"),
+        ({"weights": [1, float("inf")]}, "finite"),
+        ({"k": -1}, "non-negative"),
+        ({"limit": -1}, "non-negative"),
+    ],
+)
+def test_search_rrf_rejects_invalid_options(kwargs, message) -> None:
+    batches = [
+        SearchBatch(query="one", hits=[_hit("a", 1)]),
+        SearchBatch(query="two", hits=[_hit("b", 1)]),
+    ]
+    with pytest.raises(ValueError, match=message):
+        SearchResource(FakeTransport()).fuse_rrf(batches, **kwargs)
+
+
+def test_search_rrf_refuses_non_positive_source_rank() -> None:
+    with pytest.raises(ValueError, match="rank"):
+        SearchResource(FakeTransport()).fuse_rrf(
+            [SearchBatch(query="bad", hits=[_hit("a", 0)])]
+        )
+
+
+class ExtractionTransport:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def call(self, method, params):
+        self.calls.append((method, params))
+        return self.result
+
+
+def test_extract_many_returns_typed_per_item_results_and_forwards_repair() -> None:
+    transport = ExtractionTransport(
+        [
+            {"index": 0, "data": {"matches": True}, "error": None, "attempts": 1},
+            {
+                "index": 1,
+                "data": None,
+                "error": {
+                    "code": "schema_mismatch",
+                    "message": "matches is required",
+                    "retryable": False,
+                },
+                "attempts": 2,
+            },
+        ]
+    )
+
+    results = LLMResource(transport).extract_many(
+        [{"text": "yes"}, {"text": "unknown"}],
+        instruction="Classify each item",
+        schema={
+            "type": "object",
+            "properties": {"matches": {"type": "boolean"}},
+            "required": ["matches"],
+        },
+        max_tokens=64,
+        repair_attempts=1,
+    )
+
+    assert results[0] == ExtractionResult(index=0, data={"matches": True}, attempts=1)
+    assert results[1].error == ExtractionError(
+        code="schema_mismatch",
+        message="matches is required",
+        retryable=False,
+    )
+    assert transport.calls[0] == (
+        "llm.extract_many",
+        {
+            "items": [{"text": "yes"}, {"text": "unknown"}],
+            "instruction": "Classify each item",
+            "schema": {
+                "type": "object",
+                "properties": {"matches": {"type": "boolean"}},
+                "required": ["matches"],
+            },
+            "concurrency": 4,
+            "repair_attempts": 1,
+            "max_tokens": 64,
+        },
+    )
+
+
+def test_extract_many_rejects_non_json_values_before_transport() -> None:
+    transport = ExtractionTransport([])
+    llm = LLMResource(transport)
+
+    with pytest.raises(ValueError, match="schema must be JSON serializable"):
+        llm.extract_many([], instruction="x", schema={"matches": bool})
+    with pytest.raises(ValueError, match=r"items\[1\] must be JSON serializable"):
+        llm.extract_many([{"ok": 1}, {"bad": float("nan")}], instruction="x", schema={})
+    with pytest.raises(ValueError, match="repair_attempts"):
+        llm.extract_many([], instruction="x", schema={}, repair_attempts=2)
+
+    assert transport.calls == []
+
+
+def test_extraction_result_requires_exactly_one_data_or_error() -> None:
+    with pytest.raises(ValidationError, match="exactly one"):
+        ExtractionResult(index=0, attempts=1)
+    with pytest.raises(ValidationError, match="exactly one"):
+        ExtractionResult(
+            index=0,
+            data={},
+            error=ExtractionError(code="x", message="x", retryable=False),
+            attempts=1,
+        )
 
 
 def test_state_round_trip_and_path_confinement(tmp_path) -> None:
@@ -182,6 +439,44 @@ def test_output_submission(tmp_path) -> None:
     payload = json.loads(path.read_text())
     assert payload["output"] == {"answer": 42}
     assert payload["citations"][0]["url"] == "https://example.com"
+
+
+def test_output_forwards_an_evidence_locator_without_flattening_it(tmp_path) -> None:
+    path = tmp_path / "output.json"
+    transport = FakeTransport()
+    locator = EvidenceLocator(id="ev_1", ref="ref_1", kind="selected_passage")
+
+    OutputResource(str(path), transport).submit(
+        {"answer": 42},
+        citations=[{"ref": "ref_1", "locator": locator}],
+    )
+
+    assert transport.calls == [
+        (
+            "citations.resolve",
+            {
+                "requests": [
+                    {
+                        "ref": "ref_1",
+                        "locator": {
+                            "id": "ev_1",
+                            "ref": "ref_1",
+                            "kind": "selected_passage",
+                        },
+                    }
+                ]
+            },
+        )
+    ]
+
+
+def test_content_models_accept_optional_evidence_locators() -> None:
+    locator = {"id": "ev_1", "ref": "ref_1", "kind": "selected_passage"}
+    snippet = ContentSnippet(ref="ref_1", text="passage", locator=locator)
+    match = ContentMatch(ref="ref_1", line=8, text="match", locator=locator)
+
+    assert snippet.locator is not None and snippet.locator.id == "ev_1"
+    assert match.locator is not None and match.locator.kind == "selected_passage"
 
 
 def test_output_rejects_unscoped_citation(tmp_path) -> None:

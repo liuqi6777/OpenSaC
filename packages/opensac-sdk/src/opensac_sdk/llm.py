@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
+from .models import ExtractionResult
 from .transport import UnixSocketTransport
 
 
@@ -63,13 +65,33 @@ class LLMResource:
         schema: dict[str, Any],
         concurrency: int = 4,
         max_tokens: int | None = None,
-    ) -> list[dict[str, Any]]:
+        repair_attempts: int = 0,
+    ) -> list[ExtractionResult]:
+        if repair_attempts not in {0, 1}:
+            raise ValueError("repair_attempts must be 0 or 1")
+        if not isinstance(schema, dict):
+            raise ValueError("schema must be a JSON-serializable object")
+        self._ensure_json_serializable(schema, "schema")
+        if not isinstance(items, list):
+            raise ValueError("items must be a list")
+        for index, item in enumerate(items):
+            self._ensure_json_serializable(item, f"items[{index}]")
+
         params = {
             "items": items,
             "instruction": instruction,
             "schema": schema,
             "concurrency": concurrency,
+            "repair_attempts": repair_attempts,
         }
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
-        return self._transport.call("llm.extract_many", params)
+        result = self._transport.call("llm.extract_many", params)
+        return [ExtractionResult.model_validate(item) for item in result]
+
+    @staticmethod
+    def _ensure_json_serializable(value: Any, field: str) -> None:
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+            raise ValueError(f"{field} must be JSON serializable: {exc}") from exc

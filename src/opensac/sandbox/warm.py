@@ -14,7 +14,9 @@ from typing import Protocol
 
 from opensac.sandbox.base import SandboxRequest, SandboxResult
 from opensac.sandbox.docker import (
+    DockerImageContractVerifier,
     DockerSandbox,
+    SandboxImageContractError,
     read_bounded_process_output,
     remove_docker_container,
 )
@@ -99,6 +101,7 @@ class WarmDockerSandbox:
         self.startup_timeout_seconds = startup_timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
         self.max_containers = max(0, int(max_containers))
+        self._image_contract = DockerImageContractVerifier(image)
         self._sessions: dict[str, _WarmSession] = {}
         self._closed_session_keys: set[str] = set()
         self._registry_lock = asyncio.Lock()
@@ -381,6 +384,10 @@ class WarmDockerSandbox:
                 self._capacity_changed.set()
 
     async def _start_container(self, state: _WarmSession, request: SandboxRequest) -> str:
+        try:
+            await self._image_contract.ensure_compatible()
+        except SandboxImageContractError as exc:
+            raise _StartFailure(125, "", str(exc), str(exc)) from exc
         await self._ensure_container_capacity(state)
         containers_dir = self.broker_socket.parent / "containers"
         containers_dir.mkdir(parents=True, exist_ok=True)

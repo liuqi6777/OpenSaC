@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .models import CitationRequest
 from .transport import UnixSocketTransport
 
 
@@ -27,3 +28,13 @@ class CitationsResource:
         handle.
         """
         return self._transport.call("citations.resolve", {"refs": refs})
+
+    def resolve_requests(
+        self, requests: list[CitationRequest | dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Resolve passage locators, preserving request order and legacy refs."""
+        parsed = [CitationRequest.model_validate(item) for item in requests]
+        return self._transport.call(
+            "citations.resolve",
+            {"requests": [item.model_dump(exclude_none=True) for item in parsed]},
+        )

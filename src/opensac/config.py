@@ -43,6 +43,19 @@ class Settings(BaseSettings):
     search_max_query_chars: int = Field(default=4096, ge=1)
     # Retrieval depth (offset + limit), matching the local backend's top_k.
     search_max_top_k: int = Field(default=600, ge=1)
+    # Structured extraction limits are enforced before the provider is called.
+    # Byte limits use UTF-8 encoded request sizes so non-ASCII inputs cannot
+    # exceed the admission budget while appearing short in Python characters.
+    extract_max_items: int = Field(default=256, ge=1)
+    extract_max_instruction_bytes: int = Field(default=16_384, ge=1)
+    extract_max_schema_bytes: int = Field(default=65_536, ge=1)
+    extract_max_item_bytes: int = Field(default=65_536, ge=1)
+    extract_max_total_item_bytes: int = Field(default=2_097_152, ge=1)
+    extract_max_schema_depth: int = Field(default=8, ge=1)
+    extract_max_repair_attempts: int = Field(default=1, ge=0, le=1)
+    # Evidence locators are only minted for passages small enough to be
+    # returned and validated as one citation payload.
+    citation_max_evidence_chars: int = Field(default=16_000, ge=1)
     # Concurrent document fetches inside one `content.*` call. The broker's own
     # semaphore admits a whole call as one unit, so without this a program
     # asking for fifty pages opens fifty simultaneous requests to the provider,

@@ -5,7 +5,7 @@ import re
 from urllib.parse import urljoin
 
 import httpx
-from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
+from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
 
 # Full documents in the local corpus carry a YAML frontmatter header ahead of
 # the body, and the body then repeats the title as its own first line:
@@ -108,12 +108,13 @@ class LocalSearchBackend:
         )
         response.raise_for_status()
         payload = response.json()
+        retrieval = self._retrieval_metadata(payload)
         rows = payload.get("results", [{}])
         hits = rows[0].get("hits", []) if rows else []
         # Sliced here rather than trusted to `top_k`: the window the caller
         # asked for is this backend's contract, not the service's.
         return [
-            self._normalize_hit(hit, index + 1)
+            self._normalize_hit(hit, index + 1, retrieval=retrieval)
             for index, hit in enumerate(hits[:depth])
             if index >= offset
         ]
@@ -136,7 +137,9 @@ class LocalSearchBackend:
             json={"queries": queries, "top_k": depth},
         )
         response.raise_for_status()
-        rows = response.json().get("results")
+        payload = response.json()
+        retrieval = self._retrieval_metadata(payload)
+        rows = payload.get("results")
         if not isinstance(rows, list) or len(rows) != len(queries):
             actual = len(rows) if isinstance(rows, list) else "non-list"
             raise RuntimeError(
@@ -158,7 +161,7 @@ class LocalSearchBackend:
             if not isinstance(raw_hits, list):
                 raise RuntimeError("Local batch search returned non-list hits.")
             hits = [
-                self._normalize_hit(hit, index + 1)
+                self._normalize_hit(hit, index + 1, retrieval=retrieval)
                 for index, hit in enumerate(raw_hits[:depth])
                 if index >= offset
             ]
@@ -167,7 +170,27 @@ class LocalSearchBackend:
             )
         return batches
 
-    def _normalize_hit(self, hit: dict, rank: int) -> SearchHit:
+    @staticmethod
+    def _retrieval_metadata(payload: dict) -> RetrievalMetadata | None:
+        mode = str(payload.get("backend", "") or "").strip() or None
+        result_mode = str(payload.get("result_mode", "") or "").strip() or None
+        if mode is None and result_mode is None:
+            return None
+        return RetrievalMetadata(
+            mode=mode,
+            result_mode=result_mode,
+            score_name="backend_score" if mode else None,
+            higher_is_better=True if mode else None,
+            comparable_across_queries=False,
+        )
+
+    def _normalize_hit(
+        self,
+        hit: dict,
+        rank: int,
+        *,
+        retrieval: RetrievalMetadata | None = None,
+    ) -> SearchHit:
         # Snippet selection and document-field extraction belong to the search
         # server. In particular, query-aware snippets must arrive here intact:
         # parsing or trimming them again would make OpenSAC a second policy
@@ -183,6 +206,7 @@ class LocalSearchBackend:
             snippet=str(hit.get("snippet", "") or ""),
             score=hit.get("score"),
             rank=int(hit.get("rank", rank)),
+            retrieval=retrieval,
             metadata={key: value for key, value in hit.items() if key not in known_fields},
         )
 

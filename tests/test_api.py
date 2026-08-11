@@ -30,6 +30,8 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         broker_socket=tmp_path / "broker.sock",
         api_key="public-secret",
         backend_metadata_hash="sha256:index-manifest",
+        extract_max_items=12,
+        citation_max_evidence_chars=4096,
     )
     with TestClient(create_app(settings)) as client:
         unauthorized = client.post("/v1/sessions", json={})
@@ -47,6 +49,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
+            "capability_contract_v1",
             "idempotent_exec",
             "worker_affinity",
             "idempotent_session_create",
@@ -60,6 +63,12 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["closing"] is False
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
+        assert payload["environment"]["sandbox_contract"] == 3
+        assert payload["environment"]["capability_contract"] == 1
+        capability_limits = payload["environment"]["capability_limits"]
+        assert capability_limits["extract_many"]["max_items"] == 12
+        assert capability_limits["evidence"]["max_chars"] == 4096
+        assert not any(method.startswith("llm.") for method in payload["capabilities"])
 
 
 def test_public_session_api_rejects_unknown_backend(tmp_path) -> None:
@@ -72,8 +81,10 @@ def test_public_session_api_rejects_unknown_backend(tmp_path) -> None:
 def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
     settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
     with TestClient(create_app(settings)) as client:
-        paths = client.get("/openapi.json").json()["paths"]
+        schema = client.get("/openapi.json").json()
+        paths = schema["paths"]
 
+    assert schema["info"]["version"] == "0.2.0"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
@@ -1078,11 +1089,24 @@ def test_session_reports_its_mechanisms_and_reachable_capabilities(tmp_path) -> 
         for manifest in (payload["capabilities"], web["capabilities"]):
             assert "search.query" in manifest
             assert not any("web" in method or "local" in method for method in manifest)
+            assert not any(method.startswith("llm.") for method in manifest)
 
         # Recorded on the session, which is what makes an arm recoverable after
         # the run.
         stored = client.app.state.runtime.store.get_session(payload["id"])
         assert stored.mechanisms.llm_subroutine is False
+
+
+def test_session_advertises_llm_capabilities_only_when_model_is_configured(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        broker_socket=tmp_path / "broker.sock",
+        model_name="pipeline-model",
+    )
+    with TestClient(create_app(settings)) as client:
+        payload = client.post("/v1/sessions", json={"backends": ["local"]}).json()
+
+    assert "llm.extract_many" in payload["capabilities"]
 
 
 def test_omitted_mechanisms_default_to_the_unablated_session(tmp_path) -> None:

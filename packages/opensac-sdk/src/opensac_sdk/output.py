@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .models import SubmittedOutput
+from .models import CitationRequest, SubmittedOutput
 from .transport import UnixSocketTransport
 
 
@@ -14,15 +14,31 @@ class OutputResource:
         self._output_path = Path(output_path)
         self._transport = transport
 
-    def submit(self, output: Any, *, citations: list[dict[str, Any]] | None = None) -> None:
-        requested = citations or []
+    def submit(
+        self,
+        output: Any,
+        *,
+        citations: list[CitationRequest | dict[str, Any]] | None = None,
+    ) -> None:
+        requested = [CitationRequest.model_validate(item) for item in citations or []]
         if requested:
             if self._transport is None:
                 raise RuntimeError("Citation resolution requires a broker transport")
-            refs = [str(citation.get("ref", "")) for citation in requested]
-            if any(not ref for ref in refs):
+            if any(not citation.ref for citation in requested):
                 raise ValueError("Every citation must contain a search result ref")
-            resolved = self._transport.call("citations.resolve", {"refs": refs})
+            if any(citation.locator is not None for citation in requested):
+                resolved = self._transport.call(
+                    "citations.resolve",
+                    {
+                        "requests": [
+                            citation.model_dump(exclude_none=True) for citation in requested
+                        ]
+                    },
+                )
+            else:
+                resolved = self._transport.call(
+                    "citations.resolve", {"refs": [citation.ref for citation in requested]}
+                )
         else:
             resolved = []
         payload = SubmittedOutput(output=output, citations=resolved)

@@ -4,7 +4,7 @@ import asyncio
 from urllib.parse import urlparse
 
 import httpx
-from opensac_sdk.models import ContentSnippet, SearchHit
+from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchHit
 
 
 class SerperBackend:
@@ -91,6 +91,11 @@ class SerperBackend:
             domain=urlparse(url).netloc or None,
             snippet=str(hit.get("snippet", "") or ""),
             rank=int(hit.get("position", rank)),
+            retrieval=RetrievalMetadata(
+                mode="organic",
+                result_mode="snippet",
+                comparable_across_queries=False,
+            ),
             metadata={k: v for k, v in hit.items() if k not in {"title", "link", "snippet"}},
         )
 

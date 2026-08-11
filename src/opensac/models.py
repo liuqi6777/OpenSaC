@@ -288,6 +288,36 @@ class HitRecord(BaseModel):
     identity: str
     rank: int
     score: float | None = None
+    # Populated for search fan-out so one trace can reconstruct which query
+    # surfaced a candidate. Content and citation events have no query index.
+    query_index: int | None = None
+    # Effective backend behaviour, not a caller-requested mode. Kept flat in
+    # the trace so older analysis does not need the SDK model to read it.
+    retrieval_mode: str | None = None
+
+
+class ModelAttemptRecord(BaseModel):
+    """One pipeline-model attempt, without prompts or generated content."""
+
+    index: int
+    phase: str
+    status: str
+    duration_seconds: float
+    model_tokens: int = 0
+    error_code: str | None = None
+
+
+class EvidenceTraceRecord(BaseModel):
+    """Evidence lifecycle metadata suitable for persistent research traces."""
+
+    locator_id: str | None = None
+    ref: str
+    action: str
+    status: str
+    coordinates: dict[str, Any] = Field(default_factory=dict)
+    document_fingerprint: str | None = None
+    passage_fingerprint: str | None = None
+    error_code: str | None = None
 
 
 class CapabilityEvent(BaseModel):
@@ -300,6 +330,8 @@ class CapabilityEvent(BaseModel):
     result_count: int = 0
     hits: list[HitRecord] = Field(default_factory=list)
     model_tokens: int = 0
+    model_attempts: list[ModelAttemptRecord] = Field(default_factory=list)
+    evidence_records: list[EvidenceTraceRecord] = Field(default_factory=list)
     error_type: str | None = None
     error: str | None = None
     # Only populated when the session disables context decoupling: the result

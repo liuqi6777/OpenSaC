@@ -5,7 +5,8 @@ agent generates Python, a locked-down Docker sandbox executes it, and an embedde
 search primitives through a host-side capability broker.
 
 See [the design goals and capability roadmap](docs/design.md) for the intended system
-properties, current implementation status, primitive-selection criteria, and next milestones.
+properties and primitive-selection criteria. The concrete next milestone is the
+[OpenSAC 0.3 high-fan-out reliability plan](docs/opensac-0.3-plan.md).
 
 ## Architecture
 
@@ -96,6 +97,56 @@ GET    /v1/sessions/{session_id}/workspace
 POST   /v1/sessions/{session_id}/exec
 POST   /v1/admin/drain
 ```
+
+## OpenSAC 0.2 primitives
+
+Multi-query fusion is a local SDK operation: it preserves every query/rank source and does not
+make a broker call or consume capability budget.
+
+```python
+batches = sdk.search.many(["vector database history", "ANN index origins"])
+fusion = sdk.search.fuse_rrf(batches, weights=[1.0, 0.8], k=60, limit=20)
+refs = [candidate.ref for candidate in fusion.candidates[:5]]
+```
+
+Structured extraction validates every model output against a restricted JSON Schema Draft
+2020-12 contract. Results stay aligned with the input; malformed rows carry a typed error and
+do not cancel successful siblings. Repair is explicit and limited to one attempt.
+
+```python
+rows = sdk.llm.extract_many(
+    [{"title": candidate.title, "snippet": candidate.snippet}
+     for candidate in fusion.candidates],
+    instruction="Decide whether this result contains a dated historical claim.",
+    schema={
+        "type": "object",
+        "properties": {
+            "relevant": {"type": "boolean"},
+            "year": {"type": ["integer", "null"]},
+        },
+        "required": ["relevant", "year"],
+        "additionalProperties": False,
+    },
+    repair_attempts=1,
+)
+valid = [row.data for row in rows if row.data is not None]
+```
+
+`content.read`, `content.snippets`, and `content.grep` attach a broker-issued locator to each
+non-empty passage of at most 16,000 characters. Passing that locator makes the final citation
+point at the selected passage; passing only a ref keeps the legacy search-preview citation.
+
+```python
+passage = sdk.content.read([refs[0]], offset=1, limit=20)[0]
+sdk.output.submit(
+    {"answer": "..."},
+    citations=[{"ref": passage.ref, "locator": passage.locator}],
+)
+```
+
+The session manifest reports capability contract `1`, sandbox contract `3`, feature flags, and
+the active extraction/evidence limits. Sessions without a configured pipeline model do not
+advertise `llm.*` methods.
 
 ## External Control Model
 

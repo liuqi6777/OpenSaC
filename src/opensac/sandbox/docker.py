@@ -16,6 +16,60 @@ _OUTPUT_LIMIT_MARKER = (
     b"\nOpenSAC terminated the sandbox process after stdout/stderr reached "
     b"the output limit.\n"
 )
+SANDBOX_CONTRACT = 3
+SANDBOX_CONTRACT_LABEL = "org.opensac.sandbox.contract"
+
+
+class SandboxImageContractError(RuntimeError):
+    pass
+
+
+class DockerImageContractVerifier:
+    """Lazily reject sandbox images built for an incompatible SDK contract."""
+
+    def __init__(self, image: str, *, expected: int = SANDBOX_CONTRACT) -> None:
+        self.image = image
+        self.expected = expected
+        self._verified = False
+        self._lock = asyncio.Lock()
+
+    async def ensure_compatible(self) -> None:
+        if self._verified:
+            return
+        async with self._lock:
+            if self._verified:
+                return
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "docker",
+                    "image",
+                    "inspect",
+                    "--format",
+                    f'{{{{ index .Config.Labels "{SANDBOX_CONTRACT_LABEL}" }}}}',
+                    self.image,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except OSError as exc:
+                raise SandboxImageContractError(
+                    f"Could not inspect sandbox image {self.image!r}: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            stdout_bytes, stderr_bytes = await process.communicate()
+            if process.returncode != 0:
+                stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+                detail = stderr or f"docker image inspect exited {process.returncode}"
+                raise SandboxImageContractError(
+                    f"Could not inspect sandbox image {self.image!r}: {detail}"
+                )
+            actual = stdout_bytes.decode("utf-8", errors="replace").strip()
+            if actual != str(self.expected):
+                rendered = "missing" if not actual or actual == "<no value>" else actual
+                raise SandboxImageContractError(
+                    f"Sandbox image {self.image!r} has contract {rendered!r}; "
+                    f"expected {self.expected}. Rebuild it with `opensac build-sandbox`."
+                )
+            self._verified = True
 
 
 @dataclass(frozen=True)
@@ -143,6 +197,7 @@ class DockerSandbox:
         self.cpus = cpus
         self.pids_limit = pids_limit
         self.max_output_bytes = max_output_bytes
+        self._image_contract = DockerImageContractVerifier(image)
 
     def command(self, request: SandboxRequest, *, cid_path: Path | None = None) -> list[str]:
         workspace = request.workspace.resolve()
@@ -198,6 +253,25 @@ class DockerSandbox:
         validation_started = time.monotonic()
         validate_code(request.code)
         validation_seconds = time.monotonic() - validation_started
+        try:
+            await self._image_contract.ensure_compatible()
+        except SandboxImageContractError as exc:
+            duration_seconds = time.monotonic() - validation_started
+            return SandboxResult(
+                exit_code=125,
+                stdout="",
+                stderr=str(exc),
+                duration_seconds=duration_seconds,
+                timings={
+                    "validation_seconds": validation_seconds,
+                    "workspace_setup_seconds": 0.0,
+                    "startup_seconds": max(duration_seconds - validation_seconds, 0.0),
+                    "program_seconds": 0.0,
+                    "result_processing_seconds": 0.0,
+                    "sandbox_total_seconds": duration_seconds,
+                },
+                launch_error=str(exc),
+            )
         setup_started = time.monotonic()
         request.workspace.mkdir(parents=True, exist_ok=True)
         program_path = request.workspace / request.program_filename

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from opensac_sdk.llm import LLMResource
 from opensac_sdk.models import ContentSnippet, SearchHit
-from opensac_sdk.transport import UnixSocketTransport
+from opensac_sdk.transport import BrokerError, UnixSocketTransport
 
 from opensac.broker import BrokerAlreadyRunning, BrokerRuntime, BrokerService
 from opensac.models import Session
@@ -57,6 +57,38 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
         await runtime.stop()
 
 
+async def test_broker_round_trip_returns_contract_v1_errors(tmp_path) -> None:
+    service = BrokerService({"local": SocketBackend()})
+    service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            workspace=str(tmp_path / "workspace"),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+    try:
+        transport = UnixSocketTransport(str(runtime.socket_path), "secret")
+        with pytest.raises(BrokerError, match="query must not be empty") as raised:
+            await asyncio.to_thread(
+                transport.call,
+                "search.query",
+                {"query": "", "limit": 1},
+            )
+        assert raised.value.code == "invalid_request"
+        assert raised.value.retryable is False
+
+        denied = UnixSocketTransport(str(runtime.socket_path), "unknown-token")
+        with pytest.raises(BrokerError, match="Unknown or expired") as raised:
+            await asyncio.to_thread(denied.call, "session.usage", {})
+        assert raised.value.code == "permission_denied"
+        assert raised.value.retryable is False
+    finally:
+        await runtime.stop()
+
+
 class EchoModelClient:
     def __init__(self) -> None:
         class Completions:
@@ -67,6 +99,52 @@ class EchoModelClient:
                 )
 
         self.chat = SimpleNamespace(completions=Completions())
+
+
+class FailingModelClient:
+    def __init__(self) -> None:
+        class Completions:
+            async def create(self, **kwargs):
+                raise RuntimeError("provider response that must not cross the broker")
+
+        self.chat = SimpleNamespace(completions=Completions())
+
+
+async def test_extraction_infrastructure_error_is_retryable_and_sanitized(tmp_path) -> None:
+    service = BrokerService(
+        {"local": SocketBackend()},
+        model_client=FailingModelClient(),
+        extraction_model="test-model",
+    )
+    service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            workspace=str(tmp_path / "workspace"),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+    try:
+        resource = LLMResource(UnixSocketTransport(str(runtime.socket_path), "secret"))
+        with pytest.raises(BrokerError, match="failed for every item") as raised:
+            await asyncio.to_thread(
+                resource.extract_many,
+                [{"value": 1}],
+                instruction="Copy the value.",
+                schema={
+                    "type": "object",
+                    "properties": {"value": {"type": "integer"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            )
+        assert raised.value.code == "extraction_provider_unavailable"
+        assert raised.value.retryable is True
+        assert "provider response" not in str(raised.value)
+    finally:
+        await runtime.stop()
 
 
 async def test_llm_resource_round_trips_over_real_unix_socket(tmp_path) -> None:

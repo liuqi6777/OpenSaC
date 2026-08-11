@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from openai import AsyncOpenAI
 
+from opensac import __version__
 from opensac.backends import LocalSearchBackend, SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_path
 from opensac.broker.policy import BudgetExceeded
@@ -45,7 +46,12 @@ from opensac.models import (
     budget_remaining,
     utc_now,
 )
-from opensac.sandbox import DockerSandbox, UnsafeCodeError, WarmDockerSandbox
+from opensac.sandbox import (
+    SANDBOX_CONTRACT,
+    DockerSandbox,
+    UnsafeCodeError,
+    WarmDockerSandbox,
+)
 from opensac.sandbox.base import SandboxRequest, SandboxResult
 from opensac.store import StateStore
 
@@ -126,6 +132,14 @@ class ApplicationRuntime:
             max_search_queries_per_request=settings.search_max_queries_per_request,
             max_search_query_chars=settings.search_max_query_chars,
             max_search_top_k=settings.search_max_top_k,
+            max_extract_items=settings.extract_max_items,
+            max_extract_instruction_bytes=settings.extract_max_instruction_bytes,
+            max_extract_schema_bytes=settings.extract_max_schema_bytes,
+            max_extract_item_bytes=settings.extract_max_item_bytes,
+            max_extract_total_item_bytes=settings.extract_max_total_item_bytes,
+            max_extract_schema_depth=settings.extract_max_schema_depth,
+            max_extract_repair_attempts=settings.extract_max_repair_attempts,
+            max_evidence_chars=settings.citation_max_evidence_chars,
         )
         broker_socket = resolve_broker_socket_path(settings.broker_socket)
         self.broker_runtime = BrokerRuntime(self.broker, broker_socket)
@@ -235,13 +249,33 @@ class ApplicationRuntime:
         try:
             package_version = importlib_metadata.version("opensac")
         except importlib_metadata.PackageNotFoundError:
-            package_version = "0.1.0"
+            package_version = __version__
         return {
             "opensac_version": package_version,
             "build_commit": self.settings.build_commit,
             "sandbox_image": self.settings.sandbox_image,
             "sandbox_image_digest": self.settings.sandbox_image_digest,
-            "sandbox_contract": 2,
+            "sandbox_contract": SANDBOX_CONTRACT,
+            "capability_contract": 1,
+            "capability_limits": {
+                "search": {
+                    "max_queries_per_request": self.settings.search_max_queries_per_request,
+                    "max_query_chars": self.settings.search_max_query_chars,
+                    "max_top_k": self.settings.search_max_top_k,
+                },
+                "extract_many": {
+                    "max_items": self.settings.extract_max_items,
+                    "max_instruction_bytes": self.settings.extract_max_instruction_bytes,
+                    "max_schema_bytes": self.settings.extract_max_schema_bytes,
+                    "max_item_bytes": self.settings.extract_max_item_bytes,
+                    "max_total_item_bytes": self.settings.extract_max_total_item_bytes,
+                    "max_schema_depth": self.settings.extract_max_schema_depth,
+                    "max_repair_attempts": self.settings.extract_max_repair_attempts,
+                },
+                "evidence": {
+                    "max_chars": self.settings.citation_max_evidence_chars,
+                },
+            },
             "backend_revision": self.settings.backend_revision,
             "backend_metadata_hash": self.settings.backend_metadata_hash,
             "local_search_base_url": self.settings.local_search_base_url,
@@ -883,7 +917,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             await runtime.stop()
 
-    app = FastAPI(title="OpenSAC", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="OpenSAC", version=__version__, lifespan=lifespan)
     app.state.runtime = runtime
 
     @app.middleware("http")
@@ -946,11 +980,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return get_session(session_id)
 
     def public_session(session: Session) -> PublicSession:
+        capabilities = session.mechanisms.capabilities()
+        if not runtime.settings.model_name:
+            capabilities = [method for method in capabilities if not method.startswith("llm.")]
         return PublicSession.model_validate(
             {
                 **session.model_dump(exclude={"token", "workspace"}),
-                "capabilities": session.mechanisms.capabilities(),
+                "capabilities": capabilities,
                 "features": [
+                    "capability_contract_v1",
                     "idempotent_exec",
                     "worker_affinity",
                     "idempotent_session_create",

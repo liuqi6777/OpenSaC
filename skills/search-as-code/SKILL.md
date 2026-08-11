@@ -15,6 +15,8 @@ from opensac_sdk import sdk
 
 - `sdk.search(query, limit=10, offset=0, domains=None)`
 - `sdk.search.many(queries, limit_per_query=10, offset=0, concurrency=5, domains=None)`
+- `sdk.search.fuse_rrf(batches, weights=None, k=60, limit=None)` — deterministic local
+  computation; no broker call
 - `sdk.content.get_many(refs)`
 - `sdk.content.snippets(query, refs, max_tokens=4000, max_tokens_per_page=1000)`
 - `sdk.content.grep(refs, pattern, context=0, max_matches_per_ref=20)`
@@ -22,14 +24,15 @@ from opensac_sdk import sdk
 - `sdk.citations.resolve(refs)`
 - `sdk.llm.complete(prompt, system=None, temperature=0.2, max_tokens=None)`
 - `sdk.llm.complete_many(prompts, concurrency=4, ...)`
-- `sdk.llm.extract_many(items, instruction=..., schema=..., concurrency=4)`
+- `sdk.llm.extract_many(items, instruction=..., schema=..., concurrency=4,
+  repair_attempts=0)`
 - `sdk.state.read_json/read_jsonl`, `write_json/write_jsonl`, `append_jsonl`, `exists`,
   `list(prefix="")`
 - `sdk.session.usage()` — searches, fetches and LLM calls made so far
 - `sdk.output.submit(output, citations=[{"ref": hit.ref}])`
 
 Search returns typed hits with `ref`, `backend`, `title`, `url`, `docid`, `domain`,
-`date`, `snippet`, `score`, and `rank`.
+`date`, `snippet`, `score`, `rank`, and optional effective `retrieval` metadata.
 
 A `ref` is stable for the document behind it: the same page or document returned by two
 different queries comes back as the same `ref`, so `{h.ref: h for ...}` deduplicates a
@@ -37,6 +40,12 @@ multi-query candidate pool without comparing URLs by hand. Anywhere a `ref` is a
 you may equally pass a `docid` or a `url` from a hit you already hold — whichever is
 easiest to carry — but only for documents a search in this session actually returned.
 Handles cannot be invented or guessed: retrieval is the one door into the corpus.
+
+When relative rank across queries matters, pass the returned `SearchBatch` objects to
+`sdk.search.fuse_rrf`. It groups by `ref`, keeps every source query/rank/score, and returns a
+`FusionResult` with candidates and input/unique/duplicate counts. It does not spend a search
+call, fetch content, or invoke a model. Query weights, the RRF constant, and the final limit
+remain choices made by your program.
 
 There is one `search`, and it reaches whichever corpus this session was deployed against;
 `hit.backend` names it. Which one is not something a program chooses, so it is not in the
@@ -75,6 +84,12 @@ robots block, a timeout — comes back with empty `text` and `metadata["fetch_er
 rather than being dropped, so a short result is never mistaken for a complete one. Only if
 *every* document in a call fails does the call raise, since that is infrastructure rather
 than a property of the pages.
+
+Non-empty passages returned by `snippets`, `grep`, and reasonably-sized `read` windows carry a
+broker-issued `locator`. Cite the passage actually used with
+`{"ref": passage.ref, "locator": passage.locator}`. The broker verifies that the locator was
+minted for that ref and resolves the selected evidence. A citation containing only `ref`
+deliberately cites the search preview. Never edit or construct a locator.
 
 ## Session capabilities
 
@@ -117,6 +132,13 @@ fixed shape, and `llm.complete` only for planning steps whose output has no sche
 as summarizing current coverage and proposing follow-up queries. Validate anything
 `llm.complete` returns with code before acting on it.
 
+`llm.extract_many` accepts a JSON Schema whose root is an object and returns one
+`ExtractionResult` per input. Read successful values from `result.data`; inspect
+`result.error.code/message/retryable` for failures. Partial failures do not move or drop other
+rows. `repair_attempts=1` permits one additional generation for invalid JSON or a schema
+mismatch; the default is zero so cost never increases implicitly. Use JSON Schema values such
+as `{"type": "string"}` — Python type objects such as `str` cannot cross the JSON transport.
+
 Defaults worth starting from: `limit_per_query=10`, then `offset=10` on a query that
 looked promising (ranks 11–20 of a query that half worked usually beat a fresh phrasing of
 one that failed outright); `concurrency=6` on a fan-out; `grep` the whole pool at once
@@ -133,10 +155,10 @@ Persist compact intermediate records to JSONL when later turns may need them. Th
 workspace and the ref table survive across turns, so handles written to JSONL in one turn
 still resolve in a later one: extend a record with `append_jsonl` rather than reading and
 rewriting it, and call `exists` before assuming an earlier turn left something behind.
-`session.usage()` reports how much has been retrieved so far. Nothing rations it — there
-are no ceilings — so it is there for a program that wants to pace itself: retrieval
-climbing while evidence does not is the signal to read rather than search again. Submit
-only evidence and summaries useful to the control model, not every raw result.
+`session.usage()` reports how much has been retrieved so far. Evaluation sessions normally
+leave ceilings unset; deployments may advertise hard session budgets. Retrieval climbing while
+evidence does not is the signal to read rather than search again. Submit only evidence and
+summaries useful to the control model, not every raw result.
 
 Never use direct HTTP, sockets, subprocesses, shell commands, credentials, environment
 inspection, or package installation. Dunder attributes are rejected apart from `__name__`
@@ -150,9 +172,10 @@ resolves its trusted URL, document ID, title, and evidence.
 from opensac_sdk import sdk
 
 batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
-hits = {h.ref: h for batch in batches if not batch.error for h in batch.hits}
-for ref, hit in hits.items():
-    print(f"{hit.rank} {ref} {hit.date or ''} {hit.title}")
+fusion = sdk.search.fuse_rrf(batches, k=60, limit=50)
+hits = {candidate.ref: candidate for candidate in fusion.candidates}
+for candidate in fusion.candidates:
+    print(f"{candidate.fused_rank} {candidate.ref} {candidate.date or ''} {candidate.title}")
 
 matches = sdk.content.grep(list(hits), r"born in (18|19)\d{2}", context=2)
 records = sdk.llm.extract_many(
@@ -160,6 +183,12 @@ records = sdk.llm.extract_many(
     instruction=instruction,
     schema=schema,
 )
-sdk.state.write_jsonl("records.jsonl", records)
-sdk.output.submit({"records": records}, citations=[{"ref": m.ref} for m in matches[:5]])
+values = [result.data for result in records if result.data is not None]
+sdk.state.write_jsonl("records.jsonl", values)
+citations = [
+    {"ref": match.ref, "locator": match.locator}
+    for match in matches[:5]
+    if match.locator is not None
+]
+sdk.output.submit({"records": values}, citations=citations)
 ```

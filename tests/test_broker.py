@@ -6,10 +6,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
+from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
 
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
-from opensac.broker.service import BrokerService
+from opensac.broker.service import BrokerService, ExtractionInfrastructureError
 from opensac.models import (
     CAPABILITY_METHODS,
     Mechanisms,
@@ -293,6 +293,40 @@ async def test_search_many_tolerates_partial_failure() -> None:
     assert "must not be empty" in batches[1]["error"]
 
 
+async def test_web_search_many_registers_provenance_in_input_order() -> None:
+    class CompletionOrderBackend(FakeBackend):
+        async def search(self, query, *, limit, offset=0, domains=None):
+            if query == "first":
+                await asyncio.sleep(0.02)
+            return [
+                SearchHit(
+                    ref="",
+                    backend="web",
+                    title=query,
+                    url="https://example.com/shared",
+                    snippet=query,
+                    rank=1,
+                    retrieval=RetrievalMetadata(mode="organic", result_mode="snippet"),
+                )
+            ]
+
+    service = BrokerService({"web": CompletionOrderBackend("web")})
+    state = service.register_session(make_session())
+
+    batches = await service.call(
+        "token",
+        "search.query_many",
+        {"queries": ["first", "second"], "concurrency": 2},
+        execution_id="exec-query-order",
+    )
+
+    assert batches[0]["hits"][0]["ref"] == batches[1]["hits"][0]["ref"]
+    assert state.references[batches[0]["hits"][0]["ref"]].title == "first"
+    event = service.take_trace("token", "exec-query-order")[0]
+    assert [hit.query_index for hit in event.hits] == [0, 1]
+    assert [hit.retrieval_mode for hit in event.hits] == ["organic", "organic"]
+
+
 async def test_local_search_many_prefers_backend_batch_and_preserves_order() -> None:
     class BatchLocal(FakeBackend):
         def __init__(self) -> None:
@@ -370,6 +404,46 @@ class FakeModelClient:
         self.chat = SimpleNamespace(completions=Completions())
 
 
+class ScriptedModelClient:
+    """Return one scripted provider outcome per call, in dispatch order."""
+
+    def __init__(self, outcomes: list[str | BaseException], *, tokens: int = 7) -> None:
+        self.outcomes = list(outcomes)
+        self.tokens = tokens
+        self.calls: list[dict] = []
+        parent = self
+
+        class Completions:
+            async def create(self, **kwargs):
+                parent.calls.append(kwargs)
+                outcome = parent.outcomes.pop(0)
+                if isinstance(outcome, BaseException):
+                    raise outcome
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content=outcome))],
+                    usage=SimpleNamespace(total_tokens=parent.tokens),
+                )
+
+        self.chat = SimpleNamespace(completions=Completions())
+
+
+def make_scripted_llm_service(
+    outcomes: list[str | BaseException],
+    *,
+    budget: ResourceBudget | None = None,
+    **limits,
+) -> tuple[BrokerService, ScriptedModelClient]:
+    client = ScriptedModelClient(outcomes)
+    service = BrokerService(
+        {"web": FakeBackend("web")},
+        model_client=client,
+        extraction_model="test-model",
+        **limits,
+    )
+    service.register_session(make_session(budget=budget))
+    return service, client
+
+
 def make_llm_service() -> tuple[BrokerService, FakeModelClient]:
     client = FakeModelClient()
     service = BrokerService(
@@ -426,6 +500,7 @@ async def test_pipeline_output_budget_clamps_and_reserves_before_call() -> None:
     assert state.policy.usage.pipeline_model_tokens == 11
     with pytest.raises(BudgetExceeded, match="max_pipeline_output_tokens"):
         await service.call("token", "llm.complete", {"prompt": "again"})
+    assert state.policy.usage.llm_calls == 1
 
 
 async def test_capability_trace_records_compact_inputs_results_and_errors() -> None:
@@ -513,6 +588,373 @@ async def test_llm_complete_many_preserves_prompt_order() -> None:
     assert answers == ["echo:one", "echo:two", "echo:three"]
     assert service.sessions["token"].policy.usage.llm_calls == 3
     assert service.take_trace("token", "exec-many")[0].model_tokens == 33
+
+
+async def test_extract_many_returns_checked_rows_and_rejects_non_strict_json() -> None:
+    service, _ = make_scripted_llm_service(
+        [
+            '{"name":"valid"}',
+            "[]",
+            '{"name":"first","name":"duplicate"}',
+            '{"name":NaN}',
+            '{"name":1e400}',
+            "   ",
+        ]
+    )
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+        "additionalProperties": False,
+    }
+
+    rows = await service.call(
+        "token",
+        "llm.extract_many",
+        {
+            "items": list(range(6)),
+            "instruction": "Extract a name",
+            "schema": schema,
+            "concurrency": 1,
+        },
+        execution_id="exec-extract",
+    )
+
+    assert rows[0] == {
+        "index": 0,
+        "data": {"name": "valid"},
+        "error": None,
+        "attempts": 1,
+    }
+    assert [row["error"]["code"] for row in rows[1:]] == [
+        "non_object",
+        "invalid_json",
+        "invalid_json",
+        "invalid_json",
+        "empty_output",
+    ]
+    assert all(row["data"] is None for row in rows[1:])
+    event = service.take_trace("token", "exec-extract")[0]
+    assert event.model_tokens == 42
+    assert [attempt.index for attempt in event.model_attempts] == list(range(6))
+    assert [attempt.error_code for attempt in event.model_attempts] == [
+        None,
+        "non_object",
+        "invalid_json",
+        "invalid_json",
+        "invalid_json",
+        "empty_output",
+    ]
+    assert event.result_payload is None
+    assert set(event.model_attempts[0].model_dump()) == {
+        "index",
+        "phase",
+        "status",
+        "duration_seconds",
+        "model_tokens",
+        "error_code",
+    }
+
+
+async def test_extract_many_supports_nested_arrays_nullable_scalars_and_enum() -> None:
+    service, _ = make_scripted_llm_service(
+        ['{"status":"ok","note":null,"tags":["a"],"details":{"count":2}}']
+    )
+    rows = await service.call(
+        "token",
+        "llm.extract_many",
+        {
+            "items": ["input"],
+            "instruction": "extract",
+            "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "status": {"enum": ["ok", "failed"]},
+                    "note": {"type": ["string", "null"]},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "details": {
+                        "type": "object",
+                        "properties": {"count": {"type": "integer"}},
+                        "required": ["count"],
+                        "additionalProperties": False,
+                    },
+                },
+                "required": ["status", "note", "tags", "details"],
+                "additionalProperties": False,
+            },
+        },
+    )
+
+    assert rows[0]["error"] is None
+    assert rows[0]["data"]["details"] == {"count": 2}
+
+
+async def test_extract_many_validates_schema_and_limits_before_charging() -> None:
+    service, client = make_scripted_llm_service(
+        ['{"ok":true}'],
+        max_extract_instruction_bytes=3,
+        max_extract_item_bytes=4,
+    )
+    state = service.sessions["token"]
+
+    with pytest.raises(ValueError, match="JSON-serializable"):
+        await service.call(
+            "token",
+            "llm.extract_many",
+            {
+                "items": [1],
+                "instruction": "",
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": bool}},
+                },
+            },
+        )
+    with pytest.raises(ValueError, match="keyword 'pattern'.*not supported"):
+        await service.call(
+            "token",
+            "llm.extract_many",
+            {
+                "items": [1],
+                "instruction": "",
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "string", "pattern": "x"}},
+                },
+            },
+        )
+    with pytest.raises(ValueError, match="one type plus null"):
+        await service.call(
+            "token",
+            "llm.extract_many",
+            {
+                "items": [1],
+                "instruction": "",
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": [{}, "null"]}},
+                },
+            },
+        )
+    with pytest.raises(ValueError, match="instruction is 4 bytes"):
+        await service.call(
+            "token",
+            "llm.extract_many",
+            {
+                "items": [1],
+                "instruction": "four",
+                "schema": {"type": "object"},
+            },
+        )
+    with pytest.raises(ValueError, match="item at index 0 is 6 bytes"):
+        await service.call(
+            "token",
+            "llm.extract_many",
+            {
+                "items": ["long"],
+                "instruction": "",
+                "schema": {"type": "object"},
+            },
+        )
+    with pytest.raises(ValueError, match="concurrency must be an integer"):
+        await service.call(
+            "token",
+            "llm.extract_many",
+            {
+                "items": [1],
+                "instruction": "",
+                "schema": {"type": "object"},
+                "concurrency": None,
+            },
+        )
+
+    assert client.calls == []
+    assert state.policy.usage.llm_calls == 0
+
+
+async def test_extract_many_enforces_batch_schema_total_and_depth_limits() -> None:
+    cases = [
+        (
+            {"max_extract_items": 1},
+            {
+                "items": [1, 2],
+                "instruction": "",
+                "schema": {"type": "object"},
+            },
+            "exceeding the broker maximum of 1",
+        ),
+        (
+            {"max_extract_schema_bytes": 16},
+            {
+                "items": [1],
+                "instruction": "",
+                "schema": {"type": "object"},
+            },
+            "schema is 17 bytes",
+        ),
+        (
+            {"max_extract_total_item_bytes": 3},
+            {
+                "items": [10, 20],
+                "instruction": "",
+                "schema": {"type": "object"},
+            },
+            "items total 4 bytes",
+        ),
+        (
+            {"max_extract_schema_depth": 2},
+            {
+                "items": [1],
+                "instruction": "",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "outer": {
+                            "type": "object",
+                            "properties": {"inner": {"type": "string"}},
+                        }
+                    },
+                },
+            },
+            "schema nesting exceeds maximum depth 2",
+        ),
+    ]
+
+    for limits, params, message in cases:
+        service, client = make_scripted_llm_service(['{"ok":true}'], **limits)
+        state = service.sessions["token"]
+        with pytest.raises(ValueError, match=message):
+            await service.call("token", "llm.extract_many", params)
+        assert client.calls == []
+        assert state.policy.usage.llm_calls == 0
+
+
+async def test_extract_many_keeps_partial_provider_failure_and_success_tokens() -> None:
+    service, _ = make_scripted_llm_service(
+        [RuntimeError("provider secret response body"), '{"value":2}']
+    )
+    rows = await service.call(
+        "token",
+        "llm.extract_many",
+        {
+            "items": [1, 2],
+            "instruction": "extract",
+            "schema": {
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+            },
+            "concurrency": 1,
+        },
+        execution_id="exec-partial",
+    )
+
+    assert rows[0]["error"] == {
+        "code": "provider_error",
+        "message": "Extraction provider request failed",
+        "retryable": True,
+    }
+    assert rows[1]["data"] == {"value": 2}
+    assert service.sessions["token"].policy.usage.pipeline_model_tokens == 7
+    event = service.take_trace("token", "exec-partial")[0]
+    assert event.model_tokens == 7
+    assert "secret" not in event.model_dump_json()
+
+
+async def test_extract_many_raises_safe_typed_error_when_provider_fails_all_items() -> None:
+    service, _ = make_scripted_llm_service(
+        [RuntimeError("first secret"), RuntimeError("second secret")]
+    )
+    with pytest.raises(ExtractionInfrastructureError) as raised:
+        await service.call(
+            "token",
+            "llm.extract_many",
+            {
+                "items": [1, 2],
+                "instruction": "extract",
+                "schema": {"type": "object"},
+                "concurrency": 1,
+            },
+            execution_id="exec-provider-down",
+        )
+
+    assert raised.value.code == "extraction_provider_unavailable"
+    assert raised.value.retryable is True
+    assert "secret" not in str(raised.value)
+    event = service.take_trace("token", "exec-provider-down")[0]
+    assert [attempt.error_code for attempt in event.model_attempts] == [
+        "provider_error",
+        "provider_error",
+    ]
+    assert "secret" not in event.model_dump_json()
+
+
+async def test_extract_many_repairs_in_index_order_after_one_budget_reservation() -> None:
+    service, client = make_scripted_llm_service(
+        ["not json", '{"value":"wrong"}', '{"value":1}', '{"value":"still wrong"}']
+    )
+    rows = await service.call(
+        "token",
+        "llm.extract_many",
+        {
+            "items": [1, 2],
+            "instruction": "extract",
+            "schema": {
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+            },
+            "repair_attempts": 1,
+            "concurrency": 1,
+        },
+        execution_id="exec-repair",
+    )
+
+    assert rows[0] == {
+        "index": 0,
+        "data": {"value": 1},
+        "error": None,
+        "attempts": 2,
+    }
+    assert rows[1]["attempts"] == 2
+    assert rows[1]["error"]["code"] == "schema_mismatch"
+    state = service.sessions["token"]
+    assert state.policy.usage.llm_calls == 4
+    assert state.policy.usage.pipeline_model_tokens == 28
+    event = service.take_trace("token", "exec-repair")[0]
+    assert [(attempt.index, attempt.phase) for attempt in event.model_attempts] == [
+        (0, "initial"),
+        (1, "initial"),
+        (0, "repair"),
+        (1, "repair"),
+    ]
+    repair_prompts = [call["messages"][-1]["content"] for call in client.calls[2:]]
+    assert "Validation error:\ninvalid_json:" in repair_prompts[0]
+    assert "Validation error:\nschema_mismatch:" in repair_prompts[1]
+    assert all("provider_error" not in prompt for prompt in repair_prompts)
+
+
+async def test_extract_many_reserves_all_repairs_before_dispatch() -> None:
+    service, client = make_scripted_llm_service(
+        ["not json", '{"value":2}', '{"value":1}'],
+        budget=ResourceBudget(max_pipeline_llm_calls=2),
+    )
+    with pytest.raises(BudgetExceeded, match="max_pipeline_llm_calls"):
+        await service.call(
+            "token",
+            "llm.extract_many",
+            {
+                "items": [1, 2],
+                "instruction": "extract",
+                "schema": {"type": "object"},
+                "repair_attempts": 1,
+                "concurrency": 1,
+            },
+        )
+
+    assert len(client.calls) == 2
+    assert service.sessions["token"].policy.usage.pipeline_model_tokens == 14
 
 
 async def test_a_fanout_is_counted_at_the_size_it_was_dispatched() -> None:
@@ -749,6 +1191,196 @@ async def test_grep_falls_back_to_a_literal_search_for_a_bad_pattern() -> None:
 
     matches = await service.call("token", "content.grep", {"refs": [ref], "pattern": "C++ ("})
     assert [match["line"] for match in matches] == [1]
+
+
+async def test_selected_passage_locator_resolves_exact_evidence_and_rejects_tampering() -> None:
+    class EvidenceBackend(FakeBackend):
+        async def content(self, hits, *, query=None):
+            return [
+                ContentSnippet(
+                    ref=hit.ref,
+                    text=f"document {hit.rank} line one\ndocument {hit.rank} line two",
+                    url=hit.url,
+                )
+                for hit in hits
+            ]
+
+    service = BrokerService({"web": EvidenceBackend("web", depth=2)})
+    service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
+    rows = await service.call(
+        "token",
+        "content.read",
+        {"refs": [hits[0]["ref"]], "offset": 2, "limit": 1},
+        execution_id="exec-evidence-issue",
+    )
+    locator = rows[0]["locator"]
+    issued = service.take_trace("token", "exec-evidence-issue")[0]
+    assert len(issued.evidence_records) == 1
+    assert issued.evidence_records[0].action == "issue"
+    assert issued.evidence_records[0].status == "ok"
+    assert issued.evidence_records[0].coordinates == {
+        "type": "lines",
+        "start_line": 2,
+        "end_line": 2,
+    }
+    assert len(issued.evidence_records[0].document_fingerprint or "") == 64
+    assert "document 1 line two" not in issued.model_dump_json()
+
+    selected = await service.call(
+        "token",
+        "citations.resolve",
+        {"requests": [{"ref": hits[0]["ref"], "locator": locator}]},
+        execution_id="exec-evidence-validate",
+    )
+    assert selected[0]["evidence"] == rows[0]["text"] == "document 1 line two"
+    assert selected[0]["evidence_kind"] == "selected_passage"
+    validated = service.take_trace("token", "exec-evidence-validate")[0]
+    assert validated.evidence_records[0].action == "validate"
+    assert validated.evidence_records[0].status == "ok"
+    # Default context decoupling keeps the citation body out of the trace. The
+    # explicit context-decoupling ablation remains the one intentional echo arm.
+    assert validated.result_payload is None
+    assert "document 1 line two" not in validated.model_dump_json()
+    legacy = await service.call(
+        "token", "citations.resolve", {"refs": [hits[0]["ref"]]}
+    )
+    assert legacy[0]["evidence_kind"] == "search_preview"
+    assert legacy[0]["evidence"] == "snippet"
+
+    with pytest.raises(ValueError, match="Unknown evidence locator"):
+        await service.call(
+            "token",
+            "citations.resolve",
+            {
+                "requests": [
+                    {
+                        "ref": hits[0]["ref"],
+                        "locator": {**locator, "id": "evidence_unknown"},
+                    }
+                ]
+            },
+            execution_id="exec-evidence-invalid",
+        )
+    invalid = service.take_trace("token", "exec-evidence-invalid")[0]
+    assert invalid.evidence_records[0].status == "error"
+    assert invalid.evidence_records[0].error_code == "unknown_locator"
+    with pytest.raises(ValueError, match="does not belong"):
+        await service.call(
+            "token",
+            "citations.resolve",
+            {"requests": [{"ref": hits[1]["ref"], "locator": locator}]},
+        )
+    with pytest.raises(ValueError, match="exactly id, ref, and kind"):
+        await service.call(
+            "token",
+            "citations.resolve",
+            {
+                "requests": [
+                    {
+                        "ref": hits[0]["ref"],
+                        "locator": {**locator, "extra": "tampered"},
+                    }
+                ]
+            },
+        )
+
+
+async def test_snippets_keep_one_row_per_ref_and_update_truncated_coordinates() -> None:
+    class EvidenceBackend(FakeBackend):
+        async def content(self, hits, *, query=None):
+            return [
+                ContentSnippet(ref=hit.ref, text=f"document-{hit.rank}") for hit in hits
+            ]
+
+    service = BrokerService({"web": EvidenceBackend("web", depth=2)})
+    service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
+
+    rows = await service.call(
+        "token",
+        "content.snippets",
+        {
+            "refs": [hit["ref"] for hit in hits],
+            "query": "",
+            "max_tokens_per_page": 20,
+            "max_tokens": 1,
+        },
+    )
+
+    assert [row["ref"] for row in rows] == [hit["ref"] for hit in hits]
+    assert rows[0]["text"] == "docu"
+    assert rows[0]["metadata"]["passage_end"] == 4
+    assert rows[0]["locator"]["ref"] == hits[0]["ref"]
+    assert rows[1]["text"] == ""
+    assert rows[1]["metadata"]["omitted_by_total_budget"] is True
+    assert rows[1].get("locator") is None
+
+
+async def test_read_uses_character_locator_when_one_line_is_truncated() -> None:
+    class LongLineBackend(FakeBackend):
+        async def content(self, hits, *, query=None):
+            return [ContentSnippet(ref=hit.ref, text="x" * 30 + "\nnext") for hit in hits]
+
+    service = BrokerService({"web": LongLineBackend("web")})
+    service.register_session(make_session())
+    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+
+    rows = await service.call(
+        "token",
+        "content.read",
+        {"refs": [ref], "limit": 1, "max_chars": 10},
+        execution_id="exec-partial-line",
+    )
+
+    assert rows[0]["text"] == "x" * 10
+    assert rows[0]["metadata"]["truncated_by_max_chars"] is True
+    assert rows[0]["metadata"]["truncated_mid_line"] is True
+    assert rows[0]["metadata"]["partial_line_remaining_chars"] == 20
+    evidence = service.take_trace("token", "exec-partial-line")[0].evidence_records[0]
+    assert evidence.coordinates == {
+        "type": "line_characters",
+        "line": 1,
+        "start_character": 0,
+        "end_character": 10,
+    }
+    resolved = await service.call(
+        "token",
+        "citations.resolve",
+        {"requests": [{"ref": ref, "locator": rows[0]["locator"]}]},
+    )
+    assert resolved[0]["evidence"] == "x" * 10
+
+
+async def test_grep_locator_cites_the_returned_context_and_honours_size_limit() -> None:
+    class EvidenceBackend(FakeBackend):
+        async def content(self, hits, *, query=None):
+            return [ContentSnippet(ref=hit.ref, text="before\ntarget\nafter") for hit in hits]
+
+    service = BrokerService({"web": EvidenceBackend("web")}, max_evidence_chars=19)
+    service.register_session(make_session())
+    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    matches = await service.call(
+        "token",
+        "content.grep",
+        {"refs": [ref], "pattern": "target", "context": 1},
+    )
+    resolved = await service.call(
+        "token",
+        "citations.resolve",
+        {"requests": [{"ref": ref, "locator": matches[0]["locator"]}]},
+    )
+    assert resolved[0]["evidence"] == "before\ntarget\nafter"
+
+    too_small = BrokerService({"web": EvidenceBackend("web")}, max_evidence_chars=5)
+    too_small.register_session(make_session())
+    small_ref = (
+        await too_small.call("token", "search.query", {"query": "q"})
+    )[0]["ref"]
+    small_matches = await too_small.call(
+        "token", "content.grep", {"refs": [small_ref], "pattern": "target"}
+    )
+    assert small_matches[0].get("locator") is None
 
 
 class CountingBackend:

@@ -89,12 +89,23 @@ class CapabilityPolicy:
         max_tokens: int | None = None,
     ) -> int | None:
         async with self._lock:
-            self._charge("max_pipeline_llm_calls", "llm_calls", amount)
+            call_ceiling = self.budget.max_pipeline_llm_calls
+            used_calls = self.usage.llm_calls
+            if call_ceiling is not None and used_calls + amount > call_ceiling:
+                self.terminal_reason = "budget_exhausted:max_pipeline_llm_calls"
+                raise BudgetExceeded(
+                    "max_pipeline_llm_calls",
+                    limit=call_ceiling,
+                    used=used_calls,
+                    requested=amount,
+                )
             ceiling = self.budget.max_pipeline_output_tokens
             if ceiling is None:
+                self._charge("max_pipeline_llm_calls", "llm_calls", amount)
                 return max_tokens
             remaining = ceiling - self.usage.pipeline_output_tokens_reserved
             if amount <= 0:
+                self._charge("max_pipeline_llm_calls", "llm_calls", amount)
                 return max_tokens
             per_call = min(max_tokens or 32_000, remaining // amount)
             if per_call < 1:
@@ -105,6 +116,10 @@ class CapabilityPolicy:
                     used=self.usage.pipeline_output_tokens_reserved,
                     requested=max(amount, 1),
                 )
+            # Both resources have now been validated. Commit them together so
+            # a rejected output-token reservation cannot charge an LLM call
+            # whose provider side effect never happened.
+            self._charge("max_pipeline_llm_calls", "llm_calls", amount)
             self._charge(
                 "max_pipeline_output_tokens",
                 "pipeline_output_tokens_reserved",

@@ -6,6 +6,7 @@ import typer
 import uvicorn
 
 from opensac.config import Settings
+from opensac.sandbox import SANDBOX_CONTRACT
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -46,7 +47,17 @@ def build_sandbox() -> None:
         check=True,
     )
     subprocess.run(
-        ["docker", "build", "-f", "sandbox/Dockerfile", "-t", settings.sandbox_image, "."],
+        [
+            "docker",
+            "build",
+            "--build-arg",
+            f"OPENSAC_SANDBOX_CONTRACT={SANDBOX_CONTRACT}",
+            "-f",
+            "sandbox/Dockerfile",
+            "-t",
+            settings.sandbox_image,
+            ".",
+        ],
         check=True,
     )
 if __name__ == "__main__":

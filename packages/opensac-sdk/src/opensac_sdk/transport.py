@@ -6,11 +6,14 @@ from typing import Any
 
 import httpx
 
-from .models import RpcRequest, RpcResponse
+from .models import RpcError, RpcRequest, RpcResponse
 
 
 class BrokerError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str, retryable: bool) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 class UnixSocketTransport:
@@ -36,11 +39,26 @@ class UnixSocketTransport:
             response = client.post("/v1/call", json=request.model_dump())
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise BrokerError(f"Broker request failed: {exc}") from exc
+            raise BrokerError(
+                f"Broker request failed: {exc}",
+                code="broker_transport_error",
+                retryable=True,
+            ) from exc
 
         payload = RpcResponse.model_validate(response.json())
         if not payload.ok:
-            raise BrokerError(payload.error or "Broker call failed")
+            error = payload.error
+            if isinstance(error, RpcError):
+                raise BrokerError(
+                    error.message,
+                    code=error.code,
+                    retryable=error.retryable,
+                )
+            raise BrokerError(
+                error or "Broker call failed",
+                code="broker_call_failed",
+                retryable=False,
+            )
         return payload.result
 
     def _http(self) -> httpx.Client:
