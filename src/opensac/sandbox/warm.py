@@ -647,6 +647,7 @@ class WarmDockerSandbox:
                     output=submitted.get("output"),
                     citations=submitted.get("citations", []),
                     timed_out=captured.timed_out,
+                    output_limit_exceeded=captured.output_limit_exceeded,
                     timings=self._timings(
                         validation_seconds=validation_seconds,
                         workspace_setup_seconds=workspace_setup_seconds,

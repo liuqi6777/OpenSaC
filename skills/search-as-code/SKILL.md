@@ -1,14 +1,14 @@
 ---
 name: search-as-code
-description: Compose OpenSAC search primitives as Python programs.
+description: Compose OpenSAC search, content, checked extraction, and trusted citation primitives as Python programs. Use for research workflows executed through the OpenSAC sandbox SDK.
 ---
 
 # Search as Code
 
-Use Python for orchestration and `opensac_sdk` for every external capability:
+Use Python for orchestration and `opensac_sdk` for external capabilities:
 
 ```python
-from opensac_sdk import sdk
+from opensac_sdk import BrokerError, sdk
 ```
 
 ## Primitives
@@ -21,6 +21,8 @@ from opensac_sdk import sdk
 - `sdk.content.get_many(refs)` — whole text
 - `sdk.content.snippets(query, refs, max_tokens=4000, max_tokens_per_page=1000)`
 - `sdk.content.grep(refs, pattern, context=0, max_matches_per_ref=20)`
+- `sdk.content.grep_report(refs, pattern, context=0, max_matches_per_ref=20) ->
+  ContentGrepReport`
 - `sdk.content.read(refs, offset=1, limit=200, max_chars=100_000)`
 - `sdk.citations.resolve(refs)`
 - `sdk.llm.complete(prompt, system=None, temperature=0.2, max_tokens=None)`
@@ -33,115 +35,104 @@ from opensac_sdk import sdk
 - `sdk.output.submit(output, citations=[{"ref": passage.ref,
   "locator": passage.locator}])`
 
-`SearchHit` has `ref`, `backend`, `title`, `url`, `docid`, `domain`, `date`,
-`snippet`, `score`, `rank`, and optional effective `retrieval` metadata. `SearchBatch`
-has `query`, `hits`, `error`, and `request`; check `error` before treating empty hits as
-“nothing found.” Result objects support attribute and mapping reads, and state methods accept
-them directly. A row returned by `read_jsonl` likewise supports `row.ref` and `row["ref"]`.
+`SearchHit` exposes `ref`, provenance, metadata, score, rank, and optional effective
+`retrieval`. `SearchBatch` exposes `query`, `hits`, `failure`, deprecated `error`, and
+`request`. Before treating empty hits as no result, inspect `failure.code/message/retryable`,
+`attempts`, and optional provider status/Retry-After. Partial failures stay aligned; shared
+infrastructure failure can raise `BrokerError`. Empty hits and zero matches are successes.
+`BrokerError` exposes `code`, `retryable`, `attempts`, provider status, and Retry-After directly.
+Models and `read_jsonl` rows support attribute and mapping reads.
 
-> Hosts: filter broker methods from session `capabilities`; programs cannot read the
-> manifest. Keep the tool name, output limit, backend/ablation facts, and answer format
-> host-side.
+> Hosts: OpenSAC 0.3+ uses capability contract 2; require that contract and filter methods from
+> `capabilities`; programs cannot read the manifest. Keep the tool name, output limit,
+> backend/ablation facts, provider policy, and answer format host-side.
 
 ## Handles, provenance, and evidence
 
-A `ref` is stable for the document behind it, so the same page found by several queries
-deduplicates by ref. Content methods also accept a `docid` or URL from a hit already returned
-in this session. Handles cannot be invented: search is the only door into the corpus.
+Search creates reachability. A stable `ref` deduplicates the same document across queries;
+content also accepts a returned docid or URL. Never invent handles. The host chooses the
+backend, `hit.backend` records it, unsupported parameters fail, and `offset` means ranking
+depth.
 
-Search is backend-neutral; the deployment chooses its corpus and `hit.backend` records it.
-Unsupported parameters are refused. `offset` is ranking depth, and only returned documents
-become readable.
+Ranks are query-local. Fuse `SearchBatch` objects with local `fuse_rrf`: it groups by ref,
+keeps query/rank/score in `candidate.sources`, and reports typed `batch_errors` without an RPC.
+Choose weights, `k`, and cutoff in the program.
 
-Every query has its own rank 1, so raw `rank` does not order a cross-query pool. Pass
-`SearchBatch` objects to `fuse_rrf`. It groups by ref, preserves every source query/rank/score
-in `candidate.sources`, reports failed batches in `batch_errors`, and spends no capability
-call. Query weights, `k`, and the final limit remain choices made by the program.
+Eligible `snippets`, `grep` matches, and `read` windows carry a broker locator. Cite the used
+passage with `{"ref": passage.ref, "locator": passage.locator}`; ref-only deliberately cites
+the search preview. Locators are opaque and ref-bound—never invent or edit one. Losslessly
+persisting the broker-returned `id/ref/kind` fields and submitting that mapping later is allowed.
 
-Non-empty `snippets`, `grep` matches, and reasonably sized `read` windows carry a
-broker-issued `locator`. Cite the passage actually used with
-`{"ref": passage.ref, "locator": passage.locator}`. A citation with only `ref` deliberately
-resolves the search preview. A locator is opaque and bound to its ref; never construct, edit,
-or attach it to a docid, URL, or different ref.
+The evidence registry is bounded. On capacity exhaustion, use the returned text for reasoning
+but do not cite it as selected evidence: `locator=None` and
+`locator_error.code == "evidence_capacity_exhausted"`. Explicit `{"locator": None}` is
+rejected; never silently fall back to preview.
 
 ## Reading documents
 
-- `get_many` returns whole pages.
-- `snippets` returns one broker-scored window per page.
-- `grep` locates matching lines across many documents; `line` is 1-indexed.
-- `read` returns a line window. Its metadata includes `start_line`, `end_line`,
-  `total_lines`, and `next_offset`; a `ContentMatch.line` plugs into `read(offset=...)`.
+- Use `get_many` for whole pages and `snippets` for broker-selected windows.
+- Use `grep_report` to locate 1-indexed lines while distinguishing zero matches, duplicate
+  inputs, and typed per-input failures. Legacy `grep` hides partial fetch failures.
+- Use `read(offset=match.line, ...)` for a line window; metadata carries start/end/total and
+  `next_offset`.
 
-Documents are cached per session, so grep then read beats dumping pages. `get_many`,
-`snippets`, and `read` return one ordered row per handle; a page failure has empty text and
-`metadata["fetch_error"]`. `grep` returns zero or more matches per document. If every fetch
-fails, the call raises.
+Documents cache per session. Ordered content failure rows have empty text and typed `failure`;
+`metadata["fetch_error"]` is only a compatibility mirror. All-fetch failure may raise.
 
 ## How to write a program
 
-The sandbox is a computer, not a slower function call. One execution should carry a whole
-research stage — fan out, rank, locate, read, extract, report. Only compact material the
-program prints or submits enters the control-model conversation; raw hits and pages should
-stay in variables or the workspace.
+Make one execution carry a research stage—fan out, rank, locate, read, extract, report. Keep
+raw hits/pages in variables or the workspace; only print or submit compact results.
 
 Three stages usually finish a question:
 
-1. **Survey.** Fan out 6–12 independent queries over different phrasings, entities, and
-   constraints. Check batch failures, fuse with RRF, and persist one pool keyed by ref. Print
-   only a small ranked window with ref, date, and title.
-2. **Locate.** Run one focused grep per constraint over every ref in the persistent pool, not
-   merely the printed window. Read around matches in every distinct document worth following.
-3. **Verify.** Track which constraints have actual passages behind them and check mechanical
-   constraints in code. An unsupported constraint is the next execution's work, not a detail
-   to submit around. Different constraints often require different supporting documents.
+1. **Survey:** fan out 6–12 independent queries, check failures, RRF-fuse, and persist one pool
+   keyed by ref; print only a ranked window.
+2. **Locate:** run one focused `grep_report` per constraint over the whole pool, then read around
+   useful matches.
+3. **Verify:** retain a passage per constraint and check mechanical constraints in code. Keep
+   working when anything is unsupported; constraints may require different documents.
 
-Use Python for regex, joins, filtering, counting, set arithmetic, and coverage. For fixed-shape
-semantics, `llm.extract_many` takes an object-root JSON Schema and returns one ordered
-`ExtractionResult` per input with exactly one of `data` or `error`; inspect
-`error.code/message/retryable`. `repair_attempts=1` allows one format/schema repair and defaults
-to zero. Schema types are JSON values such as `{"type": "string"}`, not Python `str`. Reserve
-`llm.complete` for results without a fixed schema and validate them before use.
+Use Python for regex, joins, filtering, counts, and coverage. For fixed-shape semantics, call
+`llm.extract_many` with an object-root JSON Schema; each ordered result has exactly one of
+`data`/`error`. Inspect typed errors. `repair_attempts=1` permits one format/schema repair
+(default 0). Use JSON types, not Python `str`. Validate free-form `llm.complete` output.
 
-The pool is the file, not the variable. Each execution is a new process: the workspace and
-handles survive, Python names do not. `merge_jsonl` treats an absent file as empty and upserts
-by ref, so one pool survives even when a later program forgets to reload before writing. What
-gets printed is a window onto the pool, not the pool: pass refs from the mapping to content
-calls and never retype handles from output. Use `append_jsonl` only for true event logs where
-duplicates are intentional.
+Treat retry, rate limiting, dedupe, and optional coalescing as host policy, not SDK knobs.
+`failure.attempts` includes host attempts; after final failure, rewrite, backfill, or stop
+instead of looping the same call.
+
+The pool is the file: processes lose variables, while workspace and handles survive.
+`merge_jsonl` upserts by ref and treats a missing file as empty. Reload before each turn, pass
+refs from the mapping, and treat printed rows as a window—not the pool. Use `append_jsonl` only
+for intentional duplicate events.
 
 Defaults worth starting from:
 
-- `limit_per_query=10`, then `offset=10` on a query that looked promising.
-- `concurrency=6` for fan-out.
-- One whole-pool `grep` per constraint with `context=2`.
-- `read(offset=max(match.line - 10, 1), limit=40, max_chars=16_000)` around a promising
-  match when it must carry a locator.
+- Start with `limit_per_query=10`, `concurrency=6`; use `offset=10` for a promising query.
+- Run one whole-pool `grep_report(context=2)` per constraint.
+- Read around a match with `offset=max(match.line - 10, 1)`, `limit=40`,
+  `max_chars=16_000` when it needs a locator.
 
 ## What goes wrong
 
-- **Answering from search snippets.** They are index-selected previews, not evidence. If no
-  content call was made, the answer is a guess.
-- **Searching again instead of reading.** When coverage stops increasing, inspect the pool
-  already held before adding more queries.
-- **Sorting merged results by raw rank.** Use RRF and do not choose what to read from an
-  arbitrary printed slice.
-- **Stopping at the first fitting document.** Keep reading while any constraint lacks a
-  passage.
-- **Reaching for last execution's variable.** Reload the workspace file. Avoid fragmented
-  `pool2.jsonl`, `pool3.jsonl`, and similar files.
-- **Dumping.** Filter before printing. Raw hits, snippets, and pages consume the observation
-  channel with material the program already holds.
+- Search snippets are previews, not evidence; read content before answering.
+- Read the held pool when coverage stalls; do not keep searching or sort cross-query hits by
+  raw rank.
+- Keep reading until every constraint has a passage. Reload the one pool file each turn.
+- Filter before printing; never dump hits/pages.
+- Never cite locator-less text as selected evidence or manufacture a locator.
 
-Wrap fragile stages and report `type(exc).__name__` plus the query, ref, or stage. The sandbox
-rejects `__class__`/`__dict__` introspection. Do not retry unknown handles or bypass the SDK
-with HTTP, sockets, subprocesses, shell, credentials, environment inspection, or installation.
+Catch `BrokerError` around fragile stages and report code/retryable/attempts plus query/ref/stage.
+Do not retry unknown handles or bypass the SDK through network, subprocess, shell, credentials,
+or installation.
 
 ## Pattern
 
 ```python
 import re
 
-from opensac_sdk import sdk
+from opensac_sdk import BrokerError, sdk
 
 # The pool is the file, not the variable: reload it before adding this turn's work.
 pool = (
@@ -150,15 +141,20 @@ pool = (
     else {}
 )
 
-# Use new follow-up queries on later turns; repeats would be weighted again.
-# Single-quoted strings carry phrase-query quotes without escaping them.
 queries = ['"exact phrase" narrowing words', 'same constraint alternate wording']
-batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
+try:
+    batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
+except BrokerError as error:
+    print(f"search failed: {error.code} retryable={error.retryable} attempts={error.attempts}")
+    batches = []
 fusion = sdk.search.fuse_rrf(batches, k=60)
 for failure in fusion.batch_errors:
-    print(f"query failed: {failure.query}: {failure.error}")
+    detail = failure.failure
+    print(
+        f"query failed: {failure.query}: {failure.error}"
+        + (f" code={detail.code} attempts={detail.attempts}" if detail else "")
+    )
 
-# Accumulate local RRF scores so ranking and the document pool both survive turns.
 for candidate in fusion.candidates:
     row = pool.setdefault(
         candidate.ref,
@@ -194,7 +190,13 @@ constraints = {
 }
 support = {}
 for name, pattern in constraints.items():
-    support[name] = sdk.content.grep(list(pool), pattern, context=2)
+    report = sdk.content.grep_report(list(pool), pattern, context=2)
+    support[name] = report.matches
+    for failed in report.failures:
+        print(
+            f"fetch failed: {name} input={failed.input_index} ref={failed.ref} "
+            f"code={failed.failure.code} attempts={failed.failure.attempts}"
+        )
     print(f"{name}: {len({m.ref for m in support[name]})} of {len(pool)} docs")
 missing = [name for name, matches in support.items() if not matches]
 print("unsupported:", missing or "none")
@@ -217,6 +219,9 @@ for name, matches in support.items():
         passage = sdk.content.read(
             [match.ref], offset=max(match.line - 10, 1), limit=40, max_chars=16_000
         )[0]
+        if passage.failure is not None:
+            print(f"read failed: {passage.ref} code={passage.failure.code}")
+            continue
         if (
             passage.text
             and passage.locator is not None
@@ -240,6 +245,8 @@ for name, matches in support.items():
             verified.add(name)
             print(f"--- {passage.ref} {passage.title}\n{passage.text}")
             break
+        if passage.locator_error is not None:
+            print(f"locator unavailable: {passage.locator_error.code}")
 
 current_evidence = [
     row

@@ -7,10 +7,15 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
+from opensac_sdk import BrokerError
 from opensac_sdk.models import (
+    CapabilityFailure,
+    ContentFailure,
+    ContentGrepReport,
     ContentMatch,
     ContentSnippet,
     EvidenceLocator,
+    EvidenceLocatorError,
     SearchBatch,
     SearchHit,
 )
@@ -66,40 +71,84 @@ class FakeContent:
         missing_year: bool = False,
         same_ref: bool = False,
         year_from_turn: int = 1,
+        partial_failure: bool = False,
+        locator_exhausted: bool = False,
     ) -> None:
         self.missing_year = missing_year
         self.same_ref = same_ref
         self.year_from_turn = year_from_turn
+        self.partial_failure = partial_failure
+        self.locator_exhausted = locator_exhausted
         self.turn = 1
         self.grep_widths: list[int] = []
 
-    def grep(self, refs: list[str], pattern: str, **_kwargs: object) -> list[ContentMatch]:
+    def grep_report(self, refs: list[str], pattern: str, **_kwargs: object) -> ContentGrepReport:
         self.grep_widths.append(len(refs))
         is_year = "1998" in pattern
         if is_year and (self.missing_year or self.turn < self.year_from_turn):
-            return []
-        ref = refs[0] if self.same_ref or not is_year else refs[1]
-        line = 120 if is_year else 12
-        return [
-            ContentMatch(
-                ref=ref,
-                title=ref,
-                line=line,
-                text="1998" if is_year else "target phrase",
-                locator=EvidenceLocator(
-                    id=f"grep-{ref}-{line}", ref=ref, kind="selected_passage"
-                ),
-            )
-        ]
+            matches = []
+        else:
+            ref = refs[0] if self.same_ref or not is_year else refs[1]
+            line = 120 if is_year else 12
+            matches = [
+                ContentMatch(
+                    input_index=refs.index(ref),
+                    ref=ref,
+                    title=ref,
+                    line=line,
+                    text="1998" if is_year else "target phrase",
+                    locator=EvidenceLocator(
+                        id=f"grep-{ref}-{line}", ref=ref, kind="selected_passage"
+                    ),
+                )
+            ]
+        failures = (
+            [
+                ContentFailure(
+                    input_index=len(refs) - 1,
+                    ref=refs[-1],
+                    failure=CapabilityFailure(
+                        code="provider_timeout",
+                        message="document fetch timed out",
+                        retryable=True,
+                        attempts=3,
+                    ),
+                )
+            ]
+            if self.partial_failure
+            else []
+        )
+        return ContentGrepReport(
+            matches=matches,
+            failures=failures,
+            input_count=len(refs),
+        )
+
+    def grep(self, refs: list[str], pattern: str, **kwargs: object) -> list[ContentMatch]:
+        return self.grep_report(refs, pattern, **kwargs).matches
 
     def read(self, refs: list[str], **kwargs: object) -> list[ContentSnippet]:
         ref = refs[0]
         offset = int(kwargs["offset"])
+        text = f"{'1998' if offset > 50 else 'target phrase'} evidence for {ref}"
+        if self.locator_exhausted:
+            return [
+                ContentSnippet(
+                    ref=ref,
+                    title=ref,
+                    text=text,
+                    locator_error=EvidenceLocatorError(
+                        code="evidence_capacity_exhausted",
+                        message="evidence registry is full",
+                        retryable=False,
+                    ),
+                )
+            ]
         return [
             ContentSnippet(
                 ref=ref,
                 title=ref,
-                text=f"{'1998' if offset > 50 else 'target phrase'} evidence for {ref}",
+                text=text,
                 locator=EvidenceLocator(
                     id=f"read-{ref}-{offset}", ref=ref, kind="selected_passage"
                 ),
@@ -122,11 +171,15 @@ def _run_pattern(
     same_ref: bool = False,
     year_from_turn: int = 1,
     turns: int = 1,
+    partial_failure: bool = False,
+    locator_exhausted: bool = False,
 ):
     content = FakeContent(
         missing_year=missing_year,
         same_ref=same_ref,
         year_from_turn=year_from_turn,
+        partial_failure=partial_failure,
+        locator_exhausted=locator_exhausted,
     )
     output = FakeOutput()
     sdk = SimpleNamespace(
@@ -136,6 +189,7 @@ def _run_pattern(
         state=StateResource(str(tmp_path)),
     )
     module = ModuleType("opensac_sdk")
+    module.BrokerError = BrokerError
     module.sdk = sdk
     printed = io.StringIO()
     with patch.dict(sys.modules, {"opensac_sdk": module}), contextlib.redirect_stdout(printed):
@@ -145,7 +199,7 @@ def _run_pattern(
     return sdk, content, output, printed.getvalue()
 
 
-def test_pattern_is_bounded_and_teaches_the_02_contract() -> None:
+def test_pattern_is_bounded_and_teaches_the_03_contract() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
     pattern = _pattern()
 
@@ -155,7 +209,9 @@ def test_pattern_is_bounded_and_teaches_the_02_contract() -> None:
     assert "sdk.search.fuse_rrf(batches, k=60)" in pattern
     assert "fuse_rrf(batches, k=60, limit=" not in pattern
     assert 'sdk.state.merge_jsonl("pool.jsonl"' in pattern
-    assert "sdk.content.grep(list(pool)" in pattern
+    assert "sdk.content.grep_report(list(pool)" in pattern
+    assert "failed.failure.code" in pattern
+    assert "passage.locator_error" in pattern
     assert '"id": passage.locator.id' in pattern
     assert 'key="evidence_key"' in pattern
     assert "model_dump" not in pattern
@@ -210,3 +266,21 @@ def test_pattern_unions_evidence_across_turns_before_submitting(tmp_path: Path) 
         "phrase",
         "year",
     }
+
+
+def test_pattern_reports_typed_partial_fetch_failure_and_keeps_matches(
+    tmp_path: Path,
+) -> None:
+    _, _, output, printed = _run_pattern(tmp_path, partial_failure=True)
+
+    assert "code=provider_timeout attempts=3" in printed
+    assert len(output.submissions) == 1
+
+
+def test_pattern_never_cites_locator_capacity_exhausted_text(tmp_path: Path) -> None:
+    sdk, _, output, printed = _run_pattern(tmp_path, locator_exhausted=True)
+
+    assert "locator unavailable: evidence_capacity_exhausted" in printed
+    assert "unverified: ['phrase', 'year']" in printed
+    assert not output.submissions
+    assert not sdk.state.exists("evidence.jsonl")

@@ -16,6 +16,7 @@ from opensac.api.app import (
 )
 from opensac.config import Settings
 from opensac.models import (
+    CapabilityEvent,
     ExecCreate,
     ExecRecord,
     ExecRecordStatus,
@@ -49,7 +50,13 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v1",
+            "capability_contract_v2",
+            "provider_reliability_v1",
+            "typed_partial_failures_v1",
+            "content_grep_report_v1",
+            "bounded_evidence_registry_v1",
+            "intra_call_dedupe_v1",
+            "execution_cancellation_v1",
             "idempotent_exec",
             "worker_affinity",
             "idempotent_session_create",
@@ -63,11 +70,19 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["closing"] is False
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
-        assert payload["environment"]["sandbox_contract"] == 3
-        assert payload["environment"]["capability_contract"] == 1
+        assert payload["environment"]["sandbox_contract"] == 4
+        assert payload["environment"]["capability_contract"] == 2
         capability_limits = payload["environment"]["capability_limits"]
         assert capability_limits["extract_many"]["max_items"] == 12
         assert capability_limits["evidence"]["max_chars"] == 4096
+        assert capability_limits["evidence"]["max_records"] == 4096
+        assert capability_limits["content"]["max_refs_per_request"] == 256
+        assert payload["environment"]["provider_policies"]["local.search"][
+            "retry_profile"
+        ] == "none"
+        assert payload["environment"]["provider_policies"]["local.search"][
+            "max_attempts"
+        ] == 1
         assert not any(method.startswith("llm.") for method in payload["capabilities"])
 
 
@@ -78,13 +93,49 @@ def test_public_session_api_rejects_unknown_backend(tmp_path) -> None:
         assert response.status_code == 422
 
 
+def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
+    tmp_path,
+) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        broker_socket=tmp_path / "broker.sock",
+        provider_retry_profile="safe",
+        provider_inflight_coalescing=True,
+        provider_operation_concurrency={"local.search": 3},
+        provider_operation_requests_per_second={"local.search": 2.5},
+        provider_operation_burst={"local.search": 2},
+    )
+
+    with TestClient(create_app(settings)) as client:
+        payload = client.post("/v1/sessions", json={}).json()
+
+    assert "inflight_coalescing_v1" in payload["features"]
+    assert payload["environment"]["capability_limits"]["inflight"] == {
+        "enabled": True,
+        "max_keys": 256,
+        "max_waiters_per_key": 64,
+    }
+    local_policy = payload["environment"]["provider_policies"]["local.search"]
+    assert local_policy["retry_profile"] == "safe"
+    assert local_policy["concurrency"] == 3
+    assert local_policy["requests_per_second"] == 2.5
+    assert local_policy["burst"] == 2
+
+
+def test_provider_policy_config_rejects_unknown_operations_and_orphan_bursts() -> None:
+    with pytest.raises(ValueError, match="unknown operations"):
+        Settings(provider_operation_concurrency={"other.search": 1})
+    with pytest.raises(ValueError, match="requires requests_per_second"):
+        Settings(provider_operation_burst={"local.search": 1})
+
+
 def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
     settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
     with TestClient(create_app(settings)) as client:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.2.0"
+    assert schema["info"]["version"] == "0.3.1"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
@@ -236,6 +287,24 @@ class RecordingSandbox:
         )
 
 
+class TerminatedSandbox(RecordingSandbox):
+    def __init__(self, *, timed_out: bool = False, output_limit_exceeded: bool = False):
+        super().__init__()
+        self.timed_out = timed_out
+        self.output_limit_exceeded = output_limit_exceeded
+
+    async def execute(self, request: SandboxRequest) -> SandboxResult:
+        self.requests.append(request)
+        return SandboxResult(
+            exit_code=-9,
+            stdout="partial output",
+            stderr="",
+            duration_seconds=0.25,
+            timed_out=self.timed_out,
+            output_limit_exceeded=self.output_limit_exceeded,
+        )
+
+
 class BlockingSandbox(RecordingSandbox):
     """Holds one execution open so DELETE and duplicate requests can race it."""
 
@@ -294,6 +363,42 @@ def exec_client(tmp_path, sandbox) -> TestClient:
     return client
 
 
+def record_broker_lifecycle(runtime: ApplicationRuntime) -> list[tuple]:
+    """Record cancellation ordering and append one final trace during drain."""
+    events: list[tuple] = []
+    original_cancel_execution = runtime.broker.cancel_execution
+    original_cancel_session = runtime.broker.cancel_session
+    original_take_trace = runtime.broker.take_trace
+
+    async def cancel_execution(token: str, execution_id: str, reason: str) -> int:
+        events.append(("cancel_execution", token, execution_id, reason))
+        cancelled = await original_cancel_execution(token, execution_id, reason)
+        state = runtime.broker.sessions.get(token)
+        if state is not None:
+            state.traces.setdefault(execution_id, []).append(
+                CapabilityEvent(
+                    sequence=state.next_trace_sequence(),
+                    method="test.provider_cleanup",
+                    status="cancelled",
+                    duration_seconds=0.0,
+                )
+            )
+        return cancelled
+
+    async def cancel_session(token: str) -> int:
+        events.append(("cancel_session", token))
+        return await original_cancel_session(token)
+
+    def take_trace(token: str, execution_id: str | None) -> list[CapabilityEvent]:
+        events.append(("take_trace", token, execution_id))
+        return original_take_trace(token, execution_id)
+
+    runtime.broker.cancel_execution = cancel_execution
+    runtime.broker.cancel_session = cancel_session
+    runtime.broker.take_trace = take_trace
+    return events
+
+
 def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None:
     sandbox = RecordingSandbox()
     with exec_client(tmp_path, sandbox) as client:
@@ -321,6 +426,54 @@ def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None
         assert sandbox.requests[0].execution_id
         # No control model was consulted: the caller supplied the program.
         assert sandbox.requests[0].code == "from opensac_sdk import sdk\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sandbox", "reason", "error_category"),
+    [
+        (TerminatedSandbox(timed_out=True), "sandbox_timeout", "timeout"),
+        (
+            TerminatedSandbox(output_limit_exceeded=True),
+            "sandbox_output_limit",
+            "output_limit",
+        ),
+    ],
+)
+async def test_sandbox_termination_drains_provider_work_before_trace_and_is_persisted(
+    tmp_path,
+    sandbox,
+    reason,
+    error_category,
+) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / reason, broker_socket=tmp_path / f"{reason}.sock")
+    )
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    events = record_broker_lifecycle(runtime)
+    request = ExecCreate(exec_id=reason, code="print('bounded')\n", include_trace=True)
+    try:
+        result = await runtime.execute_code(session.id, request)
+
+        expected_timeout = reason == "sandbox_timeout"
+        expected_output_limit = reason == "sandbox_output_limit"
+        assert result.timed_out is expected_timeout
+        assert result.output_limit_exceeded is expected_output_limit
+        assert result.succeeded is False
+        assert [event.method for event in result.trace] == ["test.provider_cleanup"]
+        assert [event[0] for event in events] == ["cancel_execution", "take_trace"]
+        assert events[0][3] == reason
+
+        stored = runtime.store.get_exec_record(session, request.exec_id)
+        assert stored is not None and stored.result is not None
+        assert stored.result.output_limit_exceeded is expected_output_limit
+        program = runtime.store.programs(session)[0]
+        assert program.timed_out is expected_timeout
+        assert program.output_limit_exceeded is expected_output_limit
+        assert program.error_category == error_category
+    finally:
+        await runtime.model_client.close()
 
 
 def test_health_reports_capacity_and_warm_mode_is_selectable(
@@ -490,19 +643,24 @@ async def test_cancelled_waiter_does_not_cancel_idempotent_execution(tmp_path) -
     runtime.sandbox = sandbox
     session = runtime.store.create_session(SessionCreate(backends=["local"]))
     request = ExecCreate(exec_id="rollout-4:turn-1", code="print('detached')\n")
+    events = record_broker_lifecycle(runtime)
     waiter = asyncio.create_task(runtime.execute_code(session.id, request))
     try:
         await sandbox.started.wait()
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
+        assert events == []
 
         retry = asyncio.create_task(runtime.execute_code(session.id, request))
         await asyncio.sleep(0)
         assert len(sandbox.requests) == 1
+        assert events == []
         sandbox.release.set()
 
         assert (await retry).succeeded is True
+        assert [event[0] for event in events] == ["cancel_execution", "take_trace"]
+        assert events[0][3] == "sandbox_finished"
         stored = runtime.store.get_exec_record(session, request.exec_id)
         assert stored is not None
         assert stored.status is ExecRecordStatus.COMPLETED
@@ -598,6 +756,7 @@ async def test_delete_marks_closing_waits_for_inflight_exec_and_rejects_new_work
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
     session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    events = record_broker_lifecycle(runtime)
     try:
         running = asyncio.create_task(
             runtime.execute_code(session.id, ExecCreate(code="print('running')\n"))
@@ -608,12 +767,16 @@ async def test_delete_marks_closing_waits_for_inflight_exec_and_rejects_new_work
         await asyncio.sleep(0)
         assert runtime.store.get_session(session.id).closing is True
         assert deleting.done() is False
+        assert events == []
         with pytest.raises(SessionClosingError):
             await runtime.execute_code(session.id, ExecCreate(code="print('too late')\n"))
 
         sandbox.release.set()
         assert (await running).succeeded is True
         assert await deleting is True
+        assert [event[0] for event in events] == ["cancel_execution", "take_trace"]
+        assert events[0][3] == "sandbox_finished"
+        assert not any(event[0] == "cancel_session" for event in events)
         assert sandbox.close_calls == [session.id]
         assert session.token not in runtime.broker.sessions
         with pytest.raises(KeyError):
@@ -630,6 +793,7 @@ async def test_abort_cancels_inflight_exec_and_is_idempotent(tmp_path) -> None:
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
     session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    events = record_broker_lifecycle(runtime)
     running = asyncio.create_task(
         runtime.execute_code(
             session.id,
@@ -640,6 +804,12 @@ async def test_abort_cancels_inflight_exec_and_is_idempotent(tmp_path) -> None:
         await sandbox.started.wait()
         assert await runtime.abort_session(session.id) is True
         assert running.cancelled()
+        assert [event[0] for event in events] == [
+            "cancel_execution",
+            "take_trace",
+            "cancel_session",
+        ]
+        assert events[0][3] == "execution_cancelled"
         assert sandbox.close_calls == [session.id]
         assert await runtime.abort_session(session.id) is False
         with pytest.raises(KeyError):
@@ -648,6 +818,34 @@ async def test_abort_cancels_inflight_exec_and_is_idempotent(tmp_path) -> None:
         sandbox.release.set()
         await asyncio.gather(running, return_exceptions=True)
         await runtime.model_client.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_shutdown_cancels_owned_exec_and_drains_its_trace(tmp_path) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    sandbox = BlockingSandbox()
+    runtime.sandbox = sandbox
+    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    events = record_broker_lifecycle(runtime)
+    waiter = asyncio.create_task(
+        runtime.execute_code(session.id, ExecCreate(code="print('shutdown')\n"))
+    )
+
+    await sandbox.started.wait()
+    execution_id = sandbox.requests[0].execution_id
+    assert execution_id is not None
+
+    await runtime.stop()
+    await asyncio.gather(waiter, return_exceptions=True)
+
+    assert [event[0] for event in events] == ["cancel_execution", "take_trace"]
+    assert events[0][3] == "execution_cancelled"
+    assert (session.token, execution_id) not in runtime.broker.execution_tasks
+    state = runtime.broker.sessions.get(session.token)
+    assert state is not None
+    assert execution_id not in state.traces
 
 
 @pytest.mark.asyncio

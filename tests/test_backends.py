@@ -10,6 +10,7 @@ from opensac.backends import local_http
 from opensac.backends import serper as serper_module
 from opensac.backends.local_http import LocalSearchBackend, parse_document_frontmatter
 from opensac.backends.serper import SerperBackend
+from opensac.provider import ProviderRequestError
 
 # What `/get_document` returns: the full document, including its YAML header.
 DOCUMENT_TEXT = (
@@ -198,7 +199,7 @@ async def test_local_backend_reuses_and_closes_one_http_client(client) -> None:
     backend = LocalSearchBackend("http://localhost:8081")
 
     hits = await backend.search("q", limit=1)
-    await backend.content(hits)
+    await backend.fetch(hits[0])
 
     assert len(client.instances) == 1
     await backend.aclose()
@@ -209,20 +210,16 @@ async def test_content_keeps_the_header_in_the_text(client) -> None:
     """`content.read` addresses lines, so nothing may silently delete one."""
     client.document_text = DOCUMENT_TEXT
     hit = SearchHit(ref="ref_x", backend="local", docid="1", title="", rank=1)
-    rows = await LocalSearchBackend("http://localhost:8081").content([hit])
+    row = await LocalSearchBackend("http://localhost:8081").fetch(hit)
 
-    assert rows[0].text == DOCUMENT_TEXT
+    assert row.text == DOCUMENT_TEXT
     # A hit whose own title was empty still renders one, recovered from the body.
-    assert rows[0].title == "Royal Rumble (2020) - Wikipedia"
-    assert rows[0].metadata["date"] == "2018-11-19"
+    assert row.title == "Royal Rumble (2020) - Wikipedia"
+    assert row.metadata["date"] == "2018-11-19"
 
 
-async def test_one_unreadable_document_does_not_fail_the_batch(monkeypatch) -> None:
-    """The program asked for a batch and can act on a partial one.
-
-    It cannot act on an exception, and it cannot act on a silently shortened
-    list either -- so a failure travels back as a row that says so.
-    """
+async def test_local_fetch_is_one_atomic_transport_operation(monkeypatch) -> None:
+    """Partial-failure shaping belongs above the single-document adapter."""
 
     class Failing(FakeClient):
         async def post(self, url, *, json):
@@ -234,12 +231,32 @@ async def test_one_unreadable_document_does_not_fail_the_batch(monkeypatch) -> N
     hits = [
         SearchHit(ref=f"ref_{n}", backend="local", docid=str(n), rank=n) for n in (1, 2, 3)
     ]
-    rows = await LocalSearchBackend("http://localhost:8081").content(hits)
+    backend = LocalSearchBackend("http://localhost:8081")
 
-    assert [row.ref for row in rows] == ["ref_1", "ref_2", "ref_3"]
-    assert rows[1].text == ""
-    assert "ConnectError" in rows[1].metadata["fetch_error"]
-    assert rows[2].text == "body"
+    assert (await backend.fetch(hits[0])).text == "body"
+    with pytest.raises(httpx.ConnectError, match="boom"):
+        await backend.fetch(hits[1])
+    assert (await backend.fetch(hits[2])).text == "body"
+
+
+async def test_local_adapter_rejects_invalid_success_payload(monkeypatch) -> None:
+    class Invalid(FakeClient):
+        async def post(self, url, *, json):
+            if url.endswith("search"):
+                return FakeResponse({"results": []})
+            return FakeResponse({"unexpected": "shape"})
+
+    monkeypatch.setattr(local_http.httpx, "AsyncClient", Invalid)
+    backend = LocalSearchBackend("http://localhost:8081")
+
+    with pytest.raises(ProviderRequestError) as search_error:
+        await backend.search("q", limit=1)
+    assert search_error.value.code == "provider_invalid_response"
+
+    hit = SearchHit(ref="ref_1", backend="local", docid="1", rank=1)
+    with pytest.raises(ProviderRequestError) as fetch_error:
+        await backend.fetch(hit)
+    assert fetch_error.value.code == "provider_invalid_response"
 
 
 def test_backends_declare_what_they_can_and_cannot_do() -> None:
@@ -258,12 +275,8 @@ def test_backends_declare_what_they_can_and_cannot_do() -> None:
     assert LocalSearchBackend("http://localhost").supports_domains is False
 
 
-async def test_web_content_reports_a_page_it_could_not_scrape(monkeypatch) -> None:
-    """Paywalls and robots blocks are ordinary on the open web.
-
-    Dropping them makes "nobody could read this" look like "this said
-    nothing", and only one of those is worth re-querying over.
-    """
+async def test_web_fetch_exposes_transport_and_typed_input_failures(monkeypatch) -> None:
+    """The provider runtime, not the adapter, shapes partial-failure rows."""
 
     class Blocked:
         def __init__(self, *args, **kwargs) -> None:
@@ -283,11 +296,41 @@ async def test_web_content_reports_a_page_it_could_not_scrape(monkeypatch) -> No
         SearchHit(ref="ref_1", backend="web", url="https://example.com/a", rank=1),
         SearchHit(ref="ref_2", backend="web", url=None, rank=2),
     ]
-    rows = await SerperBackend("key").content(hits)
+    backend = SerperBackend("key")
 
-    assert [row.ref for row in rows] == ["ref_1", "ref_2"]
-    assert "HTTPError" in rows[0].metadata["fetch_error"]
-    assert "no URL" in rows[1].metadata["fetch_error"]
+    with pytest.raises(httpx.HTTPError, match="403"):
+        await backend.fetch(hits[0])
+    with pytest.raises(ProviderRequestError) as caught:
+        await backend.fetch(hits[1])
+    assert caught.value.code == "invalid_request"
+
+
+def test_bundled_fetch_preflight_validates_handles_and_credentials() -> None:
+    local_hit = SearchHit(ref="ref_local", backend="local", docid=None, rank=1)
+    with pytest.raises(ProviderRequestError) as local_error:
+        LocalSearchBackend("http://localhost:8081").preflight_fetch(local_hit)
+    assert local_error.value.code == "invalid_request"
+
+    for invalid_url in (None, "example.com/page", "javascript:alert(1)"):
+        web_hit = SearchHit(
+            ref="ref_web",
+            backend="web",
+            url=invalid_url,
+            rank=1,
+        )
+        with pytest.raises(ProviderRequestError) as web_error:
+            SerperBackend("key").preflight_fetch(web_hit)
+        assert web_error.value.code == "invalid_request"
+
+    configured_hit = SearchHit(
+        ref="ref_web",
+        backend="web",
+        url="https://example.com/page",
+        rank=1,
+    )
+    with pytest.raises(ProviderRequestError) as credentials_error:
+        SerperBackend("").preflight_fetch(configured_hit)
+    assert credentials_error.value.code == "provider_not_configured"
 
 
 async def test_serper_reuses_and_closes_one_http_client(monkeypatch) -> None:
@@ -322,8 +365,33 @@ async def test_serper_reuses_and_closes_one_http_client(monkeypatch) -> None:
     hits = await backend.search("query", limit=1)
     assert hits[0].retrieval is not None
     assert hits[0].retrieval.mode == "organic"
-    await backend.content(hits)
+    await backend.fetch(hits[0])
 
     assert len(RecordingClient.instances) == 1
     await backend.aclose()
     assert RecordingClient.instances[0].closed is True
+
+
+async def test_serper_missing_credentials_is_a_zero_attempt_preflight_failure() -> None:
+    backend = SerperBackend("")
+
+    with pytest.raises(ProviderRequestError) as preflight:
+        backend.preflight_search()
+    assert preflight.value.code == "provider_not_configured"
+    assert preflight.value.attempts == 0
+
+    with pytest.raises(ProviderRequestError) as caught:
+        await backend.search("query", limit=1)
+    assert caught.value.code == "provider_not_configured"
+    assert caught.value.attempts == 0
+
+
+def test_provider_identity_is_stable_and_does_not_expose_credentials() -> None:
+    first = SerperBackend("top-secret")
+    second = SerperBackend("top-secret")
+    other = SerperBackend("different-secret")
+
+    assert first.provider_identity == second.provider_identity
+    assert first.provider_identity != other.provider_identity
+    assert "top-secret" not in first.provider_identity
+    assert LocalSearchBackend("http://localhost:8081").provider_identity.startswith("local:")

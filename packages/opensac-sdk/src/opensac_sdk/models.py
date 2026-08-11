@@ -84,11 +84,35 @@ class SearchHit(SubscriptableModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CapabilityFailure(SubscriptableModel):
+    """One failed item in a batch capability result.
+
+    ``attempts`` counts transport attempts made by the broker. Input rejected
+    before reaching a provider therefore has zero attempts.
+    """
+
+    code: str
+    message: str
+    retryable: bool
+    attempts: int = Field(ge=0)
+    provider_status: int | None = Field(default=None, ge=100, le=599)
+    retry_after_seconds: float | None = Field(default=None, ge=0.0)
+
+
 class SearchBatch(SubscriptableModel):
     query: str
     hits: list[SearchHit] = Field(default_factory=list)
     error: str | None = None
+    failure: CapabilityFailure | None = None
     request: SearchRequestInfo | None = None
+
+    @model_validator(mode="after")
+    def _mirror_typed_failure(self) -> Self:
+        if self.failure is not None:
+            if self.hits:
+                raise ValueError("a failed search batch cannot contain hits")
+            self.error = self.failure.message
+        return self
 
 
 class CandidateSource(SubscriptableModel):
@@ -111,6 +135,13 @@ class FusionBatchError(SubscriptableModel):
     batch_index: int
     query: str
     error: str
+    failure: CapabilityFailure | None = None
+
+    @model_validator(mode="after")
+    def _mirror_typed_failure(self) -> Self:
+        if self.failure is not None:
+            self.error = self.failure.message
+        return self
 
 
 class FusionResult(SubscriptableModel):
@@ -134,7 +165,19 @@ class ContentSnippet(SubscriptableModel):
     # that assumption dies on `AttributeError` rather than missing a filter.
     date: str | None = None
     locator: EvidenceLocator | None = None
+    locator_error: EvidenceLocatorError | None = None
+    failure: CapabilityFailure | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _mirror_typed_failure(self) -> Self:
+        if self.failure is not None:
+            if self.text or self.locator is not None or self.locator_error is not None:
+                raise ValueError(
+                    "a failed content row must have empty text and no locator state"
+                )
+            self.metadata = {**self.metadata, "fetch_error": self.failure.message}
+        return self
 
 
 class ContentMatch(SubscriptableModel):
@@ -158,6 +201,26 @@ class ContentMatch(SubscriptableModel):
     before: list[str] = Field(default_factory=list)
     after: list[str] = Field(default_factory=list)
     locator: EvidenceLocator | None = None
+    locator_error: EvidenceLocatorError | None = None
+    # Populated by grep_report so duplicate input refs remain distinguishable;
+    # legacy grep leaves it absent.
+    input_index: int | None = Field(default=None, ge=0)
+
+
+class ContentFailure(SubscriptableModel):
+    """A ref that could not be fetched while other content work succeeded."""
+
+    input_index: int = Field(ge=0)
+    ref: str
+    failure: CapabilityFailure
+
+
+class ContentGrepReport(SubscriptableModel):
+    """Matches plus refs that grep could not inspect."""
+
+    matches: list[ContentMatch] = Field(default_factory=list)
+    failures: list[ContentFailure] = Field(default_factory=list)
+    input_count: int = Field(ge=0)
 
 
 class ExtractionError(SubscriptableModel):
@@ -182,9 +245,17 @@ class ExtractionResult(SubscriptableModel):
 class EvidenceLocator(SubscriptableModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str
-    ref: str
+    id: str = Field(min_length=1, max_length=128)
+    ref: str = Field(min_length=1, max_length=256)
     kind: Literal["selected_passage"]
+
+
+class EvidenceLocatorError(SubscriptableModel):
+    """Why a returned passage could not receive a new trusted locator."""
+
+    code: str
+    message: str
+    retryable: bool = False
 
 
 class CitationRequest(SubscriptableModel):
@@ -192,6 +263,15 @@ class CitationRequest(SubscriptableModel):
 
     ref: str
     locator: EvidenceLocator | None = None
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_locator(self) -> Self:
+        if "locator" in self.model_fields_set and self.locator is None:
+            raise ValueError(
+                "locator must be omitted for a legacy search-preview citation; "
+                "explicit null is not a valid evidence locator"
+            )
+        return self
 
 
 class RpcRequest(BaseModel):
@@ -203,6 +283,9 @@ class RpcError(BaseModel):
     code: str
     message: str
     retryable: bool
+    attempts: int | None = Field(default=None, ge=0)
+    provider_status: int | None = Field(default=None, ge=100, le=599)
+    retry_after_seconds: float | None = Field(default=None, ge=0.0)
 
 
 class RpcResponse(BaseModel):

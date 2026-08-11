@@ -12,7 +12,11 @@ from opensac.sandbox import (
     UnsafeCodeError,
     validate_code,
 )
-from opensac.sandbox.docker import DockerImageContractVerifier, read_bounded_process_output
+from opensac.sandbox.docker import (
+    BoundedProcessOutput,
+    DockerImageContractVerifier,
+    read_bounded_process_output,
+)
 
 
 class _CompletedProcess:
@@ -92,7 +96,7 @@ async def test_sandbox_image_contract_is_inspected_once(
 
     async def create_process(*command: str, **_: object) -> _CompletedProcess:
         calls.append(command)
-        return _CompletedProcess(stdout=b"3\n")
+        return _CompletedProcess(stdout=b"4\n")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     verifier = DockerImageContractVerifier("opensac-test")
@@ -123,7 +127,7 @@ async def test_cold_sandbox_rejects_stale_image_before_workspace_setup(
     result = await sandbox.execute(SandboxRequest("pass", workspace, "secret"))
 
     assert result.exit_code == 125
-    assert "has contract '2'; expected 3" in (result.launch_error or "")
+    assert "has contract '2'; expected 4" in (result.launch_error or "")
     assert not workspace.exists()
     assert len(calls) == 1
     assert calls[0][1:3] == ("image", "inspect")
@@ -174,6 +178,63 @@ def test_launch_error_marks_the_result_as_failed() -> None:
         duration_seconds=0.1,
         launch_error="The sandbox container could not be started: docker: boom",
     )
+    assert result.succeeded is False
+
+
+def test_output_limit_result_defaults_to_false_and_marks_termination_as_failed() -> None:
+    succeeded = SandboxResult(
+        exit_code=0,
+        stdout="",
+        stderr="",
+        duration_seconds=0.1,
+    )
+    limited = SandboxResult(
+        exit_code=0,
+        stdout="",
+        stderr="",
+        duration_seconds=0.1,
+        output_limit_exceeded=True,
+    )
+
+    assert succeeded.output_limit_exceeded is False
+    assert succeeded.succeeded is True
+    assert limited.succeeded is False
+
+
+async def test_cold_sandbox_propagates_output_limit_termination(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def create_process(*_: str, **__: object) -> _CompletedProcess:
+        return _CompletedProcess(returncode=-9)
+
+    async def capture_output(*_: object, **__: object) -> BoundedProcessOutput:
+        return BoundedProcessOutput(
+            stdout=b"x" * 8,
+            stderr=b"output limited",
+            timed_out=False,
+            output_limit_exceeded=True,
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(
+        "opensac.sandbox.docker.read_bounded_process_output", capture_output
+    )
+    socket = tmp_path / "broker.sock"
+    socket.touch()
+    sandbox = DockerSandbox(
+        image="opensac-test",
+        broker_socket=socket,
+        max_output_bytes=8,
+    )
+    sandbox._image_contract._verified = True
+
+    result = await sandbox.execute(
+        SandboxRequest("pass", tmp_path / "workspace", "secret")
+    )
+
+    assert result.output_limit_exceeded is True
+    assert result.timed_out is False
+    assert result.launch_error is None
     assert result.succeeded is False
 
 

@@ -7,6 +7,9 @@ from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
 class SearchBackend(Protocol):
     name: str
+    # Opaque process-wide governor identity. It incorporates the effective
+    # endpoint and credential without exposing either in trace records.
+    provider_identity: str
 
     # Deployment facts a caller must be able to read off the backend rather than
     # infer from its name. The broker enforces both, so that the one search
@@ -32,20 +35,18 @@ class SearchBackend(Protocol):
         domains: list[str] | None = None,
     ) -> list[SearchHit]: ...
 
-    async def content(
+    async def fetch(
         self,
-        hits: list[SearchHit],
+        hit: SearchHit,
         *,
         query: str | None = None,
-    ) -> list[ContentSnippet]:
-        """One snippet per hit, in the order given.
+    ) -> ContentSnippet:
+        """Fetch and normalize one document with exactly one transport call.
 
-        A document that could not be retrieved comes back as a row with empty
-        ``text`` and ``metadata["fetch_error"]`` describing why, never as a
-        missing row. Dropping it silently makes a partial result look like a
-        complete one: the program sees four pages where it asked for ten and
-        has no way to learn which six are missing, and `content.read` on a page
-        that failed to load becomes indistinguishable from one that is empty.
+        Batch alignment and partial-failure rows belong to the broker. Keeping
+        this operation atomic lets the provider runtime account, retry and
+        cancel each real document request without a hidden adapter semaphore or
+        exception-swallowing gather.
         """
         ...
 

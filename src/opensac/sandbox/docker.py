@@ -16,7 +16,7 @@ _OUTPUT_LIMIT_MARKER = (
     b"\nOpenSAC terminated the sandbox process after stdout/stderr reached "
     b"the output limit.\n"
 )
-SANDBOX_CONTRACT = 3
+SANDBOX_CONTRACT = 4
 SANDBOX_CONTRACT_LABEL = "org.opensac.sandbox.contract"
 
 
@@ -332,6 +332,7 @@ class DockerSandbox:
             output=submitted.get("output"),
             citations=submitted.get("citations", []),
             timed_out=captured.timed_out,
+            output_limit_exceeded=captured.output_limit_exceeded,
             timings={
                 "validation_seconds": validation_seconds,
                 "workspace_setup_seconds": workspace_setup_seconds,

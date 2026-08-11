@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import math
 import re
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -23,12 +25,39 @@ from opensac.metrics import CapacityGate
 from opensac.models import (
     CAPABILITY_METHODS,
     CapabilityEvent,
+    CoalescedRequestRecord,
+    DeduplicatedRequestRecord,
     EvidenceTraceRecord,
     HitRecord,
     Mechanisms,
     ModelAttemptRecord,
+    ProviderAttemptRecord,
     Session,
 )
+from opensac.provider import (
+    ProviderAttempt,
+    ProviderPolicy,
+    ProviderRequestError,
+    ProviderRuntime,
+    ProviderWait,
+)
+
+
+@dataclass
+class _ProviderTraceBuffer:
+    """Mutable attempt sink shared with a leader's detached transport task."""
+
+    records: list[ProviderAttemptRecord] = field(default_factory=list)
+    event: CapabilityEvent | None = None
+
+    def append(self, record: ProviderAttemptRecord) -> None:
+        self.records.append(record)
+        if self.event is not None:
+            self.event.provider_attempts.append(record)
+
+    def bind(self, event: CapabilityEvent) -> None:
+        self.event = event
+
 
 _EVENT_MODEL_TOKENS: ContextVar[int] = ContextVar(
     "opensac_event_model_tokens", default=0
@@ -49,6 +78,24 @@ _EVENT_MODEL_ATTEMPTS: ContextVar[list[ModelAttemptRecord] | None] = ContextVar(
 )
 _EVENT_EVIDENCE: ContextVar[list[EvidenceTraceRecord] | None] = ContextVar(
     "opensac_event_evidence", default=None
+)
+_EVENT_PROVIDER_ATTEMPTS: ContextVar[list[ProviderAttemptRecord] | None] = ContextVar(
+    "opensac_event_provider_attempts", default=None
+)
+_EVENT_PROVIDER_TRACE: ContextVar[_ProviderTraceBuffer | None] = ContextVar(
+    "opensac_event_provider_trace", default=None
+)
+_EVENT_DEDUPLICATED: ContextVar[list[DeduplicatedRequestRecord] | None] = ContextVar(
+    "opensac_event_deduplicated", default=None
+)
+_EVENT_COALESCED: ContextVar[list[CoalescedRequestRecord] | None] = ContextVar(
+    "opensac_event_coalesced", default=None
+)
+_EVENT_SESSION_TOKEN: ContextVar[str | None] = ContextVar(
+    "opensac_event_session_token", default=None
+)
+_EVENT_EXECUTION_ID: ContextVar[str | None] = ContextVar(
+    "opensac_event_execution_id", default=None
 )
 
 # Query parameters that identify a referrer rather than a document. Stripping
@@ -86,6 +133,90 @@ class ExtractionInfrastructureError(RuntimeError):
         super().__init__("The extraction provider failed for every item; retry the call.")
 
 
+class CapabilityProviderError(RuntimeError):
+    """A provider failure promoted from item rows to the capability RPC."""
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        retryable: bool,
+        attempts: int,
+        provider_status: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.attempts = max(int(attempts), 0)
+        self.provider_status = provider_status
+        self.retry_after_seconds = retry_after_seconds
+
+    @classmethod
+    def from_failure(
+        cls,
+        failure: dict[str, Any],
+        *,
+        attempts: int | None = None,
+    ) -> CapabilityProviderError:
+        return cls(
+            code=str(failure.get("code") or "provider_invalid_response"),
+            message=str(failure.get("message") or "Provider operation failed."),
+            retryable=bool(failure.get("retryable")),
+            attempts=(
+                int(failure.get("attempts") or 0) if attempts is None else attempts
+            ),
+            provider_status=failure.get("provider_status"),
+            retry_after_seconds=failure.get("retry_after_seconds"),
+        )
+
+    @classmethod
+    def from_failures(
+        cls,
+        failures: list[dict[str, Any]],
+        *,
+        attempts: int,
+    ) -> CapabilityProviderError:
+        """Promote a whole failed batch without overstating retryability."""
+
+        if not failures:
+            raise ValueError("at least one provider failure is required")
+        retryable = all(bool(failure.get("retryable")) for failure in failures)
+        representative = next(
+            (
+                failure
+                for failure in failures
+                if not bool(failure.get("retryable"))
+            ),
+            failures[0],
+        )
+        aggregate = dict(representative)
+        aggregate["retryable"] = retryable
+        if retryable:
+            retry_after = [
+                float(value)
+                for failure in failures
+                if (value := failure.get("retry_after_seconds")) is not None
+            ]
+            if retry_after:
+                aggregate["retry_after_seconds"] = max(retry_after)
+        return cls.from_failure(aggregate, attempts=attempts)
+
+
+class InflightCapacityError(RuntimeError):
+    code = "inflight_capacity_exhausted"
+    retryable = True
+    attempts = 0
+    provider_status = None
+    retry_after_seconds = None
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The session in-flight provider registry is full; retry the capability call."
+        )
+
+
 @dataclass(frozen=True)
 class EvidenceRecord:
     ref: str
@@ -94,6 +225,43 @@ class EvidenceRecord:
     coordinates: dict[str, Any]
     document_fingerprint: str
     passage_fingerprint: str
+
+
+@dataclass
+class _FlightGroup:
+    """Transport work shared by one or more active provider request keys."""
+
+    operation_id: str
+    keys: set[str] = field(default_factory=set)
+    entries: dict[str, _FlightEntry] = field(default_factory=dict)
+    task: asyncio.Task[None] | None = None
+
+
+@dataclass
+class _FlightEntry:
+    """One active, session-scoped provider result shared by capability calls."""
+
+    future: asyncio.Future[Any]
+    operation_id: str
+    request_fingerprint: str
+    group: _FlightGroup
+    waiters: int = 0
+
+
+@dataclass(eq=False)
+class _FlightWaiter:
+    """One capability call's attachment to one unique provider request key."""
+
+    key: str
+    entry: _FlightEntry
+    execution_id: str | None
+    active: bool = True
+
+
+@dataclass
+class _FlightAdmission:
+    waiters: dict[str, _FlightWaiter]
+    new_groups: list[_FlightGroup]
 
 
 @dataclass(frozen=True)
@@ -148,6 +316,12 @@ class BrokerSession:
     content_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
     content_cache_bytes: int = 0
     evidence: dict[str, EvidenceRecord] = field(default_factory=dict)
+    evidence_passage_bytes: int = 0
+    flights: dict[str, _FlightEntry] = field(default_factory=dict)
+    flight_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    flight_waiters_by_execution: dict[str, set[_FlightWaiter]] = field(
+        default_factory=dict
+    )
     traces: dict[str, list[CapabilityEvent]] = field(default_factory=dict)
     trace_sequence: int = 0
 
@@ -170,7 +344,7 @@ class BrokerSession:
         text = row.get("text") or ""
         if not ref or ref in self.content_cache or row.get("metadata", {}).get("fetch_error"):
             return
-        size = len(text)
+        size = len(str(text).encode("utf-8"))
         if self.content_cache_bytes + size > budget:
             return
         self.content_cache[ref] = row
@@ -214,11 +388,20 @@ class BrokerService:
         max_extract_schema_depth: int = 8,
         max_extract_repair_attempts: int = 1,
         max_evidence_chars: int = 16_000,
+        max_evidence_records: int = 4_096,
+        max_evidence_passage_bytes: int = 33_554_432,
+        max_content_refs_per_request: int = 256,
+        inflight_coalescing: bool = False,
+        max_inflight_keys: int = 256,
+        max_waiters_per_flight: int = 64,
+        provider_runtime: ProviderRuntime | None = None,
+        backend_revision: str = "",
     ) -> None:
         self.backends = backends
         self.model_client = model_client
         self.extraction_model = extraction_model
         self.sessions: dict[str, BrokerSession] = {}
+        self.execution_tasks: dict[tuple[str, str], set[asyncio.Task[Any]]] = {}
         self.capacity_gate = CapacityGate(max_concurrency)
         self.max_context_payload_bytes = max_context_payload_bytes
         self.session_content_cache_bytes = session_content_cache_bytes
@@ -241,6 +424,11 @@ class BrokerService:
             "max_extract_total_item_bytes": max_extract_total_item_bytes,
             "max_extract_schema_depth": max_extract_schema_depth,
             "max_evidence_chars": max_evidence_chars,
+            "max_evidence_records": max_evidence_records,
+            "max_evidence_passage_bytes": max_evidence_passage_bytes,
+            "max_content_refs_per_request": max_content_refs_per_request,
+            "max_inflight_keys": max_inflight_keys,
+            "max_waiters_per_flight": max_waiters_per_flight,
         }
         for name, value in extraction_limits.items():
             if int(value) < 1:
@@ -249,9 +437,33 @@ class BrokerService:
         if int(max_extract_repair_attempts) not in {0, 1}:
             raise ValueError("max_extract_repair_attempts must be 0 or 1")
         self.max_extract_repair_attempts = int(max_extract_repair_attempts)
+        self.inflight_coalescing = bool(inflight_coalescing)
+        self.provider_runtime = provider_runtime or ProviderRuntime(
+            {
+                "local.search": ProviderPolicy(concurrency=max_concurrency),
+                "web.search": ProviderPolicy(concurrency=max_concurrency),
+                "local.document": ProviderPolicy(concurrency=6),
+                "web.scrape": ProviderPolicy(concurrency=6),
+            }
+        )
+        self.backend_revision = backend_revision
 
     async def aclose(self) -> None:
         """Close backend-owned connection pools once the broker stops."""
+        await asyncio.gather(
+            *(self._cancel_all_flights(state) for state in self.sessions.values())
+        )
+        pending = {
+            task
+            for tasks in self.execution_tasks.values()
+            for task in tasks
+            if not task.done()
+        }
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self.execution_tasks.clear()
         closable: list[ClosableSearchBackend] = []
         seen: set[int] = set()
         for backend in self.backends.values():
@@ -277,7 +489,102 @@ class BrokerService:
     def unregister_session(self, token: str) -> None:
         self.sessions.pop(token, None)
 
+    def _track_execution_task(
+        self,
+        token: str,
+        execution_id: str | None,
+        task: asyncio.Task[Any],
+    ) -> None:
+        if not execution_id:
+            return
+        key = (token, execution_id)
+        tasks = self.execution_tasks.setdefault(key, set())
+        tasks.add(task)
+
+        def finished(done: asyncio.Task[Any]) -> None:
+            current = self.execution_tasks.get(key)
+            if current is None:
+                return
+            current.discard(done)
+            if not current:
+                self.execution_tasks.pop(key, None)
+
+        task.add_done_callback(finished)
+
+    async def cancel_execution(
+        self,
+        token: str,
+        execution_id: str,
+        reason: str = "provider_cancelled",
+    ) -> int:
+        """Cancel and drain provider work owned by one sandbox execution."""
+
+        del reason
+        state = self.sessions.get(token)
+        if state is not None:
+            async with state.flight_lock:
+                flight_waiters = list(
+                    state.flight_waiters_by_execution.get(execution_id, set())
+                )
+            await asyncio.gather(
+                *(self._detach_flight_waiter(state, waiter) for waiter in flight_waiters)
+            )
+        key = (token, execution_id)
+        tasks = set(self.execution_tasks.get(key, set()))
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.execution_tasks.pop(key, None)
+        return len(tasks)
+
+    async def cancel_session(self, token: str) -> int:
+        state = self.sessions.get(token)
+        cancelled_flights = 0
+        if state is not None:
+            cancelled_flights = await self._cancel_all_flights(state)
+        keys = [key for key in self.execution_tasks if key[0] == token]
+        return cancelled_flights + sum(
+            await asyncio.gather(
+                *(self.cancel_execution(*key) for key in keys),
+            )
+        )
+
     async def call(
+        self,
+        token: str,
+        method: str,
+        params: dict[str, Any],
+        *,
+        execution_id: str | None = None,
+    ) -> Any:
+        """Run one traced capability and make execution cancellation drain it."""
+
+        if not execution_id:
+            return await self._call_traced(
+                token,
+                method,
+                params,
+                execution_id=None,
+            )
+        task = asyncio.create_task(
+            self._call_traced(
+                token,
+                method,
+                params,
+                execution_id=execution_id,
+            )
+        )
+        self._track_execution_task(token, execution_id, task)
+        try:
+            return await task
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
+    async def _call_traced(
         self,
         token: str,
         method: str,
@@ -295,6 +602,7 @@ class BrokerService:
             "content.snippets": self._content_snippets,
             "content.read": self._content_read,
             "content.grep": self._content_grep,
+            "content.grep_report": self._content_grep_report,
             "citations.resolve": self._resolve_citations,
             "session.usage": self._session_usage,
             "llm.complete": self._complete,
@@ -316,6 +624,15 @@ class BrokerService:
         hits_context = _EVENT_HITS.set([])
         attempts_context = _EVENT_MODEL_ATTEMPTS.set([])
         evidence_context = _EVENT_EVIDENCE.set([])
+        provider_trace = _ProviderTraceBuffer()
+        provider_attempts_context = _EVENT_PROVIDER_ATTEMPTS.set(
+            provider_trace.records
+        )
+        provider_trace_context = _EVENT_PROVIDER_TRACE.set(provider_trace)
+        deduplicated_context = _EVENT_DEDUPLICATED.set([])
+        coalesced_context = _EVENT_COALESCED.set([])
+        session_token_context = _EVENT_SESSION_TOKEN.set(token)
+        execution_context = _EVENT_EXECUTION_ID.set(execution_id)
         try:
             # Mechanism gates sit inside the traced region on purpose: an arm
             # that disables a capability wants to know how often the model kept
@@ -326,46 +643,81 @@ class BrokerService:
             if blocked:
                 raise MechanismDisabled(blocked)
             result = await handler(state, params)
-        except Exception as exc:
+        except asyncio.CancelledError as exc:
+            event = CapabilityEvent(
+                sequence=sequence,
+                method=method,
+                status="cancelled",
+                duration_seconds=time.monotonic() - started,
+                queries=self._trace_queries(method, params),
+                input_count=self._trace_input_count(method, params),
+                hits=list(_EVENT_HITS.get() or []),
+                model_tokens=_EVENT_MODEL_TOKENS.get(),
+                model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
+                evidence_records=list(_EVENT_EVIDENCE.get() or []),
+                provider_attempts=list(_EVENT_PROVIDER_ATTEMPTS.get() or []),
+                deduplicated_requests=list(_EVENT_DEDUPLICATED.get() or []),
+                coalesced_requests=list(_EVENT_COALESCED.get() or []),
+                error_type=type(exc).__name__,
+                error="Capability execution was cancelled.",
+            )
+            provider_trace.bind(event)
             self._append_trace(
                 state,
                 execution_id,
-                CapabilityEvent(
-                    sequence=sequence,
-                    method=method,
-                    status="error",
-                    duration_seconds=time.monotonic() - started,
-                    queries=self._trace_queries(method, params),
-                    input_count=self._trace_input_count(method, params),
-                    hits=list(_EVENT_HITS.get() or []),
-                    model_tokens=_EVENT_MODEL_TOKENS.get(),
-                    model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
-                    evidence_records=list(_EVENT_EVIDENCE.get() or []),
-                    error_type=type(exc).__name__,
-                    error=self._trace_error_message(exc),
-                ),
+                event,
+            )
+            raise
+        except Exception as exc:
+            event = CapabilityEvent(
+                sequence=sequence,
+                method=method,
+                status="error",
+                duration_seconds=time.monotonic() - started,
+                queries=self._trace_queries(method, params),
+                input_count=self._trace_input_count(method, params),
+                hits=list(_EVENT_HITS.get() or []),
+                model_tokens=_EVENT_MODEL_TOKENS.get(),
+                model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
+                evidence_records=list(_EVENT_EVIDENCE.get() or []),
+                provider_attempts=list(_EVENT_PROVIDER_ATTEMPTS.get() or []),
+                deduplicated_requests=list(_EVENT_DEDUPLICATED.get() or []),
+                coalesced_requests=list(_EVENT_COALESCED.get() or []),
+                error_type=type(exc).__name__,
+                error=self._trace_error_message(exc),
+            )
+            provider_trace.bind(event)
+            self._append_trace(
+                state,
+                execution_id,
+                event,
             )
             raise
         else:
             payload, truncated = self._context_payload(state, result)
+            event = CapabilityEvent(
+                sequence=sequence,
+                method=method,
+                status="ok",
+                duration_seconds=time.monotonic() - started,
+                queries=self._trace_queries(method, params),
+                input_count=self._trace_input_count(method, params),
+                result_count=self._trace_result_count(method, result),
+                hits=list(_EVENT_HITS.get() or []),
+                model_tokens=_EVENT_MODEL_TOKENS.get(),
+                model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
+                evidence_records=list(_EVENT_EVIDENCE.get() or []),
+                provider_attempts=list(_EVENT_PROVIDER_ATTEMPTS.get() or []),
+                deduplicated_requests=list(_EVENT_DEDUPLICATED.get() or []),
+                coalesced_requests=list(_EVENT_COALESCED.get() or []),
+                result_payload=payload,
+                result_payload_truncated=truncated,
+            )
+            provider_trace.bind(event)
             self._append_trace(
                 state,
                 execution_id,
-                CapabilityEvent(
-                    sequence=sequence,
-                    method=method,
-                    status="ok",
-                    duration_seconds=time.monotonic() - started,
-                    queries=self._trace_queries(method, params),
-                    input_count=self._trace_input_count(method, params),
-                    result_count=self._trace_result_count(method, result),
-                    hits=list(_EVENT_HITS.get() or []),
-                    model_tokens=_EVENT_MODEL_TOKENS.get(),
-                    model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
-                    evidence_records=list(_EVENT_EVIDENCE.get() or []),
-                    result_payload=payload,
-                    result_payload_truncated=truncated,
-                ),
+                event,
             )
             return result
         finally:
@@ -373,6 +725,12 @@ class BrokerService:
             _EVENT_HITS.reset(hits_context)
             _EVENT_MODEL_ATTEMPTS.reset(attempts_context)
             _EVENT_EVIDENCE.reset(evidence_context)
+            _EVENT_PROVIDER_ATTEMPTS.reset(provider_attempts_context)
+            _EVENT_PROVIDER_TRACE.reset(provider_trace_context)
+            _EVENT_DEDUPLICATED.reset(deduplicated_context)
+            _EVENT_COALESCED.reset(coalesced_context)
+            _EVENT_SESSION_TOKEN.reset(session_token_context)
+            _EVENT_EXECUTION_ID.reset(execution_context)
 
     def _context_payload(self, state: BrokerSession, result: Any) -> tuple[Any, bool]:
         """The result echoed back for a session that disables context decoupling.
@@ -406,7 +764,408 @@ class BrokerService:
         state = self.sessions.get(token)
         if state is None:
             return []
-        return state.traces.pop(execution_id, [])
+        return sorted(state.traces.pop(execution_id, []), key=lambda event: event.sequence)
+
+    @staticmethod
+    def _fingerprint(value: Any) -> str:
+        """Versioned digest of a normalized, secret-free logical value."""
+
+        def normalize(item: Any) -> Any:
+            model_dump = getattr(item, "model_dump", None)
+            if callable(model_dump):
+                return model_dump(mode="json")
+            if isinstance(item, set):
+                return sorted(item, key=repr)
+            return str(item)
+
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=normalize,
+        ).encode("utf-8")
+        return "sha256:v1:" + hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _record_deduplicated_request(
+        *,
+        request_index: int,
+        leader_index: int,
+        request_fingerprint: str,
+    ) -> None:
+        records = _EVENT_DEDUPLICATED.get()
+        if records is not None:
+            records.append(
+                DeduplicatedRequestRecord(
+                    request_index=request_index,
+                    leader_index=leader_index,
+                    request_fingerprint=request_fingerprint,
+                )
+            )
+
+    @staticmethod
+    def _flight_key(operation: str, request_fingerprint: str) -> str:
+        return f"{operation}:{request_fingerprint}"
+
+    async def _admit_flights(
+        self,
+        state: BrokerSession,
+        requests: dict[str, tuple[str, list[int]]],
+        *,
+        group_new: bool,
+    ) -> _FlightAdmission:
+        """Atomically attach or lead every unique key in one capability call.
+
+        ``requests`` is already deduplicated within the call. Consequently one
+        key consumes one waiter even if several logical rows map to it. The
+        full validation happens under one lock before any entry or waiter is
+        added, so a capacity error cannot leave a partial attachment behind.
+        """
+
+        if not self.inflight_coalescing or not requests:
+            return _FlightAdmission(waiters={}, new_groups=[])
+
+        execution_id = _EVENT_EXECUTION_ID.get()
+        attached: list[tuple[str, _FlightEntry, str, list[int]]] = []
+        created: list[tuple[str, _FlightEntry, str, list[int]]] = []
+        async with state.flight_lock:
+            # A completed result is never a cache. The group normally removes
+            # itself before waking waiters; this defensive pruning closes the
+            # narrow race where completion is waiting to acquire this lock.
+            for key, entry in list(state.flights.items()):
+                if entry.future.done():
+                    state.flights.pop(key, None)
+
+            new_keys: list[str] = []
+            for key, (fingerprint, request_indexes) in requests.items():
+                entry = state.flights.get(key)
+                if entry is None:
+                    new_keys.append(key)
+                    continue
+                if entry.waiters >= self.max_waiters_per_flight:
+                    raise InflightCapacityError()
+                attached.append((key, entry, fingerprint, request_indexes))
+
+            if len(state.flights) + len(new_keys) > self.max_inflight_keys:
+                raise InflightCapacityError()
+
+            new_groups: list[_FlightGroup] = []
+            shared_group: _FlightGroup | None = None
+            if new_keys and group_new:
+                shared_group = _FlightGroup(operation_id=f"op_{uuid.uuid4().hex}")
+                new_groups.append(shared_group)
+            for key in new_keys:
+                fingerprint, request_indexes = requests[key]
+                group = shared_group
+                if group is None:
+                    group = _FlightGroup(operation_id=f"op_{uuid.uuid4().hex}")
+                    new_groups.append(group)
+                entry = _FlightEntry(
+                    future=asyncio.get_running_loop().create_future(),
+                    operation_id=group.operation_id,
+                    request_fingerprint=fingerprint,
+                    group=group,
+                )
+                entry.future.add_done_callback(self._consume_flight_future)
+                group.keys.add(key)
+                group.entries[key] = entry
+                state.flights[key] = entry
+                created.append((key, entry, fingerprint, request_indexes))
+
+            waiters: dict[str, _FlightWaiter] = {}
+            for key, entry, _fingerprint, _request_indexes in [*attached, *created]:
+                entry.waiters += 1
+                waiter = _FlightWaiter(
+                    key=key,
+                    entry=entry,
+                    execution_id=execution_id,
+                )
+                waiters[key] = waiter
+                if execution_id:
+                    state.flight_waiters_by_execution.setdefault(
+                        execution_id, set()
+                    ).add(waiter)
+
+        if attached:
+            state.policy.record_coalesced(len(attached))
+            records = _EVENT_COALESCED.get()
+            if records is not None:
+                records.extend(
+                    CoalescedRequestRecord(
+                        operation_id=entry.operation_id,
+                        request_indexes=list(request_indexes),
+                        request_fingerprint=fingerprint,
+                    )
+                    for _key, entry, fingerprint, request_indexes in attached
+                )
+        return _FlightAdmission(waiters=waiters, new_groups=new_groups)
+
+    def _start_flight_group(
+        self,
+        state: BrokerSession,
+        group: _FlightGroup,
+        execute: Callable[[], Awaitable[dict[str, Any]]],
+    ) -> None:
+        """Start one admitted transport group without yielding to another call."""
+
+        if group.task is not None:
+            raise RuntimeError("in-flight transport group was already started")
+
+        async def run() -> None:
+            results: dict[str, Any] | None = None
+            failure: BaseException | None = None
+            cancelled = False
+            try:
+                try:
+                    results = await execute()
+                    if set(results) != group.keys:
+                        raise RuntimeError(
+                            "in-flight transport group returned an invalid key set"
+                        )
+                except asyncio.CancelledError:
+                    cancelled = True
+                except BaseException as exc:
+                    failure = exc
+            finally:
+
+                async def publish_and_cleanup() -> None:
+                    # Remove before publishing the result: a call admitted after
+                    # this point must lead a fresh transport rather than consume
+                    # a completed value as an accidental cache.
+                    async with state.flight_lock:
+                        for key, entry in group.entries.items():
+                            if state.flights.get(key) is entry:
+                                state.flights.pop(key, None)
+
+                    for key, entry in group.entries.items():
+                        if entry.future.done():
+                            continue
+                        if cancelled:
+                            entry.future.cancel()
+                        elif failure is not None:
+                            entry.future.set_exception(failure)
+                        else:
+                            assert results is not None
+                            entry.future.set_result(results[key])
+
+                cleanup = asyncio.create_task(publish_and_cleanup())
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        # Repeated cancellation while the group is publishing
+                        # must not strand a registry entry with an unresolved
+                        # future. The cleanup task is independent and shielded.
+                        cancelled = True
+                await cleanup
+
+        group.task = asyncio.create_task(run())
+
+    @staticmethod
+    def _consume_flight_future(future: asyncio.Future[Any]) -> None:
+        """Suppress unobserved-exception warnings after every waiter detaches."""
+
+        if not future.cancelled():
+            future.exception()
+
+    async def _await_flight(
+        self,
+        state: BrokerSession,
+        waiter: _FlightWaiter,
+    ) -> Any:
+        try:
+            # A waiter cancellation is only a detach. Shielding prevents it
+            # from cancelling the shared future that other capability calls
+            # are still waiting on.
+            result = await asyncio.shield(waiter.entry.future)
+            return copy.deepcopy(result)
+        finally:
+            await self._detach_flight_waiter(state, waiter)
+
+    async def _detach_flight_waiter(
+        self,
+        state: BrokerSession,
+        waiter: _FlightWaiter,
+    ) -> None:
+        cancel_task: asyncio.Task[None] | None = None
+        async with state.flight_lock:
+            if not waiter.active:
+                return
+            waiter.active = False
+            entry = waiter.entry
+            entry.waiters = max(0, entry.waiters - 1)
+            if waiter.execution_id:
+                execution_waiters = state.flight_waiters_by_execution.get(
+                    waiter.execution_id
+                )
+                if execution_waiters is not None:
+                    execution_waiters.discard(waiter)
+                    if not execution_waiters:
+                        state.flight_waiters_by_execution.pop(
+                            waiter.execution_id, None
+                        )
+            group = entry.group
+            task = group.task
+            if (
+                task is not None
+                and not task.done()
+                and all(item.waiters == 0 for item in group.entries.values())
+            ):
+                task.cancel()
+                cancel_task = task
+        if cancel_task is not None and cancel_task is not asyncio.current_task():
+            await asyncio.gather(cancel_task, return_exceptions=True)
+
+    async def _cancel_all_flights(self, state: BrokerSession) -> int:
+        async with state.flight_lock:
+            groups = {entry.group.operation_id: entry.group for entry in state.flights.values()}
+            for group in groups.values():
+                for entry in group.entries.values():
+                    entry.waiters = 0
+                    for waiter_set in state.flight_waiters_by_execution.values():
+                        for waiter in waiter_set:
+                            if waiter.entry is entry:
+                                waiter.active = False
+            state.flight_waiters_by_execution.clear()
+            state.flights.clear()
+            tasks = [
+                group.task
+                for group in groups.values()
+                if group.task is not None and not group.task.done()
+            ]
+            for task in tasks:
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return len(tasks)
+
+    @staticmethod
+    def _provider_failure(error: ProviderRequestError) -> dict[str, Any]:
+        failure: dict[str, Any] = {
+            "code": error.code,
+            "message": error.message,
+            "retryable": error.retryable,
+            "attempts": error.attempts,
+        }
+        if error.provider_status is not None:
+            failure["provider_status"] = error.provider_status
+        if error.retry_after_seconds is not None:
+            failure["retry_after_seconds"] = error.retry_after_seconds
+        return failure
+
+    @staticmethod
+    def _is_systemic_search_failure(failure: dict[str, Any]) -> bool:
+        return str(failure.get("code") or "") in {
+            "provider_not_configured",
+            "provider_timeout",
+            "provider_rate_limited",
+            "provider_unavailable",
+            "provider_auth_failed",
+            "provider_http_error",
+            "provider_invalid_response",
+        }
+
+    @staticmethod
+    def _is_systemic_content_failure(failure: dict[str, Any]) -> bool:
+        """Whether every document failing means the content service is down.
+
+        Permanent document and unexpected non-retryable HTTP failures remain
+        aligned rows: unlike a shared outage, they may be specific to the URL
+        or corpus entry the caller asked to fetch.
+        """
+
+        return str(failure.get("code") or "") in {
+            "provider_timeout",
+            "provider_rate_limited",
+            "provider_unavailable",
+            "provider_auth_failed",
+            "provider_invalid_response",
+        }
+
+    async def _run_provider(
+        self,
+        state: BrokerSession,
+        *,
+        backend: SearchBackend,
+        operation: str,
+        request_indexes: list[int],
+        request_value: Any,
+        request: Callable[[], Awaitable[Any]],
+        preflight: Callable[[], None] | None = None,
+        operation_id: str | None = None,
+        track_execution: bool = True,
+    ) -> Any:
+        """Execute, account and trace one real provider transport operation."""
+
+        operation_id = operation_id or f"op_{uuid.uuid4().hex}"
+        request_fingerprint = self._fingerprint(request_value)
+        records = _EVENT_PROVIDER_ATTEMPTS.get()
+        trace_buffer = _EVENT_PROVIDER_TRACE.get()
+
+        def observe(attempt: ProviderAttempt) -> None:
+            state.policy.record_provider_attempt(
+                kind="search" if operation.endswith(".search") else "content",
+                attempt=attempt.attempt,
+            )
+            if records is None:
+                return
+            record = ProviderAttemptRecord(
+                operation_id=operation_id,
+                attempt_id=f"{operation_id}:{attempt.attempt}",
+                provider=operation.partition(".")[0],
+                operation=operation,
+                request_indexes=list(attempt.request_indexes),
+                attempt=attempt.attempt,
+                status=attempt.status,
+                duration_seconds=attempt.duration_seconds,
+                queue_seconds=attempt.queue_seconds,
+                rate_limit_wait_seconds=attempt.rate_limit_wait_seconds,
+                backoff_before_seconds=attempt.backoff_before_seconds,
+                error_code=attempt.error_code,
+                provider_status=attempt.provider_status,
+                request_fingerprint=request_fingerprint,
+            )
+            if trace_buffer is not None:
+                trace_buffer.append(record)
+            else:
+                records.append(record)
+
+        def observe_wait(wait: ProviderWait) -> None:
+            state.policy.record_provider_timing(
+                phase=wait.phase,
+                duration_seconds=wait.duration_seconds,
+            )
+
+        provider_identity = str(
+            getattr(backend, "provider_identity", "") or f"{operation}:{id(backend)}"
+        )
+        task = asyncio.create_task(
+            self.provider_runtime.run(
+                operation,
+                request,
+                provider_identity=provider_identity,
+                request_indexes=request_indexes,
+                preflight=preflight,
+                observer=observe,
+                wait_observer=observe_wait,
+            )
+        )
+        session_token = _EVENT_SESSION_TOKEN.get()
+        if session_token and track_execution:
+            self._track_execution_task(
+                session_token,
+                _EVENT_EXECUTION_ID.get(),
+                task,
+            )
+        result = await task
+        response_fingerprint = self._fingerprint(result)
+        if records is not None:
+            for record in reversed(records):
+                if record.operation_id == operation_id and record.status == "success":
+                    record.response_fingerprint = response_fingerprint
+                    break
+        return result
 
     def _trace_queries(self, method: str, params: dict[str, Any]) -> list[str]:
         if not method.startswith("search."):
@@ -441,6 +1200,8 @@ class BrokerService:
             return sum(len(batch.get("hits", [])) for batch in result)
         if isinstance(result, list):
             return len(result)
+        if method == "content.grep_report" and isinstance(result, dict):
+            return len(result.get("matches", []))
         return 1 if result is not None else 0
 
     # A failed event without its message is a category, not a diagnosis. The
@@ -506,6 +1267,8 @@ class BrokerService:
                 f"of {self.max_search_query_chars}"
             )
         domains = params.get("domains")
+        if domains is not None and not isinstance(domains, list):
+            raise ValueError("domains must be a list when provided")
         # Refused rather than dropped. A backend-neutral method name is only
         # honest if a parameter it cannot honour fails loudly: a program that
         # asked for one site and silently got the whole web draws exactly the
@@ -588,13 +1351,24 @@ class BrokerService:
         self,
         state: BrokerSession,
         params: dict[str, Any],
+        *,
+        request_index: int = 0,
+        record_usage: bool = True,
+        operation_id: str | None = None,
+        track_execution: bool = True,
     ) -> list[SearchHit]:
         """Execute one search without mutating the session reference table."""
-        backend_name, _ = self._search_backend(state)
+        backend_name, backend = self._search_backend(state)
         state.policy.require_backend(backend_name)
-        await state.policy.record_search()
-        _, backend, query, domains, limit, offset = self._prepare_search(state, params)
-        async with self.capacity_gate.slot():
+        _, prepared_backend, query, domains, limit, offset = self._prepare_search(
+            state, params
+        )
+        if prepared_backend is not backend:
+            raise RuntimeError("Session search backend changed during request preparation.")
+        if record_usage:
+            await state.policy.record_search()
+
+        async def request() -> list[SearchHit]:
             return await backend.search(
                 query,
                 limit=limit,
@@ -602,13 +1376,105 @@ class BrokerService:
                 domains=domains,
             )
 
+        preflight = getattr(backend, "preflight_search", None)
+
+        return await self._run_provider(
+            state,
+            backend=backend,
+            operation=f"{backend_name}.search",
+            request_indexes=[request_index],
+            request_value={
+                "backend": backend_name,
+                "revision": self.backend_revision,
+                "query": query,
+                "limit": limit,
+                "offset": offset,
+                "domains": domains,
+            },
+            request=request,
+            preflight=preflight if callable(preflight) else None,
+            operation_id=operation_id,
+            track_execution=track_execution,
+        )
+
     async def _search(
         self,
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        if self.inflight_coalescing:
+            return await self._search_coalesced(state, params)
         hits = await self._retrieve_search(state, params)
         return self._record_search_hits(state, hits)
+
+    async def _search_coalesced(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        backend_name, _backend, query, domains, limit, offset = self._prepare_search(
+            state, params
+        )
+        await state.policy.record_search()
+        normalized_domains = (
+            sorted({str(domain).strip() for domain in domains if str(domain).strip()})
+            if domains
+            else None
+        )
+        request = {"limit": limit, "offset": offset, "domains": normalized_domains}
+        fingerprint = self._fingerprint(
+            {
+                "backend": backend_name,
+                "revision": self.backend_revision,
+                "query": query,
+                **request,
+            }
+        )
+        key = self._flight_key(f"{backend_name}.search", fingerprint)
+        admission = await self._admit_flights(
+            state,
+            {key: (fingerprint, [0])},
+            group_new=False,
+        )
+        for group in admission.new_groups:
+
+            async def execute(
+                group: _FlightGroup = group,
+            ) -> dict[str, SearchBatch]:
+                try:
+                    hits = await self._retrieve_search(
+                        state,
+                        {
+                            "query": query,
+                            "limit": limit,
+                            "offset": offset,
+                            "domains": normalized_domains,
+                        },
+                        record_usage=False,
+                        operation_id=group.operation_id,
+                        track_execution=False,
+                    )
+                except ProviderRequestError as exc:
+                    batch = SearchBatch(
+                        query=query,
+                        failure=self._provider_failure(exc),
+                        request=request,
+                    )
+                else:
+                    batch = SearchBatch(query=query, hits=hits, request=request)
+                return {key: batch}
+
+            self._start_flight_group(state, group, execute)
+
+        batch = SearchBatch.model_validate(
+            await self._await_flight(state, admission.waiters[key])
+        )
+        if batch.failure is not None:
+            raise CapabilityProviderError.from_failure(
+                batch.failure.model_dump(mode="json"),
+                attempts=len(_EVENT_PROVIDER_ATTEMPTS.get() or []),
+            )
+        return self._record_search_hits(state, list(batch.hits))
 
     @staticmethod
     def _canonical_url(url: str) -> str:
@@ -683,139 +1549,398 @@ class BrokerService:
                 f"broker maximum of {self.max_search_queries_per_request}"
             )
         queries = [str(query) for query in raw_queries]
-        for index, query in enumerate(queries):
-            stripped = query.strip()
-            if len(stripped) > self.max_search_query_chars:
-                raise ValueError(
-                    f"query at index {index} has {len(stripped)} characters, "
-                    f"exceeding the broker maximum of {self.max_search_query_chars}"
+        limit, offset = self._search_window(params, limit_key="limit_per_query")
+        domains_value = params.get("domains")
+        if domains_value is not None and not isinstance(domains_value, list):
+            raise ValueError("domains must be a list when provided")
+        domains = (
+            sorted({str(domain).strip() for domain in domains_value if str(domain).strip()})
+            if domains_value
+            else None
+        )
+        backend_name, backend = self._search_backend(state)
+        state.policy.require_backend(backend_name)
+        # Options are global to the batch. Validate them once before charging
+        # usage or admitting any provider side effect.
+        self._prepare_search(
+            state,
+            {
+                "query": "x",
+                "limit": limit,
+                "offset": offset,
+                "domains": domains,
+            },
+        )
+        await state.policy.record_search(len(queries))
+
+        request = {
+            "limit": limit,
+            "offset": offset,
+            "domains": domains,
+        }
+        batches: list[SearchBatch | None] = [None] * len(queries)
+        leaders: list[int] = []
+        leader_for_key: dict[str, int] = {}
+        fingerprints: dict[int, str] = {}
+        for index, original_query in enumerate(queries):
+            query = original_query.strip()
+            if not query:
+                batches[index] = SearchBatch(
+                    query=original_query,
+                    failure={
+                        "code": "invalid_request",
+                        "message": "query must not be empty",
+                        "retryable": False,
+                        "attempts": 0,
+                    },
+                    request=request,
                 )
-        self._search_window(params, limit_key="limit_per_query")
-        concurrency = min(max(int(params.get("concurrency", 5)), 1), 20)
-        try:
-            backend_name, backend = self._search_backend(state)
-        except Exception:
-            # Let the established per-query path retain its exact error and
-            # accounting semantics when no backend can be resolved.
-            backend_name, backend = "", None
+                continue
+            if len(query) > self.max_search_query_chars:
+                batches[index] = SearchBatch(
+                    query=original_query,
+                    failure={
+                        "code": "invalid_request",
+                        "message": (
+                            f"query has {len(query)} characters, exceeding the broker "
+                            f"maximum of {self.max_search_query_chars}"
+                        ),
+                        "retryable": False,
+                        "attempts": 0,
+                    },
+                    request=request,
+                )
+                continue
+            fingerprint = self._fingerprint(
+                {
+                    "backend": backend_name,
+                    "revision": self.backend_revision,
+                    "query": query,
+                    **request,
+                }
+            )
+            fingerprints[index] = fingerprint
+            leader = leader_for_key.get(fingerprint)
+            if leader is None:
+                leader_for_key[fingerprint] = index
+                leaders.append(index)
+                continue
+            self._record_deduplicated_request(
+                request_index=index,
+                leader_index=leader,
+                request_fingerprint=fingerprint,
+            )
 
-        if (
-            backend_name == "local"
-            and backend is not None
-            and isinstance(backend, BatchSearchBackend)
+        duplicate_count = len(fingerprints) - len(leaders)
+        if duplicate_count:
+            state.policy.record_deduplicated(duplicate_count)
+
+        if self.inflight_coalescing:
+            leader_rows = await self._search_many_coalesced(
+                state,
+                backend_name,
+                backend,
+                queries,
+                leaders,
+                fingerprints,
+                limit=limit,
+                offset=offset,
+                domains=domains,
+                request=request,
+                concurrency=min(max(int(params.get("concurrency", 5)), 1), 20),
+            )
+        elif leaders and backend_name == "local" and isinstance(
+            backend, BatchSearchBackend
         ):
-            batches = await self._search_many_batched(state, backend, queries, params)
+            leader_rows = await self._search_many_batched(
+                state,
+                backend,
+                queries,
+                leaders,
+                limit=limit,
+                offset=offset,
+                domains=domains,
+                request=request,
+            )
         else:
-            gate = asyncio.Semaphore(concurrency)
+            gate = asyncio.Semaphore(
+                min(max(int(params.get("concurrency", 5)), 1), 20)
+            )
 
-            async def one(query: str) -> tuple[list[SearchHit], str | None]:
+            async def one(index: int) -> SearchBatch:
                 async with gate:
                     try:
                         hits = await self._retrieve_search(
                             state,
                             {
-                                "query": query,
-                                "limit": params.get("limit_per_query", 10),
-                                "offset": params.get("offset", 0),
-                                "domains": params.get("domains"),
+                                "query": queries[index],
+                                "limit": limit,
+                                "offset": offset,
+                                "domains": domains,
                             },
+                            request_index=index,
+                            record_usage=False,
                         )
-                        return hits, None
-                    except Exception as exc:
-                        return [], str(exc)
+                    except ProviderRequestError as exc:
+                        return SearchBatch(
+                            query=queries[index],
+                            failure=self._provider_failure(exc),
+                            request=request,
+                        )
+                    return SearchBatch(
+                        query=queries[index],
+                        hits=hits,
+                        request=request,
+                    )
 
-            # Retrieval may finish in any order, but refs, representative hits,
-            # and trace rows are registered only after every task has settled,
-            # in input-query order. Provider latency therefore cannot change a
-            # replay's provenance.
-            returned = await asyncio.gather(*(one(query) for query in queries))
-            batches = []
-            for index, (query, (hits, error)) in enumerate(zip(queries, returned, strict=True)):
-                recorded = (
-                    self._record_search_hits(state, hits, query_index=index) if not error else []
-                )
-                batches.append(SearchBatch(query=query, hits=recorded, error=error))
-        # Partial failures stay in batch.error so the program can degrade
-        # gracefully, but a wholesale failure (missing backend, bad credentials,
-        # rate limit) must not be reported as an empty result set.
-        failed = [batch for batch in batches if batch.error]
-        if batches and len(failed) == len(batches):
-            raise RuntimeError(
-                f"All {len(batches)} searches failed: {failed[0].error}"
+            returned = await asyncio.gather(*(one(index) for index in leaders))
+            leader_rows = dict(zip(leaders, returned, strict=True))
+
+        for index in leaders:
+            batches[index] = leader_rows[index]
+        for index, fingerprint in fingerprints.items():
+            if index in leader_rows:
+                continue
+            leader = leader_for_key[fingerprint]
+            duplicate = copy.deepcopy(leader_rows[leader])
+            duplicate.query = queries[index]
+            batches[index] = duplicate
+
+        assert all(batch is not None for batch in batches)
+        finalized = [batch for batch in batches if batch is not None]
+        for index, batch in enumerate(finalized):
+            if batch.failure is None:
+                batch.hits = [
+                    SearchHit.model_validate(hit)
+                    for hit in self._record_search_hits(
+                        state,
+                        list(batch.hits),
+                        query_index=index,
+                    )
+                ]
+
+        provider_failures = [
+            batch.failure.model_dump(mode="json")
+            for index, batch in enumerate(finalized)
+            if index in fingerprints and batch.failure is not None
+        ]
+        if provider_failures and len(provider_failures) == len(fingerprints) and all(
+            self._is_systemic_search_failure(failure)
+            for failure in provider_failures
+        ):
+            attempts = len(_EVENT_PROVIDER_ATTEMPTS.get() or [])
+            raise CapabilityProviderError.from_failures(
+                provider_failures,
+                attempts=attempts,
             )
-        return [batch.model_dump(mode="json") for batch in batches]
+        return [batch.model_dump(mode="json") for batch in finalized]
+
+    async def _search_many_coalesced(
+        self,
+        state: BrokerSession,
+        backend_name: str,
+        backend: SearchBackend,
+        queries: list[str],
+        leaders: list[int],
+        fingerprints: dict[int, str],
+        *,
+        limit: int,
+        offset: int,
+        domains: list[str] | None,
+        request: dict[str, Any],
+        concurrency: int,
+    ) -> dict[int, SearchBatch]:
+        """Attach active keys and send the remaining local keys as one batch."""
+
+        operation = f"{backend_name}.search"
+        key_for_index = {
+            index: self._flight_key(operation, fingerprints[index]) for index in leaders
+        }
+        admission = await self._admit_flights(
+            state,
+            {
+                key_for_index[index]: (fingerprints[index], [index])
+                for index in leaders
+            },
+            group_new=backend_name == "local" and isinstance(backend, BatchSearchBackend),
+        )
+        index_for_key = {key: index for index, key in key_for_index.items()}
+        gate = asyncio.Semaphore(concurrency)
+        for group in admission.new_groups:
+            group_indexes = [index_for_key[key] for key in group.keys]
+            group_indexes.sort()
+            if backend_name == "local" and isinstance(backend, BatchSearchBackend):
+
+                async def execute_local(
+                    group: _FlightGroup = group,
+                    group_indexes: list[int] = group_indexes,
+                ) -> dict[str, SearchBatch]:
+                    rows = await self._search_many_batched(
+                        state,
+                        backend,
+                        queries,
+                        group_indexes,
+                        limit=limit,
+                        offset=offset,
+                        domains=domains,
+                        request=request,
+                        operation_id=group.operation_id,
+                        track_execution=False,
+                    )
+                    return {
+                        key_for_index[index]: row for index, row in rows.items()
+                    }
+
+                self._start_flight_group(state, group, execute_local)
+                continue
+
+            if len(group_indexes) != 1:
+                raise RuntimeError("non-batch search flight contains multiple keys")
+            index = group_indexes[0]
+            key = key_for_index[index]
+
+            async def execute_one(
+                group: _FlightGroup = group,
+                index: int = index,
+                key: str = key,
+            ) -> dict[str, SearchBatch]:
+                async with gate:
+                    try:
+                        hits = await self._retrieve_search(
+                            state,
+                            {
+                                "query": queries[index],
+                                "limit": limit,
+                                "offset": offset,
+                                "domains": domains,
+                            },
+                            request_index=index,
+                            record_usage=False,
+                            operation_id=group.operation_id,
+                            track_execution=False,
+                        )
+                    except ProviderRequestError as exc:
+                        row = SearchBatch(
+                            query=queries[index],
+                            failure=self._provider_failure(exc),
+                            request=request,
+                        )
+                    else:
+                        row = SearchBatch(
+                            query=queries[index],
+                            hits=hits,
+                            request=request,
+                        )
+                return {key: row}
+
+            self._start_flight_group(state, group, execute_one)
+
+        returned = await asyncio.gather(
+            *(
+                self._await_flight(state, admission.waiters[key_for_index[index]])
+                for index in leaders
+            )
+        )
+        rows: dict[int, SearchBatch] = {}
+        for index, result in zip(leaders, returned, strict=True):
+            row = SearchBatch.model_validate(result)
+            # Whitespace-equivalent calls share one provider request but retain
+            # the exact query string at each caller's public boundary.
+            row.query = queries[index]
+            rows[index] = row
+        return rows
 
     async def _search_many_batched(
         self,
         state: BrokerSession,
         backend: BatchSearchBackend,
         queries: list[str],
-        params: dict[str, Any],
-    ) -> list[SearchBatch]:
-        """Execute valid local queries in one backend call and restore row order."""
-        backend_name, _ = self._search_backend(state)
-        state.policy.require_backend(backend_name)
-        await state.policy.record_search(len(queries))
-        batches: list[SearchBatch | None] = [None] * len(queries)
-        valid_indices: list[int] = []
-        valid_queries: list[str] = []
-        batch_options: tuple[int, int, list[str] | None] | None = None
+        leaders: list[int],
+        *,
+        limit: int,
+        offset: int,
+        domains: list[str] | None,
+        request: dict[str, Any],
+        operation_id: str | None = None,
+        track_execution: bool = True,
+    ) -> dict[int, SearchBatch]:
+        """Execute unique local queries as one real provider microbatch."""
 
-        for index, query in enumerate(queries):
-            try:
-                _, prepared_backend, prepared_query, domains, limit, offset = (
-                    self._prepare_search(
-                        state,
-                        {
-                            "query": query,
-                            "limit": params.get("limit_per_query", 10),
-                            "offset": params.get("offset", 0),
-                            "domains": params.get("domains"),
-                        },
-                    )
+        backend_name, resolved = self._search_backend(state)
+        if resolved is not backend:
+            raise RuntimeError("Session search backend changed during batch execution.")
+        unique_queries = [queries[index].strip() for index in leaders]
+        operation_id = operation_id or f"op_{uuid.uuid4().hex}"
+
+        async def execute() -> list[SearchBatch]:
+            return await backend.search_many(
+                unique_queries,
+                limit=limit,
+                offset=offset,
+                domains=domains,
+            )
+
+        preflight = getattr(backend, "preflight_search", None)
+
+        try:
+            returned = await self._run_provider(
+                state,
+                backend=resolved,
+                operation=f"{backend_name}.search",
+                request_indexes=leaders,
+                request_value={
+                    "backend": backend_name,
+                    "revision": self.backend_revision,
+                    "queries": unique_queries,
+                    **request,
+                },
+                request=execute,
+                preflight=preflight if callable(preflight) else None,
+                operation_id=operation_id,
+                track_execution=track_execution,
+            )
+        except ProviderRequestError as exc:
+            failure = self._provider_failure(exc)
+            return {
+                index: SearchBatch(
+                    query=queries[index],
+                    failure=failure,
+                    request=request,
                 )
-                if prepared_backend is not backend:
-                    raise RuntimeError("Session search backend changed during batch execution.")
-                batch_options = (limit, offset, domains)
-                valid_indices.append(index)
-                valid_queries.append(prepared_query)
-            except Exception as exc:
-                batches[index] = SearchBatch(query=query, error=str(exc))
-
-        if valid_queries:
-            assert batch_options is not None
-            limit, offset, domains = batch_options
-            try:
-                async with self.capacity_gate.slot():
-                    returned = await backend.search_many(
-                        valid_queries,
-                        limit=limit,
-                        offset=offset,
-                        domains=domains,
-                    )
-                if len(returned) != len(valid_queries):
-                    raise RuntimeError(
-                        "Batch backend returned an invalid result count: "
-                        f"expected {len(valid_queries)}, got {len(returned)}."
-                    )
-            except Exception as exc:
-                for index in valid_indices:
-                    batches[index] = SearchBatch(query=queries[index], error=str(exc))
-            else:
-                for index, batch in zip(valid_indices, returned, strict=True):
-                    hits = self._record_search_hits(
-                        state,
-                        list(batch.hits),
-                        query_index=index,
-                    )
-                    batches[index] = SearchBatch(
-                        query=queries[index],
-                        hits=hits,
-                        error=batch.error,
-                    )
-
-        assert all(batch is not None for batch in batches)
-        return [batch for batch in batches if batch is not None]
+                for index in leaders
+            }
+        if len(returned) != len(leaders):
+            raise RuntimeError("Provider runtime accepted an invalid batch result count.")
+        attempts = max(
+            (
+                record.attempt
+                for record in (_EVENT_PROVIDER_ATTEMPTS.get() or [])
+                if record.operation_id == operation_id
+            ),
+            default=1,
+        )
+        rows: dict[int, SearchBatch] = {}
+        for index, batch in zip(leaders, returned, strict=True):
+            failure = batch.failure
+            if failure is None and batch.error:
+                failure = {
+                    "code": "provider_rejected",
+                    "message": "Provider rejected one search item.",
+                    "retryable": False,
+                    "attempts": attempts,
+                }
+            rows[index] = SearchBatch(
+                query=queries[index],
+                hits=list(batch.hits) if failure is None else [],
+                failure=failure,
+                request=request,
+            )
+        if any(row.failure is not None for row in rows.values()):
+            for record in reversed(_EVENT_PROVIDER_ATTEMPTS.get() or []):
+                if record.operation_id == operation_id and record.status == "success":
+                    record.status = "partial"
+                    break
+        return rows
 
     @staticmethod
     def _lookup(state: BrokerSession, handle: str) -> SearchHit | None:
@@ -888,6 +2013,22 @@ class BrokerService:
             )
         return hits
 
+    def _resolve_content_refs(
+        self, state: BrokerSession, refs: Any
+    ) -> list[SearchHit]:
+        if isinstance(refs, str):
+            normalized = [refs]
+        elif isinstance(refs, list):
+            normalized = refs
+        else:
+            raise ValueError("content refs must be a list or a single ref")
+        if len(normalized) > self.max_content_refs_per_request:
+            raise ValueError(
+                f"content request contains {len(normalized)} refs, exceeding the "
+                f"broker maximum of {self.max_content_refs_per_request}"
+            )
+        return self._resolve_refs(state, normalized)
+
     async def _session_usage(
         self,
         state: BrokerSession,
@@ -907,6 +2048,12 @@ class BrokerService:
         return {
             **state.policy.usage.model_dump(mode="json"),
             "documents_seen": len(state.references),
+            "evidence_records_remaining": max(
+                self.max_evidence_records - len(state.evidence), 0
+            ),
+            "evidence_passage_bytes_remaining": max(
+                self.max_evidence_passage_bytes - state.evidence_passage_bytes, 0
+            ),
             "budget_remaining": state.policy.remaining(),
             "terminal_reason": state.policy.terminal_reason,
         }
@@ -939,10 +2086,15 @@ class BrokerService:
             if not isinstance(handle, str) or not handle:
                 raise ValueError("Every citation request must contain a non-empty ref")
             hit = self._resolve_refs(state, [handle])[0]
-            locator = request.get("locator")
-            if locator is None:
+            if "locator" not in request:
                 resolved.append(self._citation_wire(hit, hit.snippet, "search_preview"))
                 continue
+            locator = request["locator"]
+            if locator is None:
+                raise ValueError(
+                    "Citation locator must be omitted for legacy preview citations; "
+                    "explicit null is not valid passage evidence"
+                )
             record = self._verify_evidence_locator(state, hit.ref, locator)
             citation = self._citation_wire(hit, record.text, record.kind)
             citation["locator"] = locator
@@ -972,9 +2124,7 @@ class BrokerService:
         locator: Any,
     ) -> EvidenceRecord:
         locator_id = locator.get("id") if isinstance(locator, dict) else None
-        registered = (
-            state.evidence.get(locator_id) if isinstance(locator_id, str) else None
-        )
+        registered: EvidenceRecord | None = None
 
         def reject(message: str, code: str) -> None:
             self._record_evidence_trace(
@@ -994,6 +2144,9 @@ class BrokerService:
             )
         if not all(isinstance(locator[key], str) for key in ("id", "ref", "kind")):
             reject("Evidence locator fields must be strings", "invalid_locator")
+        if not locator["id"] or len(locator["id"]) > 128:
+            reject("Evidence locator id is empty or too long", "invalid_locator")
+        registered = state.evidence.get(locator["id"])
         if locator["kind"] != "selected_passage":
             reject("Unsupported evidence locator kind", "invalid_locator_kind")
         if locator["ref"] != ref:
@@ -1049,11 +2202,11 @@ class BrokerService:
         text: str,
         document_text: str,
         coordinates: dict[str, Any],
-    ) -> dict[str, str] | None:
+    ) -> tuple[dict[str, str] | None, dict[str, Any] | None]:
         if not text or len(text) > self.max_evidence_chars:
-            return None
-        document_fingerprint = hashlib.sha256(document_text.encode()).hexdigest()
-        passage_fingerprint = hashlib.sha256(text.encode()).hexdigest()
+            return None, None
+        document_fingerprint = hashlib.sha256(document_text.encode("utf-8")).hexdigest()
+        passage_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
         material = json.dumps(
             {
                 "ref": ref,
@@ -1068,7 +2221,7 @@ class BrokerService:
         locator_id = "evidence_" + hashlib.sha256(
             f"{state.session.token}\0{material}".encode()
         ).hexdigest()[:24]
-        state.evidence[locator_id] = EvidenceRecord(
+        record = EvidenceRecord(
             ref=ref,
             kind="selected_passage",
             text=text,
@@ -1076,21 +2229,69 @@ class BrokerService:
             document_fingerprint=document_fingerprint,
             passage_fingerprint=passage_fingerprint,
         )
+        existing = state.evidence.get(locator_id)
+        locator = {"id": locator_id, "ref": ref, "kind": "selected_passage"}
+        if existing is not None:
+            if existing != record:
+                self._record_evidence_trace(
+                    locator_id=locator_id,
+                    ref=ref,
+                    action="issue",
+                    status="error",
+                    record=existing,
+                    error_code="evidence_locator_collision",
+                )
+                raise RuntimeError("Evidence locator collision detected")
+            self._record_evidence_trace(
+                locator_id=locator_id,
+                ref=ref,
+                action="issue",
+                status="ok",
+                record=existing,
+            )
+            return locator, None
+
+        passage_bytes = len(text.encode("utf-8"))
+        if (
+            len(state.evidence) >= self.max_evidence_records
+            or state.evidence_passage_bytes + passage_bytes
+            > self.max_evidence_passage_bytes
+        ):
+            self._record_evidence_trace(
+                locator_id=locator_id,
+                ref=ref,
+                action="issue",
+                status="error",
+                record=record,
+                error_code="evidence_capacity_exhausted",
+            )
+            return None, {
+                "code": "evidence_capacity_exhausted",
+                "message": "The session evidence registry is full.",
+                "retryable": False,
+            }
+
+        state.evidence[locator_id] = record
+        state.evidence_passage_bytes += passage_bytes
+        state.policy.set_evidence_usage(
+            records=len(state.evidence),
+            passage_bytes=state.evidence_passage_bytes,
+        )
         self._record_evidence_trace(
             locator_id=locator_id,
             ref=ref,
             action="issue",
             status="ok",
-            record=state.evidence[locator_id],
+            record=record,
         )
-        return {"id": locator_id, "ref": ref, "kind": "selected_passage"}
+        return locator, None
 
     async def _content_get_many(
         self,
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        hits = self._resolve_refs(state, params.get("refs", []))
+        hits = self._resolve_content_refs(state, params.get("refs", []))
         return await self._fetch_content(state, hits, query=None)
 
     async def _content_snippets(
@@ -1098,7 +2299,7 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        hits = self._resolve_refs(state, params.get("refs", []))
+        hits = self._resolve_content_refs(state, params.get("refs", []))
         query = str(params.get("query", ""))
         rows = await self._fetch_content(state, hits, query=query)
         per_page_chars = max(int(params.get("max_tokens_per_page", 1000)), 1) * 4
@@ -1118,7 +2319,7 @@ class BrokerService:
             row["metadata"]["passage_end"] = start + len(text)
             row["text"] = text
             used += len(text)
-            locator = self._register_evidence(
+            locator, locator_error = self._register_evidence(
                 state,
                 ref=str(row.get("ref") or ""),
                 text=text,
@@ -1132,6 +2333,8 @@ class BrokerService:
             )
             if locator is not None:
                 row["locator"] = locator
+            if locator_error is not None:
+                row["locator_error"] = locator_error
         # Positional alignment is part of the batch contract. A page which lost
         # its passage to the total budget remains as an explicit empty row.
         return rows
@@ -1159,7 +2362,7 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        hits = self._resolve_refs(state, params.get("refs", []))
+        hits = self._resolve_content_refs(state, params.get("refs", []))
         rows = await self._fetch_content(state, hits, query=None)
         # 1-indexed, and an offset below 1 is clamped rather than refused: a
         # program computing `match.line - 5` near the top of a document is
@@ -1223,7 +2426,7 @@ class BrokerService:
                     "end_line": metadata["end_line"],
                 }
             )
-            locator = self._register_evidence(
+            locator, locator_error = self._register_evidence(
                 state,
                 ref=str(row.get("ref") or ""),
                 text=text,
@@ -1232,6 +2435,8 @@ class BrokerService:
             )
             if locator is not None:
                 result["locator"] = locator
+            if locator_error is not None:
+                result["locator_error"] = locator_error
             windows.append(result)
         return windows
 
@@ -1252,11 +2457,40 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
+        matches, _ = await self._content_grep_rows(state, params, report=False)
+        return matches
+
+    async def _content_grep_report(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        matches, failures = await self._content_grep_rows(state, params, report=True)
+        raw_refs = params.get("refs", [])
+        input_count = 1 if isinstance(raw_refs, str) else len(raw_refs)
+        return {
+            "matches": matches,
+            "failures": failures,
+            "input_count": input_count,
+        }
+
+    async def _content_grep_rows(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+        *,
+        report: bool,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         pattern = str(params.get("pattern", ""))
         if not pattern:
             raise ValueError("pattern must not be empty")
-        hits = self._resolve_refs(state, params.get("refs", []))
-        rows = await self._fetch_content(state, hits, query=None)
+        hits = self._resolve_content_refs(state, params.get("refs", []))
+        rows = await self._fetch_content(
+            state,
+            hits,
+            query=None,
+            raise_on_all_failures=not report,
+        )
         regex = self._compile_pattern(pattern)
         context = min(max(int(params.get("context", 0)), 0), 20)
         # Bounded per document rather than in total: an unbounded grep over 50
@@ -1264,7 +2498,25 @@ class BrokerService:
         # and a global cap would let the first document starve the other 49.
         max_per_ref = min(max(int(params.get("max_matches_per_ref", 20)), 1), 200)
         matches: list[dict[str, Any]] = []
-        for row in rows:
+        failures: list[dict[str, Any]] = []
+        for input_index, row in enumerate(rows):
+            failure = row.get("failure")
+            if failure is None and row.get("metadata", {}).get("fetch_error"):
+                failure = {
+                    "code": "provider_rejected",
+                    "message": "Provider rejected one document.",
+                    "retryable": False,
+                    "attempts": 1,
+                }
+            if failure is not None:
+                failures.append(
+                    {
+                        "input_index": input_index,
+                        "ref": row.get("ref", ""),
+                        "failure": failure,
+                    }
+                )
+                continue
             lines = self._document_lines(row)
             metadata = row.get("metadata", {})
             found = 0
@@ -1286,8 +2538,10 @@ class BrokerService:
                     "before": before,
                     "after": after,
                 }
+                if report:
+                    match["input_index"] = input_index
                 evidence = "\n".join([*before, line, *after])
-                locator = self._register_evidence(
+                locator, locator_error = self._register_evidence(
                     state,
                     ref=str(row.get("ref") or ""),
                     text=evidence,
@@ -1301,8 +2555,10 @@ class BrokerService:
                 )
                 if locator is not None:
                     match["locator"] = locator
+                if locator_error is not None:
+                    match["locator_error"] = locator_error
                 matches.append(match)
-        return matches
+        return matches, failures
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -1392,6 +2648,7 @@ class BrokerService:
         hits: list[SearchHit],
         *,
         query: str | None,
+        raise_on_all_failures: bool = False,
     ) -> list[dict[str, Any]]:
         """Text for every requested hit, in the order requested.
 
@@ -1403,71 +2660,281 @@ class BrokerService:
         affordable against a local index but is three times the bill and the
         latency against a paid scrape API.
         """
-        grouped: dict[str, list[SearchHit]] = {}
-        misses: list[SearchHit] = []
-        for hit in hits:
+        keys: list[str] = []
+        leaders: dict[str, tuple[int, SearchHit]] = {}
+        for index, hit in enumerate(hits):
             state.policy.require_backend(hit.backend)
-            if hit.ref not in state.content_cache:
-                misses.append(hit)
-                grouped.setdefault(hit.backend, []).append(hit)
-        await state.policy.record_content_fetches(len(hits), len(misses))
+            fingerprint = self._fingerprint(
+                {
+                    "backend": hit.backend,
+                    "revision": self.backend_revision,
+                    "ref": hit.ref,
+                }
+            )
+            keys.append(fingerprint)
+            leader = leaders.get(fingerprint)
+            if leader is None:
+                leaders[fingerprint] = (index, hit)
+                continue
+            self._record_deduplicated_request(
+                request_index=index,
+                leader_index=leader[0],
+                request_fingerprint=fingerprint,
+            )
 
-        async def fetch(name: str, backend_hits: list[SearchHit]) -> list[ContentSnippet]:
-            backend = self.backends.get(name)
-            if backend is None:
-                raise RuntimeError(f"Backend '{name}' is not configured")
-            async with self.capacity_gate.slot():
-                return await backend.content(backend_hits, query=query)
-
-        chunks = await asyncio.gather(*(fetch(name, rows) for name, rows in grouped.items()))
-        fetched = {
-            item.ref: item.model_dump(mode="json") for chunk in chunks for item in chunk
+        duplicate_count = len(hits) - len(leaders)
+        if duplicate_count:
+            state.policy.record_deduplicated(duplicate_count)
+        misses = {
+            key: value
+            for key, value in leaders.items()
+            if value[1].ref not in state.content_cache
         }
+        await state.policy.record_content_fetches(len(hits), 0)
+        # The logical-usage reservation above may yield while another caller's
+        # flight completes. Its transport leader writes the cache before
+        # removing that flight, so refreshing here closes the only window in
+        # which this call could admit a second leader for an already-cached
+        # document.
+        misses = {
+            key: value
+            for key, value in misses.items()
+            if value[1].ref not in state.content_cache
+        }
+
+        async def fetch_one(
+            key: str,
+            input_index: int,
+            hit: SearchHit,
+            *,
+            operation_id: str | None = None,
+            track_execution: bool = True,
+        ) -> tuple[str, dict[str, Any]]:
+            backend = self.backends.get(hit.backend)
+            if backend is None:
+                return key, self._content_failure_row(
+                    hit,
+                    {
+                        "code": "provider_not_configured",
+                        "message": f"Backend '{hit.backend}' is not configured.",
+                        "retryable": False,
+                        "attempts": 0,
+                    },
+                )
+            operation = "local.document" if hit.backend == "local" else "web.scrape"
+
+            async def request() -> ContentSnippet:
+                fetch = getattr(backend, "fetch", None)
+                if callable(fetch):
+                    result = await fetch(hit, query=query)
+                else:
+                    # Compatibility for third-party/test backends written to
+                    # the 0.2 batch protocol. Bundled adapters never use this.
+                    content = getattr(backend, "content", None)
+                    if not callable(content):
+                        raise ValueError("backend has no atomic content fetch operation")
+                    returned = await content([hit], query=query)
+                    if not isinstance(returned, list) or len(returned) != 1:
+                        raise ValueError("backend returned an invalid content row count")
+                    result = returned[0]
+                row = ContentSnippet.model_validate(result)
+                if row.ref != hit.ref:
+                    raise ValueError("backend changed the requested content ref")
+                return row
+
+            validate_fetch = getattr(backend, "preflight_fetch", None)
+
+            def preflight() -> None:
+                if callable(validate_fetch):
+                    validate_fetch(hit)
+                # This counter represents admitted unique provider leaders,
+                # not logical input rows. Keeping it in the runtime preflight
+                # means an invalid handle or missing credential is rejected
+                # before either this usage or a governor token is consumed.
+                state.policy.record_content_backend_fetches(1)
+
+            try:
+                snippet = await self._run_provider(
+                    state,
+                    backend=backend,
+                    operation=operation,
+                    request_indexes=[input_index],
+                    request_value={
+                        "backend": hit.backend,
+                        "revision": self.backend_revision,
+                        "ref": hit.ref,
+                    },
+                    request=request,
+                    preflight=preflight,
+                    operation_id=operation_id,
+                    track_execution=track_execution,
+                )
+            except ProviderRequestError as exc:
+                return key, self._content_failure_row(
+                    hit,
+                    self._provider_failure(exc),
+                )
+
+            row = snippet.model_dump(mode="json")
+            legacy_error = row.get("metadata", {}).get("fetch_error")
+            if row.get("failure") is None and legacy_error:
+                attempts = max(
+                    (
+                        record.attempt
+                        for record in (_EVENT_PROVIDER_ATTEMPTS.get() or [])
+                        if input_index in record.request_indexes
+                        and record.operation == operation
+                    ),
+                    default=1,
+                )
+                return key, self._content_failure_row(
+                    hit,
+                    {
+                        "code": "provider_rejected",
+                        "message": "Provider rejected one document.",
+                        "retryable": False,
+                        "attempts": attempts,
+                    },
+                )
+            if row.get("date") is None and hit.date is not None:
+                row["date"] = hit.date
+            return key, row
+
+        if self.inflight_coalescing and misses:
+            flight_key_for_fingerprint = {
+                fingerprint: self._flight_key(
+                    "local.document" if hit.backend == "local" else "web.scrape",
+                    fingerprint,
+                )
+                for fingerprint, (_index, hit) in misses.items()
+            }
+            admission = await self._admit_flights(
+                state,
+                {
+                    flight_key_for_fingerprint[fingerprint]: (
+                        fingerprint,
+                        [input_index],
+                    )
+                    for fingerprint, (input_index, _hit) in misses.items()
+                },
+                group_new=False,
+            )
+            fingerprint_for_flight_key = {
+                flight_key: fingerprint
+                for fingerprint, flight_key in flight_key_for_fingerprint.items()
+            }
+            for group in admission.new_groups:
+                if len(group.keys) != 1:
+                    raise RuntimeError("content flight contains multiple keys")
+                flight_key = next(iter(group.keys))
+                fingerprint = fingerprint_for_flight_key[flight_key]
+                input_index, hit = misses[fingerprint]
+                cached = state.content_cache.get(hit.ref)
+                if cached is not None:
+
+                    async def execute_cached_content(
+                        flight_key: str = flight_key,
+                        cached: dict[str, Any] = cached,
+                    ) -> dict[str, dict[str, Any]]:
+                        # Cache and flight admission are separate structures.
+                        # A previous leader may populate the cache while this
+                        # call waits for the flight lock; publish that row
+                        # through the newly admitted future without starting a
+                        # second provider operation.
+                        return {flight_key: copy.deepcopy(cached)}
+
+                    self._start_flight_group(state, group, execute_cached_content)
+                    continue
+
+                async def execute_content(
+                    group: _FlightGroup = group,
+                    flight_key: str = flight_key,
+                    fingerprint: str = fingerprint,
+                    input_index: int = input_index,
+                    hit: SearchHit = hit,
+                ) -> dict[str, dict[str, Any]]:
+                    _key, row = await fetch_one(
+                        fingerprint,
+                        input_index,
+                        hit,
+                        operation_id=group.operation_id,
+                        track_execution=False,
+                    )
+                    # Publish successful content to the session before the
+                    # flight runner removes its active key or resolves waiter
+                    # futures. A caller queued behind flight cleanup therefore
+                    # observes either the active flight or the cache, never a
+                    # gap between the two.
+                    state.cache_content(row, self.session_content_cache_bytes)
+                    return {flight_key: row}
+
+                self._start_flight_group(state, group, execute_content)
+
+            returned_rows = await asyncio.gather(
+                *(
+                    self._await_flight(
+                        state,
+                        admission.waiters[flight_key_for_fingerprint[fingerprint]],
+                    )
+                    for fingerprint in misses
+                )
+            )
+            fetched = dict(zip(misses, returned_rows, strict=True))
+        else:
+            returned = await asyncio.gather(
+                *(
+                    fetch_one(key, input_index, hit)
+                    for key, (input_index, hit) in misses.items()
+                )
+            )
+            fetched = dict(returned)
         for row in fetched.values():
             state.cache_content(row, self.session_content_cache_bytes)
 
         rows: list[dict[str, Any]] = []
-        for hit in hits:
-            cached = state.content_cache.get(hit.ref) or fetched.get(hit.ref)
-            # Copied, never handed out by reference. `_content_snippets`
-            # replaces `text` and `metadata` on the rows it is given, so
-            # returning the cached object itself would let one call to
-            # `snippets` overwrite the stored document with the passage it
-            # selected -- and every later `read` of that document would silently
-            # be a read of that passage.
-            row = dict(cached) if cached is not None else None
-            if row is None:
-                # A backend that returned fewer rows than it was given. The
-                # protocol forbids it, but a silent hole here would surface as
-                # a shorter list than the program asked for, which is the exact
-                # failure mode this method exists to remove.
-                row = {
-                    "ref": hit.ref,
-                    "text": "",
-                    "url": hit.url,
-                    "title": hit.title,
-                    "metadata": {
-                        "backend": hit.backend,
-                        "fetch_error": "backend returned no result for this document",
+        for key, hit in zip(keys, hits, strict=True):
+            source = state.content_cache.get(hit.ref) or fetched.get(key)
+            if source is None:
+                source = self._content_failure_row(
+                    hit,
+                    {
+                        "code": "provider_invalid_response",
+                        "message": "Provider returned no result for this document.",
+                        "retryable": False,
+                        "attempts": 0,
                     },
-                }
-            # Carried from the hit rather than asked of the backends. The hit is
-            # the only thing that knows it -- a fetch returns a page, not the
-            # search record that found it -- and doing it here means a backend
-            # cannot forget to. `setdefault` semantics: a backend that does
-            # parse a date off the page itself is closer to the truth.
+                )
+            row = copy.deepcopy(source)
             if row.get("date") is None and hit.date is not None:
                 row["date"] = hit.date
             rows.append(row)
 
-        # A wholesale failure must not read as "these pages were all empty".
-        # Partial failures stay in the rows, where a program can act on them;
-        # everything failing is infrastructure, and continuing would spend the
-        # rest of the rollout drawing conclusions from nothing.
-        if rows and all(row.get("metadata", {}).get("fetch_error") for row in rows):
-            first = rows[0]["metadata"]["fetch_error"]
-            raise RuntimeError(f"All {len(rows)} document fetches failed: {first}")
+        failures = [row["failure"] for row in rows if row.get("failure") is not None]
+        all_failed = bool(rows) and len(failures) == len(rows)
+        all_systemic = all_failed and all(
+            self._is_systemic_content_failure(failure) for failure in failures
+        )
+        if all_systemic or (raise_on_all_failures and all_failed):
+            raise CapabilityProviderError.from_failures(
+                failures,
+                attempts=len(_EVENT_PROVIDER_ATTEMPTS.get() or []),
+            )
         return rows
+
+    @staticmethod
+    def _content_failure_row(
+        hit: SearchHit,
+        failure: dict[str, Any],
+    ) -> dict[str, Any]:
+        return ContentSnippet(
+            ref=hit.ref,
+            text="",
+            url=hit.url,
+            title=hit.title,
+            date=hit.date,
+            failure=failure,
+            metadata={"backend": hit.backend},
+        ).model_dump(mode="json")
 
     async def _chat(
         self,

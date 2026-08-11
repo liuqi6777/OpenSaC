@@ -3,10 +3,14 @@ import atexit
 from .client import LazyOpenSACClient, OpenSACClient
 from .models import (
     CandidateSource,
+    CapabilityFailure,
     CitationRequest,
+    ContentFailure,
+    ContentGrepReport,
     ContentMatch,
     ContentSnippet,
     EvidenceLocator,
+    EvidenceLocatorError,
     ExtractionError,
     ExtractionResult,
     FusionBatchError,
@@ -25,11 +29,15 @@ atexit.register(sdk.close)
 
 __all__ = [
     "BrokerError",
+    "CapabilityFailure",
     "CandidateSource",
     "CitationRequest",
+    "ContentFailure",
+    "ContentGrepReport",
     "ContentMatch",
     "ContentSnippet",
     "EvidenceLocator",
+    "EvidenceLocatorError",
     "ExtractionError",
     "ExtractionResult",
     "FusionBatchError",

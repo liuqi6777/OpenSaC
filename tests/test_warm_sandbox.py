@@ -71,7 +71,7 @@ class _FakeDocker:
         top_outputs: list[bytes] | None = None,
         ps_outputs: list[bytes] | None = None,
         rm_results: list[tuple[int, bytes]] | None = None,
-        image_contract: bytes = b"3\n",
+        image_contract: bytes = b"4\n",
     ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.exec_gates = list(exec_gates or [])
@@ -227,7 +227,7 @@ async def test_warm_sandbox_reports_stale_image_as_launch_error(
     result = await sandbox.execute(_request(tmp_path))
 
     assert result.exit_code == 125
-    assert "has contract '2'; expected 3" in (result.launch_error or "")
+    assert "has contract '2'; expected 4" in (result.launch_error or "")
     assert fake.operations("run") == []
 
 
@@ -408,8 +408,12 @@ async def test_output_limit_discards_whole_warm_container(
     limited = await sandbox.execute(_request(tmp_path, sequence=1))
     recovered = await sandbox.execute(_request(tmp_path, sequence=2))
 
+    assert limited.output_limit_exceeded is True
+    assert limited.timed_out is False
+    assert limited.succeeded is False
     assert len(limited.stdout.encode()) == 4096
     assert "reached the output limit" in limited.stderr
+    assert recovered.output_limit_exceeded is False
     assert recovered.succeeded is True
     assert len(fake.operations("run")) == 2
     assert len(fake.operations("rm")) == 1

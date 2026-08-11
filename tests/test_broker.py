@@ -9,13 +9,19 @@ import pytest
 from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
 
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
-from opensac.broker.service import BrokerService, ExtractionInfrastructureError
+from opensac.broker.service import (
+    BrokerService,
+    CapabilityProviderError,
+    ExtractionInfrastructureError,
+    InflightCapacityError,
+)
 from opensac.models import (
     CAPABILITY_METHODS,
     Mechanisms,
     ResourceBudget,
     Session,
 )
+from opensac.provider import ProviderRequestError
 
 
 class FakeBackend:
@@ -115,10 +121,12 @@ async def test_failed_search_consumes_hard_budget_before_backend_side_effect() -
         make_session(budget=ResourceBudget(max_search_queries=1))
     )
 
-    with pytest.raises(RuntimeError, match="backend exploded"):
+    with pytest.raises(ProviderRequestError) as failed:
         await service.call(
             "token", "search.query", {"query": "first"}, execution_id="exec-1"
         )
+    assert failed.value.code == "provider_invalid_response"
+    assert failed.value.attempts == 1
     with pytest.raises(BudgetExceeded, match="max_search_queries"):
         await service.call(
             "token", "search.query", {"query": "retry"}, execution_id="exec-1"
@@ -128,7 +136,10 @@ async def test_failed_search_consumes_hard_budget_before_backend_side_effect() -
     assert state.policy.remaining()["max_search_queries"] == 0
     assert state.policy.terminal_reason == "budget_exhausted:max_search_queries"
     trace = service.take_trace("token", "exec-1")
-    assert [event.error_type for event in trace] == ["RuntimeError", "BudgetExceeded"]
+    assert [event.error_type for event in trace] == [
+        "ProviderRequestError",
+        "BudgetExceeded",
+    ]
 
 
 async def test_concurrent_search_budget_reservations_never_overspend() -> None:
@@ -213,7 +224,7 @@ async def test_search_rejects_query_and_depth_budgets_before_backend_call() -> N
         max_search_query_chars=4,
         max_search_top_k=20,
     )
-    service.register_session(make_session())
+    state = service.register_session(make_session())
 
     with pytest.raises(ValueError, match="5 characters"):
         await service.call("token", "search.query", {"query": "abcde"})
@@ -221,8 +232,13 @@ async def test_search_rejects_query_and_depth_budgets_before_backend_call() -> N
         await service.call(
             "token", "search.query", {"query": "ok", "limit": 10, "offset": 11}
         )
+    with pytest.raises(ValueError, match="domains must be a list"):
+        await service.call(
+            "token", "search.query", {"query": "ok", "domains": "example.com"}
+        )
 
     assert backend.calls == 0
+    assert state.policy.usage.search_calls == 0
 
 
 async def test_search_many_rejects_hard_budgets_before_fanout() -> None:
@@ -241,10 +257,12 @@ async def test_search_many_rejects_hard_budgets_before_fanout() -> None:
             {"queries": ["a", "b", "c"]},
             execution_id="oversized-batch",
         )
-    with pytest.raises(ValueError, match="index 1 has 5 characters"):
-        await service.call(
-            "token", "search.query_many", {"queries": ["ok", "abcde"]}
-        )
+    batches = await service.call(
+        "token", "search.query_many", {"queries": ["ok", "abcde"]}
+    )
+    assert batches[0]["failure"] is None
+    assert batches[1]["failure"]["code"] == "invalid_request"
+    assert batches[1]["failure"]["attempts"] == 0
     with pytest.raises(ValueError, match="retrieval depth 21"):
         await service.call(
             "token",
@@ -252,7 +270,7 @@ async def test_search_many_rejects_hard_budgets_before_fanout() -> None:
             {"queries": ["ok"], "limit_per_query": 10, "offset": 11},
         )
 
-    assert state.policy.usage.search_calls == 0
+    assert state.policy.usage.search_calls == 2
     rejected = service.take_trace("token", "oversized-batch")[0]
     assert rejected.input_count == 3
     assert rejected.queries == ["a", "b"]
@@ -278,8 +296,10 @@ async def test_searches_are_counted_and_never_capped() -> None:
 async def test_search_many_raises_when_every_query_fails() -> None:
     service = BrokerService({"web": BrokenBackend()})
     service.register_session(make_session())
-    with pytest.raises(RuntimeError, match="backend exploded"):
+    with pytest.raises(CapabilityProviderError) as failed:
         await service.call("token", "search.query_many", {"queries": ["one", "two"]})
+    assert failed.value.code == "provider_invalid_response"
+    assert failed.value.attempts == 2
 
 
 async def test_search_many_tolerates_partial_failure() -> None:
@@ -291,6 +311,14 @@ async def test_search_many_tolerates_partial_failure() -> None:
     assert batches[0]["error"] is None
     assert batches[1]["hits"] == []
     assert "must not be empty" in batches[1]["error"]
+    assert batches[1]["failure"] == {
+        "code": "invalid_request",
+        "message": "query must not be empty",
+        "retryable": False,
+        "attempts": 0,
+        "provider_status": None,
+        "retry_after_seconds": None,
+    }
 
 
 async def test_web_search_many_registers_provenance_in_input_order() -> None:
@@ -1284,6 +1312,19 @@ async def test_selected_passage_locator_resolves_exact_evidence_and_rejects_tamp
                 ]
             },
         )
+    with pytest.raises(ValueError, match="too long"):
+        await service.call(
+            "token",
+            "citations.resolve",
+            {
+                "requests": [
+                    {
+                        "ref": hits[0]["ref"],
+                        "locator": {**locator, "id": "x" * 129},
+                    }
+                ]
+            },
+        )
 
 
 async def test_snippets_keep_one_row_per_ref_and_update_truncated_coordinates() -> None:
@@ -1486,7 +1527,8 @@ async def test_every_requested_document_comes_back_in_order() -> None:
     rows = await service.call("token", "content.get_many", {"refs": refs})
 
     assert [row["ref"] for row in rows] == refs
-    assert rows[1]["metadata"]["fetch_error"] == "HTTPError: 403"
+    assert rows[1]["metadata"]["fetch_error"] == "Provider rejected one document."
+    assert "HTTPError" not in json.dumps(rows[1])
     assert rows[1]["text"] == ""
     # A failure is not cached: a transient timeout must not be frozen for the
     # rest of the rollout.
@@ -1494,16 +1536,39 @@ async def test_every_requested_document_comes_back_in_order() -> None:
     assert backend.fetched == ["1", "2", "3", "2"]
 
 
-async def test_every_fetch_failing_is_raised_not_reported_as_empty_pages() -> None:
+async def test_all_permanent_document_failures_remain_typed_aligned_rows() -> None:
     backend = CountingBackend(fail={"1", "2"})
     service = BrokerService({"local": backend})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
 
-    with pytest.raises(RuntimeError, match="All 2 document fetches failed"):
+    rows = await service.call(
+        "token", "content.get_many", {"refs": [hit["ref"] for hit in hits]}
+    )
+
+    assert [row["failure"]["code"] for row in rows] == [
+        "provider_rejected",
+        "provider_rejected",
+    ]
+    assert all(row["text"] == "" and row.get("locator") is None for row in rows)
+    assert [row["metadata"]["fetch_error"] for row in rows] == [
+        "Provider rejected one document.",
+        "Provider rejected one document.",
+    ]
+    with pytest.raises(CapabilityProviderError) as promoted:
         await service.call(
-            "token", "content.get_many", {"refs": [hit["ref"] for hit in hits]}
+            "token",
+            "content.grep",
+            {
+                "refs": [hit["ref"] for hit in hits],
+                "pattern": "anything",
+            },
+            execution_id="sanitized-content-error",
         )
+    assert str(promoted.value) == "Provider rejected one document."
+    event = service.take_trace("token", "sanitized-content-error")[0]
+    assert event.error == "Provider rejected one document."
+    assert "HTTPError" not in event.model_dump_json()
 
 
 async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
@@ -1861,3 +1926,521 @@ async def test_a_snippet_carries_the_date_of_the_hit_that_found_it() -> None:
     hits = await service.call("token", "search.query", {"query": "q"})
     rows = await service.call("token", "content.get_many", {"refs": [hits[0]["ref"]]})
     assert rows[0].get("date") == hits[0].get("date")
+
+
+async def _wait_for_condition(predicate, *, turns: int = 200) -> None:
+    for _ in range(turns):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition did not become true")
+
+
+class _CoalescingBatchBackend:
+    name = "local"
+    provider_identity = "test:local:coalescing"
+    supports_domains = False
+    max_depth = None
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.release = asyncio.Event()
+
+    @staticmethod
+    def _batch(query: str) -> SearchBatch:
+        return SearchBatch(
+            query=query,
+            hits=[
+                SearchHit(
+                    ref="",
+                    backend="local",
+                    title=query,
+                    docid=f"doc-{query}",
+                    snippet="snippet",
+                    rank=1,
+                )
+            ],
+        )
+
+    async def search(self, query, *, limit, offset=0, domains=None):
+        self.calls.append([query])
+        await self.release.wait()
+        return list(self._batch(query).hits)
+
+    async def search_many(self, queries, *, limit, offset=0, domains=None):
+        self.calls.append(list(queries))
+        await self.release.wait()
+        return [self._batch(query) for query in queries]
+
+    async def fetch(self, hit, *, query=None):
+        return ContentSnippet(ref=hit.ref, text=f"body:{hit.docid}")
+
+
+class _CoalescingSearchBackend:
+    name = "web"
+    provider_identity = "test:web:coalescing"
+    supports_domains = True
+    max_depth = None
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = False
+
+    async def search(self, query, *, limit, offset=0, domains=None):
+        self.calls += 1
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return [
+            SearchHit(
+                ref="",
+                backend="web",
+                title=query,
+                url=f"https://example.com/{query}",
+                snippet="snippet",
+                rank=1,
+                metadata={"nested": {"value": query}},
+            )
+        ]
+
+    async def fetch(self, hit, *, query=None):
+        return ContentSnippet(ref=hit.ref, text="body", url=hit.url)
+
+
+class _CoalescingContentBackend(FakeBackend):
+    provider_identity = "test:web:content-coalescing"
+
+    def __init__(self) -> None:
+        super().__init__("web")
+        self.fetch_calls = 0
+        self.fetch_started = asyncio.Event()
+        self.fetch_release = asyncio.Event()
+
+    async def fetch(self, hit, *, query=None):
+        self.fetch_calls += 1
+        self.fetch_started.set()
+        await self.fetch_release.wait()
+        return ContentSnippet(
+            ref=hit.ref,
+            text="shared full document",
+            url=hit.url,
+            metadata={"nested": {"value": 1}},
+        )
+
+
+async def test_inflight_coalescing_overlapping_local_batches_and_duplicates() -> None:
+    backend = _CoalescingBatchBackend()
+    service = BrokerService({"local": backend}, inflight_coalescing=True)
+    state = service.register_session(make_session(backends=["local"]))
+
+    first = asyncio.create_task(
+        service.call(
+            "token",
+            "search.query_many",
+            {"queries": ["alpha", "beta"]},
+            execution_id="first",
+        )
+    )
+    await _wait_for_condition(lambda: len(backend.calls) == 1)
+    second = asyncio.create_task(
+        service.call(
+            "token",
+            "search.query_many",
+            {"queries": ["beta", "beta", "gamma"]},
+            execution_id="second",
+        )
+    )
+    await _wait_for_condition(lambda: len(backend.calls) == 2)
+
+    assert backend.calls == [["alpha", "beta"], ["gamma"]]
+    assert sorted(entry.waiters for entry in state.flights.values()) == [1, 1, 2]
+    backend.release.set()
+    first_rows, second_rows = await asyncio.gather(first, second)
+
+    assert [row["query"] for row in first_rows] == ["alpha", "beta"]
+    assert [row["query"] for row in second_rows] == ["beta", "beta", "gamma"]
+    assert second_rows[0] is not second_rows[1]
+    second_rows[0]["hits"][0]["title"] = "changed"
+    assert second_rows[1]["hits"][0]["title"] == "beta"
+    assert state.flights == {}
+    assert state.policy.usage.search_provider_attempts == 2
+    assert state.policy.usage.provider_coalesced_requests == 1
+    assert state.policy.usage.intra_call_deduplicated_items == 1
+
+    first_trace = service.take_trace("token", "first")
+    second_trace = service.take_trace("token", "second")
+    assert len(first_trace[0].provider_attempts) == 1
+    assert len(second_trace[0].provider_attempts) == 1
+    assert len(second_trace[0].coalesced_requests) == 1
+    assert len(second_trace[0].deduplicated_requests) == 1
+
+
+async def test_inflight_admission_is_atomic_before_provider_side_effect() -> None:
+    backend = _CoalescingBatchBackend()
+    service = BrokerService(
+        {"local": backend},
+        inflight_coalescing=True,
+        max_inflight_keys=1,
+    )
+    state = service.register_session(make_session(backends=["local"]))
+    leader = asyncio.create_task(
+        service.call("token", "search.query", {"query": "alpha"})
+    )
+    await _wait_for_condition(lambda: len(backend.calls) == 1)
+
+    with pytest.raises(InflightCapacityError):
+        await service.call(
+            "token",
+            "search.query_many",
+            {"queries": ["alpha", "beta"]},
+        )
+
+    assert backend.calls == [["alpha"]]
+    assert len(state.flights) == 1
+    assert next(iter(state.flights.values())).waiters == 1
+    backend.release.set()
+    await leader
+
+
+async def test_inflight_waiter_limit_counts_unique_call_not_duplicate_rows() -> None:
+    backend = _CoalescingBatchBackend()
+    service = BrokerService(
+        {"local": backend},
+        inflight_coalescing=True,
+        max_waiters_per_flight=2,
+    )
+    state = service.register_session(make_session(backends=["local"]))
+    leader = asyncio.create_task(
+        service.call("token", "search.query", {"query": "same"})
+    )
+    await _wait_for_condition(lambda: len(backend.calls) == 1)
+    duplicate_follower = asyncio.create_task(
+        service.call(
+            "token",
+            "search.query_many",
+            {"queries": ["same", "same"]},
+        )
+    )
+    await _wait_for_condition(
+        lambda: next(iter(state.flights.values())).waiters == 2
+    )
+
+    with pytest.raises(InflightCapacityError):
+        await service.call("token", "search.query", {"query": "same"})
+    assert backend.calls == [["same"]]
+    assert next(iter(state.flights.values())).waiters == 2
+
+    backend.release.set()
+    leader_rows, follower_rows = await asyncio.gather(leader, duplicate_follower)
+    assert leader_rows[0]["title"] == "same"
+    assert len(follower_rows) == 2
+
+
+async def test_inflight_feature_disabled_keeps_independent_transports() -> None:
+    backend = _CoalescingSearchBackend()
+    service = BrokerService({"web": backend}, inflight_coalescing=False)
+    state = service.register_session(make_session())
+
+    calls = [
+        asyncio.create_task(service.call("token", "search.query", {"query": "same"}))
+        for _ in range(2)
+    ]
+    await _wait_for_condition(lambda: backend.calls == 2)
+    assert state.flights == {}
+    backend.release.set()
+    await asyncio.gather(*calls)
+    assert state.policy.usage.provider_coalesced_requests == 0
+    assert state.policy.usage.search_provider_attempts == 2
+
+
+async def test_cancelling_leader_detaches_without_cancelling_follower() -> None:
+    backend = _CoalescingSearchBackend()
+    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    state = service.register_session(make_session())
+    leader = asyncio.create_task(
+        service.call(
+            "token",
+            "search.query",
+            {"query": "same"},
+            execution_id="leader",
+        )
+    )
+    await backend.started.wait()
+    follower = asyncio.create_task(
+        service.call(
+            "token",
+            "search.query",
+            {"query": "same"},
+            execution_id="follower",
+        )
+    )
+    await _wait_for_condition(
+        lambda: len(state.flights) == 1
+        and next(iter(state.flights.values())).waiters == 2
+    )
+
+    await service.cancel_execution("token", "leader")
+    with pytest.raises(asyncio.CancelledError):
+        await leader
+    assert not backend.cancelled
+    assert next(iter(state.flights.values())).waiters == 1
+
+    backend.release.set()
+    result = await follower
+    assert result[0]["title"] == "same"
+    assert state.flights == {}
+    leader_trace = service.take_trace("token", "leader")
+    follower_trace = service.take_trace("token", "follower")
+    assert leader_trace[0].status == "cancelled"
+    assert len(leader_trace[0].provider_attempts) == 1
+    assert follower_trace[0].status == "ok"
+    assert follower_trace[0].provider_attempts == []
+    assert len(follower_trace[0].coalesced_requests) == 1
+    assert state.policy.usage.search_provider_attempts == 1
+
+
+async def test_cancel_execution_drains_last_waiter_group_and_trace() -> None:
+    backend = _CoalescingSearchBackend()
+    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    state = service.register_session(make_session())
+    call = asyncio.create_task(
+        service.call(
+            "token",
+            "search.query",
+            {"query": "cancel"},
+            execution_id="cancel-last",
+        )
+    )
+    await backend.started.wait()
+
+    await service.cancel_execution("token", "cancel-last")
+
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert backend.cancelled
+    assert state.flights == {}
+    trace = service.take_trace("token", "cancel-last")
+    assert len(trace) == 1
+    assert trace[0].status == "cancelled"
+    assert [attempt.status for attempt in trace[0].provider_attempts] == ["cancelled"]
+    await asyncio.sleep(0)
+    assert service.take_trace("token", "cancel-last") == []
+
+
+async def test_last_waiter_cancel_cleans_flight_during_publish_lock_race() -> None:
+    backend = _CoalescingSearchBackend()
+    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    state = service.register_session(make_session())
+    call = asyncio.create_task(
+        service.call("token", "search.query", {"query": "race"})
+    )
+    await backend.started.wait()
+    entry = next(iter(state.flights.values()))
+
+    await state.flight_lock.acquire()
+    call.cancel()
+    await asyncio.sleep(0)
+    backend.release.set()
+    await asyncio.sleep(0)
+    state.flight_lock.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(call, timeout=1)
+    assert state.flights == {}
+    assert entry.future.done()
+    retry = await asyncio.wait_for(
+        service.call("token", "search.query", {"query": "race"}),
+        timeout=1,
+    )
+    assert retry[0]["title"] == "race"
+    assert backend.calls == 2
+
+
+async def test_content_coalescing_counts_only_real_backend_leader_and_copies_rows() -> None:
+    backend = _CoalescingContentBackend()
+    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    state = service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "doc"})
+    ref = hits[0]["ref"]
+
+    first = asyncio.create_task(
+        service.call(
+            "token",
+            "content.get_many",
+            {"refs": [ref]},
+            execution_id="content-leader",
+        )
+    )
+    await backend.fetch_started.wait()
+    second = asyncio.create_task(
+        service.call(
+            "token",
+            "content.get_many",
+            {"refs": [ref]},
+            execution_id="content-follower",
+        )
+    )
+    await _wait_for_condition(
+        lambda: len(state.flights) == 1
+        and next(iter(state.flights.values())).waiters == 2
+    )
+    backend.fetch_release.set()
+    first_rows, second_rows = await asyncio.gather(first, second)
+
+    assert backend.fetch_calls == 1
+    assert state.policy.usage.content_fetches == 2
+    assert state.policy.usage.content_backend_fetches == 1
+    assert state.policy.usage.provider_coalesced_requests == 1
+    first_rows[0]["metadata"]["nested"]["value"] = 9
+    assert second_rows[0]["metadata"]["nested"]["value"] == 1
+    leader_trace = service.take_trace("token", "content-leader")
+    follower_trace = service.take_trace("token", "content-follower")
+    assert len(leader_trace[0].provider_attempts) == 1
+    assert follower_trace[0].provider_attempts == []
+    assert len(follower_trace[0].coalesced_requests) == 1
+
+
+async def test_content_leader_caches_before_flight_cleanup_lock_queue() -> None:
+    backend = _CoalescingContentBackend()
+    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    state = service.register_session(make_session())
+    ref = (await service.call("token", "search.query", {"query": "doc"}))[0][
+        "ref"
+    ]
+    leader = asyncio.create_task(
+        service.call("token", "content.get_many", {"refs": [ref]})
+    )
+    await backend.fetch_started.wait()
+
+    # Hold the registry lock so the completed transport's cleanup is queued.
+    # The cache must already be visible while the old flight is still present;
+    # otherwise a third caller also queues on this lock and later starts a
+    # duplicate fetch in the flight/cache publication gap.
+    await state.flight_lock.acquire()
+    try:
+        backend.fetch_release.set()
+        await _wait_for_condition(lambda: ref in state.content_cache)
+        assert len(state.flights) == 1
+
+        third = asyncio.create_task(
+            service.call("token", "content.get_many", {"refs": [ref]})
+        )
+        await _wait_for_condition(third.done)
+        assert (await third)[0]["text"] == "shared full document"
+        assert backend.fetch_calls == 1
+    finally:
+        state.flight_lock.release()
+
+    assert (await leader)[0]["text"] == "shared full document"
+    assert state.flights == {}
+
+
+async def test_content_refreshes_stale_misses_after_usage_reservation() -> None:
+    backend = _CoalescingContentBackend()
+    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    state = service.register_session(make_session())
+    ref = (await service.call("token", "search.query", {"query": "doc"}))[0][
+        "ref"
+    ]
+    original_record = state.policy.record_content_fetches
+    follower_reserved = asyncio.Event()
+    resume_follower = asyncio.Event()
+    reservations = 0
+
+    async def gated_record(requested: int, from_backend: int) -> None:
+        nonlocal reservations
+        reservations += 1
+        await original_record(requested, from_backend)
+        if reservations == 2:
+            follower_reserved.set()
+            await resume_follower.wait()
+
+    state.policy.record_content_fetches = gated_record
+    leader = asyncio.create_task(
+        service.call("token", "content.get_many", {"refs": [ref]})
+    )
+    await backend.fetch_started.wait()
+    follower = asyncio.create_task(
+        service.call("token", "content.get_many", {"refs": [ref]})
+    )
+    await follower_reserved.wait()
+
+    backend.fetch_release.set()
+    assert (await leader)[0]["text"] == "shared full document"
+    resume_follower.set()
+    assert (await follower)[0]["text"] == "shared full document"
+    assert backend.fetch_calls == 1
+    assert state.policy.usage.content_fetches == 2
+    assert state.policy.usage.content_backend_fetches == 1
+
+
+async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> None:
+    backend = _CoalescingContentBackend()
+    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    state = service.register_session(make_session())
+    ref = (await service.call("token", "search.query", {"query": "doc"}))[0][
+        "ref"
+    ]
+    leader = asyncio.create_task(
+        service.call("token", "content.get_many", {"refs": [ref]})
+    )
+    await backend.fetch_started.wait()
+
+    original_admit = service._admit_flights
+    follower_at_admission = asyncio.Event()
+    resume_follower = asyncio.Event()
+
+    async def gated_admit(state_arg, requests, *, group_new):
+        follower_at_admission.set()
+        await resume_follower.wait()
+        return await original_admit(state_arg, requests, group_new=group_new)
+
+    service._admit_flights = gated_admit
+    follower = asyncio.create_task(
+        service.call("token", "content.get_many", {"refs": [ref]})
+    )
+    await follower_at_admission.wait()
+
+    # The follower already classified the row as a miss, but has not acquired
+    # the flight registry lock. Let the old leader cache and remove its flight
+    # before the follower admits a new key.
+    backend.fetch_release.set()
+    assert (await leader)[0]["text"] == "shared full document"
+    assert state.flights == {}
+    resume_follower.set()
+
+    assert (await follower)[0]["text"] == "shared full document"
+    assert backend.fetch_calls == 1
+    assert state.policy.usage.content_backend_fetches == 1
+
+
+async def test_local_partial_batch_attempt_is_sanitized_and_traced_as_partial() -> None:
+    class PartialBackend(_CoalescingBatchBackend):
+        async def search_many(self, queries, *, limit, offset=0, domains=None):
+            return [
+                self._batch(queries[0]),
+                SearchBatch(query=queries[1], error="secret provider response body"),
+            ]
+
+    backend = PartialBackend()
+    service = BrokerService({"local": backend})
+    service.register_session(make_session(backends=["local"]))
+
+    rows = await service.call(
+        "token",
+        "search.query_many",
+        {"queries": ["ok", "bad"]},
+        execution_id="partial-batch",
+    )
+
+    assert len(rows[0]["hits"]) == 1
+    assert rows[1]["failure"]["message"] == "Provider rejected one search item."
+    assert "secret" not in json.dumps(rows)
+    trace = service.take_trace("token", "partial-batch")[0]
+    assert trace.provider_attempts[0].status == "partial"
+    assert "secret" not in trace.model_dump_json()

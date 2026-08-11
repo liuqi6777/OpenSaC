@@ -1,6 +1,6 @@
 [project]
 name = "opensac"
-version = "0.2.0"
+version = "0.3.1"
 description = "Open reference implementation of Search as Code"
 readme = "README.md"
 requires-python = ">=3.12"

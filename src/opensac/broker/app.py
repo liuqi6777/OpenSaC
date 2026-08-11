@@ -8,11 +8,18 @@ from opensac.broker.service import BrokerService
 
 
 def _rpc_error(exc: Exception) -> RpcError:
-    """Translate broker exceptions into the contract-v1 wire shape."""
+    """Translate broker exceptions into the typed capability wire shape."""
     code = getattr(exc, "code", None)
     retryable = getattr(exc, "retryable", None)
     if isinstance(code, str) and isinstance(retryable, bool):
-        return RpcError(code=code, message=str(exc), retryable=retryable)
+        return RpcError(
+            code=code,
+            message=str(exc),
+            retryable=retryable,
+            attempts=getattr(exc, "attempts", None),
+            provider_status=getattr(exc, "provider_status", None),
+            retry_after_seconds=getattr(exc, "retry_after_seconds", None),
+        )
     if isinstance(exc, BudgetExceeded):
         return RpcError(code="budget_exhausted", message=str(exc), retryable=False)
     if isinstance(exc, MechanismDisabled):

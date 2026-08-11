@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_built_image_exposes_contract_3_and_local_rrf() -> None:
+def test_built_image_exposes_contract_4_and_local_rrf() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     image = f"opensac-sandbox-e2e:{os.getpid()}"
     environment = {**os.environ, "OPENSAC_SANDBOX_IMAGE": image}
@@ -39,14 +39,20 @@ def test_built_image_exposes_contract_3_and_local_rrf() -> None:
             capture_output=True,
             text=True,
         )
-        assert inspected.stdout.strip() == "3"
+        assert inspected.stdout.strip() == "4"
 
         script = (
             "import json; "
-            "from opensac_sdk import SearchBatch, SearchHit, sdk; "
+            "from opensac_sdk import CapabilityFailure, ContentFailure, "
+            "ContentGrepReport, SearchBatch, SearchHit, sdk; "
             "hit = SearchHit(ref='ref_a', backend='local', rank=1); "
             "result = sdk.search.fuse_rrf([SearchBatch(query='q', hits=[hit])]); "
-            "print(json.dumps(result.model_dump(mode='json'), sort_keys=True))"
+            "failure = CapabilityFailure(code='provider_not_found', message='missing', "
+            "retryable=False, attempts=1, provider_status=404); "
+            "report = ContentGrepReport(matches=[], failures=[ContentFailure("
+            "input_index=0, ref='ref_a', failure=failure)], input_count=1); "
+            "print(json.dumps({'fusion': result.model_dump(mode='json'), "
+            "'report': report.model_dump(mode='json')}, sort_keys=True))"
         )
         executed = subprocess.run(
             [
@@ -65,8 +71,9 @@ def test_built_image_exposes_contract_3_and_local_rrf() -> None:
             text=True,
         )
         payload = json.loads(executed.stdout)
-        assert payload["candidates"][0]["ref"] == "ref_a"
-        assert payload["candidates"][0]["fused_rank"] == 1
+        assert payload["fusion"]["candidates"][0]["ref"] == "ref_a"
+        assert payload["fusion"]["candidates"][0]["fused_rank"] == 1
+        assert payload["report"]["failures"][0]["failure"]["provider_status"] == 404
     finally:
         subprocess.run(
             ["docker", "image", "rm", "--force", image],

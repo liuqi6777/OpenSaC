@@ -5,11 +5,16 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from opensac_sdk.content import ContentResource
 from opensac_sdk.llm import LLMResource
 from opensac_sdk.models import (
+    CapabilityFailure,
+    ContentFailure,
+    ContentGrepReport,
     ContentMatch,
     ContentSnippet,
     EvidenceLocator,
+    EvidenceLocatorError,
     ExtractionError,
     ExtractionResult,
     RetrievalMetadata,
@@ -74,6 +79,7 @@ def test_unix_transport_reuses_one_http_client_for_all_calls() -> None:
         transport.close()
 
     assert client_type.call_count == 1
+    assert client_type.call_args.kwargs["timeout"] is None
     assert fake.posts == 2
     assert fake.closed == 1
 
@@ -89,6 +95,9 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
                 "code": "provider_unavailable",
                 "message": "model service is unavailable",
                 "retryable": True,
+                "attempts": 3,
+                "provider_status": 503,
+                "retry_after_seconds": 1.5,
             },
         },
     )
@@ -104,6 +113,9 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
 
     assert raised.value.code == "provider_unavailable"
     assert raised.value.retryable is True
+    assert raised.value.attempts == 3
+    assert raised.value.provider_status == 503
+    assert raised.value.retry_after_seconds == 1.5
 
 
 def test_search_resource_returns_typed_hits() -> None:
@@ -183,6 +195,7 @@ def test_search_rrf_fuses_refs_locally_and_preserves_provenance() -> None:
         "batch_index": 2,
         "query": "failed",
         "error": "timeout",
+        "failure": None,
     }
 
     candidate_a = result.candidates[1]
@@ -240,6 +253,123 @@ def test_search_rrf_refuses_non_positive_source_rank() -> None:
         SearchResource(FakeTransport()).fuse_rrf(
             [SearchBatch(query="bad", hits=[_hit("a", 0)])]
         )
+
+
+def test_typed_batch_failure_is_preserved_by_rrf() -> None:
+    failure = CapabilityFailure(
+        code="provider_rate_limited",
+        message="Provider rate limit was exhausted",
+        retryable=True,
+        attempts=3,
+        provider_status=429,
+        retry_after_seconds=2.0,
+    )
+    batch = SearchBatch(
+        query="limited",
+        hits=[],
+        failure=failure,
+    )
+
+    result = SearchResource(FakeTransport()).fuse_rrf([batch])
+
+    assert batch.error == failure.message
+    assert result.candidates == []
+    assert result.batch_errors[0].error == failure.message
+    assert result.batch_errors[0].failure == failure
+
+
+def test_content_failure_models_are_additive_and_json_round_trip() -> None:
+    failure = CapabilityFailure(
+        code="provider_timeout",
+        message="Provider request timed out",
+        retryable=True,
+        attempts=2,
+    )
+    snippet = ContentSnippet(
+        ref="ref_1",
+        text="",
+        metadata={"backend": "web"},
+        failure=failure,
+    )
+
+    parsed = ContentSnippet.model_validate_json(snippet.model_dump_json())
+
+    assert parsed.failure == failure
+    assert parsed.metadata == {
+        "backend": "web",
+        "fetch_error": "Provider request timed out",
+    }
+
+
+def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
+    class GrepTransport:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def call(self, method, params):
+            self.calls.append((method, params))
+            return {
+                "matches": [
+                    {
+                        "ref": "ref_1",
+                        "line": 3,
+                        "text": "target",
+                        "input_index": 0,
+                    }
+                ],
+                "failures": [
+                    {
+                        "input_index": 1,
+                        "ref": "ref_2",
+                        "failure": {
+                            "code": "provider_not_found",
+                            "message": "Document was not found",
+                            "retryable": False,
+                            "attempts": 1,
+                            "provider_status": 404,
+                        },
+                    }
+                ],
+                "input_count": 2,
+            }
+
+    transport = GrepTransport()
+    report = ContentResource(transport).grep_report(
+        ["ref_1", "ref_2"],
+        "target",
+        context=2,
+        max_matches_per_ref=4,
+    )
+
+    assert isinstance(report, ContentGrepReport)
+    assert report.matches == [
+        ContentMatch(ref="ref_1", line=3, text="target", input_index=0)
+    ]
+    assert report.failures == [
+        ContentFailure(
+            input_index=1,
+            ref="ref_2",
+            failure=CapabilityFailure(
+                code="provider_not_found",
+                message="Document was not found",
+                retryable=False,
+                attempts=1,
+                provider_status=404,
+            ),
+        )
+    ]
+    assert report.input_count == 2
+    assert transport.calls == [
+        (
+            "content.grep_report",
+            {
+                "refs": ["ref_1", "ref_2"],
+                "pattern": "target",
+                "context": 2,
+                "max_matches_per_ref": 4,
+            },
+        )
+    ]
 
 
 class ExtractionTransport:
@@ -439,6 +569,7 @@ def test_output_submission(tmp_path) -> None:
     payload = json.loads(path.read_text())
     assert payload["output"] == {"answer": 42}
     assert payload["citations"][0]["url"] == "https://example.com"
+    assert transport.calls == [("citations.resolve", {"refs": ["ref_1"]})]
 
 
 def test_output_forwards_an_evidence_locator_without_flattening_it(tmp_path) -> None:
@@ -477,6 +608,48 @@ def test_content_models_accept_optional_evidence_locators() -> None:
 
     assert snippet.locator is not None and snippet.locator.id == "ev_1"
     assert match.locator is not None and match.locator.kind == "selected_passage"
+
+    with pytest.raises(ValidationError, match="at most 128"):
+        EvidenceLocator(
+            id="x" * 129,
+            ref="ref_1",
+            kind="selected_passage",
+        )
+
+
+def test_content_models_expose_typed_locator_capacity_errors() -> None:
+    locator_error = EvidenceLocatorError(
+        code="evidence_capacity_exhausted",
+        message="Session evidence capacity is exhausted",
+    )
+    snippet = ContentSnippet(
+        ref="ref_1",
+        text="passage",
+        locator=None,
+        locator_error=locator_error,
+    )
+    match = ContentMatch(
+        ref="ref_1",
+        line=8,
+        text="match",
+        locator=None,
+        locator_error=locator_error,
+    )
+
+    assert snippet.locator is None and snippet.locator_error == locator_error
+    assert match.locator is None and match.locator_error == locator_error
+
+
+def test_output_rejects_explicit_null_locator_but_omission_remains_legacy(tmp_path) -> None:
+    transport = FakeTransport()
+    output = OutputResource(str(tmp_path / "output.json"), transport)
+
+    with pytest.raises(ValidationError, match="locator must be omitted"):
+        output.submit({}, citations=[{"ref": "ref_1", "locator": None}])
+
+    assert transport.calls == []
+    output.submit({}, citations=[{"ref": "ref_1"}])
+    assert transport.calls == [("citations.resolve", {"refs": ["ref_1"]})]
 
 
 def test_output_rejects_unscoped_citation(tmp_path) -> None:

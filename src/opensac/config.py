@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     # Evidence locators are only minted for passages small enough to be
     # returned and validated as one citation payload.
     citation_max_evidence_chars: int = Field(default=16_000, ge=1)
+    citation_max_evidence_records: int = Field(default=4_096, ge=1)
+    citation_max_evidence_passage_bytes: int = Field(default=33_554_432, ge=1)
+    content_max_refs_per_request: int = Field(default=256, ge=1)
     # Concurrent document fetches inside one `content.*` call. The broker's own
     # semaphore admits a whole call as one unit, so without this a program
     # asking for fifty pages opens fifty simultaneous requests to the provider,
@@ -70,6 +73,59 @@ class Settings(BaseSettings):
     # simply not cached; nothing is evicted, so a long rollout degrades to the
     # old behaviour instead of thrashing.
     session_content_cache_bytes: int = Field(default=32_000_000, ge=0)
+
+    # Provider reliability is deployment policy, never a knob generated code
+    # can tune per call. `none` freezes the 0.2 baseline at one attempt; `safe`
+    # enables the bounded transient retry profile below.
+    provider_retry_profile: Literal["none", "safe"] = "none"
+    provider_max_attempts: int = Field(default=3, ge=1, le=3)
+    provider_attempt_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    provider_logical_deadline_seconds: float = Field(default=90.0, gt=0.0)
+    provider_base_backoff_seconds: float = Field(default=0.5, ge=0.0)
+    provider_max_backoff_seconds: float = Field(default=4.0, ge=0.0)
+    provider_max_total_backoff_seconds: float = Field(default=15.0, ge=0.0)
+    provider_max_retry_after_seconds: float = Field(default=15.0, ge=0.0)
+    # JSON dictionaries keyed by local.search/local.document/web.search/web.scrape.
+    # Empty RPS/burst maps disable request-rate limiting. Concurrency falls back
+    # to max_concurrency for search and backend_fetch_concurrency for documents.
+    provider_operation_concurrency: dict[str, int] = Field(default_factory=dict)
+    provider_operation_requests_per_second: dict[str, float] = Field(default_factory=dict)
+    provider_operation_burst: dict[str, int] = Field(default_factory=dict)
+
+    # 0.3.1 in-flight sharing. Disabled by default so upgrading cannot alter a
+    # frozen baseline's latency or failure timing.
+    provider_inflight_coalescing: bool = False
+    provider_max_inflight_keys: int = Field(default=256, ge=1)
+    provider_max_waiters_per_key: int = Field(default=64, ge=1)
+
+    @model_validator(mode="after")
+    def validate_provider_operation_maps(self) -> Settings:
+        allowed = {
+            "local.search",
+            "local.document",
+            "web.search",
+            "web.scrape",
+        }
+        mappings = {
+            "provider_operation_concurrency": self.provider_operation_concurrency,
+            "provider_operation_requests_per_second": (
+                self.provider_operation_requests_per_second
+            ),
+            "provider_operation_burst": self.provider_operation_burst,
+        }
+        for name, values in mappings.items():
+            unknown = set(values) - allowed
+            if unknown:
+                raise ValueError(f"{name} has unknown operations: {sorted(unknown)}")
+        missing_rates = set(self.provider_operation_burst) - set(
+            self.provider_operation_requests_per_second
+        )
+        if missing_rates:
+            raise ValueError(
+                "provider_operation_burst requires requests_per_second for: "
+                f"{sorted(missing_rates)}"
+            )
+        return self
 
     sandbox_image: str = "opensac-sandbox:latest"
     # `cold` preserves one docker run per execution. `warm` keeps one hardened

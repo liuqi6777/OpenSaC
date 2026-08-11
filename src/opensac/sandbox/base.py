@@ -47,10 +47,18 @@ class SandboxResult:
     # and cannot act on this, and because an operator reading a transcript
     # needs to tell "the model could not solve it" from "nothing ever ran".
     launch_error: str | None = None
+    # Appended to preserve the positional constructor contract for existing
+    # alternate sandbox implementations.
+    output_limit_exceeded: bool = False
 
     @property
     def succeeded(self) -> bool:
-        return self.exit_code == 0 and not self.timed_out and self.launch_error is None
+        return (
+            self.exit_code == 0
+            and not self.timed_out
+            and not self.output_limit_exceeded
+            and self.launch_error is None
+        )
 
 
 class Sandbox(Protocol):

@@ -5,7 +5,8 @@ agent generates Python, a locked-down Docker sandbox executes it, and an embedde
 search primitives through a host-side capability broker.
 
 See [the design goals and capability roadmap](docs/design.md) for the intended system
-properties and primitive-selection criteria. The concrete next milestone is the
+properties and primitive-selection criteria. The implemented 0.3 reliability contract and
+release gates are recorded in the
 [OpenSAC 0.3 high-fan-out reliability plan](docs/opensac-0.3-plan.md).
 
 ## Architecture
@@ -98,7 +99,7 @@ POST   /v1/sessions/{session_id}/exec
 POST   /v1/admin/drain
 ```
 
-## OpenSAC 0.2 primitives
+## OpenSAC 0.3 primitives
 
 Multi-query fusion is a local SDK operation: it preserves every query/rank source and does not
 make a broker call or consume capability budget.
@@ -132,21 +133,65 @@ rows = sdk.llm.extract_many(
 valid = [row.data for row in rows if row.data is not None]
 ```
 
+Search and content batch rows now expose typed provider failures. `failure` is authoritative;
+the old `SearchBatch.error` and `ContentSnippet.metadata["fetch_error"]` fields remain message
+mirrors during 0.3. Empty search hits are a successful result, not a failure.
+
+```python
+batches = sdk.search.many(["query one", "query two"])
+for batch in batches:
+    if batch.failure is not None:
+        print(
+            batch.query,
+            batch.failure.code,
+            batch.failure.retryable,
+            batch.failure.attempts,
+        )
+        continue
+    print(batch.query, len(batch.hits))
+```
+
+Legacy `content.grep` still returns only successful matches. Use `grep_report` when coverage
+must distinguish a genuine zero-match document from a fetch failure, or when duplicate input
+refs must remain distinguishable.
+
+```python
+report = sdk.content.grep_report(refs, r"release(?:d)? in 19\d{2}", context=2)
+for failure in report.failures:
+    print(failure.input_index, failure.ref, failure.failure.code)
+for match in report.matches:
+    print(match.input_index, match.ref, match.line, match.text)
+```
+
 `content.read`, `content.snippets`, and `content.grep` attach a broker-issued locator to each
-non-empty passage of at most 16,000 characters. Passing that locator makes the final citation
-point at the selected passage; passing only a ref keeps the legacy search-preview citation.
+eligible passage while the session evidence registry has capacity. Passing that locator makes
+the final citation point at the selected passage; passing only a ref keeps the legacy
+search-preview citation.
 
 ```python
 passage = sdk.content.read([refs[0]], offset=1, limit=20)[0]
-sdk.output.submit(
-    {"answer": "..."},
-    citations=[{"ref": passage.ref, "locator": passage.locator}],
-)
+if passage.locator is not None:
+    sdk.output.submit(
+        {"answer": "..."},
+        citations=[{"ref": passage.ref, "locator": passage.locator}],
+    )
+elif passage.locator_error is not None:
+    print("passage is usable but not citable as selected evidence:", passage.locator_error.code)
 ```
 
-The session manifest reports capability contract `1`, sandbox contract `3`, feature flags, and
-the active extraction/evidence limits. Sessions without a configured pipeline model do not
-advertise `llm.*` methods.
+The bounded registry defaults to 4,096 locators and 32 MiB of unique UTF-8 passage bytes. Once
+full, content still returns the passage with `locator=None` and
+`locator_error.code == "evidence_capacity_exhausted"`; existing locators stay valid. Do not
+pass explicit `locator: null` or manufacture a locator. A ref-only citation is an intentional
+search-preview citation, never an implicit fallback for selected evidence.
+
+The session manifest reports capability contract `2`, sandbox contract `4`, feature flags,
+content/evidence limits, and the effective policy for `local.search`, `local.document`,
+`web.search`, and `web.scrape`. Sessions without a configured pipeline model do not advertise
+`llm.*` methods. Retry and rate limits are deployment policy rather than per-call SDK options;
+the default retry profile remains `none`. Intra-call dedupe preserves logical rows and usage.
+OpenSAC 0.3.1 can additionally enable session-local in-flight coalescing; it is disabled by
+default and does not change the wire model or agent-facing call shape.
 
 ## External Control Model
 
@@ -205,8 +250,10 @@ reconstructed safely. The scheduler starts that rollout attempt again on a healt
 
 `request_id` makes session creation safe to retry on the same worker. A lease is renewed by
 successful session operations or explicitly through `heartbeat`; `abort` cancels admitted work
-and removes its container immediately. `drain` rejects new sessions while existing sessions can
-finish. Capacity and process RSS/FD snapshots are reported by `/healthz` for external placement.
+and removes its container immediately. Session `DELETE` is graceful: it stops new admission and
+waits for accepted execution before teardown. `drain` rejects new sessions while existing
+sessions can finish. Capacity and process RSS/FD snapshots are reported by `/healthz` for
+external placement.
 
 Resource ceilings are opt-in and enforced per session. Discrete calls are reserved before the
 backend side effect, failed calls remain charged, and an idempotent `/exec` replay is not charged

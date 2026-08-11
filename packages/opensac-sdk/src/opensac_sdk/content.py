@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import ContentMatch, ContentSnippet
+from .models import ContentGrepReport, ContentMatch, ContentSnippet
 from .transport import UnixSocketTransport
 
 
@@ -74,6 +74,26 @@ class ContentResource:
             },
         )
         return [ContentMatch.model_validate(item) for item in result]
+
+    def grep_report(
+        self,
+        refs: list[str],
+        pattern: str,
+        *,
+        context: int = 0,
+        max_matches_per_ref: int = 20,
+    ) -> ContentGrepReport:
+        """Matching lines plus a typed row for every ref that could not be read."""
+        result = self._transport.call(
+            "content.grep_report",
+            {
+                "refs": refs,
+                "pattern": pattern,
+                "context": context,
+                "max_matches_per_ref": max_matches_per_ref,
+            },
+        )
+        return ContentGrepReport.model_validate(result)
 
     def snippets(
         self,

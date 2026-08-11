@@ -10,14 +10,31 @@ from .models import RpcError, RpcRequest, RpcResponse
 
 
 class BrokerError(RuntimeError):
-    def __init__(self, message: str, *, code: str, retryable: bool) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        retryable: bool,
+        attempts: int | None = None,
+        provider_status: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.attempts = attempts
+        self.provider_status = provider_status
+        self.retry_after_seconds = retry_after_seconds
 
 
 class UnixSocketTransport:
-    def __init__(self, socket_path: str, session_token: str, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        session_token: str,
+        timeout: float | None = None,
+    ) -> None:
         self.socket_path = socket_path
         self.session_token = session_token
         self.timeout = timeout
@@ -53,6 +70,9 @@ class UnixSocketTransport:
                     error.message,
                     code=error.code,
                     retryable=error.retryable,
+                    attempts=error.attempts,
+                    provider_status=error.provider_status,
+                    retry_after_seconds=error.retry_after_seconds,
                 )
             raise BrokerError(
                 error or "Broker call failed",

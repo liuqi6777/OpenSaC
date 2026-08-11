@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import re
+from typing import Any
 from urllib.parse import urljoin
 
 import httpx
 from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
+
+from opensac.provider import ProviderRequestError, invalid_provider_response
 
 # Full documents in the local corpus carry a YAML frontmatter header ahead of
 # the body, and the body then repeats the title as its own first line:
@@ -64,11 +67,18 @@ class LocalSearchBackend:
     ) -> None:
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
-        # The retriever behind this is the same process every other tool
-        # profile queries, so an unbounded fan-out here does not only slow this
-        # run down, it perturbs the thing the comparison holds fixed.
-        self._fetch_gate = asyncio.Semaphore(max(1, fetch_concurrency))
+        # Kept as a constructor compatibility shim while concurrency ownership
+        # moves to ProviderRuntime. The adapter itself performs one transport
+        # operation per method and has no hidden admission gate.
+        del fetch_concurrency
         self._client: httpx.AsyncClient | None = None
+
+    @property
+    def provider_identity(self) -> str:
+        """Opaque limiter key that changes with the effective endpoint."""
+
+        digest = hashlib.sha256(self.base_url.encode("utf-8")).hexdigest()
+        return f"local:{digest}"
 
     def _http(self) -> httpx.AsyncClient:
         # Construct lazily so importing/configuring the service does not open a
@@ -107,17 +117,27 @@ class LocalSearchBackend:
             json={"query": query, "top_k": depth},
         )
         response.raise_for_status()
-        payload = response.json()
+        payload = self._json_object(response)
         retrieval = self._retrieval_metadata(payload)
-        rows = payload.get("results", [{}])
-        hits = rows[0].get("hits", []) if rows else []
+        rows = payload.get("results")
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise invalid_provider_response()
+        first_row = rows[0]
+        if not isinstance(first_row, dict):
+            raise invalid_provider_response()
+        hits = first_row.get("hits", [])
+        if not isinstance(hits, list) or not all(isinstance(hit, dict) for hit in hits):
+            raise invalid_provider_response()
         # Sliced here rather than trusted to `top_k`: the window the caller
         # asked for is this backend's contract, not the service's.
-        return [
-            self._normalize_hit(hit, index + 1, retrieval=retrieval)
-            for index, hit in enumerate(hits[:depth])
-            if index >= offset
-        ]
+        try:
+            return [
+                self._normalize_hit(hit, index + 1, retrieval=retrieval)
+                for index, hit in enumerate(hits[:depth])
+                if index >= offset
+            ]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise invalid_provider_response() from exc
 
     async def search_many(
         self,
@@ -137,38 +157,56 @@ class LocalSearchBackend:
             json={"queries": queries, "top_k": depth},
         )
         response.raise_for_status()
-        payload = response.json()
+        payload = self._json_object(response)
         retrieval = self._retrieval_metadata(payload)
         rows = payload.get("results")
         if not isinstance(rows, list) or len(rows) != len(queries):
-            actual = len(rows) if isinstance(rows, list) else "non-list"
-            raise RuntimeError(
-                "Local batch search returned an invalid result count: "
-                f"expected {len(queries)}, got {actual}."
-            )
+            raise invalid_provider_response()
 
         batches: list[SearchBatch] = []
         for query, row in zip(queries, rows, strict=True):
             if not isinstance(row, dict):
-                raise RuntimeError("Local batch search returned a non-object result row.")
+                raise invalid_provider_response()
             returned_query = row.get("query")
             if returned_query != query:
-                raise RuntimeError(
-                    "Local batch search changed query order: "
-                    f"expected {query!r}, got {returned_query!r}."
-                )
+                raise invalid_provider_response()
             raw_hits = row.get("hits", [])
-            if not isinstance(raw_hits, list):
-                raise RuntimeError("Local batch search returned non-list hits.")
-            hits = [
-                self._normalize_hit(hit, index + 1, retrieval=retrieval)
-                for index, hit in enumerate(raw_hits[:depth])
-                if index >= offset
-            ]
-            batches.append(
-                SearchBatch(query=query, hits=hits, error=row.get("error"))
-            )
+            if not isinstance(raw_hits, list) or not all(
+                isinstance(hit, dict) for hit in raw_hits
+            ):
+                raise invalid_provider_response()
+            try:
+                hits = [
+                    self._normalize_hit(hit, index + 1, retrieval=retrieval)
+                    for index, hit in enumerate(raw_hits[:depth])
+                    if index >= offset
+                ]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise invalid_provider_response() from exc
+            error = row.get("error")
+            if error is not None and not isinstance(error, str):
+                raise invalid_provider_response()
+            try:
+                batches.append(
+                    SearchBatch(
+                        query=query,
+                        hits=hits,
+                        error="Provider rejected one search item." if error else None,
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise invalid_provider_response() from exc
         return batches
+
+    @staticmethod
+    def _json_object(response: Any) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise invalid_provider_response() from exc
+        if not isinstance(payload, dict):
+            raise invalid_provider_response()
+        return payload
 
     @staticmethod
     def _retrieval_metadata(payload: dict) -> RetrievalMetadata | None:
@@ -210,44 +248,44 @@ class LocalSearchBackend:
             metadata={key: value for key, value in hit.items() if key not in known_fields},
         )
 
-    async def content(
+    async def fetch(
         self,
-        hits: list[SearchHit],
+        hit: SearchHit,
         *,
         query: str | None = None,
-    ) -> list[ContentSnippet]:
+    ) -> ContentSnippet:
         del query
+        self.preflight_fetch(hit)
+        response = await self._http().post(
+            urljoin(self.base_url, "get_document"),
+            json={"docid": hit.docid},
+        )
+        response.raise_for_status()
+        payload = self._json_object(response)
+        raw_text = payload.get("text")
+        if not isinstance(raw_text, str):
+            raise invalid_provider_response()
+        fields, _ = parse_document_frontmatter(raw_text)
+        metadata: dict[str, object] = {"docid": hit.docid, "backend": self.name}
+        if date := hit.date or fields.get("date"):
+            metadata["date"] = date
+        return ContentSnippet(
+            ref=hit.ref,
+            # The header is left in the text on purpose: it is part of the
+            # document, and `content.read` addresses documents by line number,
+            # so deleting it here would shift offsets computed from a `grep`.
+            text=raw_text,
+            title=hit.title or fields.get("title", ""),
+            metadata=metadata,
+        )
 
-        async def fetch(client: httpx.AsyncClient, hit: SearchHit) -> ContentSnippet:
-            metadata: dict[str, object] = {"docid": hit.docid, "backend": self.name}
-            try:
-                async with self._fetch_gate:
-                    response = await client.post(
-                        urljoin(self.base_url, "get_document"),
-                        json={"docid": hit.docid},
-                    )
-                response.raise_for_status()
-                payload = response.json()
-            except Exception as exc:
-                # One unreadable document must not take the other forty-nine
-                # with it: the program asked for a batch and can act on a
-                # partial one, but not on an exception.
-                metadata["fetch_error"] = f"{type(exc).__name__}: {exc}"
-                return ContentSnippet(ref=hit.ref, text="", title=hit.title, metadata=metadata)
-            text = str(payload.get("text", ""))
-            fields, _ = parse_document_frontmatter(text)
-            if date := hit.date or fields.get("date"):
-                metadata["date"] = date
-            return ContentSnippet(
-                ref=hit.ref,
-                # The header is left in the text on purpose: it is part of the
-                # document, and `content.read` addresses documents by line
-                # number, so silently deleting lines here would shift every
-                # offset a program computed from a `grep`.
-                text=text,
-                title=hit.title or fields.get("title", ""),
-                metadata=metadata,
+    @staticmethod
+    def preflight_fetch(hit: SearchHit) -> None:
+        """Validate a local document handle before provider admission."""
+
+        if not hit.docid:
+            raise ProviderRequestError(
+                "invalid_request",
+                "Local search result has no document identifier.",
+                retryable=False,
             )
-
-        client = self._http()
-        return list(await asyncio.gather(*(fetch(client, hit) for hit in hits)))

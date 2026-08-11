@@ -10,6 +10,7 @@ from opensac_sdk.transport import BrokerError, UnixSocketTransport
 
 from opensac.broker import BrokerAlreadyRunning, BrokerRuntime, BrokerService
 from opensac.models import Session
+from opensac.provider import ProviderRequestError
 
 
 class SocketBackend:
@@ -57,7 +58,7 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
         await runtime.stop()
 
 
-async def test_broker_round_trip_returns_contract_v1_errors(tmp_path) -> None:
+async def test_broker_round_trip_returns_contract_v2_errors(tmp_path) -> None:
     service = BrokerService({"local": SocketBackend()})
     service.register_session(
         Session(
@@ -85,6 +86,45 @@ async def test_broker_round_trip_returns_contract_v1_errors(tmp_path) -> None:
             await asyncio.to_thread(denied.call, "session.usage", {})
         assert raised.value.code == "permission_denied"
         assert raised.value.retryable is False
+    finally:
+        await runtime.stop()
+
+
+async def test_provider_error_details_round_trip_over_real_unix_socket(tmp_path) -> None:
+    class LimitedBackend(SocketBackend):
+        async def search(self, query, *, limit, offset=0, domains=None):
+            raise ProviderRequestError(
+                "provider_rate_limited",
+                "Provider rate limit was exceeded.",
+                retryable=True,
+                provider_status=429,
+                retry_after_seconds=2.5,
+            )
+
+    service = BrokerService({"local": LimitedBackend()})
+    service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            workspace=str(tmp_path / "workspace"),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+    try:
+        transport = UnixSocketTransport(str(runtime.socket_path), "secret")
+        with pytest.raises(BrokerError) as raised:
+            await asyncio.to_thread(
+                transport.call,
+                "search.query",
+                {"query": "limited", "limit": 1},
+            )
+        assert raised.value.code == "provider_rate_limited"
+        assert raised.value.retryable is True
+        assert raised.value.attempts == 1
+        assert raised.value.provider_status == 429
+        assert raised.value.retry_after_seconds == 2.5
     finally:
         await runtime.stop()
 

@@ -1,6 +1,6 @@
 [project]
 name = "opensac-sdk"
-version = "0.2.0"
+version = "0.3.1"
 description = "Sandbox client SDK for OpenSAC"
 requires-python = ">=3.12"
 dependencies = [

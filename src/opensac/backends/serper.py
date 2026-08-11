@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-import asyncio
+import hashlib
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchHit
+
+from opensac.provider import ProviderRequestError, invalid_provider_response
 
 
 class SerperBackend:
@@ -29,11 +32,18 @@ class SerperBackend:
     ) -> None:
         self.api_key = api_key
         self.timeout = timeout
-        # Scraping is a metered, rate-limited API and one call here can carry
-        # the whole candidate pool. The broker's semaphore admits this call as
-        # a single unit and cannot see inside it.
-        self._fetch_gate = asyncio.Semaphore(max(1, fetch_concurrency))
+        # Kept while callers migrate concurrency ownership to ProviderRuntime.
+        # The adapter itself performs one transport operation per method.
+        del fetch_concurrency
         self._client: httpx.AsyncClient | None = None
+
+    @property
+    def provider_identity(self) -> str:
+        """Opaque limiter key for the endpoint and configured credential."""
+
+        material = "\0".join((self.search_url, self.scrape_url, self.api_key))
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        return f"web:{digest}"
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -47,8 +57,29 @@ class SerperBackend:
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
-            raise RuntimeError("Web search requires OPENSAC_SERPER_API_KEY")
+            raise ProviderRequestError(
+                "provider_not_configured",
+                "Web provider credentials are not configured.",
+                retryable=False,
+            )
         return {"X-API-KEY": self.api_key, "Content-Type": "application/json"}
+
+    def preflight_search(self) -> None:
+        """Validate deployment-owned search configuration before admission."""
+
+        self._headers()
+
+    def preflight_fetch(self, hit: SearchHit) -> None:
+        """Validate a scrape request before it enters provider governors."""
+
+        parsed_url = urlparse(str(hit.url or ""))
+        if parsed_url.scheme.lower() not in {"http", "https"} or not parsed_url.netloc:
+            raise ProviderRequestError(
+                "invalid_request",
+                "Search result cannot be fetched because it has no absolute HTTP URL.",
+                retryable=False,
+            )
+        self._headers()
 
     async def search(
         self,
@@ -58,6 +89,7 @@ class SerperBackend:
         offset: int = 0,
         domains: list[str] | None = None,
     ) -> list[SearchHit]:
+        self.preflight_search()
         if domains:
             sites = " OR ".join(f"site:{domain}" for domain in domains)
             query = f"{query} ({sites})"
@@ -74,12 +106,28 @@ class SerperBackend:
             json={"q": query, "num": depth},
         )
         response.raise_for_status()
-        payload = response.json()
-        return [
-            self._normalize_hit(hit, index + 1)
-            for index, hit in enumerate(payload.get("organic", [])[:depth])
-            if index >= offset
-        ]
+        payload = self._json_object(response)
+        organic = payload.get("organic", [])
+        if not isinstance(organic, list) or not all(isinstance(hit, dict) for hit in organic):
+            raise invalid_provider_response()
+        try:
+            return [
+                self._normalize_hit(hit, index + 1)
+                for index, hit in enumerate(organic[:depth])
+                if index >= offset
+            ]
+        except (TypeError, ValueError) as exc:
+            raise invalid_provider_response() from exc
+
+    @staticmethod
+    def _json_object(response: Any) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise invalid_provider_response() from exc
+        if not isinstance(payload, dict):
+            raise invalid_provider_response()
+        return payload
 
     def _normalize_hit(self, hit: dict, rank: int) -> SearchHit:
         url = str(hit.get("link", "") or "")
@@ -99,49 +147,29 @@ class SerperBackend:
             metadata={k: v for k, v in hit.items() if k not in {"title", "link", "snippet"}},
         )
 
-    async def content(
+    async def fetch(
         self,
-        hits: list[SearchHit],
+        hit: SearchHit,
         *,
         query: str | None = None,
-    ) -> list[ContentSnippet]:
+    ) -> ContentSnippet:
         del query
-        if not hits:
-            return []
-        client = self._http()
-        return list(await asyncio.gather(*(self._scrape(client, hit) for hit in hits)))
-
-    def _failed(self, hit: SearchHit, reason: str) -> ContentSnippet:
-        return ContentSnippet(
-            ref=hit.ref,
-            text="",
-            url=hit.url,
-            title=hit.title,
-            metadata={"backend": self.name, "fetch_error": reason},
+        self.preflight_fetch(hit)
+        response = await self._http().post(
+            self.scrape_url,
+            headers=self._headers(),
+            json={"url": hit.url},
         )
-
-    async def _scrape(self, client: httpx.AsyncClient, hit: SearchHit) -> ContentSnippet:
-        if not hit.url:
-            return self._failed(hit, "hit carries no URL to scrape")
-        try:
-            async with self._fetch_gate:
-                response = await client.post(
-                    self.scrape_url,
-                    headers=self._headers(),
-                    json={"url": hit.url},
-                )
-            response.raise_for_status()
-            payload = response.json()
-        except Exception as exc:
-            # A page behind a paywall, a robots block, or a timeout is ordinary
-            # on the open web and must not fail the batch. It is reported as
-            # itself so a program can tell "nobody could read this" apart from
-            # "this said nothing", which decides whether re-querying is worth
-            # anything.
-            return self._failed(hit, f"{type(exc).__name__}: {exc}")
+        response.raise_for_status()
+        payload = self._json_object(response)
+        if "text" not in payload and "markdown" not in payload:
+            raise invalid_provider_response()
+        text = payload.get("text", "") or payload.get("markdown", "")
+        if not isinstance(text, str):
+            raise invalid_provider_response()
         return ContentSnippet(
             ref=hit.ref,
-            text=str(payload.get("text", "") or payload.get("markdown", "")),
+            text=text,
             url=hit.url,
             title=hit.title,
             metadata={"backend": self.name},

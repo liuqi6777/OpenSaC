@@ -138,9 +138,63 @@ class CapabilityPolicy:
             self._charge("max_content_fetches", "content_fetches", requested)
             self.usage.content_backend_fetches += from_backend
 
+    def record_content_backend_fetches(self, amount: int) -> None:
+        """Count unique provider leaders after in-flight admission."""
+
+        self.usage.content_backend_fetches += max(amount, 0)
+
     async def record_pipeline_model_tokens(self, amount: int) -> None:
         async with self._lock:
             self.usage.pipeline_model_tokens += amount
+
+    def record_provider_attempt(
+        self,
+        *,
+        kind: str,
+        attempt: int,
+    ) -> None:
+        """Record one transport attempt without charging a logical quota.
+
+        Provider callbacks run on the broker event loop and this method has no
+        await point, so each update is one atomic event-loop critical section.
+        """
+
+        field = (
+            "search_provider_attempts" if kind == "search" else "content_provider_attempts"
+        )
+        setattr(self.usage, field, getattr(self.usage, field) + 1)
+        if attempt > 1:
+            self.usage.provider_retries += 1
+
+    def record_provider_timing(self, *, phase: str, duration_seconds: float) -> None:
+        """Record actual policy wait independently from transport attempts.
+
+        A request may be cancelled while queued, rate limited, or backing off,
+        before another transport attempt exists to carry the elapsed time.
+        """
+
+        field = {
+            "concurrency_queue": "provider_queue_seconds",
+            "rate_limit": "provider_rate_limit_wait_seconds",
+            "backoff": "provider_backoff_seconds",
+        }.get(phase)
+        if field is None:
+            raise ValueError(f"unknown provider wait phase: {phase!r}")
+        setattr(
+            self.usage,
+            field,
+            getattr(self.usage, field) + max(duration_seconds, 0.0),
+        )
+
+    def record_deduplicated(self, amount: int) -> None:
+        self.usage.intra_call_deduplicated_items += max(amount, 0)
+
+    def record_coalesced(self, amount: int) -> None:
+        self.usage.provider_coalesced_requests += max(amount, 0)
+
+    def set_evidence_usage(self, *, records: int, passage_bytes: int) -> None:
+        self.usage.evidence_records = max(records, 0)
+        self.usage.evidence_passage_bytes = max(passage_bytes, 0)
 
     async def record_sandbox_seconds(self, amount: float) -> None:
         async with self._lock:

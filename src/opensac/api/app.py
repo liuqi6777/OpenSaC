@@ -16,6 +16,7 @@ import weakref
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -46,6 +47,7 @@ from opensac.models import (
     budget_remaining,
     utc_now,
 )
+from opensac.provider import ProviderPolicy, ProviderRuntime
 from opensac.sandbox import (
     SANDBOX_CONTRACT,
     DockerSandbox,
@@ -113,14 +115,47 @@ class ApplicationRuntime:
             api_key=settings.model_api_key or "not-configured",
             base_url=settings.model_base_url,
         )
+        provider_policies = {
+            operation: ProviderPolicy(
+                retry_profile=settings.provider_retry_profile,
+                max_attempts=settings.provider_max_attempts,
+                attempt_timeout_seconds=settings.provider_attempt_timeout_seconds,
+                logical_deadline_seconds=settings.provider_logical_deadline_seconds,
+                base_backoff_seconds=settings.provider_base_backoff_seconds,
+                max_backoff_seconds=settings.provider_max_backoff_seconds,
+                max_total_backoff_seconds=settings.provider_max_total_backoff_seconds,
+                max_retry_after_seconds=settings.provider_max_retry_after_seconds,
+                concurrency=settings.provider_operation_concurrency.get(
+                    operation,
+                    (
+                        settings.max_concurrency
+                        if operation.endswith(".search")
+                        else settings.backend_fetch_concurrency
+                    ),
+                ),
+                requests_per_second=settings.provider_operation_requests_per_second.get(
+                    operation
+                ),
+                burst=settings.provider_operation_burst.get(operation),
+            )
+            for operation in (
+                "local.search",
+                "local.document",
+                "web.search",
+                "web.scrape",
+            )
+        }
+        provider_runtime = ProviderRuntime(provider_policies)
         self.broker = BrokerService(
             {
                 "local": LocalSearchBackend(
                     settings.local_search_base_url,
+                    timeout=settings.provider_attempt_timeout_seconds,
                     fetch_concurrency=settings.backend_fetch_concurrency,
                 ),
                 "web": SerperBackend(
                     settings.serper_api_key,
+                    timeout=settings.provider_attempt_timeout_seconds,
                     fetch_concurrency=settings.backend_fetch_concurrency,
                 ),
             },
@@ -140,6 +175,14 @@ class ApplicationRuntime:
             max_extract_schema_depth=settings.extract_max_schema_depth,
             max_extract_repair_attempts=settings.extract_max_repair_attempts,
             max_evidence_chars=settings.citation_max_evidence_chars,
+            max_evidence_records=settings.citation_max_evidence_records,
+            max_evidence_passage_bytes=settings.citation_max_evidence_passage_bytes,
+            max_content_refs_per_request=settings.content_max_refs_per_request,
+            inflight_coalescing=settings.provider_inflight_coalescing,
+            max_inflight_keys=settings.provider_max_inflight_keys,
+            max_waiters_per_flight=settings.provider_max_waiters_per_key,
+            provider_runtime=provider_runtime,
+            backend_revision=settings.backend_revision,
         )
         broker_socket = resolve_broker_socket_path(settings.broker_socket)
         self.broker_runtime = BrokerRuntime(self.broker, broker_socket)
@@ -256,7 +299,7 @@ class ApplicationRuntime:
             "sandbox_image": self.settings.sandbox_image,
             "sandbox_image_digest": self.settings.sandbox_image_digest,
             "sandbox_contract": SANDBOX_CONTRACT,
-            "capability_contract": 1,
+            "capability_contract": 2,
             "capability_limits": {
                 "search": {
                     "max_queries_per_request": self.settings.search_max_queries_per_request,
@@ -274,7 +317,33 @@ class ApplicationRuntime:
                 },
                 "evidence": {
                     "max_chars": self.settings.citation_max_evidence_chars,
+                    "max_records": self.settings.citation_max_evidence_records,
+                    "max_total_passage_bytes": (
+                        self.settings.citation_max_evidence_passage_bytes
+                    ),
                 },
+                "content": {
+                    "max_refs_per_request": self.settings.content_max_refs_per_request,
+                },
+                "inflight": {
+                    "enabled": self.settings.provider_inflight_coalescing,
+                    "max_keys": self.settings.provider_max_inflight_keys,
+                    "max_waiters_per_key": self.settings.provider_max_waiters_per_key,
+                },
+            },
+            "provider_policies": {
+                operation: {
+                    **asdict(self.broker.provider_runtime.policy_for(operation)),
+                    "max_attempts": self.broker.provider_runtime.policy_for(
+                        operation
+                    ).effective_max_attempts,
+                }
+                for operation in (
+                    "local.search",
+                    "local.document",
+                    "web.search",
+                    "web.scrape",
+                )
             },
             "backend_revision": self.settings.backend_revision,
             "backend_metadata_hash": self.settings.backend_metadata_hash,
@@ -564,6 +633,7 @@ class ApplicationRuntime:
                     task.cancel()
             if admitted:
                 await asyncio.gather(*admitted, return_exceptions=True)
+            await self.broker.cancel_session(session.token)
             async with self._session_lifecycle_lock(session_id), lock:
                 try:
                     session = self.store.get_session(session_id)
@@ -649,6 +719,8 @@ class ApplicationRuntime:
             return "sandbox"
         if result.timed_out:
             return "timeout"
+        if result.output_limit_exceeded:
+            return "output_limit"
         if result.exit_code != 0:
             return "runtime"
         return None
@@ -668,6 +740,21 @@ class ApplicationRuntime:
         # record remains the source of truth for a later retry.
         if not task.cancelled():
             task.exception()
+
+    async def _cancel_execution_and_take_trace(
+        self,
+        session_token: str,
+        execution_id: str,
+        reason: str,
+    ) -> list[CapabilityEvent]:
+        """Drain provider work before taking the execution's final trace.
+
+        Provider attempts append their trace while unwinding cancellation. If
+        the trace were popped first, those late records would either be lost or
+        recreate an orphan trace entry after the exec had finished.
+        """
+        await self.broker.cancel_execution(session_token, execution_id, reason)
+        return self.broker.take_trace(session_token, execution_id)
 
     async def execute_code(self, session_id: str, request: ExecCreate) -> ExecResult:
         """Run an exec as runtime-owned work, independent of its HTTP waiter."""
@@ -774,39 +861,84 @@ class ApplicationRuntime:
                 "output_filename": f".opensac-output-{sequence:03d}.json",
             }
             prepare_seconds = time.monotonic() - prepare_started
-            with self._exec_workspace(session) as workspace:
-                result: SandboxResult | None = None
-                rejection: str | None = None
-                sandbox_queue_seconds = 0.0
-                sandbox_execute_seconds = 0.0
-                try:
-                    async with self.sandbox_gate.slot() as sandbox_queue_seconds:
-                        sandbox_started = time.monotonic()
-                        result = await self.sandbox.execute(
-                            SandboxRequest(
-                                code=request.code,
-                                workspace=workspace,
-                                session_token=session.token,
-                                session_id=session.id,
-                                execution_id=execution_id,
-                                timeout_seconds=sandbox_timeout,
-                                **request_names,
+            drain_task: asyncio.Task[list[CapabilityEvent]] | None = None
+            try:
+                with self._exec_workspace(session) as workspace:
+                    result: SandboxResult | None = None
+                    rejection: str | None = None
+                    sandbox_queue_seconds = 0.0
+                    sandbox_execute_seconds = 0.0
+                    try:
+                        async with self.sandbox_gate.slot() as sandbox_queue_seconds:
+                            sandbox_started = time.monotonic()
+                            result = await self.sandbox.execute(
+                                SandboxRequest(
+                                    code=request.code,
+                                    workspace=workspace,
+                                    session_token=session.token,
+                                    session_id=session.id,
+                                    execution_id=execution_id,
+                                    timeout_seconds=sandbox_timeout,
+                                    **request_names,
+                                )
                             )
-                        )
+                            sandbox_execute_seconds = time.monotonic() - sandbox_started
+                    except UnsafeCodeError as exc:
+                        # A rejection is a normal observation for the control model,
+                        # not a transport error: it has to see the reason and
+                        # rewrite the program.
+                        rejection = f"Rejected by the sandbox code validator: {exc}"
                         sandbox_execute_seconds = time.monotonic() - sandbox_started
-                except UnsafeCodeError as exc:
-                    # A rejection is a normal observation for the control model,
-                    # not a transport error: it has to see the reason and
-                    # rewrite the program.
-                    rejection = f"Rejected by the sandbox code validator: {exc}"
-                    sandbox_execute_seconds = time.monotonic() - sandbox_started
 
-                postprocess_started = time.monotonic()
-                if result is not None:
-                    await state.policy.record_sandbox_seconds(result.duration_seconds)
-                trace = self.broker.take_trace(session.token, execution_id)
-                artifacts = self.store.artifacts(session, workspace)
-                workspace_bytes = self.store.workspace_bytes(session, workspace)
+                    postprocess_started = time.monotonic()
+                    if result is not None:
+                        await state.policy.record_sandbox_seconds(result.duration_seconds)
+                    termination_reason = (
+                        "sandbox_timeout"
+                        if result is not None and result.timed_out
+                        else "sandbox_output_limit"
+                        if result is not None and result.output_limit_exceeded
+                        else "sandbox_finished"
+                    )
+                    drain_task = asyncio.create_task(
+                        self._cancel_execution_and_take_trace(
+                            session.token,
+                            execution_id,
+                            termination_reason,
+                        ),
+                        name=f"opensac-drain-{execution_id}",
+                    )
+                    trace = await asyncio.shield(drain_task)
+                    artifacts = self.store.artifacts(session, workspace)
+                    workspace_bytes = self.store.workspace_bytes(session, workspace)
+            except asyncio.CancelledError:
+                if drain_task is None:
+                    drain_task = asyncio.create_task(
+                        self._cancel_execution_and_take_trace(
+                            session.token,
+                            execution_id,
+                            "execution_cancelled",
+                        ),
+                        name=f"opensac-cancel-{execution_id}",
+                    )
+                # The runtime owns this cleanup even though its exec task is
+                # already being cancelled. Awaiting the shield also preserves
+                # the ordering guarantee: provider tasks settle, their trace is
+                # appended, and only then is the trace popped.
+                await asyncio.shield(drain_task)
+                raise
+            except Exception:
+                if drain_task is None:
+                    drain_task = asyncio.create_task(
+                        self._cancel_execution_and_take_trace(
+                            session.token,
+                            execution_id,
+                            "execution_failed",
+                        ),
+                        name=f"opensac-failed-{execution_id}",
+                    )
+                await asyncio.shield(drain_task)
+                raise
 
             await state.policy.record_workspace_bytes(workspace_bytes)
             persisted_session = self.store.save_session_usage(
@@ -823,6 +955,9 @@ class ApplicationRuntime:
                     code=request.code,
                     exit_code=result.exit_code if result else -1,
                     timed_out=bool(result.timed_out) if result else False,
+                    output_limit_exceeded=(
+                        bool(result.output_limit_exceeded) if result else False
+                    ),
                     duration_seconds=result.duration_seconds if result else 0.0,
                     error=rejection or (result.launch_error if result else None),
                     error_category=self._program_error_category(
@@ -854,6 +989,9 @@ class ApplicationRuntime:
                 stderr=result.stderr if result else "",
                 duration_seconds=result.duration_seconds if result else 0.0,
                 timed_out=bool(result.timed_out) if result else False,
+                output_limit_exceeded=(
+                    bool(result.output_limit_exceeded) if result else False
+                ),
                 succeeded=bool(result.succeeded) if result else False,
                 output=result.output if result else None,
                 citations=result.citations if result else [],
@@ -983,19 +1121,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         capabilities = session.mechanisms.capabilities()
         if not runtime.settings.model_name:
             capabilities = [method for method in capabilities if not method.startswith("llm.")]
+        features = [
+            "capability_contract_v2",
+            "provider_reliability_v1",
+            "typed_partial_failures_v1",
+            "content_grep_report_v1",
+            "bounded_evidence_registry_v1",
+            "intra_call_dedupe_v1",
+            "execution_cancellation_v1",
+            "idempotent_exec",
+            "worker_affinity",
+            "idempotent_session_create",
+            "leases",
+            "resource_budgets",
+            "abort_session",
+        ]
+        if runtime.settings.provider_inflight_coalescing:
+            features.append("inflight_coalescing_v1")
         return PublicSession.model_validate(
             {
                 **session.model_dump(exclude={"token", "workspace"}),
                 "capabilities": capabilities,
-                "features": [
-                    "capability_contract_v1",
-                    "idempotent_exec",
-                    "worker_affinity",
-                    "idempotent_session_create",
-                    "leases",
-                    "resource_budgets",
-                    "abort_session",
-                ],
+                "features": features,
                 "budget_remaining": budget_remaining(session.budget, session.usage),
                 "state": runtime.session_state(session),
             }

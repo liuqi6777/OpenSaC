@@ -54,6 +54,7 @@ CAPABILITY_METHODS: tuple[str, ...] = (
     "content.snippets",
     "content.read",
     "content.grep",
+    "content.grep_report",
     "citations.resolve",
     # The program's own budget. Without it the only place the remaining quota
     # appears is the observation the host renders for the control model, so the
@@ -199,6 +200,22 @@ class RunUsage(BaseModel):
     # only the first would hide the saving; only the second would make a program
     # look like it stopped reading.
     content_backend_fetches: int = 0
+    # Real transport attempts, distinct from the logical operations above. A
+    # local search_many HTTP request counts once even when it carries many
+    # queries; retries add attempts without adding logical calls.
+    search_provider_attempts: int = 0
+    content_provider_attempts: int = 0
+    provider_retries: int = 0
+    intra_call_deduplicated_items: int = 0
+    provider_coalesced_requests: int = 0
+    provider_queue_seconds: float = 0.0
+    provider_rate_limit_wait_seconds: float = 0.0
+    provider_backoff_seconds: float = 0.0
+    # Trusted passage state held by the broker for this session. These are
+    # measurements, not agent-spend budgets, so they intentionally have no
+    # ResourceBudget counterpart.
+    evidence_records: int = 0
+    evidence_passage_bytes: int = 0
     llm_calls: int = 0
     sandbox_seconds: float = 0.0
     workspace_bytes: int = 0
@@ -320,6 +337,42 @@ class EvidenceTraceRecord(BaseModel):
     error_code: str | None = None
 
 
+class ProviderAttemptRecord(BaseModel):
+    """One real provider transport attempt without request or response bodies."""
+
+    operation_id: str
+    attempt_id: str
+    provider: str
+    operation: str
+    request_indexes: list[int] = Field(default_factory=list)
+    attempt: int = Field(ge=1)
+    status: str
+    duration_seconds: float = 0.0
+    queue_seconds: float = 0.0
+    rate_limit_wait_seconds: float = 0.0
+    backoff_before_seconds: float = 0.0
+    error_code: str | None = None
+    provider_status: int | None = None
+    request_fingerprint: str
+    response_fingerprint: str | None = None
+
+
+class DeduplicatedRequestRecord(BaseModel):
+    """Logical rows served by another row in the same capability call."""
+
+    request_index: int
+    leader_index: int
+    request_fingerprint: str
+
+
+class CoalescedRequestRecord(BaseModel):
+    """Logical rows which waited on an already-running provider operation."""
+
+    operation_id: str
+    request_indexes: list[int] = Field(default_factory=list)
+    request_fingerprint: str
+
+
 class CapabilityEvent(BaseModel):
     sequence: int
     method: str
@@ -332,6 +385,9 @@ class CapabilityEvent(BaseModel):
     model_tokens: int = 0
     model_attempts: list[ModelAttemptRecord] = Field(default_factory=list)
     evidence_records: list[EvidenceTraceRecord] = Field(default_factory=list)
+    provider_attempts: list[ProviderAttemptRecord] = Field(default_factory=list)
+    deduplicated_requests: list[DeduplicatedRequestRecord] = Field(default_factory=list)
+    coalesced_requests: list[CoalescedRequestRecord] = Field(default_factory=list)
     error_type: str | None = None
     error: str | None = None
     # Only populated when the session disables context decoupling: the result
@@ -371,6 +427,7 @@ class ExecResult(BaseModel):
     stderr: str
     duration_seconds: float
     timed_out: bool = False
+    output_limit_exceeded: bool = False
     succeeded: bool
     output: Any = None
     citations: list[dict[str, Any]] = Field(default_factory=list)
@@ -431,6 +488,7 @@ class ProgramRecord(BaseModel):
     code: str
     exit_code: int | None = None
     timed_out: bool = False
+    output_limit_exceeded: bool = False
     duration_seconds: float = 0.0
     error: str | None = None
     # Coarse and local: what this process can tell from the exit status alone.

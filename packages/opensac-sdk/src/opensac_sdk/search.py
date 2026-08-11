@@ -108,12 +108,13 @@ class SearchResource:
         for batch_index, (batch, weight) in enumerate(
             zip(parsed_batches, normalized_weights, strict=True)
         ):
-            if batch.error is not None:
+            if batch.failure is not None or batch.error is not None:
                 batch_errors.append(
                     FusionBatchError(
                         batch_index=batch_index,
                         query=batch.query,
-                        error=batch.error,
+                        error=batch.error or batch.failure.message,
+                        failure=batch.failure,
                     )
                 )
                 continue
