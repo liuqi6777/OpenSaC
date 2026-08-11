@@ -5,7 +5,7 @@ description: Compose OpenSAC search primitives as Python programs.
 
 # Search as Code
 
-Use Python for orchestration and `opensac_sdk` for every external capability.
+Use Python for orchestration and `opensac_sdk` for every external capability:
 
 ```python
 from opensac_sdk import sdk
@@ -13,182 +13,261 @@ from opensac_sdk import sdk
 
 ## Primitives
 
-- `sdk.search(query, limit=10, offset=0, domains=None)`
-- `sdk.search.many(queries, limit_per_query=10, offset=0, concurrency=5, domains=None)`
-- `sdk.search.fuse_rrf(batches, weights=None, k=60, limit=None)` — deterministic local
-  computation; no broker call
-- `sdk.content.get_many(refs)`
+- `sdk.search(query, limit=10, offset=0, domains=None) -> list[SearchHit]`
+- `sdk.search.many(queries, limit_per_query=10, offset=0, concurrency=5,
+  domains=None) -> list[SearchBatch]`
+- `sdk.search.fuse_rrf(batches, weights=None, k=60, limit=None) -> FusionResult`
+  — deterministic local computation; no broker call
+- `sdk.content.get_many(refs)` — whole text
 - `sdk.content.snippets(query, refs, max_tokens=4000, max_tokens_per_page=1000)`
 - `sdk.content.grep(refs, pattern, context=0, max_matches_per_ref=20)`
-- `sdk.content.read(refs, offset=1, limit=200)`
+- `sdk.content.read(refs, offset=1, limit=200, max_chars=100_000)`
 - `sdk.citations.resolve(refs)`
 - `sdk.llm.complete(prompt, system=None, temperature=0.2, max_tokens=None)`
 - `sdk.llm.complete_many(prompts, concurrency=4, ...)`
 - `sdk.llm.extract_many(items, instruction=..., schema=..., concurrency=4,
-  repair_attempts=0)`
-- `sdk.state.read_json/read_jsonl`, `write_json/write_jsonl`, `append_jsonl`, `exists`,
-  `list(prefix="")`
-- `sdk.session.usage()` — searches, fetches and LLM calls made so far
-- `sdk.output.submit(output, citations=[{"ref": hit.ref}])`
+  repair_attempts=0) -> list[ExtractionResult]`
+- `sdk.state.merge_jsonl(path, rows, key="ref") -> int` — read, upsert, write
+- `sdk.state.write_json/write_jsonl/append_jsonl/read_json/read_jsonl/exists/list`
+- `sdk.session.usage()`
+- `sdk.output.submit(output, citations=[{"ref": passage.ref,
+  "locator": passage.locator}])`
 
-Search returns typed hits with `ref`, `backend`, `title`, `url`, `docid`, `domain`,
-`date`, `snippet`, `score`, `rank`, and optional effective `retrieval` metadata.
+`SearchHit` has `ref`, `backend`, `title`, `url`, `docid`, `domain`, `date`,
+`snippet`, `score`, `rank`, and optional effective `retrieval` metadata. `SearchBatch`
+has `query`, `hits`, `error`, and `request`; check `error` before treating empty hits as
+“nothing found.” Result objects support attribute and mapping reads, and state methods accept
+them directly. A row returned by `read_jsonl` likewise supports `row.ref` and `row["ref"]`.
 
-A `ref` is stable for the document behind it: the same page or document returned by two
-different queries comes back as the same `ref`, so `{h.ref: h for ...}` deduplicates a
-multi-query candidate pool without comparing URLs by hand. Anywhere a `ref` is accepted
-you may equally pass a `docid` or a `url` from a hit you already hold — whichever is
-easiest to carry — but only for documents a search in this session actually returned.
-Handles cannot be invented or guessed: retrieval is the one door into the corpus.
+> Hosts: filter broker methods from session `capabilities`; programs cannot read the
+> manifest. Keep the tool name, output limit, backend/ablation facts, and answer format
+> host-side.
 
-When relative rank across queries matters, pass the returned `SearchBatch` objects to
-`sdk.search.fuse_rrf`. It groups by `ref`, keeps every source query/rank/score, and returns a
-`FusionResult` with candidates and input/unique/duplicate counts. It does not spend a search
-call, fetch content, or invoke a model. Query weights, the RRF constant, and the final limit
-remain choices made by your program.
+## Handles, provenance, and evidence
 
-There is one `search`, and it reaches whichever corpus this session was deployed against;
-`hit.backend` names it. Which one is not something a program chooses, so it is not in the
-method name — a program written against one arm runs unchanged against another. Where a
-backend genuinely differs it differs in a parameter, and the difference is always refused
-rather than absorbed: a backend with no domain filter rejects `domains` instead of
-returning unfiltered hits, and a backend that serves only to rank 100 rejects a deeper
-request instead of clipping it. A program is never told it read a rank that nothing looked
-at, or searched a site nothing filtered on.
+A `ref` is stable for the document behind it, so the same page found by several queries
+deduplicates by ref. Content methods also accept a `docid` or URL from a hit already returned
+in this session. Handles cannot be invented: search is the only door into the corpus.
 
-`offset` is depth into that ranking, and it decides more than convenience. A document
-becomes readable only by being returned from a search, so `limit` is at once how far
-you can see and how far you are allowed to reach. If you believe the answer sits below
-the first page, ask for it with `offset` rather than rewriting the query.
+Search is backend-neutral; the deployment chooses its corpus and `hit.backend` records it.
+Unsupported parameters are refused. `offset` is ranking depth, and only returned documents
+become readable.
 
-Reading a document has four shapes, and the last two are what let you choose the passage
-instead of accepting one:
+Every query has its own rank 1, so raw `rank` does not order a cross-query pool. Pass
+`SearchBatch` objects to `fuse_rrf`. It groups by ref, preserves every source query/rank/score
+in `candidate.sources`, reports failed batches in `batch_errors`, and spends no capability
+call. Query weights, `k`, and the final limit remain choices made by the program.
 
-- `get_many` — the whole text.
-- `snippets` — one window per page, chosen by a broker-side scorer against your query.
-- `grep` — matching lines across many documents, each with its 1-indexed line number.
-- `read` — a line window; `metadata` carries `start_line`, `end_line`, `total_lines`, and
-  `next_offset` (`None` at the end).
-
-A `ContentMatch.line` is a `read(offset=...)` directly, so locating and reading compose
-with no character arithmetic. Most corpus documents are far longer than anything worth
-printing, so `grep` then `read` is usually cheaper and more reliable than `get_many`.
-Because a line is a sentence in some corpora and a whole section in a scraped web page,
-`read` bounds its window by characters as well as by lines and says so in `metadata`.
-
-A document is retrieved once per session and cached, so grepping and re-reading a pool you
-already fetched costs nothing further; `content_fetches` and `content_backend_fetches` are
-both reported so the saving is visible rather than hidden. Every content call returns one
-row per handle requested, in order. A page that could not be retrieved — a paywall, a
-robots block, a timeout — comes back with empty `text` and `metadata["fetch_error"]`
-rather than being dropped, so a short result is never mistaken for a complete one. Only if
-*every* document in a call fails does the call raise, since that is infrastructure rather
-than a property of the pages.
-
-Non-empty passages returned by `snippets`, `grep`, and reasonably-sized `read` windows carry a
+Non-empty `snippets`, `grep` matches, and reasonably sized `read` windows carry a
 broker-issued `locator`. Cite the passage actually used with
-`{"ref": passage.ref, "locator": passage.locator}`. The broker verifies that the locator was
-minted for that ref and resolves the selected evidence. A citation containing only `ref`
-deliberately cites the search preview. Never edit or construct a locator.
+`{"ref": passage.ref, "locator": passage.locator}`. A citation with only `ref` deliberately
+resolves the search preview. A locator is opaque and bound to its ref; never construct, edit,
+or attach it to a docid, URL, or different ref.
 
-## Session capabilities
+## Reading documents
 
-The primitive list above is the full set. A session may have some of it switched off for
-an experiment, in which case the disabled calls raise with a message saying so and how to
-work around it — batching may be limited to one item per call, `sdk.llm.*` may be
-unavailable, and the workspace may not survive across turns. Read the session's
-`capabilities` list rather than assuming, and when a call reports a disabled mechanism,
-restructure around it instead of retrying the same call.
+- `get_many` returns whole pages.
+- `snippets` returns one broker-scored window per page.
+- `grep` locates matching lines across many documents; `line` is 1-indexed.
+- `read` returns a line window. Its metadata includes `start_line`, `end_line`,
+  `total_lines`, and `next_offset`; a `ContentMatch.line` plugs into `read(offset=...)`.
 
-> Hosts that generate their own skill text: build the primitive list from the session's
-> `capabilities` field, not from a copy of this file. Naming a capability the session
-> cannot reach costs the model a turn to discover.
+Documents are cached per session, so grep then read beats dumping pages. `get_many`,
+`snippets`, and `read` return one ordered row per handle; a page failure has empty text and
+`metadata["fetch_error"]`. `grep` returns zero or more matches per document. If every fetch
+fails, the call raises.
 
-## Strategy
+## How to write a program
 
-The sandbox is a computer, not a slower way to call one tool. One execution should carry a
-whole stage of research — fan out, filter, read, extract, report — because a round trip is
-paid for each one, and only what the program prints or submits survives it. A program that
-performs a single action and stops is the most expensive way to use this interface.
+The sandbox is a computer, not a slower function call. One execution should carry a whole
+research stage — fan out, rank, locate, read, extract, report. Only compact material the
+program prints or submits enters the control-model conversation; raw hits and pages should
+stay in variables or the workspace.
 
-Three stages usually finish a question, and they do not each need their own turn when the
-work is already determined:
+Three stages usually finish a question:
 
-1. **Survey.** Fan out independent queries with `*_many`, encoding source and date
-   constraints into the queries (and `domains`) before retrieval rather than filtering
-   afterwards. Merge into one pool keyed by `ref`. Print rank, handle, date and title —
-   one line each, no snippets — and persist the pool with `state.write_jsonl`.
-2. **Locate.** `grep` the whole pool for the distinguishing strings: names, dates,
-   numbers, quoted phrases. `read` a window around the matches worth following. This is
-   where the answer is found, and it is the step most often skipped.
-3. **Verify.** Check the candidate against every constraint in the question, in code
-   wherever the constraint is mechanical. Submit the passage that settles it, with its
-   handle as a citation.
+1. **Survey.** Fan out 6–12 independent queries over different phrasings, entities, and
+   constraints. Check batch failures, fuse with RRF, and persist one pool keyed by ref. Print
+   only a small ranked window with ref, date, and title.
+2. **Locate.** Run one focused grep per constraint over every ref in the persistent pool, not
+   merely the printed window. Read around matches in every distinct document worth following.
+3. **Verify.** Track which constraints have actual passages behind them and check mechanical
+   constraints in code. An unsupported constraint is the next execution's work, not a detail
+   to submit around. Different constraints often require different supporting documents.
 
-Use deterministic code for regex, joins, filtering, counting, ranking, set arithmetic and
-coverage checks — none of it needs a capability, and writing it inline is more precise
-than a primitive that would generalise it. Use `llm.extract_many` for semantic work with a
-fixed shape, and `llm.complete` only for planning steps whose output has no schema, such
-as summarizing current coverage and proposing follow-up queries. Validate anything
-`llm.complete` returns with code before acting on it.
+Use Python for regex, joins, filtering, counting, set arithmetic, and coverage. For fixed-shape
+semantics, `llm.extract_many` takes an object-root JSON Schema and returns one ordered
+`ExtractionResult` per input with exactly one of `data` or `error`; inspect
+`error.code/message/retryable`. `repair_attempts=1` allows one format/schema repair and defaults
+to zero. Schema types are JSON values such as `{"type": "string"}`, not Python `str`. Reserve
+`llm.complete` for results without a fixed schema and validate them before use.
 
-`llm.extract_many` accepts a JSON Schema whose root is an object and returns one
-`ExtractionResult` per input. Read successful values from `result.data`; inspect
-`result.error.code/message/retryable` for failures. Partial failures do not move or drop other
-rows. `repair_attempts=1` permits one additional generation for invalid JSON or a schema
-mismatch; the default is zero so cost never increases implicitly. Use JSON Schema values such
-as `{"type": "string"}` — Python type objects such as `str` cannot cross the JSON transport.
+The pool is the file, not the variable. Each execution is a new process: the workspace and
+handles survive, Python names do not. `merge_jsonl` treats an absent file as empty and upserts
+by ref, so one pool survives even when a later program forgets to reload before writing. What
+gets printed is a window onto the pool, not the pool: pass refs from the mapping to content
+calls and never retype handles from output. Use `append_jsonl` only for true event logs where
+duplicates are intentional.
 
-Defaults worth starting from: `limit_per_query=10`, then `offset=10` on a query that
-looked promising (ranks 11–20 of a query that half worked usually beat a fresh phrasing of
-one that failed outright); `concurrency=6` on a fan-out; `grep` the whole pool at once
-with `context=2`; `read(offset=match.line - 10, limit=40)` around a promising match.
+Defaults worth starting from:
 
-Four things go wrong often enough to name. Answering from search snippets: a snippet is a
-retrieval preview chosen by the index, not evidence. Searching again instead of reading:
-once a document is in the pool, grepping it costs nothing, while rewriting the query is
-the expensive move. Dumping: printing raw snippets or whole pages fills the caller's
-observation budget with material the program already held. Losing the pool: a handle
-neither printed nor written to the workspace is gone when the program exits.
+- `limit_per_query=10`, then `offset=10` on a query that looked promising.
+- `concurrency=6` for fan-out.
+- One whole-pool `grep` per constraint with `context=2`.
+- `read(offset=max(match.line - 10, 1), limit=40, max_chars=16_000)` around a promising
+  match when it must carry a locator.
 
-Persist compact intermediate records to JSONL when later turns may need them. The
-workspace and the ref table survive across turns, so handles written to JSONL in one turn
-still resolve in a later one: extend a record with `append_jsonl` rather than reading and
-rewriting it, and call `exists` before assuming an earlier turn left something behind.
-`session.usage()` reports how much has been retrieved so far. Evaluation sessions normally
-leave ceilings unset; deployments may advertise hard session budgets. Retrieval climbing while
-evidence does not is the signal to read rather than search again. Submit only evidence and
-summaries useful to the control model, not every raw result.
+## What goes wrong
 
-Never use direct HTTP, sockets, subprocesses, shell commands, credentials, environment
-inspection, or package installation. Dunder attributes are rejected apart from `__name__`
-and `__doc__`, so report errors with `type(exc).__name__` and never introspect via
-`__class__` or `__dict__`. Citations must name a document search returned; the broker
-resolves its trusted URL, document ID, title, and evidence.
+- **Answering from search snippets.** They are index-selected previews, not evidence. If no
+  content call was made, the answer is a guess.
+- **Searching again instead of reading.** When coverage stops increasing, inspect the pool
+  already held before adding more queries.
+- **Sorting merged results by raw rank.** Use RRF and do not choose what to read from an
+  arbitrary printed slice.
+- **Stopping at the first fitting document.** Keep reading while any constraint lacks a
+  passage.
+- **Reaching for last execution's variable.** Reload the workspace file. Avoid fragmented
+  `pool2.jsonl`, `pool3.jsonl`, and similar files.
+- **Dumping.** Filter before printing. Raw hits, snippets, and pages consume the observation
+  channel with material the program already holds.
+
+Wrap fragile stages and report `type(exc).__name__` plus the query, ref, or stage. The sandbox
+rejects `__class__`/`__dict__` introspection. Do not retry unknown handles or bypass the SDK
+with HTTP, sockets, subprocesses, shell, credentials, environment inspection, or installation.
 
 ## Pattern
 
 ```python
+import re
+
 from opensac_sdk import sdk
 
-batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
-fusion = sdk.search.fuse_rrf(batches, k=60, limit=50)
-hits = {candidate.ref: candidate for candidate in fusion.candidates}
-for candidate in fusion.candidates:
-    print(f"{candidate.fused_rank} {candidate.ref} {candidate.date or ''} {candidate.title}")
-
-matches = sdk.content.grep(list(hits), r"born in (18|19)\d{2}", context=2)
-records = sdk.llm.extract_many(
-    [m.model_dump() for m in matches],
-    instruction=instruction,
-    schema=schema,
+# The pool is the file, not the variable: reload it before adding this turn's work.
+pool = (
+    {row.ref: dict(row) for row in sdk.state.read_jsonl("pool.jsonl")}
+    if sdk.state.exists("pool.jsonl")
+    else {}
 )
-values = [result.data for result in records if result.data is not None]
-sdk.state.write_jsonl("records.jsonl", values)
-citations = [
-    {"ref": match.ref, "locator": match.locator}
-    for match in matches[:5]
-    if match.locator is not None
+
+# Use new follow-up queries on later turns; repeats would be weighted again.
+# Single-quoted strings carry phrase-query quotes without escaping them.
+queries = ['"exact phrase" narrowing words', 'same constraint alternate wording']
+batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
+fusion = sdk.search.fuse_rrf(batches, k=60)
+for failure in fusion.batch_errors:
+    print(f"query failed: {failure.query}: {failure.error}")
+
+# Accumulate local RRF scores so ranking and the document pool both survive turns.
+for candidate in fusion.candidates:
+    row = pool.setdefault(
+        candidate.ref,
+        {
+            "ref": candidate.ref,
+            "title": candidate.title,
+            "date": candidate.date,
+            "rank": candidate.rank,
+            "rrf": 0.0,
+            "queries": 0,
+        },
+    )
+    row["rrf"] += candidate.fused_score
+    row["queries"] += len(candidate.sources)
+    row["rank"] = min(row["rank"], candidate.rank)
+
+pool_size = sdk.state.merge_jsonl("pool.jsonl", list(pool.values()))
+ordered = sorted(
+    pool.values(),
+    key=lambda row: (-row["rrf"], -row["queries"], row["rank"], row["ref"]),
+)
+print(f"pool={pool_size} failed_batches={len(fusion.batch_errors)}")
+for row in ordered[:40]:
+    print(
+        f'{row["queries"]}q r{row["rank"]} {row["ref"]} '
+        f'{row.get("date") or "-"} {row["title"]}'
+    )
+
+# One focused grep per constraint, each over the whole persistent pool.
+constraints = {
+    "phrase": r"target phrase|alternate spelling",
+    "year": r"\b(1998|1999)\b",
+}
+support = {}
+for name, pattern in constraints.items():
+    support[name] = sdk.content.grep(list(pool), pattern, context=2)
+    print(f"{name}: {len({m.ref for m in support[name]})} of {len(pool)} docs")
+missing = [name for name, matches in support.items() if not matches]
+print("unsupported:", missing or "none")
+
+# Evidence is a cross-turn ledger, keyed by the constraint and exact match coordinate.
+ledger = (
+    {row.evidence_key: dict(row) for row in sdk.state.read_jsonl("evidence.jsonl")}
+    if sdk.state.exists("evidence.jsonl")
+    else {}
+)
+verified = {
+    row["constraint"]
+    for row in ledger.values()
+    if row.get("pattern") == constraints.get(row.get("constraint"))
+}
+for name, matches in support.items():
+    if name in verified:
+        continue
+    for match in matches[:2]:
+        passage = sdk.content.read(
+            [match.ref], offset=max(match.line - 10, 1), limit=40, max_chars=16_000
+        )[0]
+        if (
+            passage.text
+            and passage.locator is not None
+            and re.search(constraints[name], passage.text, re.IGNORECASE)
+        ):
+            key = f"{name}|{constraints[name]}|{passage.ref}|{match.line}"
+            ledger[key] = {
+                "evidence_key": key,
+                "constraint": name,
+                "pattern": constraints[name],
+                "ref": passage.ref,
+                "line": match.line,
+                "title": passage.title,
+                "text": passage.text,
+                "locator": {
+                    "id": passage.locator.id,
+                    "ref": passage.locator.ref,
+                    "kind": passage.locator.kind,
+                },
+            }
+            verified.add(name)
+            print(f"--- {passage.ref} {passage.title}\n{passage.text}")
+            break
+
+current_evidence = [
+    row
+    for row in ledger.values()
+    if row.get("pattern") == constraints.get(row.get("constraint"))
 ]
-sdk.output.submit({"records": values}, citations=citations)
+if ledger:
+    sdk.state.merge_jsonl(
+        "evidence.jsonl", list(ledger.values()), key="evidence_key"
+    )
+unverified = [name for name in constraints if name not in verified]
+print("unverified:", unverified or "none")
+
+if current_evidence and not unverified:
+    sdk.output.submit(
+        {
+            "evidence": [
+                {
+                    "constraint": row["constraint"],
+                    "ref": row["ref"],
+                    "text": row["text"],
+                }
+                for row in current_evidence
+            ]
+        },
+        citations=[
+            {"ref": row["ref"], "locator": row["locator"]}
+            for row in current_evidence
+        ],
+    )
 ```

@@ -14,10 +14,11 @@ class ContentResource:
     `ContentMatch.line` is a `read(offset=...)` with no arithmetic.
 
     A document retrieved once is cached for the rest of the session, so reading
-    the same pool repeatedly is cheap after the first pass. Every method returns
-    one row per requested document, in order; a page that could not be
-    retrieved comes back with empty `text` and `metadata["fetch_error"]` rather
-    than being dropped, so a short result is never mistaken for a complete one.
+    the same pool repeatedly is cheap after the first pass. `get_many`,
+    `snippets`, and `read` return one row per requested document, in order; a
+    page that could not be retrieved comes back with empty `text` and
+    `metadata["fetch_error"]`. `grep` instead returns zero or more matches per
+    document, so an absent ref means no line matched rather than a missing row.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
