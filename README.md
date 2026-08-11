@@ -1,7 +1,7 @@
 # OpenSAC
 
-OpenSAC is an open reference implementation of the Search as Code architecture. A control
-model generates Python, a locked-down Docker sandbox executes it, and an embedded SDK exposes
+OpenSAC is an open reference implementation of the Search as Code architecture. An external
+agent generates Python, a locked-down Docker sandbox executes it, and an embedded SDK exposes
 search primitives through a host-side capability broker.
 
 See [the design goals and capability roadmap](docs/design.md) for the intended system
@@ -10,7 +10,7 @@ properties, current implementation status, primitive-selection criteria, and nex
 ## Architecture
 
 ```text
-OpenAI-compatible model -> generated Python -> Docker sandbox
+external agent harness -> generated Python -> OpenSAC API -> Docker sandbox
                                                 |
                                          opensac_sdk
                                                 |
@@ -30,8 +30,8 @@ enforces backend permissions, concurrency, search-call limits, and LLM-call limi
 - Python 3.12
 - `uv`
 - Docker for real sandbox execution
-- An OpenAI-compatible chat-completions endpoint
 - At least one configured search backend
+- Optionally, an OpenAI-compatible chat-completions endpoint for `sdk.llm.*`
 
 The current development machine does not contain a Docker runtime. Command generation and
 security flags are tested, but the image must be built and integration-tested on a Docker host.
@@ -48,8 +48,9 @@ uv run opensac serve
 Rebuild the sandbox image after upgrading this checkout. The preflight probe checks its
 contract version so a stale tag cannot silently miss bundled SDK or entrypoint changes.
 
-Configure `OPENSAC_MODEL_API_KEY`, `OPENSAC_MODEL_NAME`, and optionally
-`OPENSAC_MODEL_BASE_URL`. Set `OPENSAC_API_KEY` outside local development.
+Set `OPENSAC_API_KEY` outside local development. To expose the optional pipeline-LLM
+capabilities to sandbox programs, configure `OPENSAC_MODEL_API_KEY`,
+`OPENSAC_MODEL_NAME`, and optionally `OPENSAC_MODEL_BASE_URL`.
 
 For local retrieval, run the compatible DeepResearch endpoint at
 `OPENSAC_LOCAL_SEARCH_BASE_URL`. It must expose `POST /search`, `POST /search_many`,
@@ -66,24 +67,21 @@ the backend talks to Serper's search and scrape endpoints over plain HTTP:
 export OPENSAC_SERPER_API_KEY=...
 ```
 
-## Submit A Task
+## Execute A Program
 
-```bash
-uv run opensac run "Compare official vector search capabilities of three databases"
-```
-
-Or use the HTTP API:
+The external agent owns the control loop. Create one session per rollout, then submit each
+agent-generated Python program through `/exec`:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/sessions \
   -H "Authorization: Bearer $OPENSAC_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"backends":["web"],"limits":{"max_turns":8}}'
+  -d '{"backends":["web"]}'
 
-curl -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/runs \
+curl -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/exec \
   -H "Authorization: Bearer $OPENSAC_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"input":"Research the task and cite primary sources"}'
+  -d '{"code":"from opensac_sdk import sdk\nhits = sdk.search(\"vector databases\")\nsdk.output.submit({\"hits\": [h.model_dump() for h in hits]})"}'
 ```
 
 The API exposes:
@@ -94,22 +92,18 @@ GET    /v1/sessions/{session_id}
 DELETE /v1/sessions/{session_id}
 POST   /v1/sessions/{session_id}/heartbeat
 POST   /v1/sessions/{session_id}/abort
-POST   /v1/sessions/{session_id}/runs
+GET    /v1/sessions/{session_id}/workspace
 POST   /v1/sessions/{session_id}/exec
 POST   /v1/admin/drain
-GET    /v1/runs/{run_id}
-GET    /v1/runs/{run_id}/events
-POST   /v1/runs/{run_id}/cancel
-GET    /v1/runs/{run_id}/artifacts/{path}
 ```
 
-## Bring Your Own Control Model
+## External Control Model
 
-`runs` delegates the whole task to OpenSAC's control model. `exec` inverts that: an
-external agent harness generates the program and OpenSAC contributes only the sandbox,
-the SDK, and the capability broker. Session state persists across `exec` calls -- the
-workspace filesystem and the search reference table -- so a program can serialize
-intermediate results in one turn and resolve their refs several turns later.
+OpenSAC deliberately does not run an agent loop. The external agent harness generates each
+program; OpenSAC contributes only the sandbox, SDK, and capability broker. Session state
+persists across `exec` calls -- the workspace filesystem and search reference table -- so a
+program can serialize intermediate results in one turn and resolve their refs several turns
+later.
 
 ```python
 from opensac import OpenSAC
@@ -217,7 +211,7 @@ from opensac import OpenSAC
 
 with OpenSAC(api_key="...") as client:
     session = client.create_session(backends=["local"])
-    result = client.create_and_wait(session["id"], "Research the task")
+    result = client.exec_code(session["id"], "print('ready')\n")
 ```
 
 ```python
@@ -225,7 +219,7 @@ from opensac import AsyncOpenSAC
 
 async with AsyncOpenSAC(api_key="...") as client:
     session = await client.create_session(backends=["web"])
-    result = await client.create_and_wait(session["id"], "Research the task")
+    result = await client.exec_code(session["id"], "print('ready')\n")
 ```
 
 ## Tests

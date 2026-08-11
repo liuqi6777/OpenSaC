@@ -11,32 +11,9 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class RunStatus(StrEnum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
 class ExecRecordStatus(StrEnum):
     PENDING = "pending"
     COMPLETED = "completed"
-
-
-class RunLimits(BaseModel):
-    """Bounds on OpenSAC's own control loop, not on what a program may retrieve.
-
-    Retrieval and pipeline-LLM ceilings used to live here. They were removed
-    rather than raised: in a research harness a hard cap is dead code when it
-    never binds and a manufactured zero when it does, and either way the volume
-    a paradigm retrieves at is an outcome worth measuring rather than a
-    parameter worth fixing. `RunUsage` still counts everything, and
-    `session.usage` hands the counts to the program.
-    """
-
-    max_turns: int = Field(default=8, ge=1, le=50)
-    timeout_seconds: int = Field(default=300, ge=1, le=3600)
 
 
 class ResourceBudget(BaseModel):
@@ -55,10 +32,6 @@ class ResourceBudget(BaseModel):
     max_pipeline_output_tokens: int | None = Field(default=None, ge=0)
     max_sandbox_seconds: float | None = Field(default=None, ge=0.0)
     max_workspace_bytes: int | None = Field(default=None, ge=0)
-
-    def configured(self) -> bool:
-        return any(value is not None for value in self.model_dump().values())
-
 
 # Every capability the broker dispatches, in one place. The broker asserts its
 # handler table against this tuple, so a capability cannot be added on one side
@@ -175,7 +148,6 @@ class SessionCreate(BaseModel):
     # `local` is the default because it needs no credentials, so a fresh install
     # is runnable before anyone has a Serper key.
     backends: list[str] = Field(default_factory=lambda: ["local"])
-    limits: RunLimits = Field(default_factory=RunLimits)
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
     request_id: str | None = Field(default=None, min_length=1, max_length=256)
     lease_seconds: float | None = Field(default=None, gt=0.0, le=86_400.0)
@@ -186,7 +158,6 @@ class Session(BaseModel):
     id: str
     token: str
     backends: list[str]
-    limits: RunLimits
     workspace: str
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
     request_id: str | None = None
@@ -211,16 +182,8 @@ class Session(BaseModel):
     closing: bool = False
 
 
-class RunCreate(BaseModel):
-    input: str = Field(min_length=1)
-    model: str | None = None
-    output_schema: dict[str, Any] | None = None
-    include_trace: bool = False
-
-
 class RunUsage(BaseModel):
     exec_calls: int = 0
-    model_tokens: int = 0
     pipeline_model_tokens: int = 0
     # Reserved maximum completion tokens.  Kept separate from actual provider
     # usage because it is the value a hard fan-out budget can enforce up front.
@@ -278,12 +241,10 @@ class SessionTombstone(BaseModel):
 class ExecCreate(BaseModel):
     """One turn of an externally driven Search as Code loop.
 
-    `POST /v1/sessions/{id}/runs` hands the task to OpenSAC's own control
-    model. `POST /v1/sessions/{id}/exec` instead lets a foreign agent harness
-    be the control plane: the harness generates the program and OpenSAC only
-    supplies the sandbox, the SDK, and the capability broker. Session state --
-    the workspace filesystem and the search reference table -- persists across
-    exec calls, so a program can serialize intermediate results in one turn and
+    The agent harness is the control plane: it generates the program and
+    OpenSAC supplies the sandbox, SDK, and capability broker. Session state --
+    the workspace filesystem and search reference table -- persists across exec
+    calls, so a program can serialize intermediate results in one turn and
     resolve their refs several turns later.
     """
 
@@ -421,23 +382,6 @@ class ExecRecord(BaseModel):
         return self
 
 
-class Run(BaseModel):
-    id: str
-    session_id: str
-    status: RunStatus = RunStatus.QUEUED
-    input: str
-    model: str | None = None
-    output_schema: dict[str, Any] | None = None
-    include_trace: bool = False
-    output: Any = None
-    citations: list[dict[str, Any]] = Field(default_factory=list)
-    error: str | None = None
-    usage: RunUsage = Field(default_factory=RunUsage)
-    trace: list[dict[str, Any]] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-
-
 class ProgramRecord(BaseModel):
     """One generated program, archived outside the workspace.
 
@@ -472,7 +416,6 @@ class ProgramRecord(BaseModel):
 class PublicSession(BaseModel):
     id: str
     backends: list[str]
-    limits: RunLimits
     mechanisms: Mechanisms
     # Derived from `mechanisms`, returned so a host can build its skill text from
     # what the session can actually reach instead of from a duplicated constant.
@@ -494,19 +437,3 @@ class PublicSession(BaseModel):
     created_at: datetime
     last_access: datetime
     closing: bool
-
-
-class PublicRun(BaseModel):
-    id: str
-    session_id: str
-    status: RunStatus
-    input: str
-    output: Any = None
-    citations: list[dict[str, Any]] = Field(default_factory=list)
-    error: str | None = None
-    usage: RunUsage
-    trace: list[dict[str, Any]] | None = None
-    artifacts: list[str] = Field(default_factory=list)
-    events_url: str
-    created_at: datetime
-    updated_at: datetime

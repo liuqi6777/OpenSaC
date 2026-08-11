@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import resource
-import secrets
 import socket
 import sys
 import tempfile
@@ -15,7 +14,7 @@ import time
 import uuid
 import weakref
 from collections import Counter, defaultdict
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta
 from importlib import metadata as importlib_metadata
@@ -23,16 +22,14 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
 from openai import AsyncOpenAI
 
-from opensac.agent import AgentController
 from opensac.backends import LocalSearchBackend, SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_path
 from opensac.broker.policy import BudgetExceeded
 from opensac.broker.service import BrokerSession
 from opensac.config import Settings
-from opensac.metrics import CapacityGate, CapacityLimitedSandbox
+from opensac.metrics import CapacityGate
 from opensac.models import (
     CapabilityEvent,
     ExecCreate,
@@ -40,11 +37,7 @@ from opensac.models import (
     ExecRecordStatus,
     ExecResult,
     ProgramRecord,
-    PublicRun,
     PublicSession,
-    Run,
-    RunCreate,
-    RunStatus,
     RunUsage,
     Session,
     SessionCreate,
@@ -151,14 +144,6 @@ class ApplicationRuntime:
             sandbox_kwargs["max_containers"] = settings.sandbox_max_warm_containers
         self.sandbox = sandbox_type(**sandbox_kwargs)
         self.sandbox_gate = CapacityGate(settings.sandbox_max_concurrency)
-        self.controller = AgentController(
-            self.model_client,
-            CapacityLimitedSandbox(self.sandbox, self.sandbox_gate),
-            default_model=settings.model_name,
-            temperature=settings.model_temperature,
-        )
-        self.tasks: dict[str, asyncio.Task[None]] = {}
-        self.events: dict[str, set[asyncio.Queue[dict]]] = defaultdict(set)
         # /exec is driven by an external harness that may have dozens of
         # rollouts in flight. Without a ceiling each in-flight tool call would
         # start its own container.
@@ -168,8 +153,8 @@ class ApplicationRuntime:
         self.inflight_execs: dict[
             tuple[str, str], tuple[str, asyncio.Task[ExecResult]]
         ] = {}
-        # A reservation is registered synchronously when /exec or /runs accepts
-        # work, before the child task gets its first event-loop turn. DELETE can
+        # A reservation is registered synchronously when /exec accepts work,
+        # before the child task gets its first event-loop turn. DELETE can
         # then distinguish admitted work from a late request even when the task
         # has not acquired the session lock yet.
         self.session_tasks: dict[str, set[asyncio.Task[Any]]] = defaultdict(set)
@@ -198,28 +183,6 @@ class ApplicationRuntime:
                 self._reaper_task.cancel()
                 await asyncio.gather(self._reaper_task, return_exceptions=True)
                 self._reaper_task = None
-            run_tasks = tuple(self.tasks.items())
-            for _, task in run_tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*(task for _, task in run_tasks), return_exceptions=True)
-            for run_id, task in run_tasks:
-                if not task.cancelled():
-                    continue
-                try:
-                    run = self.store.get_run(run_id)
-                except KeyError:
-                    continue
-                except Exception:
-                    logger.exception("shutdown_run_status_read_failed run_id=%s", run_id)
-                    continue
-                if run.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
-                    run.status = RunStatus.CANCELLED
-                    run.updated_at = utc_now()
-                    try:
-                        self.store.save_run(run)
-                    except Exception:
-                        logger.exception("shutdown_run_status_save_failed run_id=%s", run_id)
             for task in tuple(self.exec_tasks):
                 if not task.done():
                     task.cancel()
@@ -267,11 +230,6 @@ class ApplicationRuntime:
                 # One corrupt or concurrently removed session must not disable
                 # cleanup for every session created afterwards.
                 logger.exception("session_reaper_failed")
-
-    async def publish(self, run_id: str, event_type: str, data: dict) -> None:
-        event = {"type": event_type, "data": data}
-        for queue in tuple(self.events[run_id]):
-            await queue.put(event)
 
     def environment_manifest(self) -> dict[str, Any]:
         try:
@@ -438,43 +396,13 @@ class ApplicationRuntime:
             task for task in self.session_tasks.get(session_id, ()) if not task.done()
         )
 
-    def track_run_task(
-        self,
-        run_id: str,
-        session_id: str,
-        task: asyncio.Task[None],
-    ) -> None:
-        self.tasks[run_id] = task
-        self._reserve_session_task(session_id, task)
-
-        def done(finished: asyncio.Task[None]) -> None:
-            if self.tasks.get(run_id) is finished:
-                self.tasks.pop(run_id, None)
-            if not finished.cancelled():
-                finished.exception()
-
-        task.add_done_callback(done)
-
-    def start_run_task(self, run: Run, session: Session) -> asyncio.Task[None]:
-        current = self.store.get_session(session.id)
-        if current.closing or session.id in self.closing_sessions:
-            raise SessionClosingError(f"Session '{session.id}' is closing")
-        task = asyncio.create_task(
-            self.execute_run(run, current, admitted=True),
-            name=f"opensac-run-{run.id}",
-        )
-        self.track_run_task(run.id, session.id, task)
-        return task
-
     def bind_session(self, session: Session) -> BrokerSession:
         """Attach a long-lived broker state to a session.
 
-        Runs get a throwaway token per run because their capability budget is
-        per-run. `/exec` is the opposite: the harness owns the loop, so quotas
-        and the search reference table have to survive across calls. Keying the
-        broker state on the durable `session.token` gives a program the ability
-        to persist refs to its workspace in one turn and resolve them in a
-        later one.
+        The harness owns the loop, so quotas and the search reference table have
+        to survive across calls. Keying the broker state on the durable
+        `session.token` gives a program the ability to persist refs to its
+        workspace in one turn and resolve them in a later one.
 
         Idempotent, so a session created before a process restart keeps working.
         Note that only the workspace survives such a restart: broker state is in
@@ -942,57 +870,6 @@ class ApplicationRuntime:
     def _session_usage(self, state: BrokerSession) -> RunUsage:
         return RunUsage.model_validate(state.policy.usage.model_dump())
 
-    async def execute_run(
-        self,
-        run: Run,
-        session: Session,
-        *,
-        admitted: bool = False,
-    ) -> None:
-        async with self.session_locks[session.id]:
-            session = self.store.get_session(session.id)
-            if not admitted and (
-                session.closing or session.id in self.closing_sessions
-            ):
-                run.status = RunStatus.FAILED
-                run.error = "Session is closing"
-                self.store.save_run(run)
-                await self.publish(
-                    run.id,
-                    "run.failed",
-                    {"run_id": run.id, "status": run.status},
-                )
-                return
-            session = self.store.touch_session(session.id)
-            run_token = secrets.token_urlsafe(32)
-            state = self.broker.register_session(session, token=run_token)
-            try:
-                await self.publish(run.id, "run.started", {"run_id": run.id})
-                if not self.settings.model_name and not run.model:
-                    run.status = RunStatus.FAILED
-                    run.error = "No control model is configured"
-                else:
-                    await self.controller.execute(
-                        run,
-                        workspace=Path(session.workspace),
-                        session_token=run_token,
-                        max_turns=session.limits.max_turns,
-                    )
-                run.usage.search_calls = state.policy.usage.search_calls
-                run.usage.llm_calls = state.policy.usage.llm_calls
-                self.store.save_run(run)
-                self.store.touch_session(session.id)
-                event_type = (
-                    "run.completed" if run.status == RunStatus.COMPLETED else "run.failed"
-                )
-                await self.publish(
-                    run.id,
-                    event_type,
-                    {"run_id": run.id, "status": run.status},
-                )
-            finally:
-                self.broker.unregister_session(run_token)
-
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
@@ -1050,12 +927,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Session not found") from exc
 
-    def get_run(run_id: str) -> Run:
-        try:
-            return runtime.store.get_run(run_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Run not found") from exc
-
     async def renew_public_session(
         session_id: str, *, allow_closing: bool = False
     ) -> Session:
@@ -1090,15 +961,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "budget_remaining": budget_remaining(session.budget, session.usage),
                 "state": runtime.session_state(session),
             }
-        )
-
-    def public_run(run: Run) -> PublicRun:
-        session = get_session(run.session_id)
-        return PublicRun(
-            **run.model_dump(exclude={"trace"}),
-            trace=run.trace if run.include_trace else None,
-            artifacts=runtime.store.artifacts(session),
-            events_url=f"/v1/runs/{run.id}/events",
         )
 
     @app.get("/healthz")
@@ -1259,22 +1121,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "draining", "worker_id": runtime.worker_id}
 
     @app.post(
-        "/v1/sessions/{session_id}/runs",
-        response_model=PublicRun,
-        dependencies=[Depends(authorize)],
-    )
-    async def create_run(session_id: str, request: RunCreate) -> PublicRun:
-        session = await renew_public_session(session_id)
-        run = runtime.store.create_run(session_id, request)
-        try:
-            runtime.start_run_task(run, session)
-        except SessionClosingError as exc:
-            raise contract_error(
-                409, "session_closing", str(exc), retryable=False
-            ) from exc
-        return public_run(run)
-
-    @app.post(
         "/v1/sessions/{session_id}/exec",
         response_model=ExecResult,
         dependencies=[Depends(authorize)],
@@ -1313,57 +1159,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise contract_error(
                 409, "budget_exhausted", str(exc), retryable=False
             ) from exc
-
-    @app.get("/v1/runs/{run_id}", response_model=PublicRun, dependencies=[Depends(authorize)])
-    async def read_run(run_id: str) -> PublicRun:
-        return public_run(get_run(run_id))
-
-    @app.post("/v1/runs/{run_id}/cancel", dependencies=[Depends(authorize)])
-    async def cancel_run(run_id: str) -> PublicRun:
-        run = get_run(run_id)
-        task = runtime.tasks.get(run_id)
-        if task and not task.done():
-            task.cancel()
-            run.status = RunStatus.CANCELLED
-            runtime.store.save_run(run)
-            await runtime.publish(run.id, "run.cancelled", {"run_id": run.id})
-        return public_run(run)
-
-    @app.get("/v1/runs/{run_id}/events", dependencies=[Depends(authorize)])
-    async def stream_events(run_id: str, request: Request) -> StreamingResponse:
-        run = get_run(run_id)
-
-        async def generate() -> AsyncIterator[str]:
-            queue: asyncio.Queue[dict] = asyncio.Queue()
-            runtime.events[run_id].add(queue)
-            try:
-                current = runtime.store.get_run(run_id)
-                yield "event: snapshot\ndata: " + current.model_dump_json() + "\n\n"
-                if current.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
-                    return
-                while not await request.is_disconnected():
-                    try:
-                        event = await asyncio.wait_for(queue.get(), timeout=15)
-                    except TimeoutError:
-                        yield ": keepalive\n\n"
-                        continue
-                    yield f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
-                    if event["type"] in {"run.completed", "run.failed", "run.cancelled"}:
-                        return
-            finally:
-                runtime.events[run_id].discard(queue)
-
-        del run
-        return StreamingResponse(generate(), media_type="text/event-stream")
-
-    @app.get("/v1/runs/{run_id}/artifacts/{artifact_path:path}", dependencies=[Depends(authorize)])
-    async def read_artifact(run_id: str, artifact_path: str) -> FileResponse:
-        run = get_run(run_id)
-        session = get_session(run.session_id)
-        try:
-            path = runtime.store.read_artifact(session, artifact_path)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Artifact not found") from exc
-        return FileResponse(path)
 
     return app

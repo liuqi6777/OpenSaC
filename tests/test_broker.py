@@ -14,7 +14,6 @@ from opensac.models import (
     CAPABILITY_METHODS,
     Mechanisms,
     ResourceBudget,
-    RunLimits,
     Session,
 )
 
@@ -75,7 +74,6 @@ def make_session(*, backends=None, mechanisms=None, budget=None):
         id="sess_test",
         token="token",
         backends=backends or ["web"],
-        limits=RunLimits(),
         workspace="/tmp/session",
         mechanisms=mechanisms or Mechanisms(),
         budget=budget or ResourceBudget(),
@@ -384,7 +382,6 @@ def make_llm_service() -> tuple[BrokerService, FakeModelClient]:
             id="sess_test",
             token="token",
             backends=["web"],
-            limits=RunLimits(),
             workspace="/tmp/session",
         )
     )

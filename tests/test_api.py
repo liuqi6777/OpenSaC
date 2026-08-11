@@ -19,8 +19,6 @@ from opensac.models import (
     ExecCreate,
     ExecRecord,
     ExecRecordStatus,
-    RunCreate,
-    RunStatus,
     SessionCreate,
 )
 from opensac.sandbox import SandboxRequest, SandboxResult, UnsafeCodeError, WarmDockerSandbox
@@ -39,7 +37,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
 
         response = client.post(
             "/v1/sessions",
-            json={"backends": ["local"]},
+            json={"backends": ["local"], "limits": {"max_turns": 1}},
             headers={"Authorization": "Bearer public-secret"},
         )
         assert response.status_code == 200
@@ -47,6 +45,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["id"].startswith("sess_")
         assert "token" not in payload
         assert "workspace" not in payload
+        assert "limits" not in payload
         assert set(payload["features"]) == {
             "idempotent_exec",
             "worker_affinity",
@@ -68,6 +67,15 @@ def test_public_session_api_rejects_unknown_backend(tmp_path) -> None:
     with TestClient(create_app(settings)) as client:
         response = client.post("/v1/sessions", json={"backends": ["unknown"]})
         assert response.status_code == 422
+
+
+def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    with TestClient(create_app(settings)) as client:
+        paths = client.get("/openapi.json").json()["paths"]
+
+    assert "/v1/sessions/{session_id}/exec" in paths
+    assert all("/runs" not in path for path in paths)
 
 
 def test_a_session_takes_exactly_one_search_backend(tmp_path) -> None:
@@ -265,18 +273,6 @@ class BlockingCloseSandbox(RecordingSandbox):
         self.close_calls.append(session.id)
         self.started.set()
         await self.release.wait()
-
-
-class BlockingController:
-    def __init__(self) -> None:
-        self.started = asyncio.Event()
-        self.release = asyncio.Event()
-
-    async def execute(self, run, **_kwargs):
-        self.started.set()
-        await self.release.wait()
-        run.status = RunStatus.COMPLETED
-        return run
 
 
 def exec_client(tmp_path, sandbox) -> TestClient:
@@ -802,46 +798,6 @@ async def test_immediate_delete_waits_for_an_admitted_exec_before_its_task_start
 
 
 @pytest.mark.asyncio
-async def test_immediate_delete_waits_for_an_admitted_internal_run(tmp_path) -> None:
-    runtime = ApplicationRuntime(
-        Settings(
-            data_dir=tmp_path / "data",
-            broker_socket=tmp_path / "broker.sock",
-            model_name="test-model",
-        )
-    )
-    controller = BlockingController()
-    runtime.controller = controller
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
-    run = runtime.store.create_run(session.id, RunCreate(input="research"))
-
-    async def submit() -> asyncio.Task[None]:
-        task = runtime.start_run_task(run, session)
-        # Let an already-ready DELETE run before the admitted child gets its
-        # first turn. The reservation must be sufficient; the session lock is
-        # deliberately not held yet.
-        await asyncio.sleep(0)
-        return task
-
-    submitting = asyncio.create_task(submit())
-    deleting = asyncio.create_task(runtime.close_session(session.id))
-    try:
-        running = await submitting
-        await asyncio.wait_for(controller.started.wait(), timeout=1)
-        assert deleting.done() is False
-
-        controller.release.set()
-        await running
-        assert await deleting is True
-        with pytest.raises(KeyError):
-            runtime.store.get_session(session.id)
-    finally:
-        controller.release.set()
-        await asyncio.gather(submitting, deleting, return_exceptions=True)
-        await runtime.model_client.close()
-
-
-@pytest.mark.asyncio
 async def test_ttl_reaper_removes_only_idle_sessions_and_cleans_broker_state(tmp_path) -> None:
     now = datetime(2026, 8, 10, 12, tzinfo=UTC)
     runtime = ApplicationRuntime(
@@ -923,34 +879,6 @@ async def test_ttl_reaper_backs_off_for_an_admitted_exec_before_its_task_starts(
         sandbox.release.set()
         await asyncio.gather(running, reaping, return_exceptions=True)
         await runtime.model_client.close()
-
-
-@pytest.mark.asyncio
-async def test_stop_persists_an_inflight_internal_run_as_cancelled(tmp_path) -> None:
-    runtime = ApplicationRuntime(
-        Settings(
-            data_dir=tmp_path / "data",
-            broker_socket=tmp_path / "broker.sock",
-            model_name="test-model",
-        )
-    )
-    controller = BlockingController()
-    runtime.controller = controller
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
-    run = runtime.store.create_run(session.id, RunCreate(input="research"))
-    running = runtime.start_run_task(run, session)
-    stopped = False
-    try:
-        await asyncio.wait_for(controller.started.wait(), timeout=1)
-        await runtime.stop()
-        stopped = True
-
-        assert running.cancelled()
-        assert runtime.store.get_run(run.id).status is RunStatus.CANCELLED
-    finally:
-        if not stopped:
-            controller.release.set()
-            await runtime.stop()
 
 
 @pytest.mark.asyncio

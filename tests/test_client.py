@@ -54,9 +54,10 @@ def test_sync_client_negotiates_idempotency_and_preserves_explicit_options() -> 
         assert session["features"] == ["idempotent_exec"]
         assert server.requests[0][2] == {
             "backends": [],
-            "limits": {},
             "mechanisms": {"persistence": False},
         }
+        assert not hasattr(client, "create_run")
+        assert not hasattr(client, "create_and_wait")
         assert client.health() == {"status": "ok"}
         client.exec_code("sess-new", "pass\n", exec_id="logical-1")
         assert server.requests[-1][2]["exec_id"] == "logical-1"

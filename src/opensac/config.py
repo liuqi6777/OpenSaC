@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     model_api_key: str = ""
     model_base_url: str | None = None
     model_name: str = ""
-    model_temperature: float = 0.1
 
     local_search_base_url: str = "http://127.0.0.1:8081"
     serper_api_key: str = ""
@@ -77,7 +76,6 @@ class Settings(BaseSettings):
     # per in-flight tool call and exhaust the host.
     sandbox_max_concurrency: int = 8
 
-    max_turns: int = 8
     max_concurrency: int = 12
     max_output_bytes: int = Field(default=1_000_000, ge=1024)
     # Only reached by a session that disables context decoupling, where every

@@ -1,28 +1,29 @@
 from datetime import UTC, datetime
 
-from opensac.models import ExecRecord, ExecResult, RunCreate, RunUsage, SessionCreate
+from opensac.models import ExecRecord, ExecResult, RunUsage, SessionCreate
 from opensac.store import StateStore
 
 
-def test_store_persists_sessions_runs_and_artifacts(tmp_path) -> None:
+def test_store_persists_sessions_and_leaves_legacy_runs_untouched(tmp_path) -> None:
+    legacy_run = tmp_path / "runs" / "run_old.json"
+    legacy_run.parent.mkdir()
+    legacy_run.write_text("{}")
     store = StateStore(tmp_path)
     session = store.create_session(SessionCreate(backends=["local"]))
     assert store.get_session(session.id).token == session.token
 
-    run = store.create_run(session.id, RunCreate(input="task"))
-    assert store.get_run(run.id).input == "task"
-
     artifact = tmp_path / "sessions" / session.id / "workspace" / "result.json"
     artifact.write_text("{}")
     assert store.artifacts(session) == ["result.json"]
-    assert store.read_artifact(session, "result.json") == artifact
 
     store.delete_session(session.id)
     assert not artifact.exists()
+    assert legacy_run.exists()
 
 
 def test_store_persists_session_lifecycle_and_idempotent_exec_results(tmp_path) -> None:
     store = StateStore(tmp_path)
+    assert not (tmp_path / "runs").exists()
     session = store.create_session(SessionCreate(backends=["local"]))
     touched_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
 

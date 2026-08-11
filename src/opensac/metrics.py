@@ -5,8 +5,6 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from opensac.sandbox.base import Sandbox, SandboxRequest, SandboxResult
-
 
 class CapacityGate:
     """A semaphore that exposes queue depth and reports each caller's wait."""
@@ -45,17 +43,3 @@ class CapacityGate:
             "waiting": self.waiting,
             "admitted": self.admitted,
         }
-
-
-class CapacityLimitedSandbox:
-    """Apply the global execution ceiling to sandbox callers outside /exec."""
-
-    def __init__(self, sandbox: Sandbox, gate: CapacityGate) -> None:
-        self.sandbox = sandbox
-        self.gate = gate
-
-    async def execute(self, request: SandboxRequest) -> SandboxResult:
-        async with self.gate.slot() as queue_seconds:
-            result = await self.sandbox.execute(request)
-        result.timings.setdefault("sandbox_queue_seconds", queue_seconds)
-        return result

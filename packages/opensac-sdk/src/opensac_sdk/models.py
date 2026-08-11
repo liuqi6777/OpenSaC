@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -122,8 +122,3 @@ class RpcResponse(BaseModel):
 class SubmittedOutput(BaseModel):
     output: Any
     citations: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class SandboxEvent(BaseModel):
-    type: Literal["output", "log"]
-    payload: Any

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from opensac.metrics import CapacityGate, CapacityLimitedSandbox
-from opensac.sandbox import SandboxRequest, SandboxResult
+from opensac.metrics import CapacityGate
 
 
 async def test_capacity_gate_reports_queue_depth_and_wait_time() -> None:
@@ -35,13 +34,3 @@ async def test_capacity_gate_reports_queue_depth_and_wait_time() -> None:
     assert waits[0] >= 0
     assert waits[1] > 0
     assert gate.snapshot() == {"capacity": 1, "active": 0, "waiting": 0, "admitted": 2}
-
-
-async def test_capacity_limited_sandbox_records_queue_wait(tmp_path) -> None:
-    class FakeSandbox:
-        async def execute(self, _request: SandboxRequest) -> SandboxResult:
-            return SandboxResult(0, "", "", 0.1)
-
-    sandbox = CapacityLimitedSandbox(FakeSandbox(), CapacityGate(1))
-    result = await sandbox.execute(SandboxRequest("pass", tmp_path, "token"))
-    assert result.timings["sandbox_queue_seconds"] >= 0

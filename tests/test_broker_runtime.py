@@ -9,7 +9,7 @@ from opensac_sdk.models import ContentSnippet, SearchHit
 from opensac_sdk.transport import UnixSocketTransport
 
 from opensac.broker import BrokerAlreadyRunning, BrokerRuntime, BrokerService
-from opensac.models import RunLimits, Session
+from opensac.models import Session
 
 
 class SocketBackend:
@@ -39,7 +39,6 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
             id="session",
             token="secret",
             backends=["local"],
-            limits=RunLimits(),
             workspace=str(tmp_path / "workspace"),
         )
     )
@@ -86,7 +85,6 @@ async def test_llm_resource_round_trips_over_real_unix_socket(tmp_path) -> None:
             id="session",
             token="secret",
             backends=["local"],
-            limits=RunLimits(),
             workspace=str(tmp_path / "workspace"),
         )
     )
@@ -116,7 +114,6 @@ async def test_second_broker_refuses_to_evict_a_live_socket(tmp_path) -> None:
             id="session",
             token="secret",
             backends=["local"],
-            limits=RunLimits(),
             workspace=str(tmp_path / "workspace"),
         )
     )

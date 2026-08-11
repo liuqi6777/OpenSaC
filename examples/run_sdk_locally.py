@@ -27,7 +27,7 @@ from pathlib import Path
 from opensac.backends import LocalSearchBackend, SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService
 from opensac.config import Settings
-from opensac.models import RunLimits, Session
+from opensac.models import Session
 from opensac.sandbox import DockerSandbox, UnsafeCodeError
 from opensac.sandbox.base import SandboxRequest
 
@@ -63,7 +63,6 @@ async def main() -> int:
             id="sdk-runner",
             token=token,
             backends=backends,
-            limits=RunLimits(),
             workspace=str(workspace),
         )
     )

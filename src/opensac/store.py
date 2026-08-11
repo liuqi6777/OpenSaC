@@ -10,8 +10,6 @@ from pathlib import Path
 from opensac.models import (
     ExecRecord,
     ProgramRecord,
-    Run,
-    RunCreate,
     RunUsage,
     Session,
     SessionCreate,
@@ -26,9 +24,7 @@ class StateStore:
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir.resolve()
         self.sessions_dir = self.data_dir / "sessions"
-        self.runs_dir = self.data_dir / "runs"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        self.runs_dir.mkdir(parents=True, exist_ok=True)
 
     def create_session(
         self,
@@ -49,7 +45,6 @@ class StateStore:
             id=session_id,
             token=secrets.token_urlsafe(32),
             backends=request.backends,
-            limits=request.limits,
             workspace=str(workspace),
             # Frozen onto the session, not read from process settings: the arm a
             # run belongs to has to stay recoverable from its own record after
@@ -231,28 +226,6 @@ class StateStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write_text(path, record.model_dump_json(indent=2))
 
-    def create_run(self, session_id: str, request: RunCreate) -> Run:
-        run = Run(
-            id=f"run_{uuid.uuid4().hex}",
-            session_id=session_id,
-            input=request.input,
-            model=request.model,
-            output_schema=request.output_schema,
-            include_trace=request.include_trace,
-        )
-        self.save_run(run)
-        return run
-
-    def save_run(self, run: Run) -> None:
-        path = self.runs_dir / f"{run.id}.json"
-        path.write_text(run.model_dump_json(indent=2), encoding="utf-8")
-
-    def get_run(self, run_id: str) -> Run:
-        path = self.runs_dir / f"{run_id}.json"
-        if not path.exists():
-            raise KeyError(run_id)
-        return Run.model_validate_json(path.read_text(encoding="utf-8"))
-
     def programs_dir(self, session: Session) -> Path:
         """Where generated programs are archived.
 
@@ -358,10 +331,3 @@ class StateStore:
                 )
             )
         return WorkspaceSnapshot(files=files, omitted=omitted)
-
-    def read_artifact(self, session: Session, relative_path: str) -> Path:
-        workspace = Path(session.workspace).resolve()
-        path = (workspace / relative_path).resolve()
-        if not path.is_relative_to(workspace) or not path.is_file():
-            raise KeyError(relative_path)
-        return path
