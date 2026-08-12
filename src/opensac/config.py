@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     model_base_url: str | None = None
     model_name: str = ""
 
+    # One deployment-wide search backend. Sessions inherit this value so a
+    # caller cannot switch corpora or credentials through the public API.
+    search_backend: Literal["local", "web"] = "local"
     local_search_base_url: str = "http://127.0.0.1:8081"
     serper_api_key: str = ""
     # Admission limits are enforced by the broker before query fan-out. Keep

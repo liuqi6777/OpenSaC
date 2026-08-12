@@ -70,10 +70,10 @@ def _health_metrics(payload: dict[str, Any]) -> dict[str, float]:
     }
 
 
-async def _create_session(client: httpx.AsyncClient, backend: str, request_id: str) -> str:
+async def _create_session(client: httpx.AsyncClient, request_id: str) -> str:
     response = await client.post(
         "/v1/sessions",
-        json={"backends": [backend], "request_id": request_id},
+        json={"request_id": request_id},
     )
     response.raise_for_status()
     return str(response.json()["id"])
@@ -135,7 +135,6 @@ async def _run_level(
     concurrency: int,
     requests: int,
     warmup_per_worker: int,
-    backend: str,
     code: str,
     include_trace: bool,
     duration_seconds: float = 0.0,
@@ -145,7 +144,7 @@ async def _run_level(
     run_token = uuid.uuid4().hex
     sessions = await asyncio.gather(
         *(
-            _create_session(client, backend, f"bench-{run_token}-worker-{index}")
+            _create_session(client, f"bench-{run_token}-worker-{index}")
             for index in range(worker_count)
         )
     )
@@ -297,7 +296,6 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
                 concurrency=concurrency,
                 requests=args.requests,
                 warmup_per_worker=args.warmup_per_worker,
-                backend=args.backend,
                 code=args.code,
                 include_trace=args.include_trace,
                 duration_seconds=args.duration_seconds,
@@ -309,7 +307,7 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
             levels.append(level)
     return {
         "base_url": args.base_url,
-        "backend": args.backend,
+        "backend": health.get("build", {}).get("search_backend"),
         "health": health,
         "code_sha256": hashlib.sha256(args.code.encode("utf-8")).hexdigest(),
         "include_trace": args.include_trace,
@@ -324,7 +322,6 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--api-key", default=os.getenv("OPENSAC_API_KEY", ""))
-    parser.add_argument("--backend", choices=("local", "web"), default="local")
     parser.add_argument("--concurrency", type=_parse_concurrency, default=[1, 4, 8, 16])
     parser.add_argument("--requests", type=int, default=32)
     parser.add_argument(

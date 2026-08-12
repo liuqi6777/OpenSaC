@@ -145,14 +145,20 @@ class Mechanisms(BaseModel):
 
 
 class SessionCreate(BaseModel):
-    # One search backend per session; the API refuses more (see `create_session`).
-    # `local` is the default because it needs no credentials, so a fresh install
-    # is runnable before anyone has a Serper key.
-    backends: list[str] = Field(default_factory=lambda: ["local"])
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
     request_id: str | None = Field(default=None, min_length=1, max_length=256)
     lease_seconds: float | None = Field(default=None, gt=0.0, le=86_400.0)
     budget: ResourceBudget = Field(default_factory=ResourceBudget)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_backend_override(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "backends" in data:
+            raise ValueError(
+                "Search backend is configured when OpenSAC starts; remove "
+                "'backends' from the session request."
+            )
+        return data
 
 
 class Session(BaseModel):

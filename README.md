@@ -55,6 +55,12 @@ Set `OPENSAC_API_KEY` outside local development. To expose the optional pipeline
 capabilities to sandbox programs, configure `OPENSAC_MODEL_API_KEY`,
 `OPENSAC_MODEL_NAME`, and optionally `OPENSAC_MODEL_BASE_URL`.
 
+Choose one search backend for the whole OpenSAC service. The default is `local`:
+
+```bash
+export OPENSAC_SEARCH_BACKEND=local  # or web
+```
+
 For local retrieval, run the compatible DeepResearch endpoint at
 `OPENSAC_LOCAL_SEARCH_BASE_URL`. It must expose `POST /search`, `POST /search_many`,
 and `POST /get_document`. Search hits provide a server-shaped `snippet`; modes that extract
@@ -63,10 +69,11 @@ extracting or truncating the snippet again. Configure `full`, `compact`, or `que
 result mode on the DeepResearch search server, not in OpenSAC. Programs can fetch the complete
 document separately through the content SDK, which uses `/get_document`.
 
-For web retrieval, set a [Serper](https://serper.dev) API key. No extra dependency is needed --
+For web retrieval, select `web` and set a [Serper](https://serper.dev) API key. No extra dependency is needed --
 the backend talks to Serper's search and scrape endpoints over plain HTTP:
 
 ```bash
+export OPENSAC_SEARCH_BACKEND=web
 export OPENSAC_SERPER_API_KEY=...
 ```
 
@@ -79,7 +86,7 @@ agent-generated Python program through `/exec`:
 curl -X POST http://127.0.0.1:8000/v1/sessions \
   -H "Authorization: Bearer $OPENSAC_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"backends":["web"]}'
+  -d '{}'
 
 curl -X POST http://127.0.0.1:8000/v1/sessions/SESSION_ID/exec \
   -H "Authorization: Bearer $OPENSAC_API_KEY" \
@@ -187,8 +194,7 @@ pass explicit `locator: null` or manufacture a locator. A ref-only citation is a
 search-preview citation, never an implicit fallback for selected evidence.
 
 The session manifest reports capability contract `3`, sandbox contract `5`, feature flags,
-content/evidence limits, and the effective policy for `local.search`, `local.document`,
-`web.search`, and `web.scrape`. Sessions without a configured pipeline model do not advertise
+content/evidence limits, and the effective policies for the selected backend. Sessions without a configured pipeline model do not advertise
 `llm.*` methods. Retry and rate limits are deployment policy rather than per-call SDK options;
 the default retry profile remains `none`. Intra-call dedupe preserves logical rows and usage.
 Session-local in-flight coalescing remains optional and disabled by default.
@@ -212,7 +218,6 @@ from opensac import OpenSAC
 
 with OpenSAC(api_key="...") as client:
     session = client.create_session(
-        backends=["local"],
         request_id="rollout-17:attempt-1",
         lease_seconds=600,
         budget={
@@ -314,7 +319,7 @@ The external Python client supports both synchronous and asynchronous applicatio
 from opensac import OpenSAC
 
 with OpenSAC(api_key="...") as client:
-    session = client.create_session(backends=["local"])
+    session = client.create_session()
     result = client.exec_code(session["id"], "print('ready')\n")
 ```
 
@@ -322,7 +327,7 @@ with OpenSAC(api_key="...") as client:
 from opensac import AsyncOpenSAC
 
 async with AsyncOpenSAC(api_key="...") as client:
-    session = await client.create_session(backends=["web"])
+    session = await client.create_session()
     result = await client.exec_code(session["id"], "print('ready')\n")
 ```
 

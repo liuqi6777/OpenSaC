@@ -30,6 +30,7 @@ class StateStore:
         self,
         request: SessionCreate,
         *,
+        backend: str,
         worker_id: str = "",
         worker_epoch: str = "",
         request_hash: str | None = None,
@@ -44,7 +45,7 @@ class StateStore:
         session = Session(
             id=session_id,
             token=secrets.token_urlsafe(32),
-            backends=request.backends,
+            backends=[backend],
             workspace=str(workspace),
             # Frozen onto the session, not read from process settings: the arm a
             # run belongs to has to stay recoverable from its own record after

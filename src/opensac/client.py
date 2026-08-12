@@ -20,14 +20,12 @@ class OpenSAC:
     def create_session(
         self,
         *,
-        backends: list[str] | None = None,
         mechanisms: dict[str, Any] | None = None,
         request_id: str | None = None,
         lease_seconds: float | None = None,
         budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "backends": ["local"] if backends is None else backends,
             "mechanisms": mechanisms or {},
         }
         if budget is not None:
@@ -130,14 +128,12 @@ class AsyncOpenSAC:
     async def create_session(
         self,
         *,
-        backends: list[str] | None = None,
         mechanisms: dict[str, Any] | None = None,
         request_id: str | None = None,
         lease_seconds: float | None = None,
         budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "backends": ["local"] if backends is None else backends,
             "mechanisms": mechanisms or {},
         }
         if budget is not None:

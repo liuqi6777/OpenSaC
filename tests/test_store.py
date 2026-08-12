@@ -9,7 +9,8 @@ def test_store_persists_sessions_and_leaves_legacy_runs_untouched(tmp_path) -> N
     legacy_run.parent.mkdir()
     legacy_run.write_text("{}")
     store = StateStore(tmp_path)
-    session = store.create_session(SessionCreate(backends=["local"]))
+    session = store.create_session(SessionCreate(), backend="local")
+    assert session.backends == ["local"]
     assert store.get_session(session.id).token == session.token
 
     artifact = tmp_path / "sessions" / session.id / "workspace" / "result.json"
@@ -24,7 +25,7 @@ def test_store_persists_sessions_and_leaves_legacy_runs_untouched(tmp_path) -> N
 def test_store_persists_session_lifecycle_and_idempotent_exec_results(tmp_path) -> None:
     store = StateStore(tmp_path)
     assert not (tmp_path / "runs").exists()
-    session = store.create_session(SessionCreate(backends=["local"]))
+    session = store.create_session(SessionCreate(), backend="local")
     touched_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
 
     touched = store.touch_session(session.id, at=touched_at)
@@ -64,7 +65,7 @@ def test_workspace_snapshot_is_bounded_and_says_what_it_left_out(tmp_path) -> No
     program that filled it.
     """
     store = StateStore(tmp_path)
-    session = store.create_session(SessionCreate(backends=["local"]))
+    session = store.create_session(SessionCreate(), backend="local")
     workspace = tmp_path / "sessions" / session.id / "workspace"
     (workspace / "a.jsonl").write_text("x" * 100)
     (workspace / "b.jsonl").write_text("y" * 100)
@@ -85,7 +86,7 @@ def test_workspace_snapshot_is_bounded_and_says_what_it_left_out(tmp_path) -> No
 
 def test_workspace_snapshot_reports_files_the_budget_never_reached(tmp_path) -> None:
     store = StateStore(tmp_path)
-    session = store.create_session(SessionCreate(backends=["local"]))
+    session = store.create_session(SessionCreate(), backend="local")
     workspace = tmp_path / "sessions" / session.id / "workspace"
     (workspace / "a.jsonl").write_text("x" * 100)
     (workspace / "b.jsonl").write_text("y" * 100)

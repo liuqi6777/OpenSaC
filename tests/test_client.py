@@ -48,12 +48,10 @@ def test_sync_client_negotiates_idempotency_and_preserves_explicit_options() -> 
     )
     try:
         session = client.create_session(
-            backends=[],
             mechanisms={"persistence": False},
         )
         assert session["features"] == ["idempotent_exec"]
         assert server.requests[0][2] == {
-            "backends": [],
             "mechanisms": {"persistence": False},
         }
         assert not hasattr(client, "create_run")

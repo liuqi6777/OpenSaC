@@ -115,6 +115,11 @@ class ApplicationRuntime:
             api_key=settings.model_api_key or "not-configured",
             base_url=settings.model_base_url,
         )
+        self.provider_operations = (
+            ("local.search", "local.document")
+            if settings.search_backend == "local"
+            else ("web.search", "web.scrape")
+        )
         provider_policies = {
             operation: ProviderPolicy(
                 retry_profile=settings.provider_retry_profile,
@@ -138,27 +143,23 @@ class ApplicationRuntime:
                 ),
                 burst=settings.provider_operation_burst.get(operation),
             )
-            for operation in (
-                "local.search",
-                "local.document",
-                "web.search",
-                "web.scrape",
-            )
+            for operation in self.provider_operations
         }
         provider_runtime = ProviderRuntime(provider_policies)
+        if settings.search_backend == "local":
+            search_backend = LocalSearchBackend(
+                settings.local_search_base_url,
+                timeout=settings.provider_attempt_timeout_seconds,
+                fetch_concurrency=settings.backend_fetch_concurrency,
+            )
+        else:
+            search_backend = SerperBackend(
+                settings.serper_api_key,
+                timeout=settings.provider_attempt_timeout_seconds,
+                fetch_concurrency=settings.backend_fetch_concurrency,
+            )
         self.broker = BrokerService(
-            {
-                "local": LocalSearchBackend(
-                    settings.local_search_base_url,
-                    timeout=settings.provider_attempt_timeout_seconds,
-                    fetch_concurrency=settings.backend_fetch_concurrency,
-                ),
-                "web": SerperBackend(
-                    settings.serper_api_key,
-                    timeout=settings.provider_attempt_timeout_seconds,
-                    fetch_concurrency=settings.backend_fetch_concurrency,
-                ),
-            },
+            {settings.search_backend: search_backend},
             model_client=self.model_client if settings.model_name else None,
             extraction_model=settings.model_name,
             max_concurrency=settings.max_concurrency,
@@ -338,15 +339,11 @@ class ApplicationRuntime:
                         operation
                     ).effective_max_attempts,
                 }
-                for operation in (
-                    "local.search",
-                    "local.document",
-                    "web.search",
-                    "web.scrape",
-                )
+                for operation in self.provider_operations
             },
             "backend_revision": self.settings.backend_revision,
             "backend_metadata_hash": self.settings.backend_metadata_hash,
+            "search_backend": self.settings.search_backend,
             "local_search_base_url": self.settings.local_search_base_url,
         }
 
@@ -457,6 +454,7 @@ class ApplicationRuntime:
             )
             session = self.store.create_session(
                 request,
+                backend=self.settings.search_backend,
                 worker_id=self.worker_id,
                 worker_epoch=self.worker_epoch,
                 request_hash=request_hash,
@@ -1185,23 +1183,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/sessions", response_model=PublicSession, dependencies=[Depends(authorize)])
     async def create_session(request: SessionCreate) -> PublicSession:
-        unknown = set(request.backends) - {"web", "local"}
-        if unknown:
-            raise HTTPException(status_code=422, detail=f"Unknown backends: {sorted(unknown)}")
-        # One search backend per session. `search.query` resolves to it, so two
-        # would leave the broker picking one and the program unable to tell
-        # which -- and a session that silently searched half of what it enabled
-        # is the quiet kind of wrong. Mixed retrieval, when there is an
-        # experiment that wants it, is an explicit parameter and an arm of its
-        # own, not a default nobody chose.
-        if len(set(request.backends)) != 1:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "A session takes exactly one search backend, got "
-                    f"{sorted(set(request.backends))}."
-                ),
-            )
         try:
             session, _ = await runtime.create_session(request)
         except WorkerDrainingError as exc:

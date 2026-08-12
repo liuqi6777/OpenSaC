@@ -6,7 +6,7 @@ can iterate on SDK code directly.
 
     python examples/run_sdk_locally.py examples/research_pipeline.py
     python examples/run_sdk_locally.py my_program.py --docker
-    python examples/run_sdk_locally.py my_program.py --backends local,web
+    OPENSAC_SEARCH_BACKEND=web python examples/run_sdk_locally.py my_program.py
 
 Host mode is fast but runs the program in this process, so the sandbox code
 validator and the container isolation do not apply. Use --docker to exercise the
@@ -36,7 +36,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("program", type=Path, help="Python file that imports opensac_sdk")
     parser.add_argument("--docker", action="store_true", help="run inside the real sandbox image")
-    parser.add_argument("--backends", default="local", help="comma separated: local,web")
     parser.add_argument("--workspace", type=Path, default=None, help="reuse a workspace directory")
     return parser.parse_args()
 
@@ -44,16 +43,18 @@ def parse_args() -> argparse.Namespace:
 async def main() -> int:
     args = parse_args()
     settings = Settings()
-    backends = [name.strip() for name in args.backends.split(",") if name.strip()]
+    backend = settings.search_backend
     workspace = args.workspace or Path(tempfile.mkdtemp(prefix="opensac-sdk-"))
     workspace.mkdir(parents=True, exist_ok=True)
     token = secrets.token_urlsafe(16)
 
+    search_backend = (
+        LocalSearchBackend(settings.local_search_base_url)
+        if backend == "local"
+        else SerperBackend(settings.serper_api_key)
+    )
     service = BrokerService(
-        {
-            "local": LocalSearchBackend(settings.local_search_base_url),
-            "web": SerperBackend(settings.serper_api_key),
-        },
+        {backend: search_backend},
         model_client=None,
         extraction_model="",
         max_concurrency=settings.max_concurrency,
@@ -62,7 +63,7 @@ async def main() -> int:
         Session(
             id="sdk-runner",
             token=token,
-            backends=backends,
+            backends=[backend],
             workspace=str(workspace),
         )
     )
@@ -70,7 +71,7 @@ async def main() -> int:
     await runtime.start()
     print(f"broker    {runtime.socket_path}")
     print(f"workspace {workspace}")
-    print(f"backends  {backends}\n")
+    print(f"backend   {backend}\n")
 
     try:
         if args.docker:

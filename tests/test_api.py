@@ -40,7 +40,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
 
         response = client.post(
             "/v1/sessions",
-            json={"backends": ["local"], "limits": {"max_turns": 1}},
+            json={"limits": {"max_turns": 1}},
             headers={"Authorization": "Bearer public-secret"},
         )
         assert response.status_code == 200
@@ -70,6 +70,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["closing"] is False
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
+        assert payload["environment"]["search_backend"] == "local"
         assert payload["environment"]["sandbox_contract"] == 5
         assert payload["environment"]["capability_contract"] == 3
         capability_limits = payload["environment"]["capability_limits"]
@@ -86,11 +87,12 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert not any(method.startswith("llm.") for method in payload["capabilities"])
 
 
-def test_public_session_api_rejects_unknown_backend(tmp_path) -> None:
+def test_public_session_api_rejects_request_level_backend(tmp_path) -> None:
     settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
     with TestClient(create_app(settings)) as client:
-        response = client.post("/v1/sessions", json={"backends": ["unknown"]})
+        response = client.post("/v1/sessions", json={"backends": ["web"]})
         assert response.status_code == 422
+        assert "configured when OpenSAC starts" in response.text
 
 
 def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
@@ -140,22 +142,18 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
     assert all("/runs" not in path for path in paths)
 
 
-def test_a_session_takes_exactly_one_search_backend(tmp_path) -> None:
-    """Two would leave `search.query` picking one and the program unable to tell.
-
-    Refused at creation rather than resolved at call time: a session that
-    searched half of what it enabled is wrong in a way nothing downstream can
-    detect. Mixed retrieval, when an experiment wants it, is an explicit
-    parameter and an arm of its own.
-    """
-    settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+def test_sessions_inherit_the_service_search_backend(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        broker_socket=tmp_path / "broker.sock",
+        search_backend="web",
+    )
     with TestClient(create_app(settings)) as client:
-        both = client.post("/v1/sessions", json={"backends": ["web", "local"]})
-        assert both.status_code == 422
-        assert "exactly one search backend" in both.json()["detail"]
-        assert client.post("/v1/sessions", json={"backends": []}).status_code == 422
-        # The default is one backend, so an omitted field stays valid.
-        assert client.post("/v1/sessions", json={}).status_code == 200
+        response = client.post("/v1/sessions", json={})
+        assert response.status_code == 200
+        assert response.json()["backends"] == ["web"]
+        assert set(client.app.state.runtime.broker.backends) == {"web"}
+        assert client.get("/healthz").json()["build"]["search_backend"] == "web"
 
 
 def test_session_create_is_idempotent_and_capacity_is_admitted_up_front(tmp_path) -> None:
@@ -199,7 +197,7 @@ async def test_concurrent_session_create_request_id_produces_one_directory(tmp_p
     runtime = ApplicationRuntime(
         Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
     )
-    request = SessionCreate(request_id="same-rollout", backends=["local"])
+    request = SessionCreate(request_id="same-rollout")
     try:
         results = await asyncio.gather(
             *(runtime.create_session(request) for _ in range(20))
@@ -402,7 +400,7 @@ def record_broker_lifecycle(runtime: ApplicationRuntime) -> list[tuple]:
 def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None:
     sandbox = RecordingSandbox()
     with exec_client(tmp_path, sandbox) as client:
-        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
         response = client.post(
             f"/v1/sessions/{session_id}/exec",
             json={"code": "from opensac_sdk import sdk\n", "include_trace": True},
@@ -450,7 +448,7 @@ async def test_sandbox_termination_drains_provider_work_before_trace_and_is_pers
         Settings(data_dir=tmp_path / reason, broker_socket=tmp_path / f"{reason}.sock")
     )
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     events = record_broker_lifecycle(runtime)
     request = ExecCreate(exec_id=reason, code="print('bounded')\n", include_trace=True)
     try:
@@ -512,7 +510,7 @@ def test_health_reports_capacity_and_warm_mode_is_selectable(
 def test_exec_id_retries_return_the_persisted_result_and_conflicts_are_409(tmp_path) -> None:
     sandbox = RecordingSandbox()
     with exec_client(tmp_path, sandbox) as client:
-        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
         request = {"exec_id": "rollout-1:turn-4", "code": "print('once')\n"}
 
         first = client.post(f"/v1/sessions/{session_id}/exec", json=request)
@@ -591,7 +589,7 @@ async def test_concurrent_identical_exec_ids_run_the_sandbox_once(tmp_path) -> N
     )
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     request = ExecCreate(exec_id="rollout-2:turn-9", code="print('once')\n")
     try:
         first = asyncio.create_task(runtime.execute_code(session.id, request))
@@ -616,7 +614,7 @@ async def test_completed_exec_id_survives_an_application_restart(tmp_path) -> No
     first_runtime = ApplicationRuntime(settings)
     first_sandbox = RecordingSandbox()
     first_runtime.sandbox = first_sandbox
-    session = first_runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = first_runtime.store.create_session(SessionCreate(), backend="local")
     request = ExecCreate(exec_id="rollout-3:turn-2", code="print('durable')\n")
     try:
         original = await first_runtime.execute_code(session.id, request)
@@ -641,7 +639,7 @@ async def test_cancelled_waiter_does_not_cancel_idempotent_execution(tmp_path) -
     )
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     request = ExecCreate(exec_id="rollout-4:turn-1", code="print('detached')\n")
     events = record_broker_lifecycle(runtime)
     waiter = asyncio.create_task(runtime.execute_code(session.id, request))
@@ -678,7 +676,7 @@ async def test_restart_refuses_to_reexecute_a_pending_exec_record(tmp_path) -> N
     )
     sandbox = RecordingSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     request = ExecCreate(exec_id="rollout-5:turn-8", code="print('unknown')\n")
     runtime.store.save_exec_record(
         session,
@@ -707,7 +705,7 @@ def test_workspace_can_be_read_back_before_the_session_is_deleted(tmp_path) -> N
     """
     sandbox = RecordingSandbox()
     with exec_client(tmp_path, sandbox) as client:
-        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
         client.post(
             f"/v1/sessions/{session_id}/exec",
             json={"code": "from opensac_sdk import sdk\n"},
@@ -731,7 +729,7 @@ def test_exec_keeps_one_broker_session_across_turns(tmp_path) -> None:
     """
     with exec_client(tmp_path, RecordingSandbox()) as client:
         runtime = client.app.state.runtime
-        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
         token = runtime.store.get_session(session_id).token
 
         client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"})
@@ -755,7 +753,7 @@ async def test_delete_marks_closing_waits_for_inflight_exec_and_rejects_new_work
     )
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     events = record_broker_lifecycle(runtime)
     try:
         running = asyncio.create_task(
@@ -792,7 +790,7 @@ async def test_abort_cancels_inflight_exec_and_is_idempotent(tmp_path) -> None:
     )
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     events = record_broker_lifecycle(runtime)
     running = asyncio.create_task(
         runtime.execute_code(
@@ -827,7 +825,7 @@ async def test_runtime_shutdown_cancels_owned_exec_and_drains_its_trace(tmp_path
     )
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     events = record_broker_lifecycle(runtime)
     waiter = asyncio.create_task(
         runtime.execute_code(session.id, ExecCreate(code="print('shutdown')\n"))
@@ -855,7 +853,7 @@ async def test_concurrent_delete_and_abort_share_one_lifecycle_transition(tmp_pa
     )
     sandbox = BlockingCloseSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     deleting = asyncio.create_task(runtime.close_session(session.id))
     try:
         await sandbox.started.wait()
@@ -882,7 +880,7 @@ async def test_abort_preempts_graceful_delete_waiting_for_exec(tmp_path) -> None
     )
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     running = asyncio.create_task(
         runtime.execute_code(session.id, ExecCreate(code="print('running')\n"))
     )
@@ -912,7 +910,7 @@ async def test_cleanup_failure_revokes_token_but_keeps_durable_closing_session(
     runtime = ApplicationRuntime(settings)
     sandbox = RetryingCloseSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     runtime.bind_session(session)
     try:
         with pytest.raises(SessionCleanupError, match="Sandbox cleanup failed"):
@@ -934,7 +932,7 @@ def test_delete_cleanup_failure_returns_503_and_preserves_session(tmp_path) -> N
     sandbox = RetryingCloseSandbox()
     with exec_client(tmp_path, sandbox) as client:
         runtime = client.app.state.runtime
-        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
         session = runtime.store.get_session(session_id)
         runtime.bind_session(session)
 
@@ -951,7 +949,7 @@ async def test_startup_cleanup_failure_keeps_closing_session_for_next_start(
 ) -> None:
     settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
     seed = ApplicationRuntime(settings)
-    session = seed.store.create_session(SessionCreate(backends=["local"]))
+    session = seed.store.create_session(SessionCreate(), backend="local")
     seed.store.mark_session_closing(session.id)
     await seed.model_client.close()
 
@@ -983,7 +981,7 @@ async def test_immediate_delete_waits_for_an_admitted_exec_before_its_task_start
     )
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     running = asyncio.create_task(
         runtime.execute_code(
             session.id,
@@ -1019,8 +1017,8 @@ async def test_ttl_reaper_removes_only_idle_sessions_and_cleans_broker_state(tmp
     )
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
-    stale = runtime.store.create_session(SessionCreate(backends=["local"]))
-    fresh = runtime.store.create_session(SessionCreate(backends=["local"]))
+    stale = runtime.store.create_session(SessionCreate(), backend="local")
+    fresh = runtime.store.create_session(SessionCreate(), backend="local")
     runtime.store.touch_session(stale.id, at=now - timedelta(seconds=61))
     runtime.store.touch_session(fresh.id, at=now - timedelta(seconds=59))
     runtime.bind_session(stale)
@@ -1046,7 +1044,7 @@ async def test_per_session_lease_expires_without_global_ttl(tmp_path) -> None:
         Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
     )
     session, _ = await runtime.create_session(
-        SessionCreate(backends=["local"], lease_seconds=30)
+        SessionCreate(lease_seconds=30)
     )
     runtime.store.touch_session(session.id, at=now - timedelta(seconds=31))
     try:
@@ -1071,7 +1069,7 @@ async def test_ttl_reaper_backs_off_for_an_admitted_exec_before_its_task_starts(
     )
     sandbox = BlockingSandbox()
     runtime.sandbox = sandbox
-    session = runtime.store.create_session(SessionCreate(backends=["local"]))
+    session = runtime.store.create_session(SessionCreate(), backend="local")
     stale_at = now - timedelta(seconds=61)
     runtime.store.touch_session(session.id, at=stale_at)
     running = asyncio.create_task(
@@ -1150,7 +1148,7 @@ def test_exec_returns_validator_rejection_as_an_observation(tmp_path) -> None:
     """The control model has to see why its program was refused and retry."""
     sandbox = RecordingSandbox(raises=UnsafeCodeError("Blocked imports: socket"))
     with exec_client(tmp_path, sandbox) as client:
-        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
         response = client.post(f"/v1/sessions/{session_id}/exec", json={"code": "import socket\n"})
         assert response.status_code == 200
         payload = response.json()
@@ -1186,7 +1184,7 @@ def test_every_program_is_archived_with_the_name_it_ran_under(tmp_path) -> None:
     sandbox = TurnMarkingSandbox()
     with exec_client(tmp_path, sandbox) as client:
         runtime = client.app.state.runtime
-        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
         for index in range(3):
             client.post(
                 f"/v1/sessions/{session_id}/exec",
@@ -1214,7 +1212,7 @@ def test_archive_records_a_validator_rejection_too(tmp_path) -> None:
     sandbox = RecordingSandbox(raises=UnsafeCodeError("Blocked imports: socket"))
     with exec_client(tmp_path, sandbox) as client:
         runtime = client.app.state.runtime
-        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
         client.post(f"/v1/sessions/{session_id}/exec", json={"code": "import socket\n"})
 
         record = runtime.store.programs(runtime.store.get_session(session_id))[0]
@@ -1232,7 +1230,7 @@ def test_persistence_disabled_discards_the_workspace_between_calls(tmp_path) -> 
     with exec_client(tmp_path, TurnMarkingSandbox()) as client:
         session_id = client.post(
             "/v1/sessions",
-            json={"backends": ["local"], "mechanisms": {"persistence": False}},
+            json={"mechanisms": {"persistence": False}},
         ).json()["id"]
 
         first = client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"})
@@ -1243,7 +1241,7 @@ def test_persistence_disabled_discards_the_workspace_between_calls(tmp_path) -> 
 
 def test_persistence_enabled_keeps_the_workspace(tmp_path) -> None:
     with exec_client(tmp_path, TurnMarkingSandbox()) as client:
-        session_id = client.post("/v1/sessions", json={"backends": ["local"]}).json()["id"]
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
         client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"})
         second = client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"})
         assert sorted(second.json()["artifacts"]) == ["turn-0.txt", "turn-1.txt"]
@@ -1255,7 +1253,7 @@ def test_program_archive_survives_a_session_without_persistence(tmp_path) -> Non
         runtime = client.app.state.runtime
         session_id = client.post(
             "/v1/sessions",
-            json={"backends": ["local"], "mechanisms": {"persistence": False}},
+            json={"mechanisms": {"persistence": False}},
         ).json()["id"]
         client.post(f"/v1/sessions/{session_id}/exec", json={"code": "print(1)\n"})
 
@@ -1272,22 +1270,19 @@ def test_session_reports_its_mechanisms_and_reachable_capabilities(tmp_path) -> 
     with exec_client(tmp_path, RecordingSandbox()) as client:
         payload = client.post(
             "/v1/sessions",
-            json={"backends": ["local"], "mechanisms": {"llm_subroutine": False}},
+            json={"mechanisms": {"llm_subroutine": False}},
         ).json()
         assert payload["mechanisms"]["llm_subroutine"] is False
         assert payload["mechanisms"]["batching"] is True
         assert not any(method.startswith("llm.") for method in payload["capabilities"])
         assert "search.query_many" in payload["capabilities"]
 
-        # The manifest used to over-advertise: it filtered on mechanisms only,
-        # so a local-only session still announced `search.web`. One neutral
-        # search name makes the manifest correct on both backends by
-        # construction rather than by a second filter that could drift.
-        web = client.post("/v1/sessions", json={"backends": ["web"]}).json()
-        for manifest in (payload["capabilities"], web["capabilities"]):
-            assert "search.query" in manifest
-            assert not any("web" in method or "local" in method for method in manifest)
-            assert not any(method.startswith("llm.") for method in manifest)
+        # Capability names stay backend-neutral; the deployment chooses the
+        # corpus without changing the program-facing SDK contract.
+        manifest = payload["capabilities"]
+        assert "search.query" in manifest
+        assert not any("web" in method or "local" in method for method in manifest)
+        assert not any(method.startswith("llm.") for method in manifest)
 
         # Recorded on the session, which is what makes an arm recoverable after
         # the run.
@@ -1302,14 +1297,14 @@ def test_session_advertises_llm_capabilities_only_when_model_is_configured(tmp_p
         model_name="pipeline-model",
     )
     with TestClient(create_app(settings)) as client:
-        payload = client.post("/v1/sessions", json={"backends": ["local"]}).json()
+        payload = client.post("/v1/sessions", json={}).json()
 
     assert "llm.extract_many" in payload["capabilities"]
 
 
 def test_omitted_mechanisms_default_to_the_unablated_session(tmp_path) -> None:
     with exec_client(tmp_path, RecordingSandbox()) as client:
-        payload = client.post("/v1/sessions", json={"backends": ["local"]}).json()
+        payload = client.post("/v1/sessions", json={}).json()
         assert payload["mechanisms"] == {
             "batching": True,
             "persistence": True,

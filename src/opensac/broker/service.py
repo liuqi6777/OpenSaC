@@ -1232,10 +1232,10 @@ class BrokerService:
         """The one backend this session searches.
 
         Resolved from the session rather than from the method name, which is
-        what makes `search.query` backend-neutral. `create_session` admits
-        exactly one, so there is nothing to choose between here; a session that
-        somehow holds two is a bug worth stopping on rather than a tie to break
-        arbitrarily.
+        what makes `search.query` backend-neutral. The deployment records its
+        one configured backend on every session, so there is nothing to choose
+        between here; a session that somehow holds two is a bug worth stopping
+        on rather than a tie to break arbitrarily.
         """
         names = sorted(state.policy.allowed_backends & set(self.backends))
         if len(names) != 1:

@@ -55,7 +55,6 @@ async def test_benchmark_level_isolates_warmup_and_records_failures() -> None:
             concurrency=4,
             requests=2,
             warmup_per_worker=1,
-            backend="local",
             code="print('measure')\n",
             include_trace=True,
         )
