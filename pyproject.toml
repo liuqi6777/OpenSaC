@@ -3,6 +3,7 @@ name = "opensac"
 version = "0.4.0"
 description = "Open reference implementation of Search as Code"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.116",
