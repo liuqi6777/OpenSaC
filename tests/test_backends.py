@@ -25,8 +25,9 @@ DOCUMENT_TEXT = (
 
 
 class FakeResponse:
-    def __init__(self, payload: dict[str, Any]) -> None:
+    def __init__(self, payload: dict[str, Any], *, text: str = "") -> None:
         self._payload = payload
+        self.text = text
 
     def raise_for_status(self) -> None:
         return None
@@ -288,7 +289,7 @@ async def test_web_fetch_exposes_transport_and_typed_input_failures(monkeypatch)
         async def __aexit__(self, *exc):
             return None
 
-        async def post(self, url, *, headers, json):
+        async def get(self, url, *, headers):
             raise httpx.HTTPError("403 Forbidden")
 
     monkeypatch.setattr(serper_module.httpx, "AsyncClient", Blocked)
@@ -328,9 +329,7 @@ def test_bundled_fetch_preflight_validates_handles_and_credentials() -> None:
         url="https://example.com/page",
         rank=1,
     )
-    with pytest.raises(ProviderRequestError) as credentials_error:
-        SerperBackend("").preflight_fetch(configured_hit)
-    assert credentials_error.value.code == "provider_not_configured"
+    SerperBackend("").preflight_fetch(configured_hit)
 
 
 async def test_serper_reuses_and_closes_one_http_client(monkeypatch) -> None:
@@ -342,25 +341,28 @@ async def test_serper_reuses_and_closes_one_http_client(monkeypatch) -> None:
             self.instances.append(self)
 
         async def post(self, url, *, headers, json):
-            if url == SerperBackend.search_url:
-                return FakeResponse(
-                    {
-                        "organic": [
-                            {
-                                "title": "A",
-                                "link": "https://example.com/a",
-                                "snippet": "summary",
-                            }
-                        ]
-                    }
-                )
-            return FakeResponse({"text": "page"})
+            return FakeResponse(
+                {
+                    "organic": [
+                        {
+                            "title": "A",
+                            "link": "https://example.com/a",
+                            "snippet": "summary",
+                        }
+                    ]
+                }
+            )
+
+        async def get(self, url, *, headers):
+            assert url == "https://r.jina.ai/https://example.com/a"
+            assert headers == {"Authorization": "Bearer jina-secret"}
+            return FakeResponse({}, text="page")
 
         async def aclose(self) -> None:
             self.closed = True
 
     monkeypatch.setattr(serper_module.httpx, "AsyncClient", RecordingClient)
-    backend = SerperBackend("key")
+    backend = SerperBackend("key", jina_api_key="jina-secret")
 
     hits = await backend.search("query", limit=1)
     assert hits[0].retrieval is not None
@@ -387,11 +389,14 @@ async def test_serper_missing_credentials_is_a_zero_attempt_preflight_failure() 
 
 
 def test_provider_identity_is_stable_and_does_not_expose_credentials() -> None:
-    first = SerperBackend("top-secret")
-    second = SerperBackend("top-secret")
-    other = SerperBackend("different-secret")
+    first = SerperBackend("top-secret", jina_api_key="jina-secret")
+    second = SerperBackend("top-secret", jina_api_key="jina-secret")
+    other = SerperBackend("different-secret", jina_api_key="jina-secret")
+    other_reader = SerperBackend("top-secret", jina_api_key="different-jina-secret")
 
     assert first.provider_identity == second.provider_identity
     assert first.provider_identity != other.provider_identity
+    assert first.provider_identity != other_reader.provider_identity
     assert "top-secret" not in first.provider_identity
+    assert "jina-secret" not in first.provider_identity
     assert LocalSearchBackend("http://localhost:8081").provider_identity.startswith("local:")

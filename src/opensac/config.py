@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     search_backend: Literal["local", "web"] = "local"
     local_search_base_url: str = "http://127.0.0.1:8081"
     serper_api_key: str = ""
+    jina_api_key: str = ""
     # Admission limits are enforced by the broker before query fan-out. Keep
     # the defaults wide enough for research pipelines while bounding one
     # malformed/generated call independently of rollout-level usage metrics.

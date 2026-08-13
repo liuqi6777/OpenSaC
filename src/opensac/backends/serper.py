@@ -13,7 +13,7 @@ from opensac.provider import ProviderRequestError, invalid_provider_response
 class SerperBackend:
     name = "web"
     search_url = "https://google.serper.dev/search"
-    scrape_url = "https://scrape.serper.dev"
+    reader_url = "https://r.jina.ai"
     # Pushed down into the query as `site:` rather than filtered afterwards,
     # which is the point: the ranking is recomputed under the constraint instead
     # of being thinned after the fact.
@@ -29,8 +29,10 @@ class SerperBackend:
         api_key: str = "",
         timeout: float = 30.0,
         fetch_concurrency: int = 6,
+        jina_api_key: str = "",
     ) -> None:
         self.api_key = api_key
+        self.jina_api_key = jina_api_key
         self.timeout = timeout
         # Kept while callers migrate concurrency ownership to ProviderRuntime.
         # The adapter itself performs one transport operation per method.
@@ -41,7 +43,9 @@ class SerperBackend:
     def provider_identity(self) -> str:
         """Opaque limiter key for the endpoint and configured credential."""
 
-        material = "\0".join((self.search_url, self.scrape_url, self.api_key))
+        material = "\0".join(
+            (self.search_url, self.reader_url, self.api_key, self.jina_api_key)
+        )
         digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
         return f"web:{digest}"
 
@@ -70,7 +74,7 @@ class SerperBackend:
         self._headers()
 
     def preflight_fetch(self, hit: SearchHit) -> None:
-        """Validate a scrape request before it enters provider governors."""
+        """Validate a Reader request before it enters provider governors."""
 
         parsed_url = urlparse(str(hit.url or ""))
         if parsed_url.scheme.lower() not in {"http", "https"} or not parsed_url.netloc:
@@ -79,7 +83,11 @@ class SerperBackend:
                 "Search result cannot be fetched because it has no absolute HTTP URL.",
                 retryable=False,
             )
-        self._headers()
+
+    def _reader_headers(self) -> dict[str, str]:
+        if not self.jina_api_key:
+            return {}
+        return {"Authorization": f"Bearer {self.jina_api_key}"}
 
     async def search(
         self,
@@ -155,16 +163,12 @@ class SerperBackend:
     ) -> ContentSnippet:
         del query
         self.preflight_fetch(hit)
-        response = await self._http().post(
-            self.scrape_url,
-            headers=self._headers(),
-            json={"url": hit.url},
+        response = await self._http().get(
+            f"{self.reader_url}/{hit.url}",
+            headers=self._reader_headers(),
         )
         response.raise_for_status()
-        payload = self._json_object(response)
-        if "text" not in payload and "markdown" not in payload:
-            raise invalid_provider_response()
-        text = payload.get("text", "") or payload.get("markdown", "")
+        text = response.text
         if not isinstance(text, str):
             raise invalid_provider_response()
         return ContentSnippet(

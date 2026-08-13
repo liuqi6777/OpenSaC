@@ -131,6 +131,12 @@ def test_provider_policy_config_rejects_unknown_operations_and_orphan_bursts() -
         Settings(provider_operation_burst={"local.search": 1})
 
 
+def test_settings_load_jina_api_key_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENSAC_JINA_API_KEY", "jina-secret")
+
+    assert Settings(_env_file=None).jina_api_key == "jina-secret"
+
+
 def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
     settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
     with TestClient(create_app(settings)) as client:
@@ -147,12 +153,17 @@ def test_sessions_inherit_the_service_search_backend(tmp_path) -> None:
         data_dir=tmp_path / "data",
         broker_socket=tmp_path / "broker.sock",
         search_backend="web",
+        serper_api_key="serper-secret",
+        jina_api_key="jina-secret",
     )
     with TestClient(create_app(settings)) as client:
         response = client.post("/v1/sessions", json={})
         assert response.status_code == 200
         assert response.json()["backends"] == ["web"]
         assert set(client.app.state.runtime.broker.backends) == {"web"}
+        backend = client.app.state.runtime.broker.backends["web"]
+        assert backend.api_key == "serper-secret"
+        assert backend.jina_api_key == "jina-secret"
         assert client.get("/healthz").json()["build"]["search_backend"] == "web"
 
 

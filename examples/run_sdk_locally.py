@@ -51,7 +51,10 @@ async def main() -> int:
     search_backend = (
         LocalSearchBackend(settings.local_search_base_url)
         if backend == "local"
-        else SerperBackend(settings.serper_api_key)
+        else SerperBackend(
+            settings.serper_api_key,
+            jina_api_key=settings.jina_api_key,
+        )
     )
     service = BrokerService(
         {backend: search_backend},

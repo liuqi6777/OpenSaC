@@ -70,11 +70,12 @@ result mode on the DeepResearch search server, not in OpenSAC. Programs can fetc
 document separately through the content SDK, which uses `/get_document`.
 
 For web retrieval, select `web` and set a [Serper](https://serper.dev) API key. No extra dependency is needed --
-the backend talks to Serper's search and scrape endpoints over plain HTTP:
+the backend uses Serper for search and Jina Reader for fetching result content:
 
 ```bash
 export OPENSAC_SEARCH_BACKEND=web
 export OPENSAC_SERPER_API_KEY=...
+export OPENSAC_JINA_API_KEY=...
 ```
 
 ## Execute A Program

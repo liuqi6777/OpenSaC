@@ -155,6 +155,7 @@ class ApplicationRuntime:
         else:
             search_backend = SerperBackend(
                 settings.serper_api_key,
+                jina_api_key=settings.jina_api_key,
                 timeout=settings.provider_attempt_timeout_seconds,
                 fetch_concurrency=settings.backend_fetch_concurrency,
             )
