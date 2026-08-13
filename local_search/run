@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+VENV_DIR=${LOCAL_SEARCH_VENV:-"$PROJECT_DIR/.venv"}
+PYTHON=${LOCAL_SEARCH_PYTHON:-python3.12}
+VENV_PYTHON="$VENV_DIR/bin/python"
+
+require_environment() {
+    if test ! -x "$VENV_PYTHON"; then
+        echo "local search environment is missing; run ./local_search/run setup" >&2
+        exit 1
+    fi
+}
+
+case "${1:-start}" in
+    setup)
+        shift
+        command -v "$PYTHON" >/dev/null 2>&1 || {
+            echo "$PYTHON is required; set LOCAL_SEARCH_PYTHON to a Python 3.12 executable" >&2
+            exit 127
+        }
+        "$PYTHON" -m venv "$VENV_DIR"
+        exec "$VENV_PYTHON" -m pip install -r "$PROJECT_DIR/requirements.txt" "$@"
+        ;;
+    prepare)
+        shift
+        require_environment
+        PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+            exec "$VENV_PYTHON" -m local_search.prepare "$@"
+        ;;
+    start)
+        if test "${1:-}" = "start"; then shift; fi
+        require_environment
+        PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+            exec "$VENV_PYTHON" -m local_search.server "$@"
+        ;;
+    help|-h|--help)
+        cat <<'EOF'
+Usage:
+  ./local_search/run setup          Create .venv and install requirements
+  ./local_search/run prepare [ARGS] Download the ready-made index and corpus
+  ./local_search/run [ARGS]         Start the search service in the foreground
+
+Environment:
+  LOCAL_SEARCH_PYTHON  Python 3.12 executable used by setup
+  LOCAL_SEARCH_VENV    Existing virtual environment directory to use
+
+Example:
+  ./local_search/run --device cuda:0 --port 8081
+EOF
+        ;;
+    *)
+        require_environment
+        PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+            exec "$VENV_PYTHON" -m local_search.server "$@"
+        ;;
+esac

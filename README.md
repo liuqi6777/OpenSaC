@@ -61,13 +61,18 @@ Choose one search backend for the whole OpenSAC service. The default is `local`:
 export OPENSAC_SEARCH_BACKEND=local  # or web
 ```
 
-For local retrieval, run the compatible DeepResearch endpoint at
-`OPENSAC_LOCAL_SEARCH_BASE_URL`. It must expose `POST /search`, `POST /search_many`,
-and `POST /get_document`. Search hits provide a server-shaped `snippet`; modes that extract
-document metadata also provide `title` and `date`. OpenSAC consumes those fields without
-extracting or truncating the snippet again. Configure `full`, `compact`, or `query_aware`
-result mode on the DeepResearch search server, not in OpenSAC. Programs can fetch the complete
-document separately through the content SDK, which uses `/get_document`.
+For local retrieval, OpenSAC now includes the compatible dense search service. Download the
+ready-made BrowseComp-Plus FAISS index and corpus, then start it on port 8081:
+
+```bash
+./local_search/run setup
+./local_search/run prepare
+./local_search/run
+```
+
+See [Local dense search](docs/local-search.md) for GPU/CPU settings, API examples, index file
+contracts, and OpenSAC integration. The service exposes `POST /search`, `POST /search_many`,
+and `POST /get_document` at `OPENSAC_LOCAL_SEARCH_BASE_URL`.
 
 For web retrieval, select `web` and set a [Serper](https://serper.dev) API key. No extra dependency is needed --
 the backend uses Serper for search and Jina Reader for fetching result content:
