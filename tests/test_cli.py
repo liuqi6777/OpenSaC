@@ -34,6 +34,20 @@ def test_build_sandbox_builds_directly_from_source(monkeypatch) -> None:
     ]
 
 
+def test_build_sandbox_accepts_network_mode(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], *, check: bool) -> None:
+        assert check is True
+        calls.append(command)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    cli.build_sandbox(network="host")
+
+    assert calls[0][:4] == ["docker", "build", "--network", "host"]
+
+
 def test_sandbox_dockerfile_installs_sdk_from_source() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     dockerfile = (repo_root / "sandbox" / "Dockerfile").read_text()

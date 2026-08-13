@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from typing import Annotated
 
 import typer
 import uvicorn
@@ -24,22 +25,49 @@ def serve() -> None:
 
 
 @app.command("build-sandbox")
-def build_sandbox() -> None:
+def build_sandbox(
+    network: Annotated[
+        str | None,
+        typer.Option(help="Docker build network mode, for example 'host'."),
+    ] = None,
+    pip_index_url: Annotated[
+        str | None,
+        typer.Option(help="Custom pip index URL used inside the build."),
+    ] = None,
+    pip_trusted_host: Annotated[
+        str | None,
+        typer.Option(help="Trusted host for the custom pip index URL."),
+    ] = None,
+) -> None:
     """Build the hardened sandbox image with Docker."""
     settings = Settings()
-    subprocess.run(
+    command = ["docker", "build"]
+    if network is not None:
+        command.extend(["--network", network])
+    command.extend(
         [
-            "docker",
-            "build",
             "--build-arg",
             f"OPENSAC_SANDBOX_CONTRACT={SANDBOX_CONTRACT}",
+        ]
+    )
+    if pip_index_url is not None:
+        command.extend(["--build-arg", f"PIP_INDEX_URL={pip_index_url}"])
+    if pip_trusted_host is not None:
+        command.extend(["--build-arg", f"PIP_TRUSTED_HOST={pip_trusted_host}"])
+    command.extend(
+        [
             "-f",
             "sandbox/Dockerfile",
             "-t",
             settings.sandbox_image,
             ".",
-        ],
+        ]
+    )
+    subprocess.run(
+        command,
         check=True,
     )
+
+
 if __name__ == "__main__":
     app()
