@@ -27,25 +27,6 @@ def serve() -> None:
 def build_sandbox() -> None:
     """Build the hardened sandbox image with Docker."""
     settings = Settings()
-    wheels_dir = "_sandbox_wheel"
-    subprocess.run(["rm", "-rf", wheels_dir], check=True)
-    subprocess.run(
-        [
-            "pip", "wheel", "--no-deps", "--no-build-isolation", 
-            "--ignore-requires-python", "-w", wheels_dir, "packages/opensac-sdk"
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "pip", "download", "-d", wheels_dir,
-            "httpx>=0.28", "pydantic>=2.11",
-            "--python-version", "3.12", "--only-binary=:all:",
-            "--platform", "manylinux2014_x86_64", "--platform", "manylinux_2_17_x86_64",
-            "--platform", "linux_x86_64", "--implementation", "cp", "--abi", "cp312",
-        ],
-        check=True,
-    )
     subprocess.run(
         [
             "docker",
