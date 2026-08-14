@@ -7,7 +7,7 @@ license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.116",
-    "httpx>=0.28",
+    "httpx[socks]>=0.28",
     "jsonschema>=4.25",
     "mcp>=1.27,<2",
     "openai>=1.99",
