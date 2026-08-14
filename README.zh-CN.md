@@ -218,10 +218,86 @@ OpenSAC 支持两种驱动方式：
 1. **自定义 agent loop**：将 `/v1/sessions/{session_id}/exec` 包装为模型可见的单一
    `sac_run(code)` 工具，并在一个 rollout 内复用 session。可运行的
    [`sac_agent`](sac_agent/README.md) 展示了最小 OpenAI 兼容 ReAct 循环。
-2. **Coding agent**：安装或改造 [`skills/search-as-code`](skills/search-as-code/SKILL.md)，让 coding
-   agent 生成程序并直接调用已经部署的 OpenSAC 服务。
+2. **通过 MCP 接入 coding agent**：以本地 stdio 服务运行 `opensac mcp`，并安装
+   [`skills/search-as-code`](skills/search-as-code/SKILL.md)。公开执行接口只有
+   `sac_run(code)`；对话身份、session 创建、lease 续租和恢复都由 MCP 适配层负责，不进入模型参数。
 
 `sac_agent` 使用的控制模型端点，与沙箱内通过 `sdk.llm.*` 暴露的可选 pipeline 模型端点彼此独立。
+
+### Codex
+
+先启动 OpenSAC API，再使用仓库绝对路径注册 MCP 服务：
+
+```bash
+export OPENSAC_REPO=/absolute/path/to/OpenSaC
+export SAC_API_BASE=http://127.0.0.1:8000
+export SAC_API_KEY=replace-with-your-opensac-key
+
+codex mcp add \
+  --env SAC_API_BASE="$SAC_API_BASE" \
+  --env SAC_API_KEY="$SAC_API_KEY" \
+  opensac -- uv --directory "$OPENSAC_REPO" run opensac mcp
+```
+
+Codex 会在 MCP 请求 metadata 中提供当前 task 身份。如果该字段缺失，适配层会 fail closed，不会退化为
+按工作目录或整个进程共享 session。
+
+### Claude Code
+
+注册同一个 stdio 服务：
+
+```bash
+export OPENSAC_REPO=/absolute/path/to/OpenSaC
+export SAC_API_BASE=http://127.0.0.1:8000
+export SAC_API_KEY=replace-with-your-opensac-key
+
+claude mcp add --scope user opensac \
+  -e SAC_API_BASE="$SAC_API_BASE" \
+  -e SAC_API_KEY="$SAC_API_KEY" \
+  -- uv --directory "$OPENSAC_REPO" run opensac mcp
+```
+
+将下面的 hook 合并到 `~/.claude/settings.json`。每次调用 `sac_run` 前，它会把 Claude Code 官方 hook
+输入中的 `session_id` 传给宿主专用的 `bind_context` 工具，agent 不参与绑定：
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__opensac__sac_run",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "opensac",
+            "tool": "bind_context",
+            "input": { "context_id": "${session_id}" }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+如果 hook 没有完成绑定，`sac_run` 会 fail closed。Search-as-Code skill 也明确将 `bind_context`
+保留给宿主 hook，禁止模型主动调用。
+
+### MCP 配置与生命周期
+
+| 环境变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `SAC_API_BASE` | `http://127.0.0.1:8000` | 适配层访问的 OpenSAC API |
+| `SAC_API_KEY` | 空，随后回退到 `OPENSAC_API_KEY` | Bearer 凭据；不会写入 MCP registry |
+| `SAC_MCP_LEASE_SECONDS` | `3600` | 可续租 session lease，范围为 `1` 到 `86400` 秒 |
+| `SAC_MCP_STATE_DIR` | 平台用户状态目录 | SQLite generation registry 的位置 |
+
+原始 Codex/Claude 对话 ID 在进入 request ID 或 SQLite 前，会先结合 host namespace 做 SHA-256
+派生。一个 task 的多次调用复用一个带 lease 的 OpenSAC session，MCP 重启后仍可恢复。MCP 退出只关闭
+HTTP client，不删除 session。如果服务端返回 `session_expired` 或 `worker_restarted`，失败的程序不会
+自动重放；本次返回 `state_lost`，下一次调用使用干净的新 generation。宿主配置细节可参考官方
+[Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) 与
+[Claude Code hooks](https://code.claude.com/docs/en/hooks) 文档。
 
 ## TODO
 

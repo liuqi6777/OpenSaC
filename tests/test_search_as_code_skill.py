@@ -203,7 +203,14 @@ def test_pattern_is_bounded_and_teaches_the_04_contract() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
     pattern = _pattern()
 
-    assert len(skill) < 8_000
+    assert len(skill) < 12_000
+    assert "MCP tool `sac_run(code)`" in skill
+    assert "Never create, resume, or delete REST sessions" in skill
+    assert "`bind_context` is host-internal" in skill
+    assert "session_id" not in skill
+    assert "SAC_MCP_" not in skill
+    assert "codex mcp add" not in skill
+    assert "claude mcp add" not in skill
     compile(pattern, "<search-as-code-skill>", "exec")
     validate_code(pattern)
     assert "sdk.search.fuse_rrf(batches, k=60)" in pattern
@@ -226,10 +233,10 @@ def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -
     pool = sdk.state.read_jsonl("pool.jsonl")
     consensus = next(row for row in pool if row.ref == "ref_consensus")
     assert len(pool) == 3
-    assert set(consensus) == {"ref", "title", "date", "score"}
+    assert set(consensus) == {"ref", "title", "date", "snippet", "score"}
     assert consensus.score > 0
     assert content.grep_widths == [3, 3]
-    assert printed.splitlines()[1].endswith("consensus")
+    assert "ref_consensus" in printed.splitlines()[0]
     assert len(output.submissions) == 2
     assert all(
         citation["ref"] == citation["locator"]["ref"]
@@ -252,7 +259,7 @@ def test_pattern_pool_score_is_idempotent_across_replayed_turns(tmp_path: Path) 
 def test_pattern_does_not_submit_with_an_unsupported_constraint(tmp_path: Path) -> None:
     _, _, output, printed = _run_pattern(tmp_path, missing_year=True)
 
-    assert "unverified: ['year']" in printed
+    assert "unsupported: ['year']" in printed
     assert not output.submissions
 
 
@@ -274,7 +281,7 @@ def test_pattern_verifies_far_apart_constraints_in_the_same_document(tmp_path: P
 def test_pattern_unions_evidence_across_turns_before_submitting(tmp_path: Path) -> None:
     sdk, _, output, printed = _run_pattern(tmp_path, year_from_turn=2, turns=2)
 
-    assert "unverified: ['year']" in printed
+    assert "unsupported: ['year']" in printed
     assert len(output.submissions) == 1
     submitted, citations = output.submissions[0]
     assert {row["constraint"] for row in submitted["evidence"]} == {"phrase", "year"}
@@ -295,7 +302,7 @@ def test_pattern_never_cites_locator_capacity_exhausted_text(tmp_path: Path) -> 
     sdk, _, output, printed = _run_pattern(tmp_path, locator_exhausted=True)
 
     assert "locator unavailable: evidence_capacity_exhausted" in printed
-    assert "unverified: ['phrase', 'year']" in printed
+    assert "unsupported: ['phrase', 'year']" in printed
     assert not output.submissions
     assert not sdk.state.exists("evidence.json")
 

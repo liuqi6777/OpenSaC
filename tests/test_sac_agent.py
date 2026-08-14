@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from inspect import signature
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +12,17 @@ from sac_agent.react import ReactAgent
 from sac_agent.tool_sac import SacConfig, SacRunTool
 
 FINAL_OUTPUT = "preamble\n<answer>literal text</answer>\nepilogue\n"
+
+
+def test_sac_tool_constructor_has_no_mcp_lifecycle_policy() -> None:
+    parameters = signature(SacRunTool).parameters
+
+    assert {
+        "session_create",
+        "delete_on_close",
+        "raise_state_loss",
+        "redact_errors",
+    }.isdisjoint(parameters)
 
 
 class FakeModelClient:

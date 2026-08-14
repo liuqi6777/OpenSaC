@@ -3,7 +3,21 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from opensac import cli
+from opensac import cli, mcp_server
+
+
+def test_mcp_command_starts_stdio_server(monkeypatch) -> None:
+    called = False
+
+    def fake_run() -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(mcp_server, "run", fake_run)
+
+    cli.serve_mcp()
+
+    assert called
 
 
 def test_build_sandbox_builds_directly_from_source(monkeypatch) -> None:

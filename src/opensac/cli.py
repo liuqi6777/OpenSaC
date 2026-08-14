@@ -24,6 +24,14 @@ def serve() -> None:
     )
 
 
+@app.command("mcp")
+def serve_mcp() -> None:
+    """Start the local OpenSAC MCP server over stdio."""
+    from opensac.mcp_server import run
+
+    run()
+
+
 @app.command("build-sandbox")
 def build_sandbox(
     network: Annotated[

@@ -235,11 +235,91 @@ OpenSAC can be driven in two ways:
 1. **Custom agent loop.** Wrap `/v1/sessions/{session_id}/exec` as one model-visible
    `sac_run(code)` tool and reuse a session for the rollout. The runnable
    [`sac_agent`](sac_agent/README.md) package demonstrates a minimal OpenAI-compatible ReAct loop.
-2. **Coding agent.** Install or adapt [`skills/search-as-code`](skills/search-as-code/SKILL.md) so
-   a coding agent can generate programs and call a deployed OpenSAC service directly.
+2. **Coding agent over MCP.** Run `opensac mcp` as a local stdio server and install
+   [`skills/search-as-code`](skills/search-as-code/SKILL.md). The public execution surface is only
+   `sac_run(code)`; conversation identity, session creation, lease renewal, and recovery stay in
+   the MCP adapter rather than model arguments.
 
 The control-model endpoint used by `sac_agent` is separate from the optional pipeline-model
 endpoint exposed inside the sandbox as `sdk.llm.*`.
+
+### Codex
+
+Start the OpenSAC API first, then register the MCP server from an absolute repository path:
+
+```bash
+export OPENSAC_REPO=/absolute/path/to/OpenSaC
+export SAC_API_BASE=http://127.0.0.1:8000
+export SAC_API_KEY=replace-with-your-opensac-key
+
+codex mcp add \
+  --env SAC_API_BASE="$SAC_API_BASE" \
+  --env SAC_API_KEY="$SAC_API_KEY" \
+  opensac -- uv --directory "$OPENSAC_REPO" run opensac mcp
+```
+
+Codex supplies the current task identity in MCP request metadata. If that metadata is absent, the
+adapter fails closed and does not fall back to the working directory or a process-wide session.
+
+### Claude Code
+
+Register the same stdio server:
+
+```bash
+export OPENSAC_REPO=/absolute/path/to/OpenSaC
+export SAC_API_BASE=http://127.0.0.1:8000
+export SAC_API_KEY=replace-with-your-opensac-key
+
+claude mcp add --scope user opensac \
+  -e SAC_API_BASE="$SAC_API_BASE" \
+  -e SAC_API_KEY="$SAC_API_KEY" \
+  -- uv --directory "$OPENSAC_REPO" run opensac mcp
+```
+
+Merge this hook into `~/.claude/settings.json`. Before each `sac_run`, it passes Claude Code's
+official hook `session_id` to the host-internal `bind_context` tool; the agent does not perform
+the binding:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__opensac__sac_run",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "opensac",
+            "tool": "bind_context",
+            "input": { "context_id": "${session_id}" }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+If the hook does not bind a context, `sac_run` fails closed. The Search-as-Code skill explicitly
+reserves `bind_context` for the host hook.
+
+### MCP settings and lifecycle
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `SAC_API_BASE` | `http://127.0.0.1:8000` | OpenSAC API used by the adapter |
+| `SAC_API_KEY` | empty, then `OPENSAC_API_KEY` | Bearer credential; never written to the MCP registry |
+| `SAC_MCP_LEASE_SECONDS` | `3600` | Renewable session lease, from `1` to `86400` seconds |
+| `SAC_MCP_STATE_DIR` | platform user-state directory | Location of the SQLite generation registry |
+
+Raw Codex and Claude conversation IDs are SHA-256-derived with a host namespace before they enter
+request IDs or SQLite. A task reuses one leased OpenSAC session across calls and can recover it
+after an MCP restart. MCP shutdown closes HTTP clients without deleting sessions. If the server
+reports `session_expired` or `worker_restarted`, the failed program is not replayed; the response
+is `state_lost`, and the next call starts with a clean generation. See the official
+[Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli) and
+[Claude Code hooks](https://code.claude.com/docs/en/hooks) documentation for host configuration
+details.
 
 ## TODO
 

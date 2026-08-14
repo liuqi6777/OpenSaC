@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-_SAC_TIMEOUT_SECONDS = 300.0
-_SAC_OUTPUT_LIMIT = 32_000
+from opensac.sac_run import (
+    DEFAULT_TIMEOUT_SECONDS,
+    AsyncSessionClient,
+    render_observation,
+    truncate_observation,
+)
 
 
 @dataclass(frozen=True)
@@ -79,7 +82,7 @@ class SacRunTool:
     ) -> None:
         self.config = config or SacConfig.from_env()
         self._transport = transport
-        self._client: httpx.AsyncClient | None = None
+        self._client: AsyncSessionClient | None = None
         self._session_id: str | None = None
         self._session_lock = asyncio.Lock()
         self.close_error: str | None = None
@@ -109,32 +112,27 @@ class SacRunTool:
     def system_prompt_addendum(self) -> str:
         return _SKILL
 
-    def _http(self) -> httpx.AsyncClient:
+    def _session_client(self) -> AsyncSessionClient:
         if self._client is None:
-            headers = (
-                {"Authorization": f"Bearer {self.config.api_key}"}
-                if self.config.api_key
-                else {}
-            )
-            self._client = httpx.AsyncClient(
-                base_url=self.config.api_base,
-                headers=headers,
-                timeout=_SAC_TIMEOUT_SECONDS,
+            self._client = AsyncSessionClient(
+                api_base=self.config.api_base,
+                api_key=self.config.api_key,
+                timeout=DEFAULT_TIMEOUT_SECONDS,
                 transport=self._transport,
             )
         return self._client
+
+    def _http(self) -> httpx.AsyncClient:
+        """Retain the minimal agent's existing test/debug access to its HTTP client."""
+        return self._session_client().http
 
     async def _ensure_session(self) -> str:
         if self._session_id is not None:
             return self._session_id
         async with self._session_lock:
             if self._session_id is None:
-                response = await self._http().post(
-                    "/v1/sessions",
-                    json={},
-                )
-                response.raise_for_status()
-                self._session_id = str(response.json()["id"])
+                session = await self._session_client().create_session()
+                self._session_id = str(session["id"])
         return self._session_id
 
     async def call(self, arguments: dict[str, Any]) -> str:
@@ -144,79 +142,33 @@ class SacRunTool:
 
         try:
             session_id = await self._ensure_session()
-            response = await self._http().post(
-                f"/v1/sessions/{session_id}/exec",
-                json={"code": code, "include_trace": False},
+            payload = await self._session_client().exec_code(
+                session_id,
+                code,
+                include_trace=False,
             )
-            response.raise_for_status()
-            return self._render(response.json())
+            return self._render(payload)
         except httpx.TimeoutException:
-            return f"[sac_run] Timed out after {_SAC_TIMEOUT_SECONDS:.0f}s."
+            return f"[sac_run] Timed out after {DEFAULT_TIMEOUT_SECONDS:.0f}s."
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             return f"[sac_run] OpenSAC request failed: {type(exc).__name__}: {exc}"
 
     def _render(self, payload: dict[str, Any]) -> str:
-        if payload.get("error"):
-            return f"[sac_run] {payload['error']}"
-
-        usage = payload.get("usage") or {}
-        sections = [
-            f"[sac_run] exit_code={payload.get('exit_code')} "
-            f"duration={float(payload.get('duration_seconds', 0.0)):.1f}s "
-            f"search_calls={usage.get('search_calls', 0)} "
-            f"docs_fetched={usage.get('content_fetches', 0)}"
-        ]
-        bodies: list[tuple[str, str]] = []
-        if str(payload.get("stdout") or "").strip():
-            bodies.append(("stdout", str(payload["stdout"]).strip()))
-        if str(payload.get("stderr") or "").strip():
-            bodies.append(("stderr", str(payload["stderr"]).strip()))
-        if payload.get("output") is not None:
-            bodies.append(
-                ("submitted output", json.dumps(payload["output"], ensure_ascii=False, default=str))
-            )
-
-        remaining = _SAC_OUTPUT_LIMIT
-        for label, body in bodies:
-            if remaining <= 0:
-                break
-            rendered = self._truncate(body, remaining)
-            sections.append(f"{label}:\n{rendered}")
-            remaining -= len(rendered)
-
-        citations = payload.get("citations") or []
-        if citations:
-            sections.append(f"resolved citations: {len(citations)}")
-        artifacts = sorted(str(item) for item in (payload.get("artifacts") or []))
-        sections.append(
-            "workspace: empty"
-            if not artifacts
-            else f"workspace: {len(artifacts)} file(s): {', '.join(artifacts[:40])}"
-        )
-        if len(sections) == 2 and not artifacts:
-            sections.insert(1, "The program printed and submitted nothing.")
-        return "\n\n".join(sections)
+        return render_observation(payload)
 
     @staticmethod
     def _truncate(text: str, limit: int) -> str:
-        if len(text) <= limit:
-            return text
-        marker = f"\n... [{len(text) - limit} chars elided] ...\n"
-        budget = max(0, limit - len(marker))
-        head = budget // 3
-        tail = budget - head
-        return text[:head] + marker + text[-tail:] if tail else text[:head] + marker
+        return truncate_observation(text, limit)
 
     async def aclose(self) -> None:
         try:
             if self._session_id is not None and self._client is not None:
-                response = await self._client.delete(f"/v1/sessions/{self._session_id}")
-                response.raise_for_status()
+                await self._client.delete_session(self._session_id)
         except Exception as exc:
             # Cleanup must not replace an answer the rollout already produced.
             self.close_error = f"{type(exc).__name__}: {exc}"
         finally:
             self._session_id = None
             if self._client is not None:
-                await self._client.aclose()
+                await self._client.close()
                 self._client = None

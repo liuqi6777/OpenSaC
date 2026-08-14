@@ -1,0 +1,385 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+
+from opensac.mcp_server import GenerationRegistry, MCPConfig, OpenSACMCP
+
+
+class FakeOpenSAC:
+    def __init__(self, *, exec_delay: float = 0) -> None:
+        self.exec_delay = exec_delay
+        self.create_payloads: list[dict[str, Any]] = []
+        self.exec_calls: list[tuple[str, str]] = []
+        self.deleted: list[str] = []
+        self.sessions_by_request: dict[str, str] = {}
+        self.workspace: dict[str, set[str]] = defaultdict(set)
+        self.next_exec_failure: int | str | None = None
+        self.next_create_failure: int | str | None = None
+        self.next_create_state_loss: str | None = None
+        self.next_state_loss: str | None = None
+        self.active_execs = 0
+        self.max_active_execs = 0
+        self.active_by_session: dict[str, int] = defaultdict(int)
+        self.max_active_by_session: dict[str, int] = defaultdict(int)
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            payload = json.loads(request.content)
+            self.create_payloads.append(payload)
+            if self.next_create_state_loss is not None:
+                state_loss = self.next_create_state_loss
+                self.next_create_state_loss = None
+                return httpx.Response(
+                    410,
+                    json={
+                        "detail": {
+                            "code": state_loss,
+                            "message": "session state is gone",
+                            "retryable": False,
+                        }
+                    },
+                )
+            if self.next_create_failure is not None:
+                failure = self.next_create_failure
+                self.next_create_failure = None
+                if failure == "timeout":
+                    raise httpx.ReadTimeout("temporary timeout", request=request)
+                return httpx.Response(int(failure), json={"detail": "temporary failure"})
+            request_id = payload["request_id"]
+            session_id = self.sessions_by_request.setdefault(
+                request_id, f"session-{len(self.sessions_by_request) + 1}"
+            )
+            return httpx.Response(200, json={"id": session_id})
+
+        if request.method == "POST" and request.url.path.endswith("/exec"):
+            session_id = request.url.path.split("/")[3]
+            code = json.loads(request.content)["code"]
+            self.exec_calls.append((session_id, code))
+            if self.next_state_loss is not None:
+                state_loss = self.next_state_loss
+                self.next_state_loss = None
+                return httpx.Response(
+                    410,
+                    json={
+                        "detail": {
+                            "code": state_loss,
+                            "message": "session state is gone",
+                            "retryable": False,
+                        }
+                    },
+                )
+            if self.next_exec_failure is not None:
+                failure = self.next_exec_failure
+                self.next_exec_failure = None
+                if failure == "timeout":
+                    raise httpx.ReadTimeout("temporary timeout", request=request)
+                return httpx.Response(int(failure), json={"detail": "temporary failure"})
+
+            self.active_execs += 1
+            self.active_by_session[session_id] += 1
+            self.max_active_execs = max(self.max_active_execs, self.active_execs)
+            self.max_active_by_session[session_id] = max(
+                self.max_active_by_session[session_id],
+                self.active_by_session[session_id],
+            )
+            try:
+                if self.exec_delay:
+                    await asyncio.sleep(self.exec_delay)
+                if code == "write":
+                    self.workspace[session_id].add("pool.jsonl")
+                stdout = (
+                    f"persisted={'pool.jsonl' in self.workspace[session_id]}"
+                    if code == "read"
+                    else "ok"
+                )
+                return httpx.Response(
+                    200,
+                    json={
+                        "exit_code": 0,
+                        "duration_seconds": 0.01,
+                        "stdout": stdout,
+                        "stderr": "",
+                        "output": None,
+                        "citations": [],
+                        "artifacts": sorted(self.workspace[session_id]),
+                        "usage": {"search_calls": 0, "content_fetches": 0},
+                        "error": None,
+                    },
+                )
+            finally:
+                self.active_execs -= 1
+                self.active_by_session[session_id] -= 1
+
+        if request.method == "DELETE":
+            self.deleted.append(request.url.path.split("/")[3])
+            return httpx.Response(200, json={"status": "deleted"})
+        return httpx.Response(404)
+
+
+def _config(tmp_path: Path, *, api_key: str = "") -> MCPConfig:
+    return MCPConfig(
+        api_base="http://opensac.test",
+        api_key=api_key,
+        lease_seconds=3_600,
+        state_dir=tmp_path / "state",
+    )
+
+
+def _bridge(tmp_path: Path, server: FakeOpenSAC, *, api_key: str = "") -> OpenSACMCP:
+    return OpenSACMCP(
+        _config(tmp_path, api_key=api_key),
+        transport=httpx.MockTransport(server),
+    )
+
+
+async def test_codex_context_reuses_and_isolates_sessions_without_leaking_ids(
+    tmp_path: Path,
+) -> None:
+    server = FakeOpenSAC()
+    bridge = _bridge(tmp_path, server, api_key="top-secret-api-key")
+    try:
+        first = await bridge.run_code("first", {"thread_id": "private-thread-a"})
+        second = await bridge.run_code("second", {"thread_id": "private-thread-a"})
+        third = await bridge.run_code("third", {"thread_id": "private-thread-b"})
+    finally:
+        await bridge.aclose()
+
+    assert "exit_code=0" in first
+    assert "private-thread" not in first + second + third
+    assert len(server.create_payloads) == 2
+    assert [payload["lease_seconds"] for payload in server.create_payloads] == [3_600, 3_600]
+    request_ids = [payload["request_id"] for payload in server.create_payloads]
+    assert all(request_id.startswith("agent:codex:") for request_id in request_ids)
+    assert all("private-thread" not in request_id for request_id in request_ids)
+    assert len(set(request_ids)) == 2
+    assert [session_id for session_id, _ in server.exec_calls] == [
+        "session-1",
+        "session-1",
+        "session-2",
+    ]
+    assert not server.deleted
+    state_bytes = (_config(tmp_path).state_dir / "mcp_sessions.sqlite3").read_bytes()
+    assert b"private-thread" not in state_bytes
+    assert b"top-secret-api-key" not in state_bytes
+
+
+async def test_claude_binding_is_host_namespaced_and_never_echoed(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    bridge = _bridge(tmp_path, server)
+    try:
+        assert bridge.bind_context("claude-session-secret") == "Claude Code session context bound"
+        observation = await bridge.run_code("work")
+    finally:
+        await bridge.aclose()
+
+    assert "claude-session-secret" not in observation
+    assert server.create_payloads[0]["request_id"].startswith("agent:claude:")
+    assert "claude-session-secret" not in server.create_payloads[0]["request_id"]
+
+
+async def test_missing_host_context_fails_closed_without_http(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    bridge = _bridge(tmp_path, server)
+    try:
+        observation = await bridge.run_code("print('unsafe fallback')")
+    finally:
+        await bridge.aclose()
+
+    assert "context_unavailable" in observation
+    assert "No OpenSAC session was created" in observation
+    assert not server.create_payloads
+    assert not server.exec_calls
+
+
+async def test_restart_resumes_same_leased_session_and_workspace(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    first_bridge = _bridge(tmp_path, server)
+    await first_bridge.run_code("write", {"thread_id": "thread-resume"})
+    await first_bridge.aclose()
+
+    second_bridge = _bridge(tmp_path, server)
+    try:
+        observation = await second_bridge.run_code("read", {"thread_id": "thread-resume"})
+    finally:
+        await second_bridge.aclose()
+
+    assert "persisted=True" in observation
+    assert len(server.create_payloads) == 2
+    assert server.create_payloads[0]["request_id"] == server.create_payloads[1]["request_id"]
+    assert [session_id for session_id, _ in server.exec_calls] == ["session-1", "session-1"]
+    assert not server.deleted
+
+
+@pytest.mark.parametrize("loss_code", ["session_expired", "worker_restarted"])
+async def test_state_loss_rotates_generation_without_replaying_code(
+    tmp_path: Path, loss_code: str
+) -> None:
+    server = FakeOpenSAC()
+    bridge = _bridge(tmp_path, server)
+    try:
+        await bridge.run_code("setup", {"thread_id": "thread-loss"})
+        server.next_state_loss = loss_code
+        lost = await bridge.run_code("must-not-replay", {"thread_id": "thread-loss"})
+        assert [code for _, code in server.exec_calls].count("must-not-replay") == 1
+        recovered = await bridge.run_code("fresh", {"thread_id": "thread-loss"})
+    finally:
+        await bridge.aclose()
+
+    assert "state_lost" in lost
+    assert "not replayed" in lost
+    assert "exit_code=0" in recovered
+    assert len(server.create_payloads) == 2
+    assert server.create_payloads[0]["request_id"].endswith(":g1")
+    assert server.create_payloads[1]["request_id"].endswith(":g2")
+
+
+@pytest.mark.parametrize("failure", [429, 500, 503, "timeout"])
+async def test_transient_failures_do_not_rotate_generation(
+    tmp_path: Path, failure: int | str
+) -> None:
+    server = FakeOpenSAC()
+    bridge = _bridge(tmp_path, server)
+    try:
+        await bridge.run_code("setup", {"thread_id": "thread-transient"})
+        server.next_exec_failure = failure
+        failed = await bridge.run_code("temporary", {"thread_id": "thread-transient"})
+        recovered = await bridge.run_code("retry-later", {"thread_id": "thread-transient"})
+    finally:
+        await bridge.aclose()
+
+    assert "failed" in failed.lower() or "timed out" in failed.lower()
+    assert "session-1" not in failed
+    assert "exit_code=0" in recovered
+    assert len(server.create_payloads) == 1
+    assert server.create_payloads[0]["request_id"].endswith(":g1")
+
+
+async def test_restart_detects_state_loss_during_idempotent_create(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    first_bridge = _bridge(tmp_path, server)
+    await first_bridge.run_code("setup", {"thread_id": "thread-create-loss"})
+    await first_bridge.aclose()
+
+    server.next_create_state_loss = "worker_restarted"
+    second_bridge = _bridge(tmp_path, server)
+    try:
+        lost = await second_bridge.run_code(
+            "must-not-replay", {"thread_id": "thread-create-loss"}
+        )
+        recovered = await second_bridge.run_code(
+            "fresh", {"thread_id": "thread-create-loss"}
+        )
+    finally:
+        await second_bridge.aclose()
+
+    assert "state_lost" in lost
+    assert "exit_code=0" in recovered
+    assert [code for _, code in server.exec_calls] == ["setup", "fresh"]
+    request_ids = [payload["request_id"] for payload in server.create_payloads]
+    assert request_ids[0] == request_ids[1]
+    assert request_ids[0].endswith(":g1")
+    assert request_ids[2].endswith(":g2")
+
+
+@pytest.mark.parametrize("failure", [429, 500, 503, "timeout"])
+async def test_transient_create_failures_reuse_generation(
+    tmp_path: Path, failure: int | str
+) -> None:
+    server = FakeOpenSAC()
+    server.next_create_failure = failure
+    bridge = _bridge(tmp_path, server)
+    try:
+        failed = await bridge.run_code("first", {"thread_id": "thread-create-transient"})
+        recovered = await bridge.run_code(
+            "retry-later", {"thread_id": "thread-create-transient"}
+        )
+    finally:
+        await bridge.aclose()
+
+    assert "failed" in failed.lower() or "timed out" in failed.lower()
+    assert "exit_code=0" in recovered
+    request_ids = [payload["request_id"] for payload in server.create_payloads]
+    assert request_ids[0] == request_ids[1]
+    assert request_ids[0].endswith(":g1")
+    assert [code for _, code in server.exec_calls] == ["retry-later"]
+
+
+async def test_same_context_serializes_while_different_contexts_run_in_parallel(
+    tmp_path: Path,
+) -> None:
+    server = FakeOpenSAC(exec_delay=0.03)
+    bridge = _bridge(tmp_path, server)
+    try:
+        await asyncio.gather(
+            bridge.run_code("same-1", {"thread_id": "same"}),
+            bridge.run_code("same-2", {"thread_id": "same"}),
+        )
+        same_session = server.exec_calls[0][0]
+        assert server.max_active_by_session[same_session] == 1
+
+        server.max_active_execs = 0
+        await asyncio.gather(
+            bridge.run_code("other-a", {"thread_id": "other-a"}),
+            bridge.run_code("other-b", {"thread_id": "other-b"}),
+        )
+    finally:
+        await bridge.aclose()
+
+    assert server.max_active_execs == 2
+
+
+def test_generation_registry_concurrent_loss_observers_converge(tmp_path: Path) -> None:
+    first = GenerationRegistry(tmp_path / "state")
+    second = GenerationRegistry(tmp_path / "state")
+    try:
+        assert first.generation("hash") == 1
+        assert first.advance("hash", 1) == 2
+        assert second.advance("hash", 1) == 2
+        assert second.generation("hash") == 2
+    finally:
+        first.close()
+        second.close()
+
+
+def test_mcp_adapter_does_not_depend_on_custom_agent_package() -> None:
+    module_path = Path(__file__).parents[1] / "src" / "opensac" / "mcp_server.py"
+
+    assert "sac_agent" not in module_path.read_text(encoding="utf-8")
+
+
+async def test_stdio_handshake_exposes_code_only_sac_run_schema(tmp_path: Path) -> None:
+    error_log_path = tmp_path / "mcp-stderr.log"
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "opensac.mcp_server"],
+        env={"SAC_MCP_STATE_DIR": str(tmp_path / "stdio-state")},
+        cwd=str(Path(__file__).parents[1]),
+    )
+    with error_log_path.open("w", encoding="utf-8") as error_log:
+        async with (
+            stdio_client(parameters, errlog=error_log) as streams,
+            ClientSession(*streams) as session,
+        ):
+            await session.initialize()
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+            sac_run = tools["sac_run"]
+            assert set(sac_run.inputSchema["properties"]) == {"code"}
+            assert sac_run.inputSchema["required"] == ["code"]
+            assert "session_id" not in json.dumps(sac_run.inputSchema)
+            assert "bind_context" in tools
+
+            result = await session.call_tool("sac_run", {"code": "print('no context')"})
+            assert not result.isError
+            assert "context_unavailable" in result.content[0].text  # type: ignore[union-attr]
+
+    assert not error_log_path.read_text(encoding="utf-8")
