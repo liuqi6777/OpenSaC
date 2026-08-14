@@ -32,6 +32,19 @@ def serve_mcp() -> None:
     run()
 
 
+@app.command("agent-run")
+def agent_run(
+    source: Annotated[
+        str,
+        typer.Argument(help="Python source file, or '-' to read the program from stdin."),
+    ] = "-",
+) -> None:
+    """Run a program in the current agent conversation's leased session."""
+    from opensac.agent_cli import run_command
+
+    run_command(source)
+
+
 @app.command("build-sandbox")
 def build_sandbox(
     network: Annotated[

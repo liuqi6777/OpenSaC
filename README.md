@@ -77,6 +77,7 @@ See [Design goals and capability roadmap](docs/design.md) for the full research 
 | `sac_agent/` | Minimal ReAct control agent exposing one `sac_run(code)` tool |
 | `local_search/` | Standalone FAISS dense-retrieval service |
 | `skills/search-as-code/` | Search-as-Code skill for coding agents |
+| `skills/search-as-code-cli/` | Search-as-Code skill for the pure CLI adapter |
 | `examples/` | Example SDK programs and local runners |
 | `tests/` | Unit, integration, security, and Docker end-to-end tests |
 | `docs/` | Design, deployment, instrumentation, and release documentation |
@@ -230,12 +231,16 @@ notes are documented in [OpenSAC 0.4](docs/opensac-0.4.md).
 
 ## Agent integrations
 
-OpenSAC can be driven in two ways:
+OpenSAC can be driven in three ways:
 
 1. **Custom agent loop.** Wrap `/v1/sessions/{session_id}/exec` as one model-visible
    `sac_run(code)` tool and reuse a session for the rollout. The runnable
    [`sac_agent`](sac_agent/README.md) package demonstrates a minimal OpenAI-compatible ReAct loop.
-2. **Coding agent over MCP.** Run `opensac mcp` as a local stdio server and install
+2. **Coding agent over a pure CLI.** Install
+   [`skills/search-as-code-cli`](skills/search-as-code-cli/SKILL.md) and pipe each generated Python
+   program to `opensac agent-run`. The adapter derives the conversation context from the host
+   environment; the model never handles a session ID.
+3. **Coding agent over MCP.** Run `opensac mcp` as a local stdio server and install
    [`skills/search-as-code`](skills/search-as-code/SKILL.md). The public execution surface is only
    `sac_run(code)`; conversation identity, session creation, lease renewal, and recovery stay in
    the MCP adapter rather than model arguments.
@@ -243,7 +248,58 @@ OpenSAC can be driven in two ways:
 The control-model endpoint used by `sac_agent` is separate from the optional pipeline-model
 endpoint exposed inside the sandbox as `sdk.llm.*`.
 
-### Codex
+### Pure CLI (without MCP)
+
+Install the command and the CLI-specific skill, then start the OpenSAC API:
+
+```bash
+export OPENSAC_REPO=/absolute/path/to/OpenSaC
+uv tool install --editable "$OPENSAC_REPO"
+
+# Codex
+mkdir -p ~/.codex/skills
+cp -R "$OPENSAC_REPO/skills/search-as-code-cli" ~/.codex/skills/
+
+# Claude Code
+mkdir -p ~/.claude/skills
+cp -R "$OPENSAC_REPO/skills/search-as-code-cli" ~/.claude/skills/
+
+export SAC_API_BASE=http://127.0.0.1:8000
+export SAC_API_KEY=replace-with-your-opensac-key
+```
+
+The agent runs one program by piping it on stdin:
+
+```bash
+opensac agent-run <<'OPENSAC_PY'
+from opensac_sdk import sdk
+print(sdk.search("OpenSAC Search as Code", limit=3))
+OPENSAC_PY
+```
+
+Local Codex tasks are resolved through the isolated `CODEX_THREAD_ID` compatibility adapter;
+Claude Code shells use `CLAUDE_CODE_SESSION_ID`. If neither is available, the command fails closed
+instead of sharing by process or working directory. Other CLI agents must set both
+`SAC_AGENT_CONTEXT_ID` and a stable lowercase `SAC_AGENT_HOST` in their subprocess environment.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `SAC_API_BASE` | `http://127.0.0.1:8000` | OpenSAC API used by the adapter |
+| `SAC_API_KEY` | empty, then `OPENSAC_API_KEY` | Bearer credential; never written to the registry |
+| `SAC_CLI_LEASE_SECONDS` | `3600` | Renewable session lease, from `1` to `86400` seconds |
+| `SAC_CLI_STATE_DIR` | platform user-state directory | Location of the CLI SQLite generation registry |
+| `SAC_AGENT_CONTEXT_ID` | unset | Explicit conversation ID for another CLI agent |
+| `SAC_AGENT_HOST` | `cli` | Namespace paired with an explicit context ID |
+
+The raw conversation ID is SHA-256-derived with its host namespace before persistence. Each CLI
+invocation exits after closing its HTTP client, while the leased server session remains resumable.
+If the server reports `session_expired` or `worker_restarted`, the failed program is not replayed;
+the response is `state_lost`, and the next call starts in a clean generation. Claude Code documents
+its subprocess session variable and personal skill directory in
+[environment variables](https://code.claude.com/docs/en/env-vars) and
+[skills](https://code.claude.com/docs/en/skills).
+
+### Codex MCP
 
 Start the OpenSAC API first, then register the MCP server from an absolute repository path:
 
@@ -261,7 +317,7 @@ codex mcp add \
 Codex supplies the current task identity in MCP request metadata. If that metadata is absent, the
 adapter fails closed and does not fall back to the working directory or a process-wide session.
 
-### Claude Code
+### Claude Code MCP
 
 Register the same stdio server:
 

@@ -65,6 +65,7 @@ OpenSAC 有意不负责 agent loop。外部控制平面选择模型、生成程�
 | `sac_agent/` | 仅暴露一个 `sac_run(code)` 工具的最小 ReAct 控制智能体 |
 | `local_search/` | 独立的 FAISS 稠密检索服务 |
 | `skills/search-as-code/` | 供 coding agent 使用的 Search-as-Code skill |
+| `skills/search-as-code-cli/` | 供纯 CLI 适配器使用的 Search-as-Code skill |
 | `examples/` | SDK 示例程序与本地运行器 |
 | `tests/` | 单元、集成、安全与 Docker 端到端测试 |
 | `docs/` | 设计、部署、研究观测与版本文档 |
@@ -213,18 +214,71 @@ uv run python examples/run_sdk_locally.py examples/research_pipeline.py
 
 ## 智能体集成
 
-OpenSAC 支持两种驱动方式：
+OpenSAC 支持三种驱动方式：
 
 1. **自定义 agent loop**：将 `/v1/sessions/{session_id}/exec` 包装为模型可见的单一
    `sac_run(code)` 工具，并在一个 rollout 内复用 session。可运行的
    [`sac_agent`](sac_agent/README.md) 展示了最小 OpenAI 兼容 ReAct 循环。
-2. **通过 MCP 接入 coding agent**：以本地 stdio 服务运行 `opensac mcp`，并安装
+2. **通过纯 CLI 接入 coding agent**：安装
+   [`skills/search-as-code-cli`](skills/search-as-code-cli/SKILL.md)，将每段生成的 Python 程序通过
+   stdin 交给 `opensac agent-run`。适配器从宿主环境派生对话上下文，模型不接触 session ID。
+3. **通过 MCP 接入 coding agent**：以本地 stdio 服务运行 `opensac mcp`，并安装
    [`skills/search-as-code`](skills/search-as-code/SKILL.md)。公开执行接口只有
    `sac_run(code)`；对话身份、session 创建、lease 续租和恢复都由 MCP 适配层负责，不进入模型参数。
 
 `sac_agent` 使用的控制模型端点，与沙箱内通过 `sdk.llm.*` 暴露的可选 pipeline 模型端点彼此独立。
 
-### Codex
+### 纯 CLI（无需 MCP）
+
+安装命令与 CLI 专用 skill，然后启动 OpenSAC API：
+
+```bash
+export OPENSAC_REPO=/absolute/path/to/OpenSaC
+uv tool install --editable "$OPENSAC_REPO"
+
+# Codex
+mkdir -p ~/.codex/skills
+cp -R "$OPENSAC_REPO/skills/search-as-code-cli" ~/.codex/skills/
+
+# Claude Code
+mkdir -p ~/.claude/skills
+cp -R "$OPENSAC_REPO/skills/search-as-code-cli" ~/.claude/skills/
+
+export SAC_API_BASE=http://127.0.0.1:8000
+export SAC_API_KEY=replace-with-your-opensac-key
+```
+
+agent 通过 stdin 执行一段程序：
+
+```bash
+opensac agent-run <<'OPENSAC_PY'
+from opensac_sdk import sdk
+print(sdk.search("OpenSAC Search as Code", limit=3))
+OPENSAC_PY
+```
+
+本地 Codex task 通过隔离的 `CODEX_THREAD_ID` 兼容适配器解析；Claude Code shell 使用
+`CLAUDE_CODE_SESSION_ID`。两者都不存在时，命令会 fail closed，不会退化为按进程或工作目录共享。
+其他 CLI agent 必须在子进程环境中同时设置 `SAC_AGENT_CONTEXT_ID` 和稳定的小写
+`SAC_AGENT_HOST`。
+
+| 环境变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `SAC_API_BASE` | `http://127.0.0.1:8000` | 适配层访问的 OpenSAC API |
+| `SAC_API_KEY` | 空，随后回退到 `OPENSAC_API_KEY` | Bearer 凭据；不会写入 registry |
+| `SAC_CLI_LEASE_SECONDS` | `3600` | 可续租 session lease，范围为 `1` 到 `86400` 秒 |
+| `SAC_CLI_STATE_DIR` | 平台用户状态目录 | CLI SQLite generation registry 的位置 |
+| `SAC_AGENT_CONTEXT_ID` | 未设置 | 其他 CLI agent 显式提供的对话 ID |
+| `SAC_AGENT_HOST` | `cli` | 与显式对话 ID 配对的 namespace |
+
+原始对话 ID 会先结合 host namespace 做 SHA-256 派生，再进入持久化状态。每次 CLI 调用退出时只关闭
+HTTP client，带 lease 的服务端 session 仍可恢复。服务端返回 `session_expired` 或
+`worker_restarted` 时不会自动重放失败程序；本次返回 `state_lost`，下一次调用进入干净的新
+generation。Claude Code 官方文档说明了其子进程 session 变量和个人 skill 目录，见
+[环境变量](https://code.claude.com/docs/en/env-vars)与
+[skills](https://code.claude.com/docs/en/skills)。
+
+### Codex MCP
 
 先启动 OpenSAC API，再使用仓库绝对路径注册 MCP 服务：
 
@@ -242,7 +296,7 @@ codex mcp add \
 Codex 会在 MCP 请求 metadata 中提供当前 task 身份。如果该字段缺失，适配层会 fail closed，不会退化为
 按工作目录或整个进程共享 session。
 
-### Claude Code
+### Claude Code MCP
 
 注册同一个 stdio 服务：
 

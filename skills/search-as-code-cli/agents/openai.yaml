@@ -1,0 +1,4 @@
+interface:
+  display_name: "Search as Code CLI"
+  short_description: "Run OpenSAC research through the local CLI"
+  default_prompt: "Use $search-as-code-cli to research this question with OpenSAC through the local CLI."
