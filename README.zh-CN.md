@@ -4,26 +4,33 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+## TOC
+
+- [为什么使用 OpenSAC](#为什么使用-opensac)
+- [架构](#架构)
+- [快速开始](#快速开始)
+- [SDK 与智能体集成](#sdk-与智能体集成)
+- [部署与开发](#部署与开发)
+- [文档](#文档)
+- [局限性](#局限性)
+- [引用](#引用)
+- [许可证](#许可证)
+
 OpenSAC 让外部智能体用 Python 程序表达搜索策略，而不是连续调用一组固定工具。程序可以批量检索、阅读
 正文、过滤与融合候选、结构化抽取、持久化中间状态并提交带引用的输出。OpenSAC 在隔离的 Docker 沙箱
 中执行程序，所有特权操作统一由 capability broker 代理。
-
-本项目用于研究一个核心问题：
-
-> 在控制模型、检索后端和评测协议保持一致时，让模型用生成的代码组合搜索原语，相比使用模型可见的
-> 工具调用，能否提升质量、上下文效率，或改善延迟—成本权衡？
 
 OpenSAC 实现了公开的
 [Search as Code](https://research.perplexity.ai/articles/rethinking-search-as-code-generation)
 抽象，但并不试图复刻 Perplexity 的内部搜索引擎。
 
 > [!IMPORTANT]
-> OpenSAC 目前是持续开发中的研究原型（版本 `0.4.0`），API、部署契约和研究材料仍可能继续演进。
+> OpenSAC 是一项持续推进中的工作（当前版本 `0.4.0`）。我们正在积极开发系统并评测其效果，项目将
+> 持续更新；API、部署契约和研究材料也可能继续演进。
 
 > [!NOTE]
 > **发布状态：**[`v0.4.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.4.0) 已发布，
-> GHCR 上的服务镜像与沙箱镜像均可公开拉取且版本一致。Docker CLI 快速开始不需要检出仓库，也不需要
-> 配置文件。OpenSAC 不发布 PyPI 包。
+> GHCR 上的服务镜像与沙箱镜像均可公开拉取且版本一致。
 
 ## 为什么使用 OpenSAC
 
@@ -46,22 +53,33 @@ flowchart LR
     D -. 可选 .-> G["Pipeline LLM"]
 ```
 
+Docker 部署只有一个常驻的 `opensac` API/broker 容器，每次执行时再创建短生命周期、无网络的 sandbox
+容器。
+
+<details>
+<summary><strong>研究范围与核心问题</strong></summary>
+
+OpenSAC 用于研究一个核心问题：
+
+> 在控制模型、检索后端和评测协议保持一致时，让模型用生成的代码组合搜索原语，相比使用模型可见的
+> 工具调用，能否提升质量、上下文效率，或改善延迟—成本权衡？
+
 OpenSAC 有意不负责 agent loop。外部控制平面选择模型、生成程序、管理 rollout 并评测答案。每个 rollout
 应复用同一个 OpenSAC session，使工作空间文件和不透明引用可以跨轮次使用。后端选择、密钥、重试、
 限流和资源约束全部保留在服务端。
 
-Docker 部署只有一个常驻的 `opensac` API/broker 容器，每次执行时再创建短生命周期、无网络的 sandbox
-容器。该部署刻意不包含 `local_search` 服务。
+</details>
 
-## 使用 Docker 快速开始
+## 快速开始
 
-公开的 `v0.4.0` 镜像包含 OpenSAC API/broker 和隔离执行沙箱。该部署使用网页检索，并且刻意不启动
-可选的本地检索器。
+公开的 `v0.4.0` 镜像包含 OpenSAC API/broker 和隔离执行沙箱。
 
-环境要求：Docker Engine 或 Docker Desktop、兼容 POSIX 的 shell，以及 Serper + Jina 凭证。不需要
-检出仓库、Compose 文件、Python 环境，也不需要在本地构建镜像。
+环境要求：Docker Engine 或 Docker Desktop、兼容 POSIX 的 shell，以及 Serper + Jina 凭证。
 
-### 1. 通过环境变量配置运行参数
+<details>
+<summary><strong>1. 配置并启动 Docker 服务</strong></summary>
+
+通过环境变量配置运行参数：
 
 ```bash
 export OPENSAC_API_KEY=replace-with-a-long-random-value
@@ -80,10 +98,7 @@ fi
 mkdir -p "$OPENSAC_RUNTIME_DIR"
 ```
 
-如果 Docker daemon 使用其他 Unix socket，请先修改 `OPENSAC_DOCKER_SOCKET`，再计算它的 group ID。
-服务商凭证只会传入 API 容器，不会传递给生成程序或沙箱容器。
-
-### 2. 启动已发布镜像
+启动已发布镜像：
 
 ```bash
 docker run --detach \
@@ -132,9 +147,11 @@ docker start opensac
 ```
 
 Compose 备选方案、不同平台参数、升级回滚和 systemd 配置见[部署指南](docs/deployment.md)。
-本地稠密检索仍可作为外部高级后端使用，详见[本地稠密检索](docs/local-search.md)。
 
-## 执行 Search-as-Code 程序
+</details>
+
+<details>
+<summary><strong>2. 运行第一个 Search-as-Code 程序</strong></summary>
 
 服务镜像中已经包含 Python 客户端。下面的示例在服务容器中运行客户端，而生成的程序仍在另一个无网络
 沙箱容器中执行：
@@ -165,25 +182,11 @@ PY
 包含多查询融合、正文过滤、JSONL 持久化状态和段落引用的完整示例见
 [examples/research_pipeline.py](examples/research_pipeline.py)。
 
-## 安装与发布状态
+</details>
 
-| 方式 | 状态 | 适用场景 |
-| --- | --- | --- |
-| Docker CLI | `v0.4.0` 已可用 | 无本地配置文件的最快启动方式 |
-| Docker Compose | `v0.4.0` 已可用 | 声明式、可复现部署 |
-| Git 源码检出 | 可用 | 开发、实验和尚未发布的改动 |
+## SDK 与智能体集成
 
-`v0.4.0` 已发布适用于 Linux `amd64` 和 `arm64` 的多架构镜像：
-
-- API/broker 镜像 `ghcr.io/liuqi6777/opensac:0.4.0`；
-- 强化执行镜像 `ghcr.io/liuqi6777/opensac-sandbox:0.4.0`。
-
-标签触发的工作流还会更新 `latest`，GitHub 也会为发布版本生成常规源码归档。工作流不会发布或附加
-Python package distribution，因此没有 PyPI 版本。
-
-服务镜像和沙箱镜像的版本应保持一致。生产环境应固定不可变版本或 digest，不要依赖 `latest`。
-
-## SDK 接口
+### SDK 接口
 
 生成程序通过 `from opensac_sdk import sdk` 导入单例。
 
@@ -199,7 +202,7 @@ Python package distribution，因此没有 PyPI 版本。
 批量操作保持输入对齐，并暴露类型化的逐项失败。空搜索结果属于成功结果。段落引用必须使用正文操作返回的
 locator。当前公共契约与迁移说明见 [OpenSAC 0.4](docs/opensac-0.4.md)。
 
-## 智能体集成
+### 智能体集成
 
 OpenSAC 支持三种驱动方式：
 
@@ -211,7 +214,30 @@ OpenSAC 支持三种驱动方式：
 适配层。完整配置见[智能体集成指南](docs/agent-integrations.zh-CN.md)或
 [英文版](docs/agent-integrations.md)。
 
-## 从源码开发
+## 部署与开发
+
+| 方式 | 状态 | 适用场景 |
+| --- | --- | --- |
+| Docker CLI | `v0.4.0` 已可用 | 无本地配置文件的最快启动方式 |
+| Docker Compose | `v0.4.0` 已可用 | 声明式、可复现部署 |
+| Git 源码 | 可用 | 开发、实验和尚未发布的改动 |
+
+<details>
+<summary><strong>发布镜像与版本策略</strong></summary>
+
+`v0.4.0` 已发布适用于 Linux `amd64` 和 `arm64` 的多架构镜像：
+
+- API/broker 镜像 `ghcr.io/liuqi6777/opensac:0.4.0`；
+- 强化执行镜像 `ghcr.io/liuqi6777/opensac-sandbox:0.4.0`。
+
+标签触发的工作流还会更新 `latest`，GitHub 也会为发布版本生成常规源码归档。
+
+服务镜像和沙箱镜像的版本应保持一致。生产环境应固定不可变版本或 digest，不要依赖 `latest`。
+
+</details>
+
+<details>
+<summary><strong>从源码开发</strong></summary>
 
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
@@ -223,6 +249,8 @@ uv run pytest
 
 运行 `uv run opensac serve` 可启动前台源码服务。只有测试尚未发布的 SDK 或沙箱改动时，才需要运行
 `uv run opensac build-sandbox`。仓库结构和贡献约定见 [AGENTS.md](AGENTS.md)。
+
+</details>
 
 ## 文档
 
@@ -244,15 +272,15 @@ uv run pytest
 
 ## 引用
 
-论文送审期间，如果 OpenSAC 对你的研究有帮助，请引用本仓库：
+如果 OpenSAC 对你的研究有帮助，请引用本仓库：
 
 ```bibtex
-@software{liu2026opensac,
-  author  = {Qi Liu},
-  title   = {OpenSAC: An Open Implementation of Search as Code},
-  year    = {2026},
-  url     = {https://github.com/liuqi6777/OpenSaC},
-  version = {0.4.0}
+@misc{opensac,
+  author       = {Qi Liu, Jiaxin Mao},
+  title        = {OpenSAC: An Open Search-as-Code System for Deep Research Agents},
+  year         = {2026},
+  howpublished = {\url{https://github.com/liuqi6777/OpenSaC}},
+  note         = {GitHub repository. Corresponding author: Jiaxin Mao}
 }
 ```
 

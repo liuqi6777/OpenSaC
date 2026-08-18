@@ -4,30 +4,35 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+## TOC
+
+- [Why OpenSAC](#why-opensac)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [SDK and agent integrations](#sdk-and-agent-integrations)
+- [Deployment and development](#deployment-and-development)
+- [Documentation](#documentation)
+- [Limitations](#limitations)
+- [Citation](#citation)
+- [License](#license)
+
 OpenSAC lets an external agent express search as a Python program instead of a sequence of fixed
 tool calls. The program can batch queries, inspect documents, filter and fuse candidates, extract
 structured data, persist intermediate state, and submit cited output. OpenSAC executes it in an
 isolated Docker sandbox and mediates every privileged operation through a capability broker.
-
-The project supports controlled research on a central question:
-
-> When the model, retrieval backend, and evaluation protocol are held constant, does composing
-> search primitives in generated code improve quality, context efficiency, or the latency–cost
-> trade-off over model-visible tool calls?
 
 OpenSAC implements the public
 [Search as Code](https://research.perplexity.ai/articles/rethinking-search-as-code-generation)
 abstraction. It is not a reconstruction of Perplexity's internal search engine.
 
 > [!IMPORTANT]
-> OpenSAC is an active research prototype (version `0.4.0`). APIs, deployment contracts, and
-> research artifacts may continue to evolve.
+> OpenSAC is ongoing work (currently at version `0.4.0`). We are actively developing the system and
+> evaluating its effectiveness, with continued updates planned. APIs, deployment contracts, and
+> research artifacts may also continue to evolve.
 
 > [!NOTE]
 > **Release status:** [`v0.4.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.4.0) is
-> available with public, version-matched service and sandbox images on GHCR. The Docker CLI quick
-> start needs no repository checkout or configuration files. OpenSAC does not publish a PyPI
-> package.
+> available with public, version-matched service and sandbox images on GHCR.
 
 ## Why OpenSAC
 
@@ -56,25 +61,36 @@ flowchart LR
     D -. optional .-> G["Pipeline LLM"]
 ```
 
+The Docker deployment has one long-running `opensac` API/broker container. It creates a short-lived,
+network-disabled sandbox container for each execution.
+
+<details>
+<summary><strong>Research scope and central question</strong></summary>
+
+OpenSAC supports controlled research on a central question:
+
+> When the model, retrieval backend, and evaluation protocol are held constant, does composing
+> search primitives in generated code improve quality, context efficiency, or the latency–cost
+> trade-off over model-visible tool calls?
+
 OpenSAC deliberately does not own the agent loop. The external control plane selects the model,
 generates programs, manages rollouts, and evaluates answers. One rollout should reuse one OpenSAC
 session so workspace files and opaque references remain valid across turns. Backend choice,
 credentials, retries, rate limits, and resource enforcement stay on the service side.
 
-The Docker deployment has one long-running `opensac` API/broker container. It creates a short-lived,
-network-disabled sandbox container for each execution. It intentionally contains no `local_search`
-service.
+</details>
 
-## Quick start with Docker
+## Quick start
 
-The public `v0.4.0` images provide the OpenSAC API/broker and the isolated execution sandbox. This
-deployment uses web search and intentionally does not start the optional local retriever.
+The public `v0.4.0` images provide the OpenSAC API/broker and the isolated execution sandbox.
 
 Requirements: Docker Engine or Docker Desktop, a POSIX-compatible shell, and Serper + Jina
-credentials. No repository checkout, Compose file, Python installation, or local image build is
-needed.
+credentials.
 
-### 1. Export runtime configuration
+<details>
+<summary><strong>1. Configure and start the Docker service</strong></summary>
+
+Export the runtime configuration:
 
 ```bash
 export OPENSAC_API_KEY=replace-with-a-long-random-value
@@ -93,11 +109,7 @@ fi
 mkdir -p "$OPENSAC_RUNTIME_DIR"
 ```
 
-If the Docker daemon uses another Unix socket, change `OPENSAC_DOCKER_SOCKET` before calculating
-its group ID. Provider credentials are passed only to the API container and never to generated
-programs or sandbox containers.
-
-### 2. Start the published image
+Start the published image:
 
 ```bash
 docker run --detach \
@@ -147,10 +159,12 @@ docker start opensac
 ```
 
 The Compose alternative, platform details, upgrades, rollback, and systemd are in the
-[deployment guide](docs/deployment.md). Local dense retrieval remains available as an external,
-advanced backend; see [Local dense search](docs/local-search.md).
+[deployment guide](docs/deployment.md).
 
-## Run a Search-as-Code program
+</details>
+
+<details>
+<summary><strong>2. Run your first Search-as-Code program</strong></summary>
 
 The service image already contains the Python client. Run this example inside the container; the
 generated program itself still executes in a separate, network-disabled sandbox:
@@ -181,26 +195,11 @@ PY
 For multi-query fusion, document filtering, persistent JSONL state, and passage citations, see
 [examples/research_pipeline.py](examples/research_pipeline.py).
 
-## Installation and release status
+</details>
 
-| Path | Status | Best for |
-| --- | --- | --- |
-| Docker CLI | Available in `v0.4.0` | Fastest start with no local configuration files |
-| Docker Compose | Available in `v0.4.0` | Declarative, repeatable deployment |
-| Git checkout | Available | Development, experiments, and unreleased changes |
+## SDK and agent integrations
 
-The `v0.4.0` release publishes multi-architecture Linux images for `amd64` and `arm64`:
-
-- `ghcr.io/liuqi6777/opensac:0.4.0` as the API/broker image;
-- `ghcr.io/liuqi6777/opensac-sandbox:0.4.0` as the hardened execution image.
-
-The tag-triggered workflow also updates `latest`, and GitHub creates normal source archives for the
-release. It does not publish or attach Python package distributions, so there is no PyPI release.
-
-Service and sandbox versions should match. Production deployments should pin an immutable version
-or digest rather than `latest`.
-
-## SDK surface
+### SDK surface
 
 Generated programs import the singleton with `from opensac_sdk import sdk`.
 
@@ -217,7 +216,7 @@ Batch operations preserve input alignment and expose typed per-item failures. Em
 are successful results. Passage citations must use locators returned by content operations. The
 current public contract and migration notes are in [OpenSAC 0.4](docs/opensac-0.4.md).
 
-## Agent integrations
+### Agent integrations
 
 OpenSAC can be driven through:
 
@@ -230,7 +229,32 @@ session creation, lease renewal, and state-loss handling stay in the adapter. Se
 [Agent integration guide](docs/agent-integrations.md) or its
 [Chinese version](docs/agent-integrations.zh-CN.md).
 
-## Develop from source
+## Deployment and development
+
+| Path | Status | Best for |
+| --- | --- | --- |
+| Docker CLI | Available in `v0.4.0` | Fastest start with no local configuration files |
+| Docker Compose | Available in `v0.4.0` | Declarative, repeatable deployment |
+| Git source | Available | Development, experiments, and unreleased changes |
+
+<details>
+<summary><strong>Published images and versioning</strong></summary>
+
+The `v0.4.0` release publishes multi-architecture Linux images for `amd64` and `arm64`:
+
+- `ghcr.io/liuqi6777/opensac:0.4.0` as the API/broker image;
+- `ghcr.io/liuqi6777/opensac-sandbox:0.4.0` as the hardened execution image.
+
+The tag-triggered workflow also updates `latest`, and GitHub creates normal source archives for the
+release.
+
+Service and sandbox versions should match. Production deployments should pin an immutable version
+or digest rather than `latest`.
+
+</details>
+
+<details>
+<summary><strong>Develop from source</strong></summary>
 
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
@@ -243,6 +267,8 @@ uv run pytest
 Run `uv run opensac serve` for a foreground source service. Use
 `uv run opensac build-sandbox` only when testing unreleased SDK or sandbox changes. The repository
 layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
+
+</details>
 
 ## Documentation
 
@@ -265,15 +291,15 @@ layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
 
 ## Citation
 
-If OpenSAC supports your research, cite the repository while the paper is under review:
+If OpenSAC supports your research, cite the repository:
 
 ```bibtex
-@software{liu2026opensac,
-  author  = {Qi Liu},
-  title   = {OpenSAC: An Open Implementation of Search as Code},
-  year    = {2026},
-  url     = {https://github.com/liuqi6777/OpenSaC},
-  version = {0.4.0}
+@misc{opensac,
+  author       = {Qi Liu, Jiaxin Mao},
+  title        = {OpenSAC: An Open Search-as-Code System for Deep Research Agents},
+  year         = {2026},
+  howpublished = {\url{https://github.com/liuqi6777/OpenSaC}},
+  note         = {GitHub repository. Corresponding author: Jiaxin Mao}
 }
 ```
 
