@@ -4,3 +4,7 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+  - package-ecosystem: npm
+    directory: "/integrations/deepseek-harness"
+    schedule:
+      interval: weekly

@@ -48,6 +48,28 @@ jobs:
       - name: Check distributions
         run: uvx --from twine twine check dist/*
 
+  deepseek-harness:
+    name: DeepSeek Harness plugin checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/deepseek-harness
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Node.js
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "22.19.0"
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Typecheck, test, build, and validate package
+        run: corepack pnpm check
+
   containers:
     name: Container images E2E
     runs-on: ubuntu-latest
