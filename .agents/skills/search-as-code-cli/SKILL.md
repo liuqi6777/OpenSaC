@@ -1,86 +1,90 @@
 ---
 name: search-as-code-cli
-description: Run evidence-grounded research as Python programs through the local OpenSAC agent-run CLI. Use when Codex or Claude Code has shell access and needs programmable search, document inspection, checked extraction, persistent research state, or trusted citations without MCP.
+description: Run evidence-grounded OpenSAC research programs through the local opensac agent-run CLI. Use when Codex, Claude Code, or another shell-capable agent needs programmable multi-query search, document inspection, fact checking, checked extraction, persistent research state, or passage-grounded citations without MCP.
 ---
 
 # Search as Code CLI
 
-Pipe each Python research program to `opensac agent-run`. Never create or manage REST sessions,
-pass conversation identifiers, or call OpenSAC endpoints directly. If the command is unavailable
-or reports a `context_*` or `configuration_error`, stop and report the setup problem.
+Pipe one complete Python research stage to `opensac agent-run` through the current agent's shell:
 
 ```bash
 opensac agent-run <<'OPENSAC_PY'
 from opensac_sdk import BrokerError, sdk
 
-batches = sdk.search.many(
-    ['"exact phrase" narrowing terms', "same clue alternate wording"],
-    limit_per_query=10,
-    concurrency=4,
-)
-fusion = sdk.search.fuse_rrf(batches, k=60)
-refs = [candidate.ref for candidate in fusion.candidates[:20]]
-report = sdk.content.grep_report(refs, r"target phrase", context=2)
-
-for match in report.matches[:3]:
-    passage = sdk.content.read(
-        [match.ref], offset=max(1, match.line - 8), limit=30, max_chars=16_000
-    )[0]
-    if passage.failure is None and passage.locator is not None:
-        print(passage.ref, passage.text[:500])
+# Replace this probe with a complete stage from references/patterns.md.
+print(sdk.session.usage())
 OPENSAC_PY
 ```
 
-Use a quoted heredoc delimiter so the shell does not expand generated Python. Put only the program
-on stdin; do not encode it into a shell argument.
+Use a quoted heredoc delimiter so the shell cannot expand generated Python. Put only the program
+on stdin; never encode it into a shell argument. Let the host bind the current conversation.
+Never expose, print, or override host conversation identity. Never create or manage REST sessions
+or call OpenSAC endpoints directly.
 
-## Core primitives
+If the command is unavailable or reports `context_*` or `configuration_error`, stop and report the
+setup problem.
 
-- `sdk.search(query, limit=10, offset=0)`
-- `sdk.search.many(queries, limit_per_query=10, offset=0, concurrency=5)`
-- `sdk.search.fuse_rrf(batches, weights=None, k=60, limit=None)`
-- `sdk.content.grep_report(refs, pattern, context=0, max_matches_per_ref=20)`
-- `sdk.content.read(refs, offset=1, limit=200, max_chars=100_000)`
-- `sdk.content.get_many(refs)` and `sdk.content.snippets(query, refs, ...)`
-- `sdk.llm.extract_many(items, instruction=..., schema=..., concurrency=4)`
-- `sdk.state.merge_jsonl`, `read_jsonl`, `write_json`, `read_json`, and `exists`
-- `sdk.session.usage()`
-- `sdk.output.submit(output, citations=[{"ref": ref, "locator": locator}])`
+## Keep the command and evidence boundaries intact
 
-Search returns opaque `ref` values. Never invent, edit, or reconstruct them. Search snippets are
-previews, not final evidence. Read the passages used for the answer and preserve their returned
-locators exactly. Never cite text whose locator is missing or reports
-`evidence_capacity_exhausted`.
+- Read the rendered `[sac_run]` observation instead of trusting only the shell status. A reported
+  sandbox `exit_code`, stderr, adapter failure, or missing submitted output can change the next
+  stage.
+- Treat search refs and evidence locators as opaque. Never invent, edit, shorten, or reconstruct
+  them.
+- Use search snippets to triage sources, not to support document-content claims. Search metadata
+  is sufficient only when the requested result is a discovery list.
+- Read the passage used for every material claim. Cite only a non-empty passage that returned a
+  locator, and preserve `locator.model_dump(mode="json")` losslessly.
+- Treat a locator as proof that a passage is bound to a retrieved document, not as proof that its
+  source is credible or its claim is true. Prefer primary sources and corroborate disputed claims.
+- Inspect typed item failures and `BrokerError`. Empty hits and zero matches are successful
+  results. After a final failure, change the query, source, or candidate instead of repeating it.
+- Keep stdout compact. Stdout, stderr, and submitted output share one observation budget.
 
-Normal failures are aligned and typed: inspect `failure.code`, `message`, `retryable`, and
-`attempts`. Empty hits and zero matches are successful results. Catch `BrokerError` for shared
-infrastructure failure.
+## Run a bounded research stage
 
-## Research workflow
+Make one CLI execution carry a complete stage: search, rank, locate, verify, persist, and report.
 
-Make one CLI execution carry a complete research stage:
+1. **Frame:** define explicit constraints and derive a stable `research_id` from the exact task,
+   stable requirements, and source policy. Store state under `runs/<research_id>/`.
+2. **Survey:** deduplicate queries before `sdk.search.many`. Use 2-4 focused variants for a known
+   entity and 6-12 only for ambiguous discovery. Fuse with RRF, retain leaders from every query,
+   and cap the persisted pool.
+3. **Locate:** order refs by current-stage RRF rank, then historical score. Call `grep_report` on
+   small ranked batches; do not send the whole accumulated pool blindly.
+4. **Verify:** read around useful 1-indexed match lines, verify every constraint separately, and
+   record attempted `(constraint, ref)` pairs so later stages advance to new candidates.
+5. **Submit:** call `sdk.output.submit` only when every material claim has a verified locator.
+   Submit compact excerpts and the exact locators used.
 
-1. **Survey:** fan out 6–12 query variants, inspect batch failures, fuse with RRF, and persist a
-   bounded pool keyed by `ref`.
-2. **Locate:** run focused `grep_report` patterns across the pool. Distinguish zero matches from
-   per-document fetch failures.
-3. **Verify:** read around useful 1-indexed match lines and retain one locatable passage for every
-   required constraint.
-4. **Submit:** call `sdk.output.submit` only when every material claim has verified evidence.
+Use ordinary Python for joins, deduplication, regex, ranking, dates, set arithmetic, and coverage.
+Use `sdk.llm.extract_many` only when a configured pipeline model is needed for semantic work.
+JSON Schema validates shape, not truth: require an evidence quote and verify in Python that it is
+present in the source passage.
 
-Use ordinary Python for regex, joins, filters, counts, ranking, dates, and coverage. Use
-`extract_many` only for semantic work requiring a checked JSON object schema. Regex proves text
-presence, not a relationship; verify relational claims with a relation-specific pattern or checked
-extraction.
+## Persist and recover correctly
 
-Workspace files, refs, and locators survive later `agent-run` calls in the same agent conversation;
-Python variables do not. Reload the pool and evidence ledger at the start of each new program.
-Use `merge_jsonl` for pool upserts and one constraint-keyed JSON object for evidence.
+Workspace files, refs, and locators survive later `agent-run` calls only while the host-bound
+OpenSAC session remains live; Python variables do not. Reload state at the start of every program.
 
-Print compact progress or submit a compact result. Raw hits and documents remain inside the
-sandbox, so filter before printing. After a final failure, rewrite the query, backfill from another
-candidate, or stop instead of repeating the same call.
+If the observation reports `state_lost`, the submitted program was not replayed. Treat all prior
+workspace files, refs, and locators as gone. Start the next stage from clean state and do not
+resubmit the same program blindly.
 
-If a call returns `state_lost`, its submitted program was not replayed. Treat all prior workspace
-and opaque handles as gone; begin the next research stage from clean state rather than resubmitting
-the same program blindly.
+An adapter `HTTP 401` or `HTTP 403` observation is a host credential setup failure. Stop without
+retrying, and report it without printing or embedding any credential. Other adapter failures and
+timeouts occur outside the sandbox, so the program cannot catch them as `BrokerError`. Their
+execution outcome may be unknown because `agent-run` accepts no execution ID. Do not replay the
+same program blindly. Use the next invocation as a small recovery stage that inspects the task
+namespace and usage, then resume only missing work. If repeated adapter failures prevent
+inspection, report OpenSAC as unavailable and never invent an OpenSAC locator.
+
+## Load details only when needed
+
+- Read [references/sdk-contract.md](references/sdk-contract.md) before using unfamiliar SDK
+  methods, fields, failure types, limits, or citation behavior.
+- Read [references/patterns.md](references/patterns.md) before a multi-turn or multi-constraint
+  investigation, or before checked semantic extraction.
+
+Avoid printing raw result objects, opaque refs, or whole pages, stopping after one constraint, or
+treating RRF agreement as independent-source corroboration.

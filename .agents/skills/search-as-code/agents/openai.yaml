@@ -1,0 +1,4 @@
+interface:
+  display_name: "Search as Code"
+  short_description: "Research with OpenSAC MCP and trusted citations"
+  default_prompt: "Use $search-as-code to research this question with OpenSAC and verify each claim against cited passages."

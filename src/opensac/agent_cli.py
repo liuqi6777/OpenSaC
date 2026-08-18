@@ -25,8 +25,9 @@ from opensac.agent_session import (
 _HOST_PATTERN = re.compile(r"^[a-z0-9_-]{1,32}$")
 _CONTEXT_UNAVAILABLE = (
     "[sac_run] context_unavailable: No supported agent conversation identifier was "
-    "found. Expected CODEX_THREAD_ID, CLAUDE_CODE_SESSION_ID, or "
-    "SAC_AGENT_CONTEXT_ID. No OpenSAC session was created."
+    "found. Expected CODEX_THREAD_ID, CLAUDE_CODE_SESSION_ID, "
+    "CLAUDE_CODE_REMOTE_SESSION_ID, or SAC_AGENT_CONTEXT_ID. No OpenSAC session "
+    "was created."
 )
 
 
@@ -73,9 +74,7 @@ def resolve_cli_context(environ: Mapping[str, str] | None = None) -> AgentContex
     if claude_session:
         candidates.append(AgentContext(host="claude-cli", context_id=claude_session))
     elif claude_remote_session:
-        candidates.append(
-            AgentContext(host="claude-remote-cli", context_id=claude_remote_session)
-        )
+        candidates.append(AgentContext(host="claude-remote-cli", context_id=claude_remote_session))
 
     if not candidates:
         raise ValueError(_CONTEXT_UNAVAILABLE)
@@ -106,9 +105,7 @@ async def run_cli_code(
     except ValueError as exc:
         return f"[sac_run] configuration_error: {exc}"
 
-    manager = AgentSessionManager(
-        config, transport=transport, registry_name="cli_sessions.sqlite3"
-    )
+    manager = AgentSessionManager(config, transport=transport, registry_name="cli_sessions.sqlite3")
     try:
         return await manager.run_code(code, context)
     finally:

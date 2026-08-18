@@ -4,27 +4,43 @@ from pathlib import Path
 
 from opensac.sandbox.validator import validate_code
 
-SKILL_DIR = Path(__file__).parents[1] / ".agents" / "skills" / "search-as-code-cli"
+ROOT = Path(__file__).parents[1]
+SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code-cli"
+MCP_SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
+CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
+PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
 
 
-def _example_program() -> str:
-    skill = SKILL_PATH.read_text(encoding="utf-8")
-    shell_block = skill.split("```bash", 1)[1].split("```", 1)[0].strip()
-    lines = shell_block.splitlines()
+def _fenced_block(path: Path, fence: str, *, heading: str | None = None) -> str:
+    text = path.read_text(encoding="utf-8")
+    if heading is not None:
+        text = text.split(heading, 1)[1]
+    return text.split(f"```{fence}", 1)[1].split("```", 1)[0].strip()
+
+
+def _posix_program() -> str:
+    lines = _fenced_block(SKILL_PATH, "bash").splitlines()
     assert lines[0] == "opensac agent-run <<'OPENSAC_PY'"
     assert lines[-1] == "OPENSAC_PY"
     return "\n".join(lines[1:-1])
 
 
-def test_cli_skill_is_small_and_keeps_lifecycle_out_of_the_prompt() -> None:
+def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
 
-    assert len(skill) < 7_000
+    assert len(skill) < 6_000
     assert "opensac agent-run <<'OPENSAC_PY'" in skill
     assert "Never create or manage REST sessions" in skill
+    assert "stable `research_id`" in skill
     assert "state_lost" in skill
-    assert "not replayed" in skill
+    assert "submitted program was not replayed" in skill
+    assert "execution outcome may be" in skill
+    assert "`HTTP 401` or `HTTP 403`" in skill
+    assert "without printing or embedding any credential" in skill
+    assert "references/sdk-contract.md" in skill
+    assert "references/patterns.md" in skill
+    assert "Codex, Claude Code, or another shell-capable agent" in skill.split("---", 2)[1]
     assert "SAC_API_" not in skill
     assert "SAC_CLI_" not in skill
     assert "SAC_AGENT_" not in skill
@@ -36,19 +52,30 @@ def test_cli_skill_is_small_and_keeps_lifecycle_out_of_the_prompt() -> None:
     assert "lease" not in skill
 
 
-def test_cli_skill_example_compiles_and_passes_sandbox_validation() -> None:
-    program = _example_program()
-
-    compile(program, "<search-as-code-cli-skill>", "exec")
+def test_cli_skill_invocation_compiles_and_passes_sandbox_validation() -> None:
+    program = _posix_program()
+    compile(program, "<search-as-code-cli-invocation>", "exec")
     validate_code(program)
-    assert "sdk.search.many(" in program
-    assert "sdk.search.fuse_rrf(" in program
-    assert "sdk.content.grep_report(" in program
-    assert "passage.locator is not None" in program
+    assert "from opensac_sdk import" in program
+    assert "sdk.session.usage()" in program
+
+
+def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
+    assert (
+        CONTRACT_PATH.read_bytes()
+        == (MCP_SKILL_DIR / "references" / "sdk-contract.md").read_bytes()
+    )
+    assert PATTERNS_PATH.read_bytes() == (MCP_SKILL_DIR / "references" / "patterns.md").read_bytes()
+
+    for heading in ("## Canonical multi-turn pattern", "## Checked semantic extraction"):
+        program = _fenced_block(PATTERNS_PATH, "python", heading=heading)
+        compile(program, "<search-as-code-cli-pattern>", "exec")
+        validate_code(program)
 
 
 def test_cli_skill_has_codex_catalog_metadata() -> None:
     metadata = (SKILL_DIR / "agents" / "openai.yaml").read_text(encoding="utf-8")
 
     assert 'display_name: "Search as Code CLI"' in metadata
+    assert 'short_description: "Run grounded OpenSAC research through a local CLI"' in metadata
     assert "$search-as-code-cli" in metadata

@@ -119,6 +119,23 @@ async def test_claude_cli_uses_official_bash_session_environment(tmp_path: Path)
     assert "private-claude-session" not in request_id
 
 
+async def test_claude_cloud_cli_uses_remote_session_environment(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    observation = await agent_cli.run_cli_code(
+        "work",
+        environ=_env(
+            tmp_path,
+            CLAUDE_CODE_REMOTE_SESSION_ID="private-claude-cloud-session",
+        ),
+        transport=httpx.MockTransport(server),
+    )
+
+    assert "exit_code=0" in observation
+    request_id = server.create_payloads[0]["request_id"]
+    assert request_id.startswith("agent:claude-remote-cli:")
+    assert "private-claude-cloud-session" not in request_id
+
+
 async def test_cli_fails_closed_without_context_or_with_ambiguous_hosts(
     tmp_path: Path,
 ) -> None:
@@ -145,6 +162,7 @@ async def test_cli_fails_closed_without_context_or_with_ambiguous_hosts(
     )
 
     assert "context_unavailable" in missing
+    assert "CLAUDE_CODE_REMOTE_SESSION_ID" in missing
     assert "context_ambiguous" in ambiguous
     assert requests == 0
 
@@ -165,6 +183,28 @@ async def test_explicit_context_supports_other_cli_agents(tmp_path: Path) -> Non
     request_id = server.create_payloads[0]["request_id"]
     assert request_id.startswith("agent:custom_agent:")
     assert "private-custom-session" not in request_id
+
+
+async def test_explicit_context_overrides_inherited_nested_agent_hosts(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    observation = await agent_cli.run_cli_code(
+        "work",
+        environ=_env(
+            tmp_path,
+            SAC_AGENT_CONTEXT_ID="private-child-session",
+            SAC_AGENT_HOST="child-agent",
+            CODEX_THREAD_ID="inherited-codex-parent",
+            CLAUDE_CODE_SESSION_ID="inherited-claude-parent",
+        ),
+        transport=httpx.MockTransport(server),
+    )
+
+    assert "exit_code=0" in observation
+    request_id = server.create_payloads[0]["request_id"]
+    assert request_id.startswith("agent:child-agent:")
+    assert "private-child-session" not in request_id
+    assert "inherited-codex-parent" not in request_id
+    assert "inherited-claude-parent" not in request_id
 
 
 async def test_invalid_cli_configuration_fails_before_http(tmp_path: Path) -> None:
@@ -209,9 +249,7 @@ async def test_cli_state_loss_rotates_without_replaying_program(tmp_path: Path) 
     await agent_cli.run_cli_code("setup", environ=env, transport=transport)
 
     server.next_state_loss = "worker_restarted"
-    lost = await agent_cli.run_cli_code(
-        "must-not-replay", environ=env, transport=transport
-    )
+    lost = await agent_cli.run_cli_code("must-not-replay", environ=env, transport=transport)
     recovered = await agent_cli.run_cli_code("fresh", environ=env, transport=transport)
 
     assert "state_lost" in lost
