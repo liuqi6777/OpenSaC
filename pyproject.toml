@@ -1,6 +1,6 @@
 [project]
 name = "opensac"
-version = "0.4.0"
+dynamic = ["version"]
 description = "Open reference implementation of Search as Code"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -11,7 +11,7 @@ dependencies = [
     "jsonschema>=4.25",
     "mcp>=1.27,<2",
     "openai>=1.99",
-    "opensac-sdk",
+    "opensac-sdk>=0.4.0,<0.5.0",
     "pydantic-settings>=2.10",
     "typer>=0.16",
     "uvicorn>=0.35",
@@ -27,12 +27,21 @@ dev = [
 [project.scripts]
 opensac = "opensac.cli:app"
 
+[project.urls]
+Homepage = "https://github.com/liuqi6777/OpenSaC"
+Documentation = "https://github.com/liuqi6777/OpenSaC/tree/main/docs"
+Issues = "https://github.com/liuqi6777/OpenSaC/issues"
+Repository = "https://github.com/liuqi6777/OpenSaC"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/opensac", "sac_agent"]
+
+[tool.hatch.version]
+path = "src/opensac/_version.py"
 
 [tool.uv.sources]
 opensac-sdk = { workspace = true }

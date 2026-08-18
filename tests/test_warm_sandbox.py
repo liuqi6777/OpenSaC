@@ -182,6 +182,19 @@ def test_warm_commands_keep_security_flags_and_inject_credentials_per_exec(
     assert execution[-1] == "/workspace/.opensac-program-001.py"
 
 
+def test_warm_sandbox_accepts_an_explicit_docker_host_platform(tmp_path: Path) -> None:
+    sandbox = _sandbox(tmp_path, docker_host_platform="darwin")
+
+    command = sandbox.container_command(_request(tmp_path))
+
+    assert all(
+        argument in command
+        for argument in broker_socket_mount_args(
+            sandbox.broker_socket, platform="darwin"
+        )
+    )
+
+
 async def test_reap_orphans_only_targets_this_broker_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

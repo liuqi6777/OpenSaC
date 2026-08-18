@@ -475,7 +475,6 @@ wheels = [
 
 [[package]]
 name = "opensac"
-version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
@@ -515,7 +514,6 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "opensac-sdk"
-version = "0.4.0"
 source = { editable = "packages/opensac-sdk" }
 dependencies = [
     { name = "httpx" },

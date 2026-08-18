@@ -2,10 +2,12 @@
 .env
 .env.*
 !.env.example
+compose.env
 .claude/settings.local.json
 
 # OpenSAC runtime state
 .opensac/
+.opensac-service-e2e-*/
 
 # Python environments and caches
 .venv/

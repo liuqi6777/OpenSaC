@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from opensac._version import __version__
+
+DEFAULT_SANDBOX_IMAGE = f"ghcr.io/liuqi6777/opensac-sandbox:{__version__}"
 
 
 class Settings(BaseSettings):
@@ -131,7 +136,13 @@ class Settings(BaseSettings):
             )
         return self
 
-    sandbox_image: str = "opensac-sandbox:latest"
+    sandbox_image: str = DEFAULT_SANDBOX_IMAGE
+    # The API may itself run in a Linux container while talking to a macOS
+    # Docker Desktop daemon. Keep the daemon host explicit so broker socket
+    # mounts use Docker Desktop's socket-forwarding-compatible syntax.
+    sandbox_docker_host_platform: Literal["linux", "darwin"] = (
+        "darwin" if sys.platform == "darwin" else "linux"
+    )
     # `cold` preserves one docker run per execution. `warm` keeps one hardened
     # container per active session while still starting a fresh Python process
     # for every program.

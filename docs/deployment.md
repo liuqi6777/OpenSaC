@@ -1,12 +1,16 @@
-# Source deployment
+# Deployment
 
-OpenSAC currently supports deployment from a Git source checkout only. PyPI, wheel-only
-deployment, and a prebuilt service image are not supported yet. For local development, use the
-shorter [Quick start](../README.md#quick-start).
+The release workflow is prepared to publish version-matched OpenSAC service and sandbox images,
+but no public release has been made yet. PyPI publication is not planned. The prepared Compose
+deployment runs the API and capability broker from the service image and starts an isolated
+sandbox container for each execution. It intentionally does **not** build or run the
+`local_search` service. For the current source-based path, use the shorter
+[Quick start](../README.md#quick-start-from-source).
 
 ## Before you start
 
-The host needs Python 3.12+, `uv`, Git, Docker, and permission to run Docker commands.
+The container deployment needs Git, Docker Engine or Docker Desktop, Docker Compose, and permission
+to run Docker commands. A source deployment additionally needs Python 3.12+ and `uv`.
 
 - Run setup and sandbox builds from the repository root.
 - One OpenSAC process owns one data directory and broker socket. Do not point multiple Uvicorn
@@ -17,7 +21,66 @@ The host needs Python 3.12+, `uv`, Git, Docker, and permission to run Docker com
 
 See [RL environment worker deployment](rl-environment-workers.md) for worker-pool details.
 
-## 1. Install
+## Prepared container deployment (after the first release)
+
+> [!WARNING]
+> The image and Git tag commands in this section become usable only after the first release has
+> completed and the GHCR packages have been made public.
+
+Check out a release tag only to obtain the versioned Compose files; the host does not build or
+install Python packages:
+
+```bash
+git clone https://github.com/liuqi6777/OpenSaC.git
+cd OpenSaC
+git checkout vX.Y.Z
+cp .env.example .env
+cp compose.env.example compose.env
+mkdir -p "$PWD/.opensac"
+```
+
+Set `OPENSAC_API_KEY`, `OPENSAC_SERPER_API_KEY`, and `OPENSAC_JINA_API_KEY` in `.env`. Keep
+`OPENSAC_SEARCH_BACKEND=web`. Then edit `compose.env`:
+
+- Set `OPENSAC_CONTAINER_DATA_DIR` to the absolute path printed by `pwd`, followed by `/.opensac`.
+- Set `OPENSAC_UID` and `OPENSAC_GID` from `id -u` and `id -g`.
+- On Linux, set `OPENSAC_DOCKER_GID` from `stat -c '%g' /var/run/docker.sock`; on Docker Desktop,
+  keep it at `0`.
+- Keep the service and sandbox image tags identical to the checked-out release.
+
+Pull and start the service image:
+
+```bash
+docker compose --env-file compose.env pull
+docker compose --env-file compose.env up -d
+docker compose --env-file compose.env ps
+curl -fsS http://127.0.0.1:8000/healthz
+```
+
+The first program execution pulls the version-matched sandbox image automatically.
+
+The Compose model has exactly one long-running service, `opensac`. It mounts the Docker socket so
+the broker can create short-lived, network-disabled sandbox containers. Docker socket access is
+equivalent to host-level Docker control; run this stack only under a trusted account and do not
+add the socket to generated programs.
+
+Provider credentials stay in the API container and are never passed to sandboxes. The service
+mounts its data directory at the same absolute path inside the container so sibling sandbox
+containers can use session workspaces and the broker socket on both Linux and Docker Desktop.
+
+View logs or stop the stack with:
+
+```bash
+docker compose --env-file compose.env logs -f opensac
+docker compose --env-file compose.env down
+```
+
+To upgrade, drain active sessions, update both image tags in `compose.env`, then run `pull` and
+`up -d` again. Pin an immutable `X.Y.Z` tag or digest in production.
+
+## Source deployment
+
+### 1. Install
 
 Pin the deployed source revision:
 
@@ -32,7 +95,7 @@ cp .env.example .env
 Use a dedicated service account for a long-running deployment. Access to the Docker daemon is
 highly privileged, so do not share that account with unrelated services.
 
-## 2. Configure a search backend
+### 2. Configure a search backend
 
 ### Local search
 
@@ -65,7 +128,7 @@ OPENSAC_JINA_API_KEY=replace-with-jina-key
 
 They remain in the host broker and are not passed to sandbox programs.
 
-## 3. Configure and start OpenSAC
+### 3. Configure and start OpenSAC
 
 For local-only use, the defaults in `.env` are sufficient. For a persistent service, use absolute
 state paths and set an API key:
@@ -81,14 +144,16 @@ OPENSAC_BUILD_COMMIT=replace-with-git-commit
 OPENSAC_SESSION_TTL_SECONDS=3600
 ```
 
-Create the data directory with write permission for the service account, then build and start:
+Create the data directory with write permission for the service account. Until a matching public
+sandbox image exists, build it locally before starting:
 
 ```bash
 uv run opensac build-sandbox
 uv run opensac serve
 ```
 
-Rebuild the sandbox after every source upgrade. The second command stays in the foreground.
+After a release is public, the first execution can pull the release-matched sandbox image from
+GHCR instead. The serve command stays in the foreground.
 
 ### Minimal systemd service
 
@@ -123,7 +188,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now opensac.service
 ```
 
-## 4. Verify and expose
+### 4. Verify and expose
 
 Check the running services:
 
@@ -139,7 +204,7 @@ When another host needs access, put OpenSAC behind an HTTPS reverse proxy or pri
 Forward `Authorization`, set the proxy read timeout above `OPENSAC_SANDBOX_TIMEOUT_SECONDS`, and
 restrict `/healthz`, `/docs`, and `/openapi.json` if operational metadata should not be public.
 
-## 5. Upgrade
+### 5. Upgrade
 
 Sessions do not survive a worker restart. Drain active work, then update the pinned source:
 
@@ -155,7 +220,7 @@ sudo systemctl stop opensac.service
 git fetch --tags
 git checkout NEW_COMMIT_SHA
 uv sync --locked
-uv run opensac build-sandbox
+# If .env pins OPENSAC_SANDBOX_IMAGE, update it to the new release tag here.
 sudo systemctl start opensac.service
 ```
 
@@ -165,7 +230,8 @@ the previous commit.
 ## Troubleshooting
 
 - Docker permission error: verify the service account can run `docker info`.
-- Sandbox contract mismatch: rebuild from the checked-out revision.
+- Sandbox contract mismatch: select the image matching the OpenSAC release, or rebuild it from
+  the checked-out revision.
 - Docker status 125 with `NanoCPUs`: set `OPENSAC_SANDBOX_CPUS=0` if the host has no CPU cgroup.
 - `429 capacity_exhausted`: retry according to `Retry-After` or select another worker.
 - `410 worker_restarted` or `session_expired`: create a new session.

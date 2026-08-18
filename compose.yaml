@@ -1,0 +1,51 @@
+name: opensac
+
+services:
+  opensac:
+    image: ${OPENSAC_SERVICE_IMAGE:-ghcr.io/liuqi6777/opensac:0.4.0}
+    init: true
+    user: "${OPENSAC_UID:-10001}:${OPENSAC_GID:-10001}"
+    group_add:
+      - "${OPENSAC_DOCKER_GID:-0}"
+    env_file:
+      - path: ${OPENSAC_ENV_FILE:-.env}
+        required: false
+    environment:
+      HOME: /tmp/opensac-home
+      OPENSAC_API_HOST: 0.0.0.0
+      OPENSAC_API_PORT: "8000"
+      OPENSAC_BROKER_SOCKET: ${OPENSAC_CONTAINER_DATA_DIR:?Set an absolute OPENSAC_CONTAINER_DATA_DIR}/broker.sock
+      OPENSAC_DATA_DIR: ${OPENSAC_CONTAINER_DATA_DIR}
+      OPENSAC_SANDBOX_IMAGE: ${OPENSAC_SANDBOX_IMAGE:-ghcr.io/liuqi6777/opensac-sandbox:0.4.0}
+      OPENSAC_SEARCH_BACKEND: ${OPENSAC_CONTAINER_SEARCH_BACKEND:-web}
+    ports:
+      - "${OPENSAC_BIND_ADDRESS:-127.0.0.1}:${OPENSAC_PORT:-8000}:8000"
+    volumes:
+      - type: bind
+        source: ${OPENSAC_CONTAINER_DATA_DIR}
+        target: ${OPENSAC_CONTAINER_DATA_DIR}
+      - type: bind
+        source: ${OPENSAC_DOCKER_SOCKET:-/var/run/docker.sock}
+        target: /var/run/docker.sock
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 3m

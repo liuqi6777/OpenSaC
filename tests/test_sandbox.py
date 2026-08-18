@@ -15,6 +15,7 @@ from opensac.sandbox import (
 from opensac.sandbox.docker import (
     BoundedProcessOutput,
     DockerImageContractVerifier,
+    SandboxImageContractError,
     broker_socket_mount_args,
     read_bounded_process_output,
 )
@@ -107,6 +108,25 @@ def test_broker_socket_mount_uses_docker_desktop_socket_forwarding(tmp_path) -> 
     ]
 
 
+def test_docker_sandbox_accepts_an_explicit_docker_host_platform(tmp_path) -> None:
+    socket = tmp_path / "broker.sock"
+    socket.touch()
+    sandbox = DockerSandbox(
+        image="opensac-test",
+        broker_socket=socket,
+        docker_host_platform="darwin",
+    )
+
+    command = sandbox.command(
+        SandboxRequest("pass", tmp_path / "workspace", "secret")
+    )
+
+    assert all(
+        argument in command
+        for argument in broker_socket_mount_args(socket, platform="darwin")
+    )
+
+
 async def test_sandbox_image_contract_is_inspected_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -125,6 +145,52 @@ async def test_sandbox_image_contract_is_inspected_once(
     assert len(calls) == 1
     assert calls[0][:3] == ("docker", "image", "inspect")
     assert calls[0][-1] == "opensac-test"
+
+
+async def test_missing_sandbox_image_is_pulled_before_contract_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    results = iter(
+        [
+            _CompletedProcess(returncode=1, stderr=b"No such image: published:0.4.0\n"),
+            _CompletedProcess(stdout=b"pulled\n"),
+            _CompletedProcess(stdout=b"5\n"),
+        ]
+    )
+
+    async def create_process(*command: str, **_: object) -> _CompletedProcess:
+        calls.append(command)
+        return next(results)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+
+    await DockerImageContractVerifier("published:0.4.0").ensure_compatible()
+
+    assert [call[1:3] for call in calls] == [
+        ("image", "inspect"),
+        ("pull", "published:0.4.0"),
+        ("image", "inspect"),
+    ]
+
+
+async def test_sandbox_image_pull_failure_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results = iter(
+        [
+            _CompletedProcess(returncode=1, stderr=b"No such object: private:0.4.0\n"),
+            _CompletedProcess(returncode=1, stderr=b"denied\n"),
+        ]
+    )
+
+    async def create_process(*_: str, **__: object) -> _CompletedProcess:
+        return next(results)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+
+    with pytest.raises(SandboxImageContractError, match="Could not pull.*denied"):
+        await DockerImageContractVerifier("private:0.4.0").ensure_compatible()
 
 
 async def test_cold_sandbox_rejects_stale_image_before_workspace_setup(

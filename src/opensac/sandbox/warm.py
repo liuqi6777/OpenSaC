@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -83,6 +84,7 @@ class WarmDockerSandbox:
         *,
         image: str,
         broker_socket: Path,
+        docker_host_platform: str = sys.platform,
         timeout_seconds: int = 120,
         memory: str = "512m",
         cpus: float = 1.0,
@@ -94,6 +96,7 @@ class WarmDockerSandbox:
     ) -> None:
         self.image = image
         self.broker_socket = broker_socket.resolve()
+        self.docker_host_platform = docker_host_platform
         self.timeout_seconds = timeout_seconds
         self.memory = memory
         self.cpus = cpus
@@ -182,7 +185,9 @@ class WarmDockerSandbox:
             "--mount",
             f"type=bind,src={workspace},dst=/workspace",
         ]
-        command += broker_socket_mount_args(self.broker_socket)
+        command += broker_socket_mount_args(
+            self.broker_socket, platform=self.docker_host_platform
+        )
         command += [
             "--env",
             "OPENSAC_BROKER_SOCKET=/run/opensac/broker.sock",

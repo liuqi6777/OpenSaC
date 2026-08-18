@@ -37,6 +37,8 @@ def test_build_sandbox_builds_directly_from_source(monkeypatch) -> None:
                 "build",
                 "--build-arg",
                 f"OPENSAC_SANDBOX_CONTRACT={cli.SANDBOX_CONTRACT}",
+                "--build-arg",
+                f"OPENSAC_VERSION={cli.__version__}",
                 "-f",
                 "sandbox/Dockerfile",
                 "-t",
@@ -68,4 +70,5 @@ def test_sandbox_dockerfile_installs_sdk_from_source() -> None:
 
     assert "COPY packages/opensac-sdk /opt/opensac-sdk" in dockerfile
     assert "RUN pip install --no-cache-dir /opt/opensac-sdk" in dockerfile
+    assert "org.opencontainers.image.version=$OPENSAC_VERSION" in dockerfile
     assert "_sandbox_wheel" not in dockerfile

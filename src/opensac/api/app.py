@@ -192,6 +192,7 @@ class ApplicationRuntime:
         sandbox_kwargs = dict(
             image=settings.sandbox_image,
             broker_socket=broker_socket,
+            docker_host_platform=settings.sandbox_docker_host_platform,
             timeout_seconds=settings.sandbox_timeout_seconds,
             memory=settings.sandbox_memory,
             cpus=settings.sandbox_cpus,

@@ -1,7 +1,14 @@
-.env
+.env*
+.agents
 .git
+.github
 .opensac
 .venv
 __pycache__
+compose.env
 dist
+docs
+examples
+local_search
+paper
 tests

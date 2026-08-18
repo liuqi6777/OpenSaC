@@ -1,12 +1,20 @@
 [project]
 name = "opensac-sdk"
-version = "0.4.0"
+dynamic = ["version"]
 description = "Sandbox client SDK for OpenSAC"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28",
     "pydantic>=2.11",
 ]
+
+[project.urls]
+Homepage = "https://github.com/liuqi6777/OpenSaC"
+Documentation = "https://github.com/liuqi6777/OpenSaC/tree/main/docs"
+Issues = "https://github.com/liuqi6777/OpenSaC/issues"
+Repository = "https://github.com/liuqi6777/OpenSaC"
 
 [build-system]
 requires = ["hatchling"]
@@ -14,3 +22,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/opensac_sdk"]
+
+[tool.hatch.version]
+path = "src/opensac_sdk/_version.py"

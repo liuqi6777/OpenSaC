@@ -6,6 +6,7 @@ from typing import Annotated
 import typer
 import uvicorn
 
+from opensac import __version__
 from opensac.config import Settings
 from opensac.sandbox import SANDBOX_CONTRACT
 
@@ -69,6 +70,8 @@ def build_sandbox(
         [
             "--build-arg",
             f"OPENSAC_SANDBOX_CONTRACT={SANDBOX_CONTRACT}",
+            "--build-arg",
+            f"OPENSAC_VERSION={__version__}",
         ]
     )
     if pip_index_url is not None:

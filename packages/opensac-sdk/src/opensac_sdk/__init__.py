@@ -1,5 +1,6 @@
 import atexit
 
+from ._version import __version__
 from .client import LazyOpenSACClient, OpenSACClient
 from .models import (
     CandidateSource,
@@ -50,4 +51,5 @@ __all__ = [
     "SearchHit",
     "SearchRequestInfo",
     "sdk",
+    "__version__",
 ]

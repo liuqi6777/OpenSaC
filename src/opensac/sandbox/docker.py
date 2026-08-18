@@ -60,32 +60,65 @@ class DockerImageContractVerifier:
         self._verified = False
         self._lock = asyncio.Lock()
 
+    async def _inspect(self) -> tuple[int, bytes, bytes]:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                f'{{{{ index .Config.Labels "{SANDBOX_CONTRACT_LABEL}" }}}}',
+                self.image,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            raise SandboxImageContractError(
+                f"Could not inspect sandbox image {self.image!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        stdout, stderr = await process.communicate()
+        return process.returncode or 0, stdout, stderr
+
+    async def _pull(self) -> None:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "pull",
+                self.image,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            raise SandboxImageContractError(
+                f"Could not pull sandbox image {self.image!r}: {type(exc).__name__}: {exc}"
+            ) from exc
+        _, stderr_bytes = await process.communicate()
+        if process.returncode != 0:
+            stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+            detail = stderr or f"docker pull exited {process.returncode}"
+            raise SandboxImageContractError(
+                f"Could not pull sandbox image {self.image!r}: {detail}"
+            )
+
+    @staticmethod
+    def _image_is_missing(stderr_bytes: bytes) -> bool:
+        stderr = stderr_bytes.decode("utf-8", errors="replace").lower()
+        return "no such image" in stderr or "no such object" in stderr
+
     async def ensure_compatible(self) -> None:
         if self._verified:
             return
         async with self._lock:
             if self._verified:
                 return
-            try:
-                process = await asyncio.create_subprocess_exec(
-                    "docker",
-                    "image",
-                    "inspect",
-                    "--format",
-                    f'{{{{ index .Config.Labels "{SANDBOX_CONTRACT_LABEL}" }}}}',
-                    self.image,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            except OSError as exc:
-                raise SandboxImageContractError(
-                    f"Could not inspect sandbox image {self.image!r}: "
-                    f"{type(exc).__name__}: {exc}"
-                ) from exc
-            stdout_bytes, stderr_bytes = await process.communicate()
-            if process.returncode != 0:
+            returncode, stdout_bytes, stderr_bytes = await self._inspect()
+            if returncode != 0 and self._image_is_missing(stderr_bytes):
+                await self._pull()
+                returncode, stdout_bytes, stderr_bytes = await self._inspect()
+            if returncode != 0:
                 stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
-                detail = stderr or f"docker image inspect exited {process.returncode}"
+                detail = stderr or f"docker image inspect exited {returncode}"
                 raise SandboxImageContractError(
                     f"Could not inspect sandbox image {self.image!r}: {detail}"
                 )
@@ -211,6 +244,7 @@ class DockerSandbox:
         *,
         image: str,
         broker_socket: Path,
+        docker_host_platform: str = sys.platform,
         timeout_seconds: int = 120,
         memory: str = "512m",
         cpus: float = 1.0,
@@ -219,6 +253,7 @@ class DockerSandbox:
     ) -> None:
         self.image = image
         self.broker_socket = broker_socket.resolve()
+        self.docker_host_platform = docker_host_platform
         self.timeout_seconds = timeout_seconds
         self.memory = memory
         self.cpus = cpus
@@ -259,7 +294,9 @@ class DockerSandbox:
             "--mount",
             f"type=bind,src={workspace},dst=/workspace",
         ]
-        command += broker_socket_mount_args(self.broker_socket)
+        command += broker_socket_mount_args(
+            self.broker_socket, platform=self.docker_host_platform
+        )
         command += [
             "--env",
             "OPENSAC_BROKER_SOCKET=/run/opensac/broker.sock",

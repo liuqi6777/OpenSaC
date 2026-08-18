@@ -1,8 +1,10 @@
 FROM python:3.12.12-slim
 
 ARG OPENSAC_SANDBOX_CONTRACT=5
+ARG OPENSAC_VERSION=0.0.0
 ENV OPENSAC_SANDBOX_CONTRACT=$OPENSAC_SANDBOX_CONTRACT
 LABEL org.opensac.sandbox.contract=$OPENSAC_SANDBOX_CONTRACT
+LABEL org.opencontainers.image.version=$OPENSAC_VERSION
 
 RUN groupadd --gid 10001 opensac \
     && useradd --uid 10001 --gid opensac --create-home opensac
