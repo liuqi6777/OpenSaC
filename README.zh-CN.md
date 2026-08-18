@@ -204,11 +204,12 @@ locator。当前公共契约与迁移说明见 [OpenSAC 0.4](docs/opensac-0.4.md
 
 ### 智能体集成
 
-OpenSAC 支持三种驱动方式：
+OpenSAC 支持四种驱动方式：
 
 1. 自定义 agent loop，通过 HTTP/Python 客户端调用；
 2. `opensac agent-run` 配合 CLI 版 Search-as-Code skill；
-3. `opensac mcp` 配合 Codex 或 Claude Code 的 MCP skill。
+3. `opensac mcp` 配合 Codex 或 Claude Code 的 MCP skill；
+4. `opensac-dsh` bundle 配合 DeepSeek Harness 原生工具和随包 skill。
 
 模型可见的公开接口仍只有 `sac_run(code)`。对话绑定、session 创建、lease 续租和状态丢失处理全部留在
 适配层。完整配置见[智能体集成指南](docs/agent-integrations.zh-CN.md)或

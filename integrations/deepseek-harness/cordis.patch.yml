@@ -1,0 +1,12 @@
+# Installable DeepSeek Harness bundle for OpenSAC. The plugin itself validates
+# these values and resolves the executable before publishing its tool.
+- insert:
+    - id: opensac
+      name: opensac-dsh
+      inject: [tools, subprocess, credentials, skills]
+      config:
+        command: opensac
+        apiBase: !!js process.env.SAC_API_BASE ?? 'http://127.0.0.1:8000'
+        apiKeyEnv: SAC_API_KEY
+        leaseSeconds: !!js Number(process.env.SAC_CLI_LEASE_SECONDS ?? '3600')
+        stateDir: !!js process.env.SAC_CLI_STATE_DIR

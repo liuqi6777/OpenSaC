@@ -13,6 +13,7 @@ conversation.
 | Custom HTTP/Python loop | You own the agent harness | Your application |
 | `opensac agent-run` | A coding agent can execute shell commands | CLI adapter |
 | `opensac mcp` | Codex or Claude Code should call one MCP tool | MCP adapter |
+| `opensac-dsh` | DeepSeek Harness should call one native tool | dsh plugin + CLI adapter |
 
 The control-model endpoint used by an external agent is separate from the optional pipeline-model
 endpoint exposed inside sandbox programs as `sdk.llm.*`.
@@ -21,8 +22,8 @@ endpoint exposed inside sandbox programs as `sdk.llm.*`.
 
 Start the public `v0.4.0` service image by following the main README's
 [Docker quick start](../README.md#quick-start-with-docker). The service itself needs no source
-checkout. PyPI publication is not planned, so a host that uses the CLI or MCP adapter should check
-out the matching release to install the adapter and skills:
+checkout. PyPI publication is not planned, so a host that uses the CLI, MCP, or dsh adapter should
+check out the matching release to install the adapter, skills, or bundle:
 
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
@@ -34,8 +35,8 @@ export SAC_API_BASE=http://127.0.0.1:8000
 export SAC_API_KEY=replace-with-your-opensac-key
 ```
 
-The skills are versioned in the repository rather than embedded in the Python wheel. Set
-`OPENSAC_REPO` to the version-matched checkout:
+The skills and dsh bundle are versioned in the repository rather than embedded in the Python
+wheel. Set `OPENSAC_REPO` to the version-matched checkout:
 
 ```bash
 export OPENSAC_REPO=/absolute/path/to/OpenSaC
@@ -104,9 +105,11 @@ print(sdk.search("OpenSAC Search as Code", limit=3))
 OPENSAC_PY
 ```
 
-Local Codex tasks use `CODEX_THREAD_ID`; Claude Code shells use `CLAUDE_CODE_SESSION_ID`. If neither
-is available, the command fails closed rather than sharing a session by process or working
-directory. Other CLI agents must set an explicit conversation identity:
+Local Codex tasks use `CODEX_THREAD_ID`. Claude Code 2.1.132 and later inject
+`CLAUDE_CODE_SESSION_ID` into Bash and PowerShell tool subprocesses; cloud sessions can also expose
+`CLAUDE_CODE_REMOTE_SESSION_ID`. If none is available, the command fails closed rather than
+sharing a session by process or working directory. Other CLI agents must set an explicit
+conversation identity:
 
 ```bash
 export SAC_AGENT_CONTEXT_ID=stable-conversation-id
@@ -253,6 +256,53 @@ request IDs or SQLite. A task reuses one leased OpenSAC session and can recover 
 restart. MCP shutdown closes HTTP clients without deleting sessions. On `session_expired` or
 `worker_restarted`, the failed program is not replayed; the current call returns `state_lost`, and
 the next call starts a clean generation.
+
+## DeepSeek Harness integration
+
+The installable bundle lives at
+[`integrations/deepseek-harness`](../integrations/deepseek-harness/README.md). It registers the
+native `sac_run({ code })` tool and the `search-as-code-dsh` skill together. The skill teaches the
+research workflow; the plugin owns execution, credentials, context binding, and lifecycle.
+
+The bundle targets the package versions in DeepSeek Harness `0.1.0-rc.7` and therefore requires
+Node.js `^22.19.0` or `>=24.0.0`. Build it before adding the local checkout to a profile:
+
+```bash
+cd "$OPENSAC_REPO/integrations/deepseek-harness"
+corepack pnpm install --frozen-lockfile
+corepack pnpm build
+
+dsh plugin --profile web add "$OPENSAC_REPO/integrations/deepseek-harness"
+```
+
+Replace `web` with the profile that should receive OpenSAC. The package also supports tarball
+delivery: run `corepack pnpm pack` after building and add the generated `.tgz`. No separate skill
+copy is needed because the plugin registers its packaged skill at runtime.
+
+Export configuration before starting dsh. `SAC_API_KEY` is optional only for an intentionally
+unauthenticated OpenSAC service:
+
+```bash
+export SAC_API_BASE=http://127.0.0.1:8000
+export SAC_API_KEY=replace-with-your-opensac-key
+export SAC_CLI_LEASE_SECONDS=3600
+
+dsh --profile web
+```
+
+The bundle resolves `opensac` when the plugin loads and fails early if the command is unavailable.
+For every call it resolves the `SAC_API_KEY` credential through dsh, launches the fixed argv
+`opensac agent-run` without a shell, sends the Python program on stdin, and binds
+`SAC_AGENT_CONTEXT_ID` to the current dsh agent id with host namespace `dsh`. Calls remain
+exclusive, cancellation terminates the managed process tree, and stdout/stderr are bounded.
+
+The existing CLI generation registry hashes the raw agent id before persistence and lets one dsh
+agent resume its leased OpenSAC session after a dsh restart. Plugin shutdown does not delete the
+session. As with the other adapters, `state_lost` is returned without replaying the submitted
+program; the following call starts a clean generation.
+
+The complete field table, profile override rules, security model, and development commands are in
+the bundle's [README](../integrations/deepseek-harness/README.md).
 
 ## Security and correctness rules
 

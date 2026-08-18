@@ -21,6 +21,11 @@ __pycache__/
 .mypy_cache/
 .pyright/
 
+# Node environments and generated plugin output
+**/node_modules/
+integrations/deepseek-harness/lib/
+integrations/deepseek-harness/coverage/
+
 # Test and coverage output
 .coverage
 .coverage.*

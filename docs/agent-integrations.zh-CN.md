@@ -12,14 +12,15 @@ OpenSAC 提供执行运行时，而不负责控制循环。智能体集成应只
 | 自定义 HTTP/Python loop | 已有自己的 agent harness | 你的应用 |
 | `opensac agent-run` | Coding agent 可以执行 shell 命令 | CLI 适配层 |
 | `opensac mcp` | Codex 或 Claude Code 通过一个 MCP 工具调用 | MCP 适配层 |
+| `opensac-dsh` | DeepSeek Harness 通过一个原生工具调用 | dsh 插件 + CLI 适配层 |
 
 外部智能体使用的控制模型端点，与沙箱程序通过 `sdk.llm.*` 使用的可选 pipeline 模型端点彼此独立。
 
 ## 前置条件
 
 按照主 README 的 [Docker 快速开始](../README.zh-CN.md#使用-docker-快速开始)启动公开的 `v0.4.0`
-服务镜像，服务本身不需要源码检出。项目不发布 PyPI 包，因此使用 CLI 或 MCP 适配器的宿主机需要检出
-相同的发布版本，以安装适配命令和 skill：
+服务镜像，服务本身不需要源码检出。项目不发布 PyPI 包，因此使用 CLI、MCP 或 dsh 适配器的宿主机
+需要检出相同的发布版本，以安装适配命令、skill 或 bundle：
 
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
@@ -31,8 +32,8 @@ export SAC_API_BASE=http://127.0.0.1:8000
 export SAC_API_KEY=replace-with-your-opensac-key
 ```
 
-Skill 随仓库进行版本控制，不嵌入 Python wheel。让 `OPENSAC_REPO` 指向与运行中服务版本一致的源码
-检出：
+Skill 和 dsh bundle 随仓库进行版本控制，不嵌入 Python wheel。让 `OPENSAC_REPO` 指向与运行中服务
+版本一致的源码检出：
 
 ```bash
 export OPENSAC_REPO=/absolute/path/to/OpenSaC
@@ -95,8 +96,10 @@ print(sdk.search("OpenSAC Search as Code", limit=3))
 OPENSAC_PY
 ```
 
-本地 Codex task 使用 `CODEX_THREAD_ID`，Claude Code shell 使用 `CLAUDE_CODE_SESSION_ID`。两者都不存在
-时，命令会 fail closed，不会退化为按进程或工作目录共享 session。其他 CLI agent 必须显式设置对话身份：
+本地 Codex task 使用 `CODEX_THREAD_ID`。Claude Code 2.1.132 及以上会向 Bash 和 PowerShell tool
+子进程注入 `CLAUDE_CODE_SESSION_ID`；cloud session 还可能提供
+`CLAUDE_CODE_REMOTE_SESSION_ID`。这些变量都不存在时，命令会 fail closed，不会退化为按进程或工作目录
+共享 session。其他 CLI agent 必须显式设置对话身份：
 
 ```bash
 export SAC_AGENT_CONTEXT_ID=stable-conversation-id
@@ -237,6 +240,49 @@ Claude Code 还支持 `--scope local`，用于保存在仓库外的项目级个�
 一个 task 复用一个带 lease 的 OpenSAC session，并能在 MCP 重启后恢复。MCP 退出只关闭 HTTP client，
 不会删除 session。遇到 `session_expired` 或 `worker_restarted` 时不会重放失败程序；本次调用返回
 `state_lost`，下一次调用从干净 generation 开始。
+
+## DeepSeek Harness 集成
+
+可安装 bundle 位于
+[`integrations/deepseek-harness`](../integrations/deepseek-harness/README.zh-CN.md)。它会同时注册原生
+`sac_run({ code })` 工具和 `search-as-code-dsh` skill。Skill 负责研究工作流，插件负责执行、凭证、
+上下文绑定和生命周期。
+
+Bundle 面向 DeepSeek Harness `0.1.0-rc.7` 的包版本，因此要求 Node.js `^22.19.0` 或
+`>=24.0.0`。把本地 checkout 加入 profile 前先完成构建：
+
+```bash
+cd "$OPENSAC_REPO/integrations/deepseek-harness"
+corepack pnpm install --frozen-lockfile
+corepack pnpm build
+
+dsh plugin --profile web add "$OPENSAC_REPO/integrations/deepseek-harness"
+```
+
+可将 `web` 替换为需要启用 OpenSAC 的 profile。该包也支持 tarball 交付：构建后运行
+`corepack pnpm pack`，再把生成的 `.tgz` 加入 profile。Skill 已由插件从包内注册，无需另行复制。
+
+启动 dsh 前导出配置。只有 OpenSAC 服务明确未启用鉴权时，`SAC_API_KEY` 才可以省略：
+
+```bash
+export SAC_API_BASE=http://127.0.0.1:8000
+export SAC_API_KEY=replace-with-your-opensac-key
+export SAC_CLI_LEASE_SECONDS=3600
+
+dsh --profile web
+```
+
+插件加载时会解析 `opensac`，命令不存在则提前失败。每次调用都会通过 dsh 解析 `SAC_API_KEY`
+credential，以固定 argv `opensac agent-run` 无 shell 启动进程，通过 stdin 传入 Python 程序，并把
+`SAC_AGENT_CONTEXT_ID` 绑定到当前 dsh agent id，host namespace 固定为 `dsh`。调用保持 exclusive，
+取消会终止受管进程树，stdout/stderr 也有明确上限。
+
+现有 CLI generation registry 会先哈希原始 agent id 再持久化，并允许同一个 dsh agent 在 dsh 重启
+后恢复带 lease 的 OpenSAC session。插件退出不会删除该 session。与其他适配器相同，`state_lost`
+只会原样返回，不会重放已提交程序；下一次调用从干净 generation 开始。
+
+完整字段表、profile 覆盖规则、安全模型和开发命令见 bundle 的
+[README](../integrations/deepseek-harness/README.zh-CN.md)。
 
 ## 安全与正确性规则
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import tomllib
 from dataclasses import dataclass
@@ -48,6 +49,16 @@ def validate_release(tag: str | None = None) -> ReleaseMetadata:
     if opensac_version != sdk_version:
         raise ReleaseValidationError(
             f"opensac version {opensac_version!r} does not match opensac-sdk {sdk_version!r}"
+        )
+    dsh_manifest = json.loads(
+        (REPO_ROOT / "integrations/deepseek-harness/package.json").read_text(encoding="utf-8")
+    )
+    dsh_version = dsh_manifest.get("version")
+    if not isinstance(dsh_version, str):
+        raise ReleaseValidationError("opensac-dsh package version must be a string")
+    if opensac_version != dsh_version:
+        raise ReleaseValidationError(
+            f"opensac version {opensac_version!r} does not match opensac-dsh {dsh_version!r}"
         )
     if STABLE_VERSION.fullmatch(opensac_version) is None:
         raise ReleaseValidationError(
