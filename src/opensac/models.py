@@ -45,9 +45,9 @@ CAPABILITY_METHODS: tuple[str, ...] = (
     # generated program unportable across arms and the skill text differ by
     # backend for no gain. Where a backend genuinely differs -- a domain filter,
     # a depth ceiling -- it differs in a *parameter*, which the broker refuses
-    # explicitly rather than absorbing (design.md 3.8). `hit.backend` still
-    # carries provenance, so nothing downstream loses track of where a document
-    # came from.
+    # explicitly rather than absorbing it. `hit.backend` still carries
+    # provenance, so nothing downstream loses track of where a document came
+    # from.
     "search.query",
     "search.query_many",
     "content.get_many",
@@ -82,7 +82,7 @@ class Mechanisms(BaseModel):
     SaC is argued for as one paradigm but is really several mechanisms sold
     together, and a bundle cannot be attributed: an end-to-end win says nothing
     about which property produced it. These switches exist so a study can turn
-    exactly one off and re-measure. See docs/research-instrumentation.md 1.3.
+    exactly one off and re-measure.
 
     Every field defaults to True, so an omitted object -- or an omitted field --
     reproduces current behaviour byte for byte and keeps finished runs
@@ -139,7 +139,7 @@ class Mechanisms(BaseModel):
 
         A skill that names a capability the session cannot reach costs the model
         a turn to discover, so the host builds its primitive list from this
-        rather than from a hand-maintained constant (design.md 6.7).
+        rather than from a hand-maintained constant.
         """
         return [method for method in CAPABILITY_METHODS if self.blocked_reason(method) is None]
 
@@ -282,14 +282,13 @@ class ExecCreate(BaseModel):
 class HitRecord(BaseModel):
     """One document an event touched, reduced to what offline analysis needs.
 
-    ``identity`` is the stable key the broker assigns
-    (docs/research-instrumentation.md 1.2) -- enough to count duplicates across
-    queries, measure effective fan-out, and follow a document through later
-    ranking stages. It embeds the docid or canonical URL rather than a hash of
-    them on purpose: hashing would still support both of those, but it would
-    make the trace impossible to join against a corpus's qrels, and "did the
-    agent ever surface the gold document" is the first question anyone asks of
-    a failed run.
+    ``identity`` is the stable key the broker assigns -- enough to count
+    duplicates across queries, measure effective fan-out, and follow a document
+    through later ranking stages. It embeds the docid or canonical URL rather
+    than a hash of them on purpose: hashing would still support both of those,
+    but it would make the trace impossible to join against a corpus's qrels, and
+    "did the agent ever surface the gold document" is the first question anyone
+    asks of a failed run.
 
     Recorded on ``content.*`` and ``citations.resolve`` as well as on searches,
     because surfacing and opening are different events with different remedies:

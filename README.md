@@ -251,10 +251,8 @@ layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Connect Codex, Claude Code, CLI, or a custom agent | [Agent integrations](docs/agent-integrations.md) |
 | Configure the optional local retriever | [Local dense search](docs/local-search.md) |
-| Understand the architecture and research boundary | [Design goals and roadmap](docs/design.md) |
 | Migrate to the current capability contract | [OpenSAC 0.4](docs/opensac-0.4.md) |
 | Operate rollout workers | [RL environment workers](docs/rl-environment-workers.md) |
-| Inspect research metrics and traces | [Research instrumentation](docs/research-instrumentation.md) |
 | Publish a version | [Release process](docs/releasing.md) |
 
 ## Limitations

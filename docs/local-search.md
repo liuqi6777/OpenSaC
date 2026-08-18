@@ -1,9 +1,8 @@
 # Local dense search
 
-OpenSAC includes a standalone dense retrieval service migrated from
-`DeepResearch-dev`. It loads a ready-made FAISS index; it does not build or retrain an index.
-The service is compatible with OpenSAC's `local` backend and owns search-result snippet
-shaping.
+OpenSAC includes a standalone dense retrieval service. It loads a ready-made FAISS index; it does
+not build or retrain an index. The service is compatible with OpenSAC's `local` backend and owns
+search-result snippet shaping.
 
 ## 1. Install
 

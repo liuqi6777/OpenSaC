@@ -4,6 +4,7 @@
 !.env.example
 compose.env
 .claude/settings.local.json
+.private/
 
 # OpenSAC runtime state
 .opensac/

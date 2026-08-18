@@ -231,10 +231,8 @@ uv run pytest
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |
 | 配置可选的本地检索器 | [本地稠密检索](docs/local-search.md) |
-| 理解架构和研究边界 | [设计目标与路线图](docs/design.md) |
 | 迁移到当前能力契约 | [OpenSAC 0.4](docs/opensac-0.4.md) |
 | 运行 rollout worker | [RL environment workers](docs/rl-environment-workers.md) |
-| 查看研究指标与 trace | [研究观测](docs/research-instrumentation.md) |
 | 发布正式版本 | [版本发布流程](docs/releasing.zh-CN.md) |
 
 ## 局限性

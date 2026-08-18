@@ -19,11 +19,15 @@ endpoint exposed inside sandbox programs as `sdk.llm.*`.
 
 ## Prerequisites
 
-Start the OpenSAC API from a source checkout first. Public Compose images are not available until
-the first release, and PyPI publication is not planned. Install the host-side adapter from the
-same checkout:
+Start the public `v0.4.0` service image by following the main README's
+[Docker quick start](../README.md#quick-start-with-docker). The service itself needs no source
+checkout. PyPI publication is not planned, so a host that uses the CLI or MCP adapter should check
+out the matching release to install the adapter and skills:
 
 ```bash
+git clone https://github.com/liuqi6777/OpenSaC.git
+cd OpenSaC
+git checkout v0.4.0
 uv tool install --editable /absolute/path/to/OpenSaC
 
 export SAC_API_BASE=http://127.0.0.1:8000
@@ -31,8 +35,7 @@ export SAC_API_KEY=replace-with-your-opensac-key
 ```
 
 The skills are versioned in the repository rather than embedded in the Python wheel. Set
-`OPENSAC_REPO` to the current checkout; after Docker releases exist, check out the same tag as the
-running service:
+`OPENSAC_REPO` to the version-matched checkout:
 
 ```bash
 export OPENSAC_REPO=/absolute/path/to/OpenSaC

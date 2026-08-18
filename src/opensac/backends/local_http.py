@@ -36,8 +36,7 @@ _FRONTMATTER_PATTERN = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*\n?", re.DOTALL
 def parse_document_frontmatter(text: str) -> tuple[dict[str, str], str]:
     """Split ``text`` into its frontmatter fields and the body below them.
 
-    Mirrors ``DeepResearch-dev/src/local_search/snippets.py::_parse_document_frontmatter``
-    so a full document renders with the same title and date as its search hit.
+    A full document should render with the same title and date as its search hit.
     Returns ``({}, text)`` unchanged when there is no header.
     """
     match = _FRONTMATTER_PATTERN.match(text)

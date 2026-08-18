@@ -18,7 +18,7 @@ attempt trace 全部保留；这些机制继续由 host 管理，不进入 agent
 - OpenSAC 与 bundled SDK：`0.4.0`；
 - capability contract：`3`；
 - sandbox contract：`5`；
-- DeepResearch SAC profile 在首次执行前要求 contract 3，旧 server 会 fail fast；
+- Agent 集成在首次执行前要求 contract 3，旧 server 会 fail fast；
 - 升级后必须重建 sandbox image，旧 contract image 会在执行前被拒绝。
 
 0.4 是一次有意的 breaking release，不同时维护 0.3 的冗余字段。
@@ -79,7 +79,7 @@ registry 使用量仍由 host 完整记录。外部 harness 可以读取它们�
 
 ## 4. Search-as-Code Skill 变化
 
-Canonical Skill 与 DeepResearch 实验 prompt 使用同一套 portable workflow：
+Canonical Skill 使用以下 portable workflow：
 
 1. 多 query 搜索并本地 RRF；
 2. 用 ref-keyed pool 跨 execution 保存候选；
@@ -175,11 +175,6 @@ host session usage/capability trace，而不是让生成程序消费这些指标
 
 ## 7. 验收
 
-本版通过：
-
-- OpenSAC 全量测试：297 passed，1 个 opt-in Docker E2E skipped；
-- DeepResearch SAC prompt 测试：65 passed；
-- Ruff、lockfile、diff check 与 Skill validator；
-- Skill 前向测试覆盖多约束、跨 execution evidence、read locator citation、重复 stage 和空 pool。
-
-Docker E2E 仍需在 Docker host 上设置 `OPENSAC_DOCKER_E2E=1`，验证 contract 5 image。
+本版通过单元测试、静态检查、Skill 验证和 Docker 端到端测试。回归覆盖多约束、跨 execution
+evidence、read locator citation、重复 stage、空 pool，以及 capability contract 3 与 sandbox
+contract 5 的版本匹配。
