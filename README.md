@@ -25,8 +25,9 @@ abstraction. It is not a reconstruction of Perplexity's internal search engine.
 
 > [!NOTE]
 > **Release status:** [`v0.4.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.4.0) is
-> available with public, version-matched service and sandbox images on GHCR. Docker Compose is the
-> recommended installation path. OpenSAC does not publish a PyPI package.
+> available with public, version-matched service and sandbox images on GHCR. The Docker CLI quick
+> start needs no repository checkout or configuration files. OpenSAC does not publish a PyPI
+> package.
 
 ## Why OpenSAC
 
@@ -60,85 +61,102 @@ generates programs, manages rollouts, and evaluates answers. One rollout should 
 session so workspace files and opaque references remain valid across turns. Backend choice,
 credentials, retries, rate limits, and resource enforcement stay on the service side.
 
-The default Compose deployment has one long-running `opensac` API/broker container. It creates a
-short-lived, network-disabled sandbox container for each execution. It intentionally contains no
-`local_search` service.
+The Docker deployment has one long-running `opensac` API/broker container. It creates a short-lived,
+network-disabled sandbox container for each execution. It intentionally contains no `local_search`
+service.
 
-## Quick start with Docker Compose
+## Quick start with Docker
 
 The public `v0.4.0` images provide the OpenSAC API/broker and the isolated execution sandbox. This
 deployment uses web search and intentionally does not start the optional local retriever.
 
-Requirements: Git, Docker Engine or Docker Desktop with Docker Compose, and Serper + Jina
-credentials. Python and `uv` are only needed for the bundled client examples or source development.
+Requirements: Docker Engine or Docker Desktop, a POSIX-compatible shell, and Serper + Jina
+credentials. No repository checkout, Compose file, Python installation, or local image build is
+needed.
 
-### 1. Check out and configure the release
-
-```bash
-git clone https://github.com/liuqi6777/OpenSaC.git
-cd OpenSaC
-git checkout v0.4.0
-cp .env.example .env
-cp compose.env.example compose.env
-mkdir -p "$PWD/.opensac"
-```
-
-Set these values in `.env`:
+### 1. Export runtime configuration
 
 ```bash
-OPENSAC_API_KEY=replace-with-a-long-random-value
-OPENSAC_SEARCH_BACKEND=web
-OPENSAC_SERPER_API_KEY=replace-with-serper-key
-OPENSAC_JINA_API_KEY=replace-with-jina-key
+export OPENSAC_API_KEY=replace-with-a-long-random-value
+export OPENSAC_SERPER_API_KEY=replace-with-serper-key
+export OPENSAC_JINA_API_KEY=replace-with-jina-key
+
+export OPENSAC_RUNTIME_DIR="$PWD/opensac-data"
+export OPENSAC_DOCKER_SOCKET=/var/run/docker.sock
+export OPENSAC_RUN_UID="$(id -u)"
+export OPENSAC_RUN_GID="$(id -g)"
+if [ "$(uname -s)" = Linux ]; then
+  export OPENSAC_DOCKER_GID="$(stat -c '%g' "$OPENSAC_DOCKER_SOCKET")"
+else
+  export OPENSAC_DOCKER_GID=0
+fi
+mkdir -p "$OPENSAC_RUNTIME_DIR"
 ```
 
-Do not commit `.env`. Provider credentials stay in the API container and are never passed to
-generated programs.
+If the Docker daemon uses another Unix socket, change `OPENSAC_DOCKER_SOCKET` before calculating
+its group ID. Provider credentials are passed only to the API container and never to generated
+programs or sandbox containers.
 
-In `compose.env`, set `OPENSAC_CONTAINER_DATA_DIR` to the absolute path of `.opensac`, and set
-`OPENSAC_UID` and `OPENSAC_GID` to the output of `id -u` and `id -g`. On Linux, set
-`OPENSAC_DOCKER_GID` to the output of `stat -c '%g' /var/run/docker.sock`; on Docker Desktop, keep
-it at `0`. Leave both image tags at `0.4.0`.
-
-### 2. Pull and start the containers
+### 2. Start the published image
 
 ```bash
-docker compose --env-file compose.env pull
-docker compose --env-file compose.env up -d
-docker compose --env-file compose.env ps
-curl -fsS http://127.0.0.1:8000/healthz
+docker run --detach \
+  --name opensac \
+  --init \
+  --restart unless-stopped \
+  --stop-timeout 180 \
+  --user "$OPENSAC_RUN_UID:$OPENSAC_RUN_GID" \
+  --group-add "$OPENSAC_DOCKER_GID" \
+  --env OPENSAC_API_KEY \
+  --env OPENSAC_SERPER_API_KEY \
+  --env OPENSAC_JINA_API_KEY \
+  --env OPENSAC_API_HOST=0.0.0.0 \
+  --env OPENSAC_API_PORT=8000 \
+  --env OPENSAC_SEARCH_BACKEND=web \
+  --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
+  --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
+  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.4.0 \
+  --publish 127.0.0.1:8000:8000 \
+  --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
+  --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  ghcr.io/liuqi6777/opensac:0.4.0
 ```
 
-The first program execution pulls the matching sandbox image automatically. The OpenSAC container
-mounts the Docker socket so it can create short-lived, network-disabled sandbox containers. Treat
-Docker socket access as host-level control and run the stack only under a trusted account.
-
-View logs or stop the stack with:
+After a few seconds, verify the service without installing a host-side client:
 
 ```bash
-docker compose --env-file compose.env logs -f opensac
-docker compose --env-file compose.env down
+docker exec opensac python -c \
+  "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/healthz').read().decode())"
 ```
 
-Platform details, upgrades, rollback, and systemd are in the
+`docker run` pulls the service image automatically when necessary. The first program execution
+pulls the matching sandbox image. The Docker socket lets OpenSAC create short-lived,
+network-disabled sandbox containers; treat that access as host-level control and run the service
+only under a trusted account.
+
+View logs, stop, or restart the service with:
+
+```bash
+docker logs -f opensac
+docker stop opensac
+docker start opensac
+```
+
+The Compose alternative, platform details, upgrades, rollback, and systemd are in the
 [deployment guide](docs/deployment.md). Local dense retrieval remains available as an external,
 advanced backend; see [Local dense search](docs/local-search.md).
 
 ## Run a Search-as-Code program
 
-The service can remain in Docker Compose. Because the Python client is not published on PyPI,
-install it from the checked-out source tree and export the same API key used by the service:
+The service image already contains the Python client. Run this example inside the container; the
+generated program itself still executes in a separate, network-disabled sandbox:
 
 ```bash
-uv sync --locked
-export OPENSAC_API_KEY=replace-with-the-same-api-key
-uv run python
-```
-
-At the Python prompt, or in a file executed with `uv run python FILE.py`, create one session,
-execute a generated-style program, and delete the session:
-
-```python
+docker exec -i opensac python - <<'PY'
 import os
 
 from opensac import OpenSAC
@@ -157,6 +175,7 @@ with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
         print(result["output"])
     finally:
         client.delete_session(session["id"])
+PY
 ```
 
 For multi-query fusion, document filtering, persistent JSONL state, and passage citations, see
@@ -166,7 +185,8 @@ For multi-query fusion, document filtering, persistent JSONL state, and passage 
 
 | Path | Status | Best for |
 | --- | --- | --- |
-| Docker Compose | Available in `v0.4.0` | Recommended prebuilt deployment |
+| Docker CLI | Available in `v0.4.0` | Fastest start with no local configuration files |
+| Docker Compose | Available in `v0.4.0` | Declarative, repeatable deployment |
 | Git checkout | Available | Development, experiments, and unreleased changes |
 
 The `v0.4.0` release publishes multi-architecture Linux images for `amd64` and `arm64`:

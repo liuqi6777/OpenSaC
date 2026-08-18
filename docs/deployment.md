@@ -1,16 +1,17 @@
 # Deployment
 
 OpenSAC `v0.4.0` is publicly available as version-matched service and sandbox images on GHCR.
-Docker Compose is the recommended prebuilt deployment; it runs the API and capability broker from
-the service image and starts an isolated sandbox container for each execution. It intentionally
-does **not** build or run the `local_search` service. OpenSAC does not publish a PyPI package. For
-the shortest setup path, use the main README's
-[Quick start](../README.md#quick-start-with-docker-compose).
+The Docker CLI provides a no-checkout, no-configuration-file quick start. Docker Compose remains
+available for declarative deployments. Both run the API and capability broker from the service
+image and start an isolated sandbox container for each execution. Neither builds nor runs the
+`local_search` service. OpenSAC does not publish a PyPI package. For the shortest setup path, use
+the main README's [Quick start](../README.md#quick-start-with-docker).
 
 ## Before you start
 
-The container deployment needs Git, Docker Engine or Docker Desktop, Docker Compose, and permission
-to run Docker commands. A source deployment additionally needs Python 3.12+ and `uv`.
+The direct container deployment needs Docker Engine or Docker Desktop, a POSIX-compatible shell,
+and permission to run Docker commands. The Compose alternative additionally needs `curl` and
+Docker Compose. A source deployment needs Git, Python 3.12+, and `uv`.
 
 - Run setup and sandbox builds from the repository root.
 - One OpenSAC process owns one data directory and broker socket. Do not point multiple Uvicorn
@@ -23,15 +24,87 @@ See [RL environment worker deployment](rl-environment-workers.md) for worker-poo
 
 ## Container deployment
 
-Check out a release tag only to obtain the versioned Compose files; the host does not build or
-install Python packages:
+### Direct Docker run without configuration files
+
+Export the provider credentials and host-specific runtime values in the current shell:
 
 ```bash
-git clone https://github.com/liuqi6777/OpenSaC.git
-cd OpenSaC
-git checkout v0.4.0
-cp .env.example .env
-cp compose.env.example compose.env
+export OPENSAC_API_KEY=replace-with-a-long-random-value
+export OPENSAC_SERPER_API_KEY=replace-with-serper-key
+export OPENSAC_JINA_API_KEY=replace-with-jina-key
+
+export OPENSAC_RUNTIME_DIR="$PWD/opensac-data"
+export OPENSAC_DOCKER_SOCKET=/var/run/docker.sock
+export OPENSAC_RUN_UID="$(id -u)"
+export OPENSAC_RUN_GID="$(id -g)"
+if [ "$(uname -s)" = Linux ]; then
+  export OPENSAC_DOCKER_GID="$(stat -c '%g' "$OPENSAC_DOCKER_SOCKET")"
+else
+  export OPENSAC_DOCKER_GID=0
+fi
+mkdir -p "$OPENSAC_RUNTIME_DIR"
+```
+
+If the daemon uses a non-default Unix socket, update `OPENSAC_DOCKER_SOCKET` first. Start the
+version-pinned service image:
+
+```bash
+docker run --detach \
+  --name opensac \
+  --init \
+  --restart unless-stopped \
+  --stop-timeout 180 \
+  --user "$OPENSAC_RUN_UID:$OPENSAC_RUN_GID" \
+  --group-add "$OPENSAC_DOCKER_GID" \
+  --env OPENSAC_API_KEY \
+  --env OPENSAC_SERPER_API_KEY \
+  --env OPENSAC_JINA_API_KEY \
+  --env OPENSAC_API_HOST=0.0.0.0 \
+  --env OPENSAC_API_PORT=8000 \
+  --env OPENSAC_SEARCH_BACKEND=web \
+  --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
+  --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
+  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.4.0 \
+  --publish 127.0.0.1:8000:8000 \
+  --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
+  --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  ghcr.io/liuqi6777/opensac:0.4.0
+```
+
+After a few seconds, verify the service with the Python runtime already installed in the image:
+
+```bash
+docker exec opensac python -c \
+  "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/healthz').read().decode())"
+```
+
+`docker run` pulls the service image when necessary; the first program execution pulls the
+version-matched sandbox image. The environment values are stored in the container configuration,
+so restrict Docker daemon access just as you would protect an `.env` file.
+
+Use `docker logs -f opensac`, `docker stop opensac`, and `docker start opensac` for the basic
+lifecycle. To recreate or upgrade the service, drain active sessions, remove only the stopped
+container with `docker rm opensac`, and repeat the command with matching service and sandbox image
+versions. The bind-mounted runtime directory remains on the host.
+
+### Docker Compose alternative
+
+Download the versioned Compose files into an empty deployment directory. This does not clone the
+source repository, build an image, or install Python packages:
+
+```bash
+mkdir opensac-deploy
+cd opensac-deploy
+curl -fsSLo compose.yaml \
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.4.0/compose.yaml
+curl -fsSLo .env \
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.4.0/.env.example
+curl -fsSLo compose.env \
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.4.0/compose.env.example
 mkdir -p "$PWD/.opensac"
 ```
 
@@ -42,7 +115,7 @@ Set `OPENSAC_API_KEY`, `OPENSAC_SERPER_API_KEY`, and `OPENSAC_JINA_API_KEY` in `
 - Set `OPENSAC_UID` and `OPENSAC_GID` from `id -u` and `id -g`.
 - On Linux, set `OPENSAC_DOCKER_GID` from `stat -c '%g' /var/run/docker.sock`; on Docker Desktop,
   keep it at `0`.
-- Keep the service and sandbox image tags identical to the checked-out release.
+- Keep the service and sandbox image tags identical to the downloaded release files.
 
 Pull and start the service image:
 
