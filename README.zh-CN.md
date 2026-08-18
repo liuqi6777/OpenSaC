@@ -135,6 +135,9 @@ uv run opensac build-sandbox
 uv run opensac serve
 ```
 
+> [!NOTE]
+> 服务部署流程已在 macOS（Docker Desktop）和 Linux（Docker Engine）上测试通过。
+
 升级仓库后应重新构建沙箱镜像。在另一个终端中检查服务：
 
 ```bash

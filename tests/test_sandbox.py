@@ -15,6 +15,7 @@ from opensac.sandbox import (
 from opensac.sandbox.docker import (
     BoundedProcessOutput,
     DockerImageContractVerifier,
+    broker_socket_mount_args,
     read_bounded_process_output,
 )
 
@@ -86,7 +87,24 @@ def test_docker_command_has_security_boundaries(tmp_path) -> None:
     assert "OPENSAC_SESSION_TOKEN=secret" in joined
     assert "OPENSAC_READY_PATH=/workspace/.opensac-output.json.ready" in joined
     assert str(socket.resolve()) in joined
+    assert all(argument in command for argument in broker_socket_mount_args(socket))
     assert str(workspace.resolve() / ".opensac-container-id") not in joined
+
+
+def test_broker_socket_mount_uses_docker_desktop_socket_forwarding(tmp_path) -> None:
+    socket = tmp_path / "broker.sock"
+    destination = "/run/opensac/broker.sock"
+
+    assert broker_socket_mount_args(socket, platform="darwin") == [
+        "--volume",
+        f"{socket.resolve()}:{destination}:ro",
+        "--group-add",
+        "0",
+    ]
+    assert broker_socket_mount_args(socket, platform="linux") == [
+        "--mount",
+        f"type=bind,src={socket.resolve()},dst={destination},readonly",
+    ]
 
 
 async def test_sandbox_image_contract_is_inspected_once(

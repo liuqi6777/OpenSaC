@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from opensac.sandbox import SandboxRequest, WarmDockerSandbox
+from opensac.sandbox.docker import broker_socket_mount_args
 
 
 class _FakeProcess:
@@ -163,6 +164,9 @@ def test_warm_commands_keep_security_flags_and_inject_credentials_per_exec(
     assert "no-new-privileges" in joined
     assert "--init" in container
     assert f"opensac.owner={sandbox.owner_label}" in container
+    assert all(
+        argument in container for argument in broker_socket_mount_args(sandbox.broker_socket)
+    )
     assert "token-1" not in joined
     assert container[-4:] == ["opensac-test", "-I", "-c", sandbox._KEEPALIVE]
 

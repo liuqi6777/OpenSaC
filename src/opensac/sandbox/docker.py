@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 import uuid
 from contextlib import suppress
@@ -22,6 +23,32 @@ SANDBOX_CONTRACT_LABEL = "org.opensac.sandbox.contract"
 
 class SandboxImageContractError(RuntimeError):
     pass
+
+
+def broker_socket_mount_args(
+    broker_socket: Path,
+    *,
+    platform: str = sys.platform,
+) -> list[str]:
+    """Build a broker socket mount compatible with the current Docker host."""
+
+    source = broker_socket.resolve()
+    destination = "/run/opensac/broker.sock"
+    if platform == "darwin":
+        # Docker Desktop's host-socket forwarder handles --volume/-v, while
+        # --mount is rewritten to an unavailable /socket_mnt source. The
+        # forwarded socket is root:root 0660 regardless of its host ownership,
+        # so keep the sandbox user non-root but allow it to connect via GID 0.
+        return [
+            "--volume",
+            f"{source}:{destination}:ro",
+            "--group-add",
+            "0",
+        ]
+    return [
+        "--mount",
+        f"type=bind,src={source},dst={destination},readonly",
+    ]
 
 
 class DockerImageContractVerifier:
@@ -231,8 +258,9 @@ class DockerSandbox:
             str(cid_path),
             "--mount",
             f"type=bind,src={workspace},dst=/workspace",
-            "--mount",
-            f"type=bind,src={self.broker_socket},dst=/run/opensac/broker.sock,readonly",
+        ]
+        command += broker_socket_mount_args(self.broker_socket)
+        command += [
             "--env",
             "OPENSAC_BROKER_SOCKET=/run/opensac/broker.sock",
             "--env",

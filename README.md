@@ -149,6 +149,10 @@ uv run opensac build-sandbox
 uv run opensac serve
 ```
 
+> [!NOTE]
+> The service deployment workflow has been tested successfully on both macOS (Docker Desktop)
+> and Linux (Docker Engine).
+
 Rebuild the sandbox image after upgrading the repository. In another terminal, verify the
 service:
 

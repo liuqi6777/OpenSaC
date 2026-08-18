@@ -17,6 +17,7 @@ from opensac.sandbox.docker import (
     DockerImageContractVerifier,
     DockerSandbox,
     SandboxImageContractError,
+    broker_socket_mount_args,
     read_bounded_process_output,
     remove_docker_container,
 )
@@ -180,8 +181,9 @@ class WarmDockerSandbox:
             f"opensac.session={session_digest}",
             "--mount",
             f"type=bind,src={workspace},dst=/workspace",
-            "--mount",
-            f"type=bind,src={self.broker_socket},dst=/run/opensac/broker.sock,readonly",
+        ]
+        command += broker_socket_mount_args(self.broker_socket)
+        command += [
             "--env",
             "OPENSAC_BROKER_SOCKET=/run/opensac/broker.sock",
             "--env",
