@@ -20,9 +20,10 @@ OpenSAC 实现了公开的
 > [!IMPORTANT]
 > OpenSAC 目前是持续开发中的研究原型（版本 `0.4.0`），API、部署契约和研究材料仍可能继续演进。
 
-> [!WARNING]
-> **发布状态：**`v0.4.0` Git 标签尚不存在，GHCR 服务镜像也无法公开拉取。Docker 发布工作流和
-> Compose 文件已经准备好，但当前真正可用的安装方式仍是源码检出；项目不计划发布 PyPI 包。
+> [!NOTE]
+> **发布状态：**[`v0.4.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.4.0) 已发布，
+> GHCR 上的服务镜像与沙箱镜像均可公开拉取且版本一致。推荐使用 Docker Compose 安装。OpenSAC
+> 不发布 PyPI 包。
 
 ## 为什么使用 OpenSAC
 
@@ -52,20 +53,23 @@ OpenSAC 有意不负责 agent loop。外部控制平面选择模型、生成程�
 默认 Compose 部署只有一个常驻的 `opensac` API/broker 容器，每次执行时再创建短生命周期、无网络的
 sandbox 容器。Compose 刻意不包含 `local_search` 服务。
 
-## 从源码快速开始
+## 使用 Docker Compose 快速开始
 
-这是首次公开发布前真正可用的方式。它使用网页检索，不会启动可选的本地检索器。
+公开的 `v0.4.0` 镜像包含 OpenSAC API/broker 和隔离执行沙箱。该部署使用网页检索，并且刻意不启动
+可选的本地检索器。
 
-环境要求：Python 3.12+、[`uv`](https://docs.astral.sh/uv/)、Docker Engine 或 Docker Desktop，
-以及 Serper + Jina 凭证。
+环境要求：Git、支持 Docker Compose 的 Docker Engine 或 Docker Desktop，以及 Serper + Jina
+凭证。只有运行仓库中的客户端示例或从源码开发时，才需要 Python 和 `uv`。
 
-### 1. 安装并配置
+### 1. 检出并配置发布版本
 
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-uv sync --locked --extra dev
+git checkout v0.4.0
 cp .env.example .env
+cp compose.env.example compose.env
+mkdir -p "$PWD/.opensac"
 ```
 
 在 `.env` 中设置：
@@ -79,27 +83,41 @@ OPENSAC_JINA_API_KEY=replace-with-jina-key
 
 不要提交 `.env`。服务商凭证只保留在 API 容器中，不会传递给生成程序。
 
-### 2. 构建沙箱并启动服务
+在 `compose.env` 中，将 `OPENSAC_CONTAINER_DATA_DIR` 设为 `.opensac` 的绝对路径，并将
+`OPENSAC_UID` 和 `OPENSAC_GID` 分别设为 `id -u` 和 `id -g` 的输出。在 Linux 上，将
+`OPENSAC_DOCKER_GID` 设为 `stat -c '%g' /var/run/docker.sock` 的输出；在 Docker Desktop 上保留
+为 `0`。两个镜像标签都保持为 `0.4.0`。
+
+### 2. 拉取并启动容器
 
 ```bash
-uv run opensac build-sandbox
-uv run opensac serve
-```
-
-服务会保持前台运行。在另一个终端中执行：
-
-```bash
+docker compose --env-file compose.env pull
+docker compose --env-file compose.env up -d
+docker compose --env-file compose.env ps
 curl -fsS http://127.0.0.1:8000/healthz
 ```
 
-不同平台参数、升级回滚、systemd 和已经准备好的 Compose 部署见[部署指南](docs/deployment.md)。
+第一次执行程序时，服务会自动拉取相同版本的沙箱镜像。OpenSAC 容器通过挂载 Docker socket 创建
+短生命周期、无网络的沙箱容器。Docker socket 权限等同于宿主机级 Docker 控制，请仅使用可信账户
+运行该服务栈。
+
+查看日志或停止服务：
+
+```bash
+docker compose --env-file compose.env logs -f opensac
+docker compose --env-file compose.env down
+```
+
+不同平台参数、升级回滚和 systemd 配置见[部署指南](docs/deployment.md)。
 本地稠密检索仍可作为外部高级后端使用，详见[本地稠密检索](docs/local-search.md)。
 
 ## 执行 Search-as-Code 程序
 
-在源码环境中运行客户端，并导出与服务端相同的 API key：
+服务可以继续运行在 Docker Compose 中。由于 Python 客户端没有发布到 PyPI，需要从当前源码检出
+安装客户端，并导出与服务端相同的 API key：
 
 ```bash
+uv sync --locked
 export OPENSAC_API_KEY=replace-with-the-same-api-key
 uv run python
 ```
@@ -134,18 +152,18 @@ with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
 
 | 方式 | 状态 | 适用场景 |
 | --- | --- | --- |
-| Git 源码检出 | 当前可用 | 开发、实验和当前部署 |
-| Docker Compose | 已准备；公开镜像发布后可用 | 预构建服务部署 |
+| Docker Compose | `v0.4.0` 已可用 | 推荐的预构建部署方式 |
+| Git 源码检出 | 可用 | 开发、实验和尚未发布的改动 |
 
-标签触发的发布工作流已配置为发布：
+`v0.4.0` 已发布适用于 Linux `amd64` 和 `arm64` 的多架构镜像：
 
-- API/broker 镜像 `ghcr.io/liuqi6777/opensac:X.Y.Z`；
-- 强化执行镜像 `ghcr.io/liuqi6777/opensac-sandbox:X.Y.Z`。
+- API/broker 镜像 `ghcr.io/liuqi6777/opensac:0.4.0`；
+- 强化执行镜像 `ghcr.io/liuqi6777/opensac-sandbox:0.4.0`。
 
-GitHub 会为标签生成常规源码归档；工作流不会发布或附加 Python package distribution。
+标签触发的工作流还会更新 `latest`，GitHub 也会为发布版本生成常规源码归档。工作流不会发布或附加
+Python package distribution，因此没有 PyPI 版本。
 
 服务镜像和沙箱镜像的版本应保持一致。生产环境应固定不可变版本或 digest，不要依赖 `latest`。
-在这些产物真正存在之前，不应把 GHCR 命令当作可用安装方式。
 
 ## SDK 接口
 

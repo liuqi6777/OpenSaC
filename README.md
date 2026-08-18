@@ -23,10 +23,10 @@ abstraction. It is not a reconstruction of Perplexity's internal search engine.
 > OpenSAC is an active research prototype (version `0.4.0`). APIs, deployment contracts, and
 > research artifacts may continue to evolve.
 
-> [!WARNING]
-> **Release status:** the `v0.4.0` Git tag does not exist yet, and the GHCR service images are not
-> publicly available. The Docker release workflow and Compose files are prepared, but the
-> currently usable installation path is a source checkout. PyPI publication is not planned.
+> [!NOTE]
+> **Release status:** [`v0.4.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.4.0) is
+> available with public, version-matched service and sandbox images on GHCR. Docker Compose is the
+> recommended installation path. OpenSAC does not publish a PyPI package.
 
 ## Why OpenSAC
 
@@ -64,21 +64,23 @@ The default Compose deployment has one long-running `opensac` API/broker contain
 short-lived, network-disabled sandbox container for each execution. It intentionally contains no
 `local_search` service.
 
-## Quick start from source
+## Quick start with Docker Compose
 
-This is the currently usable path before the first public release. It uses web search and does not
-start the optional local retriever.
+The public `v0.4.0` images provide the OpenSAC API/broker and the isolated execution sandbox. This
+deployment uses web search and intentionally does not start the optional local retriever.
 
-Requirements: Python 3.12+, [`uv`](https://docs.astral.sh/uv/), Docker Engine or Docker Desktop,
-and Serper + Jina credentials.
+Requirements: Git, Docker Engine or Docker Desktop with Docker Compose, and Serper + Jina
+credentials. Python and `uv` are only needed for the bundled client examples or source development.
 
-### 1. Install and configure
+### 1. Check out and configure the release
 
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-uv sync --locked --extra dev
+git checkout v0.4.0
 cp .env.example .env
+cp compose.env.example compose.env
+mkdir -p "$PWD/.opensac"
 ```
 
 Set these values in `.env`:
@@ -93,28 +95,42 @@ OPENSAC_JINA_API_KEY=replace-with-jina-key
 Do not commit `.env`. Provider credentials stay in the API container and are never passed to
 generated programs.
 
-### 2. Build the sandbox and start the service
+In `compose.env`, set `OPENSAC_CONTAINER_DATA_DIR` to the absolute path of `.opensac`, and set
+`OPENSAC_UID` and `OPENSAC_GID` to the output of `id -u` and `id -g`. On Linux, set
+`OPENSAC_DOCKER_GID` to the output of `stat -c '%g' /var/run/docker.sock`; on Docker Desktop, keep
+it at `0`. Leave both image tags at `0.4.0`.
+
+### 2. Pull and start the containers
 
 ```bash
-uv run opensac build-sandbox
-uv run opensac serve
-```
-
-The service stays in the foreground. In another terminal:
-
-```bash
+docker compose --env-file compose.env pull
+docker compose --env-file compose.env up -d
+docker compose --env-file compose.env ps
 curl -fsS http://127.0.0.1:8000/healthz
 ```
 
-Platform details, upgrades, rollback, systemd, and the prepared Compose deployment are in the
+The first program execution pulls the matching sandbox image automatically. The OpenSAC container
+mounts the Docker socket so it can create short-lived, network-disabled sandbox containers. Treat
+Docker socket access as host-level control and run the stack only under a trusted account.
+
+View logs or stop the stack with:
+
+```bash
+docker compose --env-file compose.env logs -f opensac
+docker compose --env-file compose.env down
+```
+
+Platform details, upgrades, rollback, and systemd are in the
 [deployment guide](docs/deployment.md). Local dense retrieval remains available as an external,
 advanced backend; see [Local dense search](docs/local-search.md).
 
 ## Run a Search-as-Code program
 
-Run the client from the source environment and export the same API key used by the service:
+The service can remain in Docker Compose. Because the Python client is not published on PyPI,
+install it from the checked-out source tree and export the same API key used by the service:
 
 ```bash
+uv sync --locked
 export OPENSAC_API_KEY=replace-with-the-same-api-key
 uv run python
 ```
@@ -150,20 +166,19 @@ For multi-query fusion, document filtering, persistent JSONL state, and passage 
 
 | Path | Status | Best for |
 | --- | --- | --- |
-| Git checkout | Available now | Development, experiments, and current deployments |
-| Docker Compose | Prepared; usable after public images are published | Prebuilt service deployment |
+| Docker Compose | Available in `v0.4.0` | Recommended prebuilt deployment |
+| Git checkout | Available | Development, experiments, and unreleased changes |
 
-The tag-triggered release workflow is configured to publish:
+The `v0.4.0` release publishes multi-architecture Linux images for `amd64` and `arm64`:
 
-- `ghcr.io/liuqi6777/opensac:X.Y.Z` as the API/broker image;
-- `ghcr.io/liuqi6777/opensac-sandbox:X.Y.Z` as the hardened execution image.
+- `ghcr.io/liuqi6777/opensac:0.4.0` as the API/broker image;
+- `ghcr.io/liuqi6777/opensac-sandbox:0.4.0` as the hardened execution image.
 
-GitHub also creates the normal source archives for the tagged release. The workflow does not
-publish or attach Python package distributions.
+The tag-triggered workflow also updates `latest`, and GitHub creates normal source archives for the
+release. It does not publish or attach Python package distributions, so there is no PyPI release.
 
 Service and sandbox versions should match. Production deployments should pin an immutable version
-or digest rather than `latest`. Until those artifacts exist, do not use the GHCR commands as
-installation instructions.
+or digest rather than `latest`.
 
 ## SDK surface
 

@@ -1,11 +1,11 @@
 # Deployment
 
-The release workflow is prepared to publish version-matched OpenSAC service and sandbox images,
-but no public release has been made yet. PyPI publication is not planned. The prepared Compose
-deployment runs the API and capability broker from the service image and starts an isolated
-sandbox container for each execution. It intentionally does **not** build or run the
-`local_search` service. For the current source-based path, use the shorter
-[Quick start](../README.md#quick-start-from-source).
+OpenSAC `v0.4.0` is publicly available as version-matched service and sandbox images on GHCR.
+Docker Compose is the recommended prebuilt deployment; it runs the API and capability broker from
+the service image and starts an isolated sandbox container for each execution. It intentionally
+does **not** build or run the `local_search` service. OpenSAC does not publish a PyPI package. For
+the shortest setup path, use the main README's
+[Quick start](../README.md#quick-start-with-docker-compose).
 
 ## Before you start
 
@@ -21,11 +21,7 @@ to run Docker commands. A source deployment additionally needs Python 3.12+ and 
 
 See [RL environment worker deployment](rl-environment-workers.md) for worker-pool details.
 
-## Prepared container deployment (after the first release)
-
-> [!WARNING]
-> The image and Git tag commands in this section become usable only after the first release has
-> completed and the GHCR packages have been made public.
+## Container deployment
 
 Check out a release tag only to obtain the versioned Compose files; the host does not build or
 install Python packages:
@@ -33,7 +29,7 @@ install Python packages:
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-git checkout vX.Y.Z
+git checkout v0.4.0
 cp .env.example .env
 cp compose.env.example compose.env
 mkdir -p "$PWD/.opensac"
@@ -144,16 +140,15 @@ OPENSAC_BUILD_COMMIT=replace-with-git-commit
 OPENSAC_SESSION_TTL_SECONDS=3600
 ```
 
-Create the data directory with write permission for the service account. Until a matching public
-sandbox image exists, build it locally before starting:
+Create the data directory with write permission for the service account, then start OpenSAC:
 
 ```bash
-uv run opensac build-sandbox
 uv run opensac serve
 ```
 
-After a release is public, the first execution can pull the release-matched sandbox image from
-GHCR instead. The serve command stays in the foreground.
+For a released revision, the first execution pulls the release-matched sandbox image from GHCR.
+Run `uv run opensac build-sandbox` before `serve` only when testing unreleased SDK or sandbox
+changes. The serve command stays in the foreground.
 
 ### Minimal systemd service
 
