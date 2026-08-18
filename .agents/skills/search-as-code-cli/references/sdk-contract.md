@@ -8,7 +8,7 @@ Use this reference when exact signatures, fields, limits, or failure semantics m
 - [Exact result fields](#exact-result-fields)
 - [Failure and alignment semantics](#failure-and-alignment-semantics)
 - [Retrieval and evidence limits](#retrieval-and-evidence-limits)
-- [State, output, and lifecycle](#state-output-and-lifecycle)
+- [Workspace state, output, and lifecycle](#workspace-state-output-and-lifecycle)
 - [Sandbox constraints](#sandbox-constraints)
 
 ## Capabilities
@@ -141,8 +141,14 @@ SDK models support attribute and read-only mapping access. Rows returned by `rea
 - Never cite a missing locator. Explicit `locator: None` is invalid. A ref-only citation resolves
   search-preview evidence and must not support a document-content claim.
 
-## State, output, and lifecycle
+## Workspace state, output, and lifecycle
 
+- `sdk.state` is the structured interface to the session workspace, not a separate database. There
+  is no `sdk.workspace` resource.
+- State paths are workspace-relative and cannot escape it. `sdk.state.list(prefix)` returns only
+  program artifacts and hides `.opensac-*` runtime files.
+- Execution observations show artifact paths, not their contents. A later program must call
+  `read_json` or `read_jsonl` to recover saved decisions.
 - Use one task-derived namespace such as `runs/<research_id>/`. A conversation can contain more
   than one research task while reusing the same session.
 - Use `merge_jsonl` for upserts, then `write_jsonl` when pruning a pool to a fixed bound.

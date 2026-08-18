@@ -1,6 +1,6 @@
 ---
 name: search-as-code
-description: Compose evidence-grounded OpenSAC research programs through the sac_run MCP tool. Use for programmable multi-query search, document inspection, fact checking, structured extraction, persistent research state, or passage-grounded citations when sac_run is available.
+description: Compose evidence-grounded OpenSAC research programs through the sac_run MCP tool. Use for programmable multi-query search, document inspection, fact checking, structured extraction, workspace-backed research state, or passage-grounded citations when sac_run is available.
 ---
 
 # Search as Code
@@ -30,52 +30,67 @@ from opensac_sdk import BrokerError, sdk
 - Keep stdout small. Stdout, stderr, and submitted output share one observation budget, and noisy
   progress can hide the final submitted result.
 
-## Run a bounded research stage
+## End stages deliberately
 
-Make one `sac_run` call carry a complete stage: search, rank, locate, verify, persist, and report.
+- **Review needed:** print bounded results and end with `NEXT:`, naming the model decision and
+  likely next operation.
+- **Research complete:** call `sdk.output.submit(...)` once with compact evidence and citations;
+  do not print them first. After `submitted output` appears, stop calling `sac_run` and answer.
 
-1. **Frame:** write explicit constraints and derive a stable `research_id` from the exact task and
-   constraint specifications. Store state under `runs/<research_id>/` so follow-up tasks in the
-   same conversation cannot reuse unrelated evidence.
-2. **Survey:** deduplicate query strings before `sdk.search.many`. Use 2-4 focused variants for a
-   known entity and 6-12 only for ambiguous or rare-clue discovery. Fuse with RRF, retain leaders
-   from every query, and cap the persisted pool.
-3. **Locate:** order refs by the current stage's RRF rank, then historical score. Call
-   `grep_report` on small ranked batches; grep fetches and caches documents, so do not send the
-   whole accumulated pool blindly.
-4. **Verify:** read around useful 1-indexed match lines, check every constraint separately, and
-   record attempted `(constraint, ref)` pairs so the next stage advances to new candidates.
-5. **Submit:** call `sdk.output.submit` only when every material claim has a verified locator.
-   Submit compact evidence excerpts and the exact locators used.
+A final research result must use `submit`; stdout is not a substitute.
 
-Use ordinary Python for joins, deduplication, regex, ranking, dates, set arithmetic, and coverage.
-Use `sdk.llm.extract_many` only when a configured pipeline model is needed for semantic work.
-JSON Schema validates shape, not truth: require an evidence quote and verify in Python that it is
-present in the source passage.
+## Split on model judgment
 
-## Persist and recover correctly
+Keep each `sac_run` call short. Pause when titles, snippets, or passages must be understood before
+choosing the next query, ref, pattern, or rule. An exploratory search-only stage is valid; do not
+append grep merely for completeness. Continue when an explicit rule determines the next inputs:
+search can fuse/filter, while known refs and patterns can grep/read in one program.
 
-Workspace files, refs, and locators survive later calls only while this conversation's OpenSAC
-session remains live; Python variables do not. Reload state at the start of every program.
+Frame constraints and source policy first. Use 2-4 queries for a known entity and 6-12 only for
+ambiguous discovery. Bound shortlists, grep small batches, read around useful 1-indexed lines, and
+submit only after every material claim has a locator.
 
-If `sac_run` returns `state_lost`, the submitted program was not replayed. Treat every prior
-workspace file, ref, and locator as gone. Start the next stage from clean state and do not resubmit
-the same program blindly.
+## Orchestrate with Python
 
-An observation such as `[sac_run] OpenSAC request failed` or a tool-level timeout comes from the
-adapter, outside the sandbox, so the program cannot catch it as `BrokerError`. Its execution
-outcome may be unknown because the model-visible tool supplies no execution ID. Do not replay the
-same program blindly. Use the next call as a small recovery stage that inspects the task namespace
-and usage, then resume only missing work. If repeated adapter failures prevent inspection, report
-OpenSAC as unavailable. Use another authorized research path only with explicit provenance, and
-never invent an OpenSAC locator for it.
+Use comprehensions and bounded combinations to build systematic queries. Use local predicates,
+dicts, sets, sorting, `filter`, `any`, `all`, and `zip(strict=True)` to select, join, rank, and
+measure coverage. Prefer `re`, dates, strings, and arithmetic to an LLM.
+
+Treat `sdk.llm.extract_many` as a semantic map, not an inner tool-calling agent. Validate its
+quotes, then let Python make at most a bounded follow-up capability call.
+
+## Use the workspace as program memory
+
+The session workspace is program-to-program memory through `sdk.state`; no `sdk.workspace` API
+exists. Stdout guides the control model, while workspace contents guide the next program.
+Observations show artifact paths, not their contents.
+
+For multi-call work, derive `runs/<research_id>/` from the task, requirements, and source policy.
+At each stage start, list and load its manifest, bounded candidate pool, verified evidence, and
+attempted `(constraint, ref)` pairs. Before ending with `NEXT:`, persist every useful update and
+confirm the expected artifact paths appear in the observation. Submit from the evidence ledger
+only after coverage is complete. Python variables do not survive a call.
+
+Stored refs and locators remain usable only while the same broker session is live. If `sac_run`
+returns `state_lost`, the submitted program was not replayed; treat the workspace and reference
+generation as gone, start clean, and do not resubmit the same program blindly.
+
+Adapter failures and tool timeouts occur outside the sandbox, so their execution outcome may be
+unknown. Do not replay the same program blindly. Inspect the task namespace and usage in one small
+recovery stage, then resume only missing work. If inspection repeatedly fails, report OpenSAC as
+unavailable; never invent an OpenSAC locator.
 
 ## Load details only when needed
 
 - Read [references/sdk-contract.md](references/sdk-contract.md) before using unfamiliar SDK
   methods, fields, failure types, limits, or citation behavior.
-- Read [references/patterns.md](references/patterns.md) before a multi-turn or multi-constraint
-  investigation, or before using checked semantic extraction.
+- Read [references/patterns.md](references/patterns.md) when a weaker model needs separate compact
+  examples for exploration and verification/submission.
+- Read [references/python-recipes.md](references/python-recipes.md) when query variants should be
+  generated systematically, search results filtered locally, coverage aggregated, or extraction
+  output used to drive a bounded follow-up action.
+- Read [references/stateful-research.md](references/stateful-research.md) only when a task must
+  continue across multiple `sac_run` calls and needs a workspace-backed candidate/evidence ledger.
 
-Avoid printing raw result objects, opaque refs, or whole pages, stopping after one constraint, or
-treating RRF agreement as independent-source corroboration.
+Avoid printing raw result objects, unbounded ref lists, or whole pages, stopping after one
+constraint, or treating RRF agreement as independent-source corroboration.

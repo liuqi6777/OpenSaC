@@ -1,11 +1,11 @@
 ---
 name: search-as-code-cli
-description: Run evidence-grounded OpenSAC research programs through the local opensac agent-run CLI. Use when Codex, Claude Code, or another shell-capable agent needs programmable multi-query search, document inspection, fact checking, checked extraction, persistent research state, or passage-grounded citations without MCP.
+description: Run evidence-grounded OpenSAC Python research through the local agent-run CLI for Codex, Claude Code, or another shell-capable agent. Use for multi-query search, document inspection, fact checking, extraction, workspace state, or passage-grounded citations without MCP.
 ---
 
 # Search as Code CLI
 
-Pipe one complete Python research stage to `opensac agent-run` through the current agent's shell:
+Pipe one Python research stage to `opensac agent-run`:
 
 ```bash
 opensac agent-run <<'OPENSAC_PY'
@@ -16,13 +16,11 @@ print(sdk.session.usage())
 OPENSAC_PY
 ```
 
-Use a quoted heredoc delimiter so the shell cannot expand generated Python. Put only the program
-on stdin; never encode it into a shell argument. Let the host bind the current conversation.
-Never expose, print, or override host conversation identity. Never create or manage REST sessions
-or call OpenSAC endpoints directly.
+Use a quoted heredoc to prevent shell expansion; send the program only on stdin, never in a shell
+argument. Let the host bind the conversation; never expose, print, or override its identity.
+Never create or manage REST sessions or call OpenSAC endpoints directly.
 
-If the command is unavailable or reports `context_*` or `configuration_error`, stop and report the
-setup problem.
+If unavailable or reporting `context_*` or `configuration_error`, stop and report setup failure.
 
 ## Keep the command and evidence boundaries intact
 
@@ -41,50 +39,68 @@ setup problem.
   results. After a final failure, change the query, source, or candidate instead of repeating it.
 - Keep stdout compact. Stdout, stderr, and submitted output share one observation budget.
 
-## Run a bounded research stage
+## End stages deliberately
 
-Make one CLI execution carry a complete stage: search, rank, locate, verify, persist, and report.
+- **Review needed:** print bounded results and end with `NEXT:`, naming the model decision and
+  likely next operation.
+- **Research complete:** call `sdk.output.submit(...)` once with compact evidence and citations;
+  do not print them first. After `submitted output` appears, stop calling `agent-run` and answer.
 
-1. **Frame:** define explicit constraints and derive a stable `research_id` from the exact task,
-   stable requirements, and source policy. Store state under `runs/<research_id>/`.
-2. **Survey:** deduplicate queries before `sdk.search.many`. Use 2-4 focused variants for a known
-   entity and 6-12 only for ambiguous discovery. Fuse with RRF, retain leaders from every query,
-   and cap the persisted pool.
-3. **Locate:** order refs by current-stage RRF rank, then historical score. Call `grep_report` on
-   small ranked batches; do not send the whole accumulated pool blindly.
-4. **Verify:** read around useful 1-indexed match lines, verify every constraint separately, and
-   record attempted `(constraint, ref)` pairs so later stages advance to new candidates.
-5. **Submit:** call `sdk.output.submit` only when every material claim has a verified locator.
-   Submit compact excerpts and the exact locators used.
+A final research result must use `submit`; stdout is not a substitute.
 
-Use ordinary Python for joins, deduplication, regex, ranking, dates, set arithmetic, and coverage.
-Use `sdk.llm.extract_many` only when a configured pipeline model is needed for semantic work.
-JSON Schema validates shape, not truth: require an evidence quote and verify in Python that it is
-present in the source passage.
+## Split on model judgment
 
-## Persist and recover correctly
+Keep each `agent-run` program short. Pause when titles, snippets, or passages must be understood
+before choosing the next query, ref, pattern, or rule. An exploratory search-only stage is valid;
+do not append grep merely for completeness. Continue when an explicit rule determines the next
+inputs: search can fuse/filter, while known refs and patterns can grep/read in one program.
 
-Workspace files, refs, and locators survive later `agent-run` calls only while the host-bound
-OpenSAC session remains live; Python variables do not. Reload state at the start of every program.
+Frame constraints and source policy first. Use 2-4 queries for a known entity and 6-12 only for
+ambiguous discovery. Bound shortlists, grep small batches, read around useful 1-indexed lines, and
+submit only after every material claim has a locator.
 
-If the observation reports `state_lost`, the submitted program was not replayed. Treat all prior
-workspace files, refs, and locators as gone. Start the next stage from clean state and do not
-resubmit the same program blindly.
+## Orchestrate with Python
 
-An adapter `HTTP 401` or `HTTP 403` observation is a host credential setup failure. Stop without
-retrying, and report it without printing or embedding any credential. Other adapter failures and
-timeouts occur outside the sandbox, so the program cannot catch them as `BrokerError`. Their
-execution outcome may be unknown because `agent-run` accepts no execution ID. Do not replay the
-same program blindly. Use the next invocation as a small recovery stage that inspects the task
-namespace and usage, then resume only missing work. If repeated adapter failures prevent
-inspection, report OpenSAC as unavailable and never invent an OpenSAC locator.
+Use comprehensions and bounded combinations to build systematic queries. Use local predicates,
+dicts, sets, sorting, `filter`, `any`, `all`, and `zip(strict=True)` to select, join, rank, and
+measure coverage. Prefer `re`, dates, strings, and arithmetic to an LLM.
+
+Treat `sdk.llm.extract_many` as a semantic map, not an inner tool-calling agent. Validate its
+quotes, then let Python make at most a bounded follow-up capability call.
+
+## Use the workspace as program memory
+
+The session workspace is program-to-program memory through `sdk.state`; no `sdk.workspace` API
+exists. Stdout guides the control model, while workspace contents guide the next program.
+Observations show artifact paths, not their contents.
+
+For multi-call work, derive a stable `research_id` and use `runs/<research_id>/`. At each stage
+start, list and load its manifest, bounded candidate pool, verified evidence, and attempted
+`(constraint, ref)` pairs. Before ending with `NEXT:`, persist every useful update and confirm the
+expected artifact paths appear in the observation. Submit from the evidence ledger only after
+coverage is complete. Python variables do not survive a call.
+
+Stored refs and locators remain usable only while the same host-bound session is live. If the
+observation reports `state_lost`, the submitted program was not replayed; treat the workspace and
+reference generation as gone, start clean, and do not resubmit the same program blindly.
+
+An adapter `HTTP 401` or `HTTP 403` means host credential setup failed; stop.
+Report it without printing or embedding any credential. Other adapter failures occur outside the
+sandbox, so execution outcome may be unknown. Do not replay blindly: inspect task state and usage
+once, resume missing work, or report OpenSAC as unavailable. Never invent an OpenSAC locator.
 
 ## Load details only when needed
 
 - Read [references/sdk-contract.md](references/sdk-contract.md) before using unfamiliar SDK
   methods, fields, failure types, limits, or citation behavior.
-- Read [references/patterns.md](references/patterns.md) before a multi-turn or multi-constraint
-  investigation, or before checked semantic extraction.
+- Read [references/patterns.md](references/patterns.md) when a weaker model needs separate compact
+  examples for exploration and verification/submission.
+- Read [references/python-recipes.md](references/python-recipes.md) when query variants should be
+  generated systematically, search results filtered locally, coverage aggregated, or extraction
+  output used to drive a bounded follow-up action.
+- Read [references/stateful-research.md](references/stateful-research.md) only when a task must
+  continue across multiple `agent-run` calls and needs a workspace-backed candidate/evidence
+  ledger.
 
-Avoid printing raw result objects, opaque refs, or whole pages, stopping after one constraint, or
-treating RRF agreement as independent-source corroboration.
+Avoid printing raw result objects, unbounded ref lists, or whole pages, stopping after one
+constraint, or treating RRF agreement as independent-source corroboration.

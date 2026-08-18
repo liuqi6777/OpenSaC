@@ -32,40 +32,123 @@ class SacConfig:
 
 _SKILL = """# Search as Code
 
-Your only tool is `sac_run(code)`. It runs Python in a networkless sandbox with
-`opensac_sdk` preinstalled. Begin each program with:
+Your only tool is `sac_run(code)`. It runs one complete Python research stage in a networkless
+sandbox with `opensac_sdk` preinstalled. Use the SDK only; do not call REST APIs or manage sessions.
+Begin programs with:
 
 ```python
 from opensac_sdk import BrokerError, sdk
 ```
 
-Core primitives:
+Core SDK surface:
 
-- `sdk.search(query, limit=10, offset=0)`
-- `sdk.search.many(queries, limit_per_query=10, offset=0, concurrency=5)`
-- `sdk.search.fuse_rrf(batches, weights=None, k=60, limit=None)`
-- `sdk.content.grep_report(refs, pattern, context=0, max_matches_per_ref=20)`
-- `sdk.content.read(refs, offset=1, limit=200, max_chars=100000)`
-- `sdk.content.get_many(refs)` and `sdk.content.snippets(query, refs, ...)`
-- `sdk.llm.complete(...)` and `sdk.llm.extract_many(...)`
-- `sdk.state.merge_jsonl/read_jsonl/write_json/read_json/exists/list`
-- `sdk.output.submit(output, citations=[{"ref": ref, "locator": locator}])`
+- Search with `sdk.search.many(...)`; combine batches with `sdk.search.fuse_rrf(...)`.
+- Inspect documents with `sdk.content.grep_report(...)` and `sdk.content.read(...)`; read offsets
+  are 1-indexed.
+- Use `sdk.llm.extract_many(...)` only for bounded semantic mapping.
+- Persist optional research state with `sdk.state`—there is no `sdk.workspace` API. Inspect
+  recovery usage with `sdk.session.usage()`.
+- Finish with `sdk.output.submit(output, citations=[{"ref": ref, "locator": locator}])`.
 
-Search returns opaque refs; never invent or edit them. Search snippets are previews, not final
-evidence. Read the content used for the answer. `grep_report` distinguishes no match from fetch
-failure; `read` offsets are 1-indexed. Cite the exact locator returned with a non-empty passage.
-Keep refs and locators lossless and reuse them only inside this live agent run.
+## Work in deliberate stages
 
-Make one program carry a full research stage: fan out 6-12 queries, fuse/deduplicate results,
-filter in ordinary Python, grep the pool, then read a few useful passages. Save a bounded pool
-and evidence ledger with `sdk.state`; files and refs survive across `sac_run` calls, but Python
-variables do not. Print or submit only compact conclusions because raw capability results remain
-inside the sandbox. Catch `BrokerError`, inspect typed `.failure` values, and make progress instead
-of repeating a failed call. Use `sdk.llm.extract_many` only for semantic work needing a checked
-JSON shape; use normal Python for regex, joins, ranking, counts, and coverage.
+Frame the requested claims and source policy first. For each tool call, write one short, bounded
+program.
 
-When every constraint has verified evidence, stop calling the tool and answer the user. Return
-the final answer directly as your entire response, without wrapper tags or a preamble.
+- Continue inside the same program when an explicit Python rule can choose the next input. It is
+  good to search, fuse, filter, grep, and read together when those transitions are mechanical.
+- Stop when choosing the next query, ref, pattern, or rule requires language judgment. Print at
+  most eight useful summaries with exact refs and end with one `NEXT:` line naming that decision.
+- A search-only stage is valid. Do not append grep merely for completeness.
+
+## Tiny examples
+
+When search results need interpretation, stop after a bounded preview:
+
+```python
+queries = ['"exact phrase" entity', "entity alternate wording"]
+batches = sdk.search.many(queries, limit_per_query=5)
+for item in sdk.search.fuse_rrf(batches).candidates[:5]:
+    print(f"CANDIDATE ref={item.ref!r} title={item.title!r}")
+print("NEXT: choose refs and checks")
+```
+
+For a one-claim task with known inputs, keep mechanical verification together:
+
+```python
+import re
+
+refs = ["copy-ref-exactly"]
+pattern = r"target phrase"
+report = sdk.content.grep_report(refs, pattern, context=2)
+passage = None
+for match in report.matches[:4]:
+    item = sdk.content.read(
+        [match.ref], offset=max(match.line - 8, 1), limit=30, max_chars=12_000
+    )[0]
+    if (
+        item.failure is None
+        and item.locator is not None
+        and re.search(pattern, item.text, re.IGNORECASE)
+    ):
+        passage = item
+        break
+
+if passage is None:
+    print("NEXT: revise refs or pattern")
+else:
+    sdk.output.submit(
+        {"evidence": [{"ref": passage.ref, "text": passage.text}]},
+        citations=[
+            {"ref": passage.ref, "locator": passage.locator.model_dump(mode="json")}
+        ],
+    )
+```
+
+Use bounded comprehensions, `filter`, dicts, sets, `sorted`, `any`, and `all` to generate queries,
+join by ref, rank candidates, and measure coverage. Prefer `re`, dates, strings, and arithmetic to
+an extraction call. `extract_many` cannot call tools or create trusted refs or locators: validate
+its quoted evidence, clean and cap any proposed follow-up inputs, then make only bounded SDK calls.
+
+## Keep the evidence boundary intact
+
+- Treat refs and locators as opaque. Never invent, edit, shorten, or reconstruct them.
+- Search metadata and snippets are for triage, or for a requested discovery list; they do not
+  support claims about document content.
+- For every material document-content claim, read a non-empty passage and preserve its returned
+  locator losslessly. A locator binds the passage to a retrieved document; it does not establish
+  source credibility or truth. Prefer primary sources and corroborate disputed claims.
+- Inspect `BrokerError` and typed item failures. Empty hits or zero matches are successful results,
+  not failures.
+
+## End each stage deliberately
+
+- `print` is intermediate scratch output for your next decision. Keep it bounded, avoid raw result
+  objects and whole pages, and end review stages with `NEXT:`.
+- `sdk.output.submit` is the terminal research result. Call it exactly once only after every
+  material claim has evidence and citations; do not print the payload first.
+- Stdout is not completion. After the observation contains `submitted output`, stop calling
+  `sac_run` and answer from that result.
+
+## Use workspace only when observation handoff is insufficient
+
+Default to bounded stdout handoff. Even an Explore then Verify flow can remain stateless when the
+chosen refs and checks fit safely in one observation. Passing five selected refs to the next stage
+needs no workspace; accumulating a 200-document pool and evidence across stages usually does.
+
+Upgrade to `sdk.state` only when a growing candidate pool, evidence ledger, or attempted-ref history
+must survive several stages, avoid replay, or recover after uncertain execution. Derive a stable
+`runs/<research_id>/` namespace from the task, stable requirements, and source policy. At each
+stage, list and load the needed manifest, pool, evidence, and attempts before capability calls;
+persist progress before `NEXT:` and submit only from a complete evidence ledger. Observations show
+workspace paths, not file contents, and Python variables do not survive calls.
+
+Refs, locators, and workspace artifacts remain valid only in this live session. On explicit
+`state_lost`, start clean. If a timeout or adapter failure has an unknown execution outcome, do not
+replay blindly: inspect the namespace and usage once, then resume only missing work. After a final
+capability failure, change the query, source, or candidate instead of repeating it.
+
+Return the final answer directly as your entire response, without wrapper tags or a preamble.
 """
 
 
@@ -93,7 +176,9 @@ class SacRunTool:
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": "Run a Python research program in the persistent OpenSAC sandbox.",
+                "description": (
+                    "Run one Python research stage in the current OpenSAC session."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {

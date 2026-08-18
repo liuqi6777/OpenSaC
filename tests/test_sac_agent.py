@@ -25,6 +25,56 @@ def test_sac_tool_constructor_has_no_mcp_lifecycle_policy() -> None:
     }.isdisjoint(parameters)
 
 
+def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
+    tool = SacRunTool()
+    prompt = tool.system_prompt_addendum
+
+    assert tool.schema["function"]["description"] == (
+        "Run one Python research stage in the current OpenSAC session."
+    )
+    assert len(prompt) < 6_000
+    normalized = " ".join(prompt.split())
+
+    for guidance in (
+        "explicit Python rule can choose the next input",
+        "requires language judgment",
+        "A search-only stage is valid",
+        "`print` is intermediate scratch output",
+        "`sdk.output.submit` is the terminal research result",
+        "Stdout is not completion",
+        "submitted output",
+        "Treat refs and locators as opaque",
+        "read a non-empty passage",
+        "read offsets are 1-indexed",
+        "there is no `sdk.workspace` API",
+        "cannot call tools or create trusted refs or locators",
+        "Even an Explore then Verify flow can remain stateless",
+        "Passing five selected refs to the next stage needs no workspace",
+        "Upgrade to `sdk.state` only when",
+        "candidate pool, evidence ledger, or attempted-ref history",
+        "do not replay blindly",
+    ):
+        assert guidance in normalized
+
+    assert "Core primitives:" not in prompt
+    assert "For a known entity, start with" not in prompt
+    assert "Print or submit" not in prompt
+
+    examples = [part.split("```", 1)[0] for part in prompt.split("```python")[1:]]
+    assert len(examples) == 3
+    assert max(len(example.splitlines()) for example in examples) <= 28
+    for example in examples:
+        compile(example, "<sac-agent-prompt-example>", "exec")
+    assert "sdk.search.many(" in examples[1]
+    assert 'print("NEXT: choose refs and checks")' in examples[1]
+    assert examples[2].index("sdk.content.grep_report(") < examples[2].index(
+        "sdk.content.read("
+    )
+    assert examples[2].index("sdk.content.read(") < examples[2].index(
+        "sdk.output.submit("
+    )
+
+
 class FakeModelClient:
     def __init__(self) -> None:
         self.calls = 0
@@ -91,9 +141,7 @@ async def test_model_runtime_settings_are_fixed(monkeypatch) -> None:
 
     client = ModelClient.__new__(ModelClient)
     client.config = config
-    client._client = SimpleNamespace(
-        chat=SimpleNamespace(completions=FakeCompletions())
-    )
+    client._client = SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
     await client.complete(messages=[], tools=[])
 
     assert requests == [

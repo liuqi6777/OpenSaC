@@ -10,6 +10,8 @@ MCP_SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
 PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
+RECIPES_PATH = SKILL_DIR / "references" / "python-recipes.md"
+STATEFUL_PATH = SKILL_DIR / "references" / "stateful-research.md"
 
 
 def _fenced_block(path: Path, fence: str, *, heading: str | None = None) -> str:
@@ -17,6 +19,10 @@ def _fenced_block(path: Path, fence: str, *, heading: str | None = None) -> str:
     if heading is not None:
         text = text.split(heading, 1)[1]
     return text.split(f"```{fence}", 1)[1].split("```", 1)[0].strip()
+
+
+def _fenced_blocks(path: Path, fence: str) -> list[str]:
+    return [part.split("```", 1)[0].strip() for part in path.read_text().split(f"```{fence}")[1:]]
 
 
 def _posix_program() -> str:
@@ -40,6 +46,17 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "without printing or embedding any credential" in skill
     assert "references/sdk-contract.md" in skill
     assert "references/patterns.md" in skill
+    assert "references/python-recipes.md" in skill
+    assert "references/stateful-research.md" in skill
+    assert "Split on model judgment" in skill
+    assert "exploratory search-only stage is valid" in skill
+    assert "A final research result must use `submit`" in skill
+    assert "semantic map, not an inner tool-calling agent" in skill
+    assert "Use the workspace as program memory" in skill
+    assert "program-to-program memory" in skill
+    assert "Observations show artifact paths, not their contents" in skill
+    assert "Before ending with `NEXT:`" in skill
+    assert "no `sdk.workspace` API" in skill
     assert "Codex, Claude Code, or another shell-capable agent" in skill.split("---", 2)[1]
     assert "SAC_API_" not in skill
     assert "SAC_CLI_" not in skill
@@ -66,10 +83,34 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
         == (MCP_SKILL_DIR / "references" / "sdk-contract.md").read_bytes()
     )
     assert PATTERNS_PATH.read_bytes() == (MCP_SKILL_DIR / "references" / "patterns.md").read_bytes()
+    assert (
+        RECIPES_PATH.read_bytes()
+        == (MCP_SKILL_DIR / "references" / "python-recipes.md").read_bytes()
+    )
+    assert (
+        STATEFUL_PATH.read_bytes()
+        == (MCP_SKILL_DIR / "references" / "stateful-research.md").read_bytes()
+    )
 
-    for heading in ("## Canonical multi-turn pattern", "## Checked semantic extraction"):
-        program = _fenced_block(PATTERNS_PATH, "python", heading=heading)
+    for path, heading in (
+        (PATTERNS_PATH, "## Explore candidates"),
+        (PATTERNS_PATH, "## Verify selected refs and submit"),
+    ):
+        program = _fenced_block(path, "python", heading=heading)
         compile(program, "<search-as-code-cli-pattern>", "exec")
+        validate_code(program)
+
+    stateful_stages = _fenced_blocks(STATEFUL_PATH, "python")
+    assert len(stateful_stages) == 4
+    assert max(len(program.splitlines()) for program in stateful_stages) <= 55
+    for program in stateful_stages:
+        compile(program, "<search-as-code-cli-stateful-stage>", "exec")
+        validate_code(program)
+
+    recipes = _fenced_blocks(RECIPES_PATH, "python")
+    assert len(recipes) == 4
+    for program in recipes:
+        compile(program, "<search-as-code-cli-recipe>", "exec")
         validate_code(program)
 
 

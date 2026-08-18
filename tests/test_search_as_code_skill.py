@@ -28,10 +28,14 @@ from opensac_sdk.state import StateResource
 
 from opensac.sandbox.validator import validate_code
 
-SKILL_DIR = Path(__file__).parents[1] / ".agents" / "skills" / "search-as-code"
+ROOT = Path(__file__).parents[1]
+SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
 PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
+RECIPES_PATH = SKILL_DIR / "references" / "python-recipes.md"
+STATEFUL_PATH = SKILL_DIR / "references" / "stateful-research.md"
+STATEFUL_PROGRAM_PATH = ROOT / "tests" / "data" / "search_as_code_stateful_program.py"
 
 
 def _code_block(path: Path, heading: str) -> str:
@@ -40,12 +44,24 @@ def _code_block(path: Path, heading: str) -> str:
     return section.split("```python", 1)[1].split("```", 1)[0]
 
 
-def _canonical_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Canonical multi-turn pattern")
+def _explore_pattern() -> str:
+    return _code_block(PATTERNS_PATH, "## Explore candidates")
 
 
-def _semantic_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Checked semantic extraction")
+def _verify_pattern() -> str:
+    return _code_block(PATTERNS_PATH, "## Verify selected refs and submit")
+
+
+def _stateful_pattern() -> str:
+    return STATEFUL_PROGRAM_PATH.read_text(encoding="utf-8")
+
+
+def _workspace_probe() -> str:
+    return _python_blocks(STATEFUL_PATH)[2]
+
+
+def _python_blocks(path: Path) -> list[str]:
+    return [part.split("```", 1)[0] for part in path.read_text().split("```python")[1:]]
 
 
 def _artifact(state: StateResource, name: str) -> str:
@@ -265,12 +281,19 @@ def _run_pattern(
         content=content,
         output=output,
         state=StateResource(str(tmp_path)),
+        session=SimpleNamespace(
+            usage=lambda: {
+                "search_calls": 3,
+                "content_fetches": 4,
+                "terminal_reason": None,
+            }
+        ),
     )
     module = ModuleType("opensac_sdk")
     module.BrokerError = BrokerError
     module.sdk = sdk
     printed = io.StringIO()
-    source = program or _canonical_pattern()
+    source = program or _stateful_pattern()
     with patch.dict(sys.modules, {"opensac_sdk": module}), contextlib.redirect_stdout(printed):
         for turn in range(1, turns + 1):
             search.turn = turn
@@ -298,11 +321,22 @@ def test_skill_is_small_and_routes_detailed_contracts() -> None:
     assert "Never call `bind_context`" in skill
     assert "state_lost" in skill
     assert "submitted program was not replayed" in skill
-    assert "outcome may be unknown" in skill
+    assert "execution outcome may be" in skill
     assert "same program blindly" in skill
     assert "OpenSAC locator" in skill
     assert "references/sdk-contract.md" in skill
     assert "references/patterns.md" in skill
+    assert "references/python-recipes.md" in skill
+    assert "references/stateful-research.md" in skill
+    assert "Split on model judgment" in skill
+    assert "exploratory search-only stage is valid" in skill
+    assert "A final research result must use `submit`" in skill
+    assert "semantic map, not an inner tool-calling agent" in skill
+    assert "Use the workspace as program memory" in skill
+    assert "program-to-program memory" in skill
+    assert "Observations show artifact paths, not their contents" in skill
+    assert "Before ending with `NEXT:`" in skill
+    assert "no `sdk.workspace` API" in skill
     assert "fact checking" in skill.split("---", 2)[1]
     assert "session_id" not in skill
     assert "SAC_MCP_" not in skill
@@ -336,28 +370,198 @@ def test_documented_model_fields_match_the_sdk() -> None:
     for name, model in models.items():
         assert _documented_fields(contract, name) == set(model.model_fields)
     assert "GrepFailure" not in contract
+    assert "structured interface to the session workspace" in contract
+    assert "Execution observations show artifact paths, not their contents" in contract
+    assert "not a separate database" in contract
+    assert "`sdk.workspace` resource" in contract
 
 
 def test_patterns_compile_and_pass_sandbox_validation() -> None:
-    pattern = _canonical_pattern()
-    semantic = _semantic_pattern()
+    explore = _explore_pattern()
+    verify = _verify_pattern()
+    stateful = _stateful_pattern()
+    stateful_stages = _python_blocks(STATEFUL_PATH)
+    workspace_probe = _workspace_probe()
+    recipes = _python_blocks(RECIPES_PATH)
 
-    compile(pattern, "<search-as-code-pattern>", "exec")
-    compile(semantic, "<search-as-code-semantic-pattern>", "exec")
-    validate_code(pattern)
-    validate_code(semantic)
-    assert 'root = f"runs/{research_id}"' in pattern
-    assert "POOL_LIMIT = 200" in pattern
-    assert "CONTENT_BATCH = 40" in pattern
-    assert "READ_LIMIT_PER_CONSTRAINT = 6" in pattern
-    assert "sdk.state.merge_jsonl(pool_path" in pattern
-    assert "sdk.state.write_jsonl(pool_path, bounded_pool)" in pattern
-    assert '"requirements": {name: spec["requirement"]' in pattern
-    assert '"source_policy": source_policy' in pattern
-    assert "ordered_refs" in pattern
-    assert "attempted[name]" in pattern
-    assert "grep_report(list(pool)" not in pattern
-    assert "sdk.output.submit(" in pattern
+    for name, program in (
+        ("explore", explore),
+        ("verify", verify),
+        ("stateful-fixture", stateful),
+        ("workspace-probe", workspace_probe),
+        *((f"stateful-stage-{index}", program) for index, program in enumerate(stateful_stages, 1)),
+        *((f"recipe-{index}", program) for index, program in enumerate(recipes, 1)),
+    ):
+        compile(program, f"<search-as-code-{name}-pattern>", "exec")
+        validate_code(program)
+
+    assert len(explore.splitlines()) <= 45
+    assert "sdk.search.many(" in explore
+    assert "sdk.search.fuse_rrf(" in explore
+    assert ".candidates[:8]" in explore
+    assert "NEXT:" in explore
+    assert "sdk.content.grep_report(" not in explore
+    assert "sdk.output.submit(" not in explore
+
+    assert len(verify.splitlines()) <= 75
+    assert "sdk.search.many(" not in verify
+    assert "NEXT:" in verify
+    assert "passage.locator.model_dump" in verify
+    assert verify.index("sdk.content.grep_report(") < verify.index("sdk.content.read(")
+    assert verify.index("sdk.content.read(") < verify.index("sdk.output.submit(")
+    assert verify.count("sdk.output.submit(") == 1
+
+    assert "sdk.state." not in explore
+    assert "sdk.state." not in verify
+
+    assert 'root = f"runs/{research_id}"' in stateful
+    assert "POOL_LIMIT = 200" in stateful
+    assert "CONTENT_BATCH = 40" in stateful
+    assert "READ_LIMIT_PER_CONSTRAINT = 6" in stateful
+    assert "sdk.state.merge_jsonl(pool_path" in stateful
+    assert 'sdk.state.list(f"{root}/")' in stateful
+    assert "sdk.state.write_jsonl(pool_path, bounded_pool)" in stateful
+    assert '"requirements": {name: spec["requirement"]' in stateful
+    assert '"source_policy": source_policy' in stateful
+    assert "ordered_refs" in stateful
+    assert "attempted[name]" in stateful
+    assert "grep_report(list(pool)" not in stateful
+    assert "sdk.output.submit(" in stateful
+
+    stateful_reference = STATEFUL_PATH.read_text(encoding="utf-8")
+    assert len(stateful_reference.splitlines()) <= 225
+    assert len(stateful_stages) == 4
+    assert max(len(program.splitlines()) for program in stateful_stages) <= 55
+    assert "code block is one stage" in stateful_reference
+    assert "Searching first" in stateful_reference
+    assert "## Canonical stateful pattern" not in stateful_reference
+    assert "## Workspace contract" in stateful_reference
+    assert "| `manifest.json` |" in stateful_reference
+    assert "| `pool.jsonl` |" in stateful_reference
+    assert "| `evidence.json` |" in stateful_reference
+    assert "| `attempts.json` |" in stateful_reference
+    assert "workspace is the program's durable notebook" in stateful_reference
+
+    assert len(recipes) == 4
+    recipe_text = "\n".join(recipes)
+    assert "for year in years" in recipe_text
+    assert "list(filter(keep, candidates))" in recipe_text
+    assert "sdk.llm.extract_many(" in recipe_text
+    assert 'quote in item["text"]' in recipe_text
+    assert "sdk.search.many(followup_queries" in recipe_text
+    assert "MAX_FOLLOWUPS = 6" in recipe_text
+    assert "while " not in recipe_text
+
+
+def test_query_recipe_builds_a_bounded_unique_year_matrix() -> None:
+    namespace: dict[str, object] = {}
+    exec(compile(_python_blocks(RECIPES_PATH)[0], "<query-grid-recipe>", "exec"), namespace)
+
+    queries = namespace["queries"]
+    assert isinstance(queries, list)
+    assert len(queries) == 20
+    assert len(set(queries)) == len(queries)
+    assert all(any(str(year) in query for query in queries) for year in range(2019, 2024))
+
+
+def test_workspace_probe_recovers_saved_research_progress(tmp_path: Path) -> None:
+    research_id = "workspace-test"
+    root = f"runs/{research_id}"
+    state = StateResource(str(tmp_path))
+    state.write_json(f"{root}/manifest.json", {"task": "test"})
+    state.write_jsonl(f"{root}/pool.jsonl", [{"ref": "ref_1"}])
+    state.write_json(f"{root}/evidence.json", {"phrase": {"ref": "ref_1"}})
+    state.write_json(f"{root}/attempts.json", {"phrase": {"refs": ["ref_1"]}})
+
+    program = _workspace_probe().replace("copy-the-task-derived-id", research_id)
+    _, _, output, printed = _run_pattern(tmp_path, program=program)
+
+    assert f"WORKSPACE research={research_id}" in printed
+    assert "pool=1" in printed
+    assert "evidence=['phrase']" in printed
+    assert "terminal=None" in printed
+    assert printed.strip().endswith("NEXT: resume only the missing constraint or stage")
+    assert not output.submissions
+
+
+def test_stateful_stage_examples_progress_from_workspace_to_submit(tmp_path: Path) -> None:
+    stages = _python_blocks(STATEFUL_PATH)
+
+    sdk, _, output, searched = _run_pattern(tmp_path, program=stages[0])
+    match = re.search(r"research=([0-9a-f]{12})", searched)
+    assert match is not None
+    research_id = match.group(1)
+    assert sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
+    assert "NEXT: inspect candidates" in searched
+    assert not output.submissions
+
+    _, _, output, verified_phrase = _run_pattern(
+        tmp_path,
+        program=stages[1].replace("copy-the-task-derived-id", research_id),
+    )
+    assert "constraint=phrase verified=True" in verified_phrase
+    assert not output.submissions
+
+    year_stage = (
+        stages[1]
+        .replace("copy-the-task-derived-id", research_id)
+        .replace('name = "phrase"', 'name = "year"')
+        .replace(
+            'requirement = "Attribute the target phrase to the entity."',
+            'requirement = "Relate the target event to 1998 or 1999."',
+        )
+        .replace(
+            'pattern = r"(target phrase|other spelling)"',
+            r'pattern = r"\b(1998|1999)\b"',
+        )
+    )
+    sdk, _, output, verified_year = _run_pattern(tmp_path, program=year_stage)
+    assert "constraint=year verified=True" in verified_year
+    assert set(sdk.state.read_json(_artifact(sdk.state, "evidence.json"))) == {"phrase", "year"}
+    assert not output.submissions
+
+    _, _, output, printed = _run_pattern(
+        tmp_path,
+        program=stages[3].replace("copy-the-task-derived-id", research_id),
+    )
+    assert printed == ""
+    assert len(output.submissions) == 1
+
+
+def test_explore_pattern_stops_for_model_judgment(tmp_path: Path) -> None:
+    _, content, output, printed = _run_pattern(tmp_path, program=_explore_pattern())
+
+    lines = printed.strip().splitlines()
+    assert 1 <= sum(line.startswith("CANDIDATE ") for line in lines) <= 8
+    assert lines[-1].startswith("NEXT: inspect")
+    assert not content.grep_calls
+    assert not output.submissions
+
+
+def test_verify_pattern_submits_instead_of_printing_final_evidence(tmp_path: Path) -> None:
+    _, content, output, printed = _run_pattern(tmp_path, program=_verify_pattern())
+
+    assert printed == ""
+    assert len(content.grep_calls) == 2
+    assert content.read_refs
+    assert len(output.submissions) == 1
+    submitted, citations = output.submissions[0]
+    assert {row["constraint"] for row in submitted["evidence"]} == {"phrase", "year"}
+    assert all(citation["locator"]["id"].startswith("read-") for citation in citations)
+
+
+def test_verify_pattern_ends_in_next_when_model_judgment_is_needed(tmp_path: Path) -> None:
+    _, _, output, printed = _run_pattern(
+        tmp_path,
+        program=_verify_pattern(),
+        missing_year=True,
+    )
+
+    lines = printed.strip().splitlines()
+    assert lines[0].startswith("EVIDENCE phrase:")
+    assert lines[-1].startswith("NEXT:")
+    assert "missing=['year']" in lines[-1]
+    assert not output.submissions
 
 
 def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -> None:
@@ -507,7 +711,7 @@ def test_pattern_does_not_replay_refs_after_call_wide_content_failure(tmp_path: 
 
 
 def test_pattern_isolates_a_changed_task_in_a_new_state_namespace(tmp_path: Path) -> None:
-    original = _canonical_pattern()
+    original = _stateful_pattern()
     changed = original.replace(
         "Identify the target entity and verify the requested phrase and year.",
         "Identify a different entity while verifying the same phrase and year.",
@@ -524,7 +728,7 @@ def test_pattern_isolates_a_changed_task_in_a_new_state_namespace(tmp_path: Path
 
 
 def test_pattern_revalidates_changed_regex_in_the_same_namespace(tmp_path: Path) -> None:
-    original = _canonical_pattern()
+    original = _stateful_pattern()
     changed = original.replace(
         r"(target phrase|other spelling)",
         r"target phrase",
