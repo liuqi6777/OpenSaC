@@ -58,7 +58,7 @@ uv run opensac serve
 ```
 
 Backend setup, including local retrieval and web search, is documented in the
-[main OpenSAC README](../README.md#setup). The agent does not need to know which
+[main OpenSAC README](../README.md#quick-start). The agent does not need to know which
 backend the server uses.
 
 In another shell, configure the control model:
@@ -211,7 +211,7 @@ other values include `timeout`, `max_turns`, and `invalid_response`.
   and submitted output, and keeps both ends when truncation is necessary.
 
 For the SDK surface and recommended program shape, see the
-[Search-as-Code skill](../skills/search-as-code/SKILL.md).
+[Search-as-Code skill](../.agents/skills/search-as-code/SKILL.md).
 
 ## Troubleshooting
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from opensac.sandbox.validator import validate_code
 
-SKILL_DIR = Path(__file__).parents[1] / "skills" / "search-as-code-cli"
+SKILL_DIR = Path(__file__).parents[1] / ".agents" / "skills" / "search-as-code-cli"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 
 

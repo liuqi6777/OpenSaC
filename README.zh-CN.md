@@ -64,8 +64,8 @@ OpenSAC 有意不负责 agent loop。外部控制平面选择模型、生成程�
 | `sandbox/` | 强化的 Docker 镜像与沙箱入口 |
 | `sac_agent/` | 仅暴露一个 `sac_run(code)` 工具的最小 ReAct 控制智能体 |
 | `local_search/` | 独立的 FAISS 稠密检索服务 |
-| `skills/search-as-code/` | 供 coding agent 使用的 Search-as-Code skill |
-| `skills/search-as-code-cli/` | 供纯 CLI 适配器使用的 Search-as-Code skill |
+| `.agents/skills/search-as-code/` | 供 coding agent 使用的 Search-as-Code skill |
+| `.agents/skills/search-as-code-cli/` | 供纯 CLI 适配器使用的 Search-as-Code skill |
 | `examples/` | SDK 示例程序与本地运行器 |
 | `tests/` | 单元、集成、安全与 Docker 端到端测试 |
 | `docs/` | 设计、部署、研究观测与版本文档 |
@@ -80,6 +80,10 @@ OpenSAC 有意不负责 agent loop。外部控制平面选择模型、生成程�
   - 内置本地检索器、对应 FAISS 索引，以及足够的内存/GPU 资源；或
   - 用于网页检索的 Serper 和 Jina API 凭证
 - 可选：用于 `sdk.llm.*` 的 OpenAI 兼容 Chat Completions 服务
+
+> [!NOTE]
+> OpenSAC 目前只支持从 Git 源码检出进行安装和部署，暂不支持 PyPI、仅 wheel 部署或预构建的 OpenSAC
+> 服务镜像。安装依赖和构建沙箱时应位于仓库根目录。
 
 ## 快速开始
 
@@ -143,6 +147,9 @@ uv run opensac serve
 ```bash
 curl -fsS http://127.0.0.1:8000/healthz
 ```
+
+以上命令适合前台开发。长期运行的源码部署，包括 systemd、反向代理、持久化路径、就绪检查以及升级和
+回滚流程，参见[源码部署指南](docs/deployment.md)。
 
 ### 4. 执行 Search-as-Code 程序
 
@@ -223,30 +230,61 @@ OpenSAC 支持三种驱动方式：
    `sac_run(code)` 工具，并在一个 rollout 内复用 session。可运行的
    [`sac_agent`](sac_agent/README.md) 展示了最小 OpenAI 兼容 ReAct 循环。
 2. **通过纯 CLI 接入 coding agent**：安装
-   [`skills/search-as-code-cli`](skills/search-as-code-cli/SKILL.md)，将每段生成的 Python 程序通过
+   [`.agents/skills/search-as-code-cli`](.agents/skills/search-as-code-cli/SKILL.md)，将每段生成的 Python 程序通过
    stdin 交给 `opensac agent-run`。适配器从宿主环境派生对话上下文，模型不接触 session ID。
 3. **通过 MCP 接入 coding agent**：以本地 stdio 服务运行 `opensac mcp`，并安装
-   [`skills/search-as-code`](skills/search-as-code/SKILL.md)。公开执行接口只有
+   [`.agents/skills/search-as-code`](.agents/skills/search-as-code/SKILL.md)。公开执行接口只有
    `sac_run(code)`；对话身份、session 创建、lease 续租和恢复都由 MCP 适配层负责，不进入模型参数。
 
 `sac_agent` 使用的控制模型端点，与沙箱内通过 `sdk.llm.*` 暴露的可选 pipeline 模型端点彼此独立。
 
+### 选择项目级或全局级接入
+
+CLI 命令只需按用户安装一次；skill 和 MCP server 可以限制在一个目标项目中，也可以对当前用户的所有项目
+生效：
+
+| 宿主 | 项目级 | 全局/用户级 |
+| --- | --- | --- |
+| Codex skill | `<project>/.agents/skills/` | `~/.agents/skills/` |
+| Codex MCP | `<project>/.codex/config.toml` | `~/.codex/config.toml` |
+| Claude Code skill | `<project>/.claude/skills/` | `~/.claude/skills/` |
+| Claude Code MCP | `<project>/.mcp.json` | `~/.claude.json`，使用 `--scope user` |
+
+只希望在一个仓库中使用 OpenSAC 时选择项目级；可移植的项目配置也可以提交给团队。个人需要在多个仓库中
+复用时选择全局级。项目级 MCP 配置不得写入明文 API key，应引用环境变量。以上位置与作用域来自官方
+[Codex skills](https://developers.openai.com/codex/skills)、
+[Codex MCP](https://developers.openai.com/codex/mcp)、
+[Claude Code skills](https://code.claude.com/docs/en/skills)和
+[Claude Code MCP](https://code.claude.com/docs/en/mcp)文档。
+
+本仓库统一以 `.agents/skills/` 作为所有 skill 的唯一源码目录，Codex 直接发现，Claude Code 则通过
+指向 `../.agents/skills` 的 `.claude/skills` 目录软链接加载。新增共享项目 skill 时，只需创建
+`.agents/skills/<skill-name>/SKILL.md`，两个宿主都会从同一份源码发现它。下面的安装命令只用于其他
+目标项目或全局安装。
+
 ### 纯 CLI（无需 MCP）
 
-安装命令与 CLI 专用 skill，然后启动 OpenSAC API：
+先安装命令，再选择一种 skill 作用域。`AGENT_PROJECT` 是准备使用 OpenSAC 的目标仓库：
 
 ```bash
 export OPENSAC_REPO=/absolute/path/to/OpenSaC
+export AGENT_PROJECT=/absolute/path/to/your/project
 uv tool install --editable "$OPENSAC_REPO"
 
-# Codex
-mkdir -p ~/.codex/skills
-cp -R "$OPENSAC_REPO/skills/search-as-code-cli" ~/.codex/skills/
+# 项目级——只需执行自己使用的宿主对应的复制命令。
+mkdir -p "$AGENT_PROJECT/.agents/skills" "$AGENT_PROJECT/.claude/skills"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" "$AGENT_PROJECT/.agents/skills/"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" "$AGENT_PROJECT/.claude/skills/"
 
-# Claude Code
-mkdir -p ~/.claude/skills
-cp -R "$OPENSAC_REPO/skills/search-as-code-cli" ~/.claude/skills/
+# 全局级——只需执行自己使用的宿主对应的复制命令。
+mkdir -p ~/.agents/skills ~/.claude/skills
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" ~/.agents/skills/
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" ~/.claude/skills/
+```
 
+在启动 agent 的环境中设置连接参数，然后启动 OpenSAC API：
+
+```bash
 export SAC_API_BASE=http://127.0.0.1:8000
 export SAC_API_KEY=replace-with-your-opensac-key
 ```
@@ -277,23 +315,55 @@ OPENSAC_PY
 原始对话 ID 会先结合 host namespace 做 SHA-256 派生，再进入持久化状态。每次 CLI 调用退出时只关闭
 HTTP client，带 lease 的服务端 session 仍可恢复。服务端返回 `session_expired` 或
 `worker_restarted` 时不会自动重放失败程序；本次返回 `state_lost`，下一次调用进入干净的新
-generation。Claude Code 官方文档说明了其子进程 session 变量和个人 skill 目录，见
-[环境变量](https://code.claude.com/docs/en/env-vars)与
-[skills](https://code.claude.com/docs/en/skills)。
+generation。
+
+### 安装 MCP skill
+
+MCP 使用 `.agents/skills/search-as-code`，而不是 CLI 专用 skill。选择同样的项目级或全局级作用域：
+
+```bash
+export OPENSAC_REPO=/absolute/path/to/OpenSaC
+export AGENT_PROJECT=/absolute/path/to/your/project
+
+# 项目级——只需执行自己使用的宿主对应的复制命令。
+mkdir -p "$AGENT_PROJECT/.agents/skills" "$AGENT_PROJECT/.claude/skills"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code" "$AGENT_PROJECT/.agents/skills/"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code" "$AGENT_PROJECT/.claude/skills/"
+
+# 全局级——只需执行自己使用的宿主对应的复制命令。
+mkdir -p ~/.agents/skills ~/.claude/skills
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code" ~/.agents/skills/
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code" ~/.claude/skills/
+```
 
 ### Codex MCP
 
-先启动 OpenSAC API，再使用仓库绝对路径注册 MCP 服务：
+先启动 OpenSAC API，再选择一种配置作用域。
+
+**项目级。** 将下面配置合并到 `<project>/.codex/config.toml`。Codex 只会在项目被信任后读取项目配置。
+在启动 Codex 的环境中提供 `SAC_API_KEY`。每台机器需要替换源码绝对路径，或在提交前约定统一路径：
+
+```toml
+[mcp_servers.opensac]
+command = "uv"
+args = ["--directory", "/absolute/path/to/OpenSaC", "run", "opensac", "mcp"]
+env_vars = ["SAC_API_KEY"]
+
+[mcp_servers.opensac.env]
+SAC_API_BASE = "http://127.0.0.1:8000"
+```
+
+**全局级。** `codex mcp add` 会把 server 写入用户配置，并让所有项目都能使用：
 
 ```bash
 export OPENSAC_REPO=/absolute/path/to/OpenSaC
 export SAC_API_BASE=http://127.0.0.1:8000
 export SAC_API_KEY=replace-with-your-opensac-key
 
-codex mcp add \
+codex mcp add opensac \
   --env SAC_API_BASE="$SAC_API_BASE" \
   --env SAC_API_KEY="$SAC_API_KEY" \
-  opensac -- uv --directory "$OPENSAC_REPO" run opensac mcp
+  -- uv --directory "$OPENSAC_REPO" run opensac mcp
 ```
 
 Codex 会在 MCP 请求 metadata 中提供当前 task 身份。如果该字段缺失，适配层会 fail closed，不会退化为
@@ -301,21 +371,51 @@ Codex 会在 MCP 请求 metadata 中提供当前 task 身份。如果该字段�
 
 ### Claude Code MCP
 
-注册同一个 stdio 服务：
+先启动 OpenSAC API，再选择一种配置作用域。
+
+**项目级。** 将下面配置加入 `<project>/.mcp.json`。路径和凭据从每位用户的环境变量展开，因此配置本身
+可以提交。启动 Claude Code 前导出 `OPENSAC_REPO` 和 `SAC_API_KEY`：
+
+```json
+{
+  "mcpServers": {
+    "opensac": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["--directory", "${OPENSAC_REPO}", "run", "opensac", "mcp"],
+      "env": {
+        "SAC_API_BASE": "${SAC_API_BASE:-http://127.0.0.1:8000}",
+        "SAC_API_KEY": "${SAC_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Claude Code 首次使用项目级 `.mcp.json` server 时会请求确认。
+
+**全局级。** 将同一个 stdio server 注册到用户配置：
 
 ```bash
 export OPENSAC_REPO=/absolute/path/to/OpenSaC
 export SAC_API_BASE=http://127.0.0.1:8000
 export SAC_API_KEY=replace-with-your-opensac-key
 
-claude mcp add --scope user opensac \
-  -e SAC_API_BASE="$SAC_API_BASE" \
-  -e SAC_API_KEY="$SAC_API_KEY" \
+claude mcp add \
+  --scope user \
+  --env SAC_API_BASE="$SAC_API_BASE" \
+  --env SAC_API_KEY="$SAC_API_KEY" \
+  --transport stdio \
+  opensac \
   -- uv --directory "$OPENSAC_REPO" run opensac mcp
 ```
 
-将下面的 hook 合并到 `~/.claude/settings.json`。每次调用 `sac_run` 前，它会把 Claude Code 官方 hook
-输入中的 `session_id` 传给宿主专用的 `bind_context` 工具，agent 不参与绑定：
+Claude Code 还支持 `--scope local`：它只对当前项目生效，但配置保存在用户目录而不是 `.mcp.json`，
+适合不希望提交的个人项目配置。
+
+最后安装对话绑定 hook：项目级接入合并到 `<project>/.claude/settings.json`，全局级接入合并到
+`~/.claude/settings.json`。每次调用 `sac_run` 前，hook 会把 Claude Code 的 `session_id` 传给宿主专用
+的 `bind_context` 工具：
 
 ```json
 {
@@ -363,6 +463,7 @@ HTTP client，不删除 session。如果服务端返回 `session_expired` 或 `w
 
 ## 文档
 
+- [源码部署指南](docs/deployment.md)
 - [设计目标与能力路线图](docs/design.md)
 - [OpenSAC 0.4 版本与迁移说明](docs/opensac-0.4.md)
 - [本地稠密检索](docs/local-search.md)

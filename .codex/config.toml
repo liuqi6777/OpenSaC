@@ -1,0 +1,10 @@
+[mcp_servers.opensac]
+command = "uv"
+args = ["run", "opensac", "mcp"]
+env_vars = ["SAC_API_KEY"]
+
+[mcp_servers.opensac.env]
+SAC_API_BASE = "http://127.0.0.1:8000"
+
+[mcp_servers.opensac.tools.sac_run]
+approval_mode = "approve"

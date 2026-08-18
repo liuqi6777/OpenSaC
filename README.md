@@ -76,8 +76,8 @@ See [Design goals and capability roadmap](docs/design.md) for the full research 
 | `sandbox/` | Hardened Docker image and sandbox entrypoint |
 | `sac_agent/` | Minimal ReAct control agent exposing one `sac_run(code)` tool |
 | `local_search/` | Standalone FAISS dense-retrieval service |
-| `skills/search-as-code/` | Search-as-Code skill for coding agents |
-| `skills/search-as-code-cli/` | Search-as-Code skill for the pure CLI adapter |
+| `.agents/skills/search-as-code/` | Search-as-Code skill for coding agents |
+| `.agents/skills/search-as-code-cli/` | Search-as-Code skill for the pure CLI adapter |
 | `examples/` | Example SDK programs and local runners |
 | `tests/` | Unit, integration, security, and Docker end-to-end tests |
 | `docs/` | Design, deployment, instrumentation, and release documentation |
@@ -92,6 +92,11 @@ See [Design goals and capability roadmap](docs/design.md) for the full research 
   - the included local retriever, its FAISS index, and sufficient RAM/GPU resources; or
   - Serper and Jina API credentials for web retrieval
 - Optional: an OpenAI-compatible chat-completions endpoint for `sdk.llm.*`
+
+> [!NOTE]
+> OpenSAC currently supports installation and deployment from a Git source checkout only. A PyPI
+> package, wheel-only deployment, and a prebuilt OpenSAC service image are not supported yet. Run
+> setup and sandbox build commands from the repository root.
 
 ## Quick start
 
@@ -159,6 +164,10 @@ service:
 ```bash
 curl -fsS http://127.0.0.1:8000/healthz
 ```
+
+The commands above are for foreground development. For a long-running source deployment with
+systemd, a reverse proxy, persistent paths, readiness checks, and upgrade/rollback procedures, see
+[Source deployment](docs/deployment.md).
 
 ### 4. Execute a Search-as-Code program
 
@@ -241,33 +250,69 @@ OpenSAC can be driven in three ways:
    `sac_run(code)` tool and reuse a session for the rollout. The runnable
    [`sac_agent`](sac_agent/README.md) package demonstrates a minimal OpenAI-compatible ReAct loop.
 2. **Coding agent over a pure CLI.** Install
-   [`skills/search-as-code-cli`](skills/search-as-code-cli/SKILL.md) and pipe each generated Python
+   [`.agents/skills/search-as-code-cli`](.agents/skills/search-as-code-cli/SKILL.md) and pipe each generated Python
    program to `opensac agent-run`. The adapter derives the conversation context from the host
    environment; the model never handles a session ID.
 3. **Coding agent over MCP.** Run `opensac mcp` as a local stdio server and install
-   [`skills/search-as-code`](skills/search-as-code/SKILL.md). The public execution surface is only
+   [`.agents/skills/search-as-code`](.agents/skills/search-as-code/SKILL.md). The public execution surface is only
    `sac_run(code)`; conversation identity, session creation, lease renewal, and recovery stay in
    the MCP adapter rather than model arguments.
 
 The control-model endpoint used by `sac_agent` is separate from the optional pipeline-model
 endpoint exposed inside the sandbox as `sdk.llm.*`.
 
+### Choose project or global scope
+
+The CLI command is installed once per user. Skills and MCP servers can then be limited to one
+target project or made available in every project:
+
+| Host | Project scope | Global/user scope |
+| --- | --- | --- |
+| Codex skill | `<project>/.agents/skills/` | `~/.agents/skills/` |
+| Codex MCP | `<project>/.codex/config.toml` | `~/.codex/config.toml` |
+| Claude Code skill | `<project>/.claude/skills/` | `~/.claude/skills/` |
+| Claude Code MCP | `<project>/.mcp.json` | `~/.claude.json` with `--scope user` |
+
+Use project scope when OpenSAC should be visible only in one repository; portable project files
+may also be committed for the team. Use global scope for a personal installation used across
+repositories. Project MCP configuration must never contain a literal API key; reference an
+environment variable instead. These locations follow the official
+[Codex skills](https://developers.openai.com/codex/skills),
+[Codex MCP](https://developers.openai.com/codex/mcp),
+[Claude Code skills](https://code.claude.com/docs/en/skills), and
+[Claude Code MCP](https://code.claude.com/docs/en/mcp) documentation.
+
+This repository keeps every skill under `.agents/skills/` as the canonical source. Codex discovers
+them directly; `.claude/skills` is a directory symlink to `../.agents/skills` for Claude Code. To
+add another shared project skill, create `.agents/skills/<skill-name>/SKILL.md`; both hosts discover
+it from the same source. The installation commands below are only for another target project or a
+global installation.
+
 ### Pure CLI (without MCP)
 
-Install the command and the CLI-specific skill, then start the OpenSAC API:
+Install the command, then choose one skill scope. `AGENT_PROJECT` is the repository where Codex or
+Claude Code will use OpenSAC:
 
 ```bash
 export OPENSAC_REPO=/absolute/path/to/OpenSaC
+export AGENT_PROJECT=/absolute/path/to/your/project
 uv tool install --editable "$OPENSAC_REPO"
 
-# Codex
-mkdir -p ~/.codex/skills
-cp -R "$OPENSAC_REPO/skills/search-as-code-cli" ~/.codex/skills/
+# Project scope — run the line for each host you use.
+mkdir -p "$AGENT_PROJECT/.agents/skills" "$AGENT_PROJECT/.claude/skills"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" "$AGENT_PROJECT/.agents/skills/"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" "$AGENT_PROJECT/.claude/skills/"
 
-# Claude Code
-mkdir -p ~/.claude/skills
-cp -R "$OPENSAC_REPO/skills/search-as-code-cli" ~/.claude/skills/
+# Global scope — run the line for each host you use.
+mkdir -p ~/.agents/skills ~/.claude/skills
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" ~/.agents/skills/
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" ~/.claude/skills/
+```
 
+Set the connection variables in the environment used to launch the agent, then start the OpenSAC
+API:
+
+```bash
 export SAC_API_BASE=http://127.0.0.1:8000
 export SAC_API_KEY=replace-with-your-opensac-key
 ```
@@ -298,24 +343,58 @@ instead of sharing by process or working directory. Other CLI agents must set bo
 The raw conversation ID is SHA-256-derived with its host namespace before persistence. Each CLI
 invocation exits after closing its HTTP client, while the leased server session remains resumable.
 If the server reports `session_expired` or `worker_restarted`, the failed program is not replayed;
-the response is `state_lost`, and the next call starts in a clean generation. Claude Code documents
-its subprocess session variable and personal skill directory in
-[environment variables](https://code.claude.com/docs/en/env-vars) and
-[skills](https://code.claude.com/docs/en/skills).
+the response is `state_lost`, and the next call starts in a clean generation.
+
+### Install the MCP skill
+
+MCP uses `.agents/skills/search-as-code` rather than the CLI-specific skill. Choose the same project or
+global scope model:
+
+```bash
+export OPENSAC_REPO=/absolute/path/to/OpenSaC
+export AGENT_PROJECT=/absolute/path/to/your/project
+
+# Project scope — run the line for each host you use.
+mkdir -p "$AGENT_PROJECT/.agents/skills" "$AGENT_PROJECT/.claude/skills"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code" "$AGENT_PROJECT/.agents/skills/"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code" "$AGENT_PROJECT/.claude/skills/"
+
+# Global scope — run the line for each host you use.
+mkdir -p ~/.agents/skills ~/.claude/skills
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code" ~/.agents/skills/
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code" ~/.claude/skills/
+```
 
 ### Codex MCP
 
-Start the OpenSAC API first, then register the MCP server from an absolute repository path:
+Start the OpenSAC API first, then choose one configuration scope.
+
+**Project scope.** Merge this into `<project>/.codex/config.toml`. Codex loads project configuration
+only after the project is trusted. Keep `SAC_API_KEY` in the environment that launches Codex.
+Replace the source path on each machine, or standardize it before committing this file:
+
+```toml
+[mcp_servers.opensac]
+command = "uv"
+args = ["--directory", "/absolute/path/to/OpenSaC", "run", "opensac", "mcp"]
+env_vars = ["SAC_API_KEY"]
+
+[mcp_servers.opensac.env]
+SAC_API_BASE = "http://127.0.0.1:8000"
+```
+
+**Global scope.** `codex mcp add` writes the server to the user configuration and makes it available
+in every project:
 
 ```bash
 export OPENSAC_REPO=/absolute/path/to/OpenSaC
 export SAC_API_BASE=http://127.0.0.1:8000
 export SAC_API_KEY=replace-with-your-opensac-key
 
-codex mcp add \
+codex mcp add opensac \
   --env SAC_API_BASE="$SAC_API_BASE" \
   --env SAC_API_KEY="$SAC_API_KEY" \
-  opensac -- uv --directory "$OPENSAC_REPO" run opensac mcp
+  -- uv --directory "$OPENSAC_REPO" run opensac mcp
 ```
 
 Codex supplies the current task identity in MCP request metadata. If that metadata is absent, the
@@ -323,22 +402,53 @@ adapter fails closed and does not fall back to the working directory or a proces
 
 ### Claude Code MCP
 
-Register the same stdio server:
+Start the OpenSAC API first, then choose one configuration scope.
+
+**Project scope.** Add this to `<project>/.mcp.json`. It can be committed because paths and secrets
+are expanded from each user's environment. Export `OPENSAC_REPO` and `SAC_API_KEY` before launching
+Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "opensac": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["--directory", "${OPENSAC_REPO}", "run", "opensac", "mcp"],
+      "env": {
+        "SAC_API_BASE": "${SAC_API_BASE:-http://127.0.0.1:8000}",
+        "SAC_API_KEY": "${SAC_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Claude Code asks for approval before using a project-scoped `.mcp.json` server.
+
+**Global scope.** Register the same stdio server in the user configuration:
 
 ```bash
 export OPENSAC_REPO=/absolute/path/to/OpenSaC
 export SAC_API_BASE=http://127.0.0.1:8000
 export SAC_API_KEY=replace-with-your-opensac-key
 
-claude mcp add --scope user opensac \
-  -e SAC_API_BASE="$SAC_API_BASE" \
-  -e SAC_API_KEY="$SAC_API_KEY" \
+claude mcp add \
+  --scope user \
+  --env SAC_API_BASE="$SAC_API_BASE" \
+  --env SAC_API_KEY="$SAC_API_KEY" \
+  --transport stdio \
+  opensac \
   -- uv --directory "$OPENSAC_REPO" run opensac mcp
 ```
 
-Merge this hook into `~/.claude/settings.json`. Before each `sac_run`, it passes Claude Code's
-official hook `session_id` to the host-internal `bind_context` tool; the agent does not perform
-the binding:
+Claude Code also supports `--scope local`, which is private to the current project and stored in
+the user configuration rather than `.mcp.json`.
+
+Finally, install the context-binding hook. For project scope, merge it into
+`<project>/.claude/settings.json`; for global scope, merge it into `~/.claude/settings.json`.
+Before each `sac_run`, the hook passes Claude Code's `session_id` to the host-internal
+`bind_context` tool:
 
 ```json
 {
@@ -388,6 +498,7 @@ details.
 
 ## Documentation
 
+- [Source deployment](docs/deployment.md)
 - [Design goals and capability roadmap](docs/design.md)
 - [OpenSAC 0.4 release and migration notes](docs/opensac-0.4.md)
 - [Local dense search](docs/local-search.md)

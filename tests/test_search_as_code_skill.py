@@ -24,7 +24,7 @@ from opensac_sdk.state import StateResource
 
 from opensac.sandbox.validator import validate_code
 
-SKILL_PATH = Path(__file__).parents[1] / "skills" / "search-as-code" / "SKILL.md"
+SKILL_PATH = Path(__file__).parents[1] / ".agents" / "skills" / "search-as-code" / "SKILL.md"
 
 
 def _pattern() -> str:

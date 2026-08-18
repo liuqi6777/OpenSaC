@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__opensac__sac_run",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "opensac",
+            "tool": "bind_context",
+            "input": { "context_id": "${session_id}" }
+          }
+        ]
+      }
+    ]
+  }
+}
