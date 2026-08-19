@@ -267,7 +267,8 @@ OpenSACAdmin
 ```text
 broker/session.py     session state、in-flight execution 与缓存所有权
 broker/search.py      query/query_many、identity、dedupe 与 search trace
-broker/content.py     fetch、read、grep、passages 与 passage ranking
+broker/content.py     fetch、read、grep 与 passages orchestration
+broker/passages.py    纯分段、BM25、预筛与稳定选择函数
 broker/evidence.py    locator registry、验证与 citation resolution
 broker/llm.py         complete/extract、schema validation 与 model usage
 broker/trace.py       capability event 构造和无正文审计记录
@@ -401,6 +402,7 @@ failures = report.failures
 修改：
 
 - 先为现有 capability family 增加 characterization tests；
+- 先提取无 session/provider 副作用的 passage 纯函数；
 - 按 search、content、evidence、LLM 的顺序从 `broker/service.py` 提取；
 - 将 `ApplicationRuntime` 和 route 从 `api/app.py` 分离；
 - 每个 PR 只移动一个职责，不同时重命名公共方法或改变行为；

@@ -8,11 +8,9 @@ import math
 import re
 import time
 import uuid
-from bisect import bisect_right
-from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
@@ -22,12 +20,19 @@ from opensac_sdk.models import (
     ContentPassage,
     ContentPassageReport,
     ContentSnippet,
-    PassageCoordinates,
     SearchBatch,
     SearchHit,
 )
 
 from opensac.backends.base import BatchSearchBackend, ClosableSearchBackend, SearchBackend
+from opensac.broker.passages import (
+    PassageCandidate,
+    normalize_document_text,
+    prefilter_passage_candidates,
+    score_passage_candidates,
+    segment_passages,
+    select_passage_candidates,
+)
 from opensac.broker.policy import CapabilityPolicy, MechanismDisabled
 from opensac.metrics import CapacityGate
 from opensac.models import (
@@ -238,20 +243,6 @@ class EvidenceRecord:
     coordinates: dict[str, Any]
     document_fingerprint: str
     passage_fingerprint: str
-
-
-@dataclass(frozen=True)
-class _PassageCandidate:
-    hit: SearchHit
-    input_index: int
-    title: str
-    url: str | None
-    date: str | None
-    text: str
-    start: int
-    end: int
-    coordinates: PassageCoordinates
-    lexical_score: float = 0.0
 
 
 @dataclass
@@ -2353,130 +2344,12 @@ class BrokerService:
         hits = self._resolve_content_refs(state, params.get("refs", []))
         return await self._fetch_content(state, hits, query=None)
 
-    _PASSAGE_TERM_PATTERN = re.compile(
-        r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3400-\u9fff]|[^\W\d_]+",
-        flags=re.UNICODE,
-    )
-
-    @staticmethod
-    def _normalize_document_text(text: str) -> str:
-        """Normalize newline spellings without changing visible coordinates."""
-
-        return (text or "").replace("\r\n", "\n").replace("\r", "\n")
-
-    @classmethod
-    def _passage_terms(cls, text: str) -> list[str]:
-        return [match.group(0).lower() for match in cls._PASSAGE_TERM_PATTERN.finditer(text)]
-
-    @staticmethod
-    def _passage_coordinates(
-        line_starts: list[int],
-        start: int,
-        end: int,
-    ) -> PassageCoordinates:
-        start_index = max(0, bisect_right(line_starts, start) - 1)
-        end_index = max(0, bisect_right(line_starts, end - 1) - 1)
-        return PassageCoordinates(
-            start_line=start_index + 1,
-            start_character=start - line_starts[start_index],
-            end_line=end_index + 1,
-            end_character=end - line_starts[end_index],
-        )
-
-    @classmethod
-    def _segment_passages(
-        cls,
-        text: str,
-        *,
-        chunk_chars: int,
-        overlap_chars: int,
-    ) -> list[tuple[str, int, int, PassageCoordinates]]:
-        """Return deterministic windows, preferring paragraph then line boundaries."""
-
-        if not text or not text.strip():
-            return []
-        line_starts = [0, *(index + 1 for index, char in enumerate(text) if char == "\n")]
-        windows: list[tuple[str, int, int, PassageCoordinates]] = []
-        cursor = 0
-        length = len(text)
-        while cursor < length:
-            while cursor < length and text[cursor].isspace():
-                cursor += 1
-            if cursor >= length:
-                break
-            hard_end = min(length, cursor + chunk_chars)
-            end = hard_end
-            if hard_end < length:
-                boundary_floor = cursor + max(1, chunk_chars // 2)
-                paragraph = text.rfind("\n\n", boundary_floor, hard_end + 1)
-                line = text.rfind("\n", boundary_floor, hard_end + 1)
-                if paragraph >= boundary_floor:
-                    end = paragraph
-                elif line >= boundary_floor:
-                    end = line
-            while end > cursor and text[end - 1].isspace():
-                end -= 1
-            if end <= cursor:
-                end = hard_end
-            passage = text[cursor:end]
-            if passage:
-                coordinates = cls._passage_coordinates(line_starts, cursor, end)
-                windows.append((passage, cursor, end, coordinates))
-            if hard_end >= length:
-                break
-            next_cursor = max(cursor + 1, end - overlap_chars)
-            cursor = next_cursor
-        return windows
-
-    @classmethod
-    def _score_passage_candidates(
-        cls,
-        query: str,
-        candidates: list[_PassageCandidate],
-    ) -> list[_PassageCandidate]:
-        """Apply request-local BM25; scores are comparable only within this call."""
-
-        if not candidates:
-            return []
-        query_terms = list(dict.fromkeys(cls._passage_terms(query)))
-        tokenized = [cls._passage_terms(candidate.text) for candidate in candidates]
-        if not query_terms:
-            return candidates
-        document_frequency: Counter[str] = Counter()
-        for terms in tokenized:
-            document_frequency.update(set(terms))
-        document_count = len(candidates)
-        average_length = sum(len(terms) for terms in tokenized) / max(document_count, 1)
-        k1 = 1.5
-        b = 0.75
-        scored: list[_PassageCandidate] = []
-        for candidate, terms in zip(candidates, tokenized, strict=True):
-            counts = Counter(terms)
-            document_length = len(terms)
-            score = 0.0
-            for term in query_terms:
-                frequency = counts.get(term, 0)
-                if not frequency:
-                    continue
-                frequency_in_documents = document_frequency[term]
-                inverse_document_frequency = math.log(
-                    1.0
-                    + (document_count - frequency_in_documents + 0.5)
-                    / (frequency_in_documents + 0.5)
-                )
-                denominator = frequency + k1 * (
-                    1.0 - b + b * document_length / max(average_length, 1.0)
-                )
-                score += inverse_document_frequency * frequency * (k1 + 1.0) / denominator
-            scored.append(replace(candidate, lexical_score=score))
-        return scored
-
     async def _rerank_passages(
         self,
         state: BrokerSession,
         query: str,
-        candidates: list[_PassageCandidate],
-    ) -> tuple[str, list[tuple[_PassageCandidate, float]]]:
+        candidates: list[PassageCandidate],
+    ) -> tuple[str, list[tuple[PassageCandidate, float]]]:
         reranker = self.passage_reranker
         if reranker is None:
             return "lexical:bm25", [
@@ -2597,7 +2470,7 @@ class BrokerService:
             query=None,
         )
         failures: list[dict[str, Any]] = []
-        candidates: list[_PassageCandidate] = []
+        candidates: list[PassageCandidate] = []
         normalized_documents: dict[str, str] = {}
         for (input_index, hit), row in zip(unique, rows, strict=True):
             failure = row.get("failure")
@@ -2610,15 +2483,15 @@ class BrokerService:
                     }
                 )
                 continue
-            document_text = self._normalize_document_text(str(row.get("text") or ""))
+            document_text = normalize_document_text(str(row.get("text") or ""))
             normalized_documents[hit.ref] = document_text
-            for text, start, end, coordinates in self._segment_passages(
+            for text, start, end, coordinates in segment_passages(
                 document_text,
                 chunk_chars=self.passage_chunk_chars,
                 overlap_chars=self.passage_chunk_overlap_chars,
             ):
                 candidates.append(
-                    _PassageCandidate(
+                    PassageCandidate(
                         hit=hit,
                         input_index=input_index,
                         title=str(row.get("title") or hit.title or ""),
@@ -2631,47 +2504,17 @@ class BrokerService:
                     )
                 )
 
-        scored = self._score_passage_candidates(query, candidates)
-        retained: list[_PassageCandidate] = []
-        for _ref, rows_for_ref in self._group_passages_by_ref(scored).items():
-            retained.extend(
-                sorted(
-                    rows_for_ref,
-                    key=lambda candidate: (
-                        -candidate.lexical_score,
-                        candidate.start,
-                        candidate.end,
-                    ),
-                )[: max(8, max_per_ref)]
-            )
-        retained.sort(
-            key=lambda candidate: (
-                -candidate.lexical_score,
-                candidate.input_index,
-                candidate.start,
-                candidate.end,
-            )
+        retained = prefilter_passage_candidates(
+            score_passage_candidates(query, candidates),
+            max_per_ref=max_per_ref,
+            limit=self.passage_prefilter_limit,
         )
-        retained = retained[: self.passage_prefilter_limit]
         ranker_name, reranked = await self._rerank_passages(state, query, retained)
-        reranked.sort(
-            key=lambda item: (
-                -item[1],
-                item[0].input_index,
-                item[0].start,
-                item[0].end,
-            )
+        selected = select_passage_candidates(
+            reranked,
+            max_per_ref=max_per_ref,
+            limit=limit,
         )
-
-        selected: list[tuple[_PassageCandidate, float]] = []
-        per_ref: Counter[str] = Counter()
-        for candidate, score in reranked:
-            if per_ref[candidate.hit.ref] >= max_per_ref:
-                continue
-            per_ref[candidate.hit.ref] += 1
-            selected.append((candidate, score))
-            if len(selected) >= limit:
-                break
 
         passages: list[dict[str, Any]] = []
         traced = _EVENT_PASSAGES.get()
@@ -2724,28 +2567,9 @@ class BrokerService:
             unique_ref_count=len(unique),
         ).model_dump(mode="json")
 
-    @staticmethod
-    def _group_passages_by_ref(
-        candidates: list[_PassageCandidate],
-    ) -> dict[str, list[_PassageCandidate]]:
-        grouped: dict[str, list[_PassageCandidate]] = {}
-        for candidate in candidates:
-            grouped.setdefault(candidate.hit.ref, []).append(candidate)
-        return grouped
-
-    # Documents in a research corpus are mostly longer than any budget that can
-    # be handed to a control model -- median ~9k characters, p90 ~62k -- so
-    # `get_many` (whole document) and `snippets` (one broker-chosen window) both
-    # answer "show me this page" and neither answers "show me the part of this
-    # page I can name". Without a third option the passage a program sees is
-    # decided by a scoring function it cannot inspect, and if the answer is not
-    # in that window nothing downstream can recover it.
-    #
-    # `read` and `grep` are that third option, and they are deliberately the
-    # same pair the function-calling profiles already expose, with the same
-    # 1-indexed line contract: a line number from `grep` is an `offset` for
-    # `read`, no character arithmetic anywhere. Both work on the text a backend
-    # returned, so neither knows which backend it is on.
+    # `read` and `grep_report` share a 1-indexed line contract: a match line is
+    # directly usable as a read offset. Both operate on normalized backend text
+    # and remain independent of the selected search provider.
 
     @staticmethod
     def _document_lines(row: dict[str, Any]) -> list[str]:
