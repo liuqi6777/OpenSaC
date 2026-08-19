@@ -64,21 +64,21 @@ def keep(item):
 
 
 shortlist = list(filter(keep, candidates))[:12]
-multi_query_hits = [item for item in shortlist if len(item.sources) >= 2]
+multi_query_hits = [item for item in shortlist if len(item.provenance) >= 2]
 coverage = {
-    year: [item.ref for item in shortlist if year in searchable_text(item)]
+    year: [item.source for item in shortlist if year in searchable_text(item)]
     for year in wanted_years
 }
-missing_years = sorted(year for year, refs in coverage.items() if not refs)
+missing_years = sorted(year for year, sources in coverage.items() if not sources)
 ```
 
-`len(item.sources) >= 2` means multiple queries retrieved the candidate; it does not mean two
+`len(item.provenance) >= 2` means multiple queries retrieved the candidate; it does not mean two
 independent sources corroborate a claim.
 
 ## Validate structured extraction
 
 `extract_many` is a semantic map over aligned inputs. It cannot call search or content tools, and
-it must never create refs or locators. Ask it for semantic fields and a quote; let Python validate
+it must never create sources or locators. Ask it for semantic fields and a quote; let Python validate
 the quote and retain the locator from the original passage. This example handles one requested
 relation; for several constraints, add a constraint key and require set coverage before submit.
 
@@ -90,7 +90,7 @@ usable = [
     for passage in passages
     if passage.failure is None and passage.text.strip() and passage.locator is not None
 ][:12]
-items = [{"ref": passage.ref, "text": passage.text} for passage in usable]
+items = [{"source": passage.source, "text": passage.text} for passage in usable]
 schema = {
     "type": "object",
     "properties": {
@@ -134,10 +134,10 @@ if extraction_error is None:
         if data.get("next_action") == "accept" and quote and quote in item["text"]:
             accepted.append(
                 {
-                    "ref": passage.ref,
+                    "source": passage.source,
                     "text": passage.text,
                     "quote": quote,
-                    "locator": dict(passage.locator),
+                    "locator": passage.locator,
                 }
             )
         elif data.get("next_action") == "search_more":
@@ -166,11 +166,11 @@ if accepted:
     sdk.output.submit(
         {
             "evidence": [
-                {"ref": row["ref"], "text": row["text"][:2_000], "quote": row["quote"]}
+                {"source": row["source"], "text": row["text"][:2_000], "quote": row["quote"]}
                 for row in accepted
             ]
         },
-        citations=[{"ref": row["ref"], "locator": row["locator"]} for row in accepted],
+        citations=[{"locator": row["locator"]} for row in accepted],
     )
 elif followup_queries:
     try:
@@ -181,8 +181,8 @@ elif followup_queries:
     else:
         candidates = sdk.search.fuse_rrf(batches, k=60)[:8]
         for item in candidates:
-            print(f"CANDIDATE ref={item.ref!r} title={item.title!r}")
-        print("NEXT: inspect follow-up candidates and choose refs/checks")
+            print(f"CANDIDATE source={item.source!r} title={item.title!r}")
+        print("NEXT: inspect follow-up candidates and choose sources/checks")
 else:
     print(f"NEXT: use deterministic checks; extraction_error={extraction_error!r}")
 ```

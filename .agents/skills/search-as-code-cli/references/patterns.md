@@ -7,11 +7,11 @@ must recover a growing candidate or evidence ledger.
 
 ## Choose the stage
 
-- **Explore** when the next query, ref, or matching rule depends on understanding search results.
+- **Explore** when the next query, source, or matching rule depends on understanding search results.
   Show a bounded shortlist and stop for model judgment.
 - **Rank passages** when a fused shortlist is available but the relevant document sections are
   not. Search, fuse, and passage ranking can stay in one deterministic stage.
-- **Verify** when refs and checks are already concrete. Let Python grep, read, validate, and submit
+- **Verify** when sources and checks are already concrete. Let Python grep, read, validate, and submit
   without an unnecessary model round trip.
 
 The test is simple: if Python can choose the next input by an explicit rule, keep going; if the
@@ -20,7 +20,7 @@ choice requires interpreting language, end the stage with `NEXT:`.
 ## Explore candidates
 
 This stage intentionally stops after search. It prints no raw result objects and at most eight
-candidates, but includes each opaque ref so the next stage can reuse it exactly.
+candidates, including each URL or local document ID so the next stage can reuse it exactly.
 
 ```python
 from opensac_sdk import BrokerError, sdk
@@ -44,14 +44,14 @@ else:
     for item in candidates:
         snippet = " ".join((item.snippet or "").split())[:240]
         print(
-            f"CANDIDATE ref={item.ref!r} date={item.date or '-'} "
+            f"CANDIDATE source={item.source!r} date={item.date or '-'} "
             f"domain={item.domain or '-'} title={item.title or '(untitled)'} "
             f"snippet={snippet!r}"
         )
     failed = sum(batch.failure is not None for batch in batches)
     if candidates:
         print(
-            f"NEXT: inspect {len(candidates)} candidates and choose refs/checks; "
+            f"NEXT: inspect {len(candidates)} candidates and choose sources/checks; "
             f"failed_queries={failed}"
         )
     else:
@@ -78,18 +78,18 @@ try:
     fused = sdk.search.fuse_rrf(batches, k=60, limit=12)
     report = sdk.content.passages(
         goal,
-        [item.ref for item in fused],
+        [item.source for item in fused],
         limit=8,
-        max_per_ref=2,
+        max_per_source=2,
     )
 except BrokerError as error:
     print(f"ERROR: evidence retrieval code={error.code} retryable={error.retryable}")
 else:
     for item in report.passages:
         excerpt = " ".join(item.text.split())[:700]
-        locator = dict(item.locator) if item.locator else None
+        locator = item.locator
         print(
-            f"PASSAGE rank={item.rank} ref={item.ref!r} title={item.title!r} "
+            f"PASSAGE rank={item.rank} source={item.source!r} title={item.title!r} "
             f"coordinates={dict(item.coordinates)!r} "
             f"locator={locator!r} text={excerpt!r}"
         )
@@ -100,9 +100,9 @@ else:
     )
 ```
 
-## Verify selected refs and submit
+## Verify selected sources and submit
 
-Use exact refs chosen from exploration. Grep and read stay together because their next inputs are
+Use exact sources chosen from exploration. Grep and read stay together because their next inputs are
 mechanical. The program submits when all checks pass; otherwise it returns bounded evidence and a
 `NEXT:` decision for the control model.
 
@@ -111,7 +111,7 @@ import re
 
 from opensac_sdk import BrokerError, sdk
 
-refs = ["copy-ref-1-exactly", "copy-ref-2-exactly"]
+sources = ["copy-source-1-exactly", "copy-source-2-exactly"]
 checks = {
     "phrase": r"(target phrase|other spelling)",
     "year": r"\b(1998|1999)\b",
@@ -121,7 +121,7 @@ evidence = {}
 problems = []
 for name, pattern in checks.items():
     try:
-        report = sdk.content.grep_report(refs, pattern, context=2)
+        report = sdk.content.grep_report(sources, pattern, context=2)
     except BrokerError as error:
         problems.append(f"{name}:grep:{error.code}")
         continue
@@ -129,14 +129,14 @@ for name, pattern in checks.items():
 
     seen = set()
     for match in report.matches:
-        if match.ref in seen:
+        if match.source in seen:
             continue
         if len(seen) >= 4:
             break
-        seen.add(match.ref)
+        seen.add(match.source)
         try:
             passage = sdk.content.read(
-                [match.ref], offset=max(match.line - 10, 1), limit=40, max_chars=16_000
+                [match.source], offset=max(match.line - 10, 1), limit=40, max_chars=16_000
             )[0]
         except BrokerError as error:
             problems.append(f"{name}:read:{error.code}")
@@ -147,9 +147,9 @@ for name, pattern in checks.items():
         if re.search(pattern, passage.text, re.IGNORECASE) is None:
             continue
         evidence[name] = {
-            "ref": passage.ref,
+            "source": passage.source,
             "text": passage.text,
-            "locator": dict(passage.locator),
+            "locator": passage.locator,
         }
         break
 
@@ -157,17 +157,17 @@ missing = sorted(set(checks) - evidence.keys())
 if missing:
     for name, row in evidence.items():
         excerpt = " ".join(row["text"].split())[:500]
-        print(f"EVIDENCE {name}: ref={row['ref']!r} text={excerpt!r}")
-    print(f"NEXT: revise refs/checks for missing={missing}; problems={problems[:4]}")
+        print(f"EVIDENCE {name}: source={row['source']!r} text={excerpt!r}")
+    print(f"NEXT: revise sources/checks for missing={missing}; problems={problems[:4]}")
 else:
     sdk.output.submit(
         {
             "evidence": [
-                {"constraint": name, "ref": row["ref"], "text": row["text"][:2_000]}
+                {"constraint": name, "source": row["source"], "text": row["text"][:2_000]}
                 for name, row in evidence.items()
             ]
         },
-        citations=[{"ref": row["ref"], "locator": row["locator"]} for row in evidence.values()],
+        citations=[{"locator": row["locator"]} for row in evidence.values()],
     )
 ```
 

@@ -23,7 +23,7 @@ context management, subagents, or backend-specific retrieval logic.
    sandbox.
 4. Compact stdout, stderr, submitted output, usage, citations, and workspace
    filenames are returned to the model as a tool observation.
-5. Later tool calls reuse the same session, so SDK refs and workspace files
+5. Later tool calls reuse the same session, so SDK sources, locators, and workspace files
    survive across turns. The session is deleted when the run ends.
 
 The agent treats OpenSAC as a black box. Session creation sends `{}`: the agent
@@ -200,7 +200,7 @@ other values include `timeout`, `max_turns`, and `invalid_response`.
 
 - The OpenSAC session is created on the first valid `sac_run` call, not when
   the agent object is constructed.
-- One agent run uses one session. Workspace files and opaque SDK refs remain
+- One agent run uses one session. Workspace files, sources, and locators remain
   valid across its tool calls.
 - The session is deleted in a `finally` block when the run ends. A deletion
   failure is recorded as `SacRunTool.close_error` and does not replace an

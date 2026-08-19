@@ -43,15 +43,16 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
         "`sdk.output.submit` is the terminal research result",
         "Stdout is not completion",
         "submitted output",
-        "Treat refs and locators as opaque",
+        "Search sources are canonical URLs or local IDs",
+        "Locator strings are opaque",
         "read a non-empty passage",
         "read offsets are 1-indexed",
         "there is no `sdk.workspace` API",
-        "cannot call tools or create trusted refs or locators",
+        "cannot call tools or create trusted sources or locators",
         "Even an Explore then Verify flow can remain stateless",
-        "Passing five selected refs to the next stage needs no workspace",
+        "Passing five selected sources to the next stage needs no workspace",
         "Upgrade to `sdk.state` only when",
-        "candidate pool, evidence ledger, or attempted-ref history",
+        "candidate pool, evidence ledger, or attempted-source history",
         "do not replay blindly",
     ):
         assert guidance in normalized
@@ -66,13 +67,9 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
     for example in examples:
         compile(example, "<sac-agent-prompt-example>", "exec")
     assert "sdk.search.many(" in examples[1]
-    assert 'print("NEXT: choose refs and checks")' in examples[1]
-    assert examples[2].index("sdk.content.grep_report(") < examples[2].index(
-        "sdk.content.read("
-    )
-    assert examples[2].index("sdk.content.read(") < examples[2].index(
-        "sdk.output.submit("
-    )
+    assert 'print("NEXT: choose sources and checks")' in examples[1]
+    assert examples[2].index("sdk.content.grep_report(") < examples[2].index("sdk.content.read(")
+    assert examples[2].index("sdk.content.read(") < examples[2].index("sdk.output.submit(")
 
 
 class FakeModelClient:

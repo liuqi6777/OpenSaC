@@ -11,16 +11,14 @@ fusion = sdk.search.fuse_rrf(batches, k=60, limit=24)
 official_domains = {"postgresql.org", "github.com", "elastic.co", "milvus.io"}
 
 unique = {
-    candidate.ref: candidate
-    for candidate in fusion
-    if candidate.domain in official_domains
+    candidate.source: candidate for candidate in fusion if candidate.domain in official_domains
 }
 
 report = sdk.content.passages(
     "vector index types, filtering, consistency and limitations",
     list(unique),
     limit=20,
-    max_per_ref=3,
+    max_per_source=3,
 )
 
 sdk.state.write_jsonl(
@@ -32,9 +30,5 @@ sdk.output.submit(
         "evidence": [dict(item) for item in report.passages],
         "fetch_failures": [dict(item) for item in report.failures],
     },
-    citations=[
-        {"ref": item.ref, "locator": item.locator}
-        for item in report.passages
-        if item.locator is not None
-    ],
+    citations=[{"locator": item.locator} for item in report.passages if item.locator is not None],
 )

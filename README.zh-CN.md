@@ -195,13 +195,14 @@ PY
 | `sdk.search` | `search`、`many`、`fuse_rrf` | 检索并融合候选，同时保留 provenance |
 | `sdk.content` | `passages`、`read`、`grep_report` | 排序、定位和检查证据，不隐藏部分抓取失败 |
 | `sdk.llm` | `extract_many`、`complete`、`complete_many` | 可选的 broker 模型调用与 schema 校验抽取 |
-| `sdk.citations` | `resolve`、`resolve_requests` | 高级检查已检索的引用句柄 |
+| `sdk.citations` | `resolve` | 高级检查 source 或 locator 引用 |
 | `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
 | `sdk.session` | `usage` | 查看策略统计与剩余预算 |
 | `sdk.output` | `submit` | 返回结构化输出并解析可信引用 |
 
-批量操作保持输入对齐，并暴露结构化的逐项失败。空搜索结果属于成功结果。段落引用必须使用正文操作返回的
-locator。精确 core 签名与有意保留的 advanced 操作分别位于 Search-as-Code Skill references。
+批量操作保持输入对齐，并暴露结构化的逐项失败。每条搜索结果只有一个 `source`：规范化后的网页 URL 或
+本地文档 ID。空搜索结果属于成功结果。段落引用必须使用正文操作返回的 locator。精确 core 签名与有意
+保留的 advanced 操作分别位于 Search-as-Code Skill references。
 
 ### 智能体集成
 

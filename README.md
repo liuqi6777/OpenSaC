@@ -208,13 +208,14 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
 | `sdk.content` | `passages`, `read`, `grep_report` | Rank, locate, and inspect evidence without hiding partial failures |
 | `sdk.llm` | `extract_many`, `complete`, `complete_many` | Optional brokered model calls and schema-checked extraction |
-| `sdk.citations` | `resolve`, `resolve_requests` | Advanced inspection of previously retrieved citation handles |
+| `sdk.citations` | `resolve` | Advanced inspection of source or locator citations |
 | `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
 | `sdk.session` | `usage` | Inspect strategy counts and remaining budgets |
 | `sdk.output` | `submit` | Return structured output and resolve trusted citations |
 
-Batch operations preserve input alignment and expose structured per-item failures. Empty search results
-are successful results. Passage citations must use locators returned by content operations. Core
+Batch operations preserve input alignment and expose structured per-item failures. Each search hit has
+one `source`: a canonical web URL or local document ID. Empty search results are successful results.
+Passage citations must use locators returned by content operations. Core
 signatures and intentional advanced operations are split across the Search-as-Code Skill
 references.
 

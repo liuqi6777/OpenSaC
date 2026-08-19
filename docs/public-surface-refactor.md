@@ -1,7 +1,7 @@
 # OpenSAC 公共接口收敛实现设计
 
-- 状态：实施中
-- 目标版本：OpenSAC 0.6
+- 状态：0.6.1 已完成；0.6.2 source addressing 见 `source-addressing-refactor.md`
+- 目标版本：OpenSAC 0.6.1
 - 范围：MCP、sandbox SDK、Python host client 与对应契约测试
 
 ## 1. 背景
@@ -128,7 +128,7 @@ from opensac_sdk import BrokerError, sdk
 __all__ = ["BrokerError", "sdk", "__version__"]
 ```
 
-SDK 不提供公共模型模块。结构化结果是普通 JSON record，同时支持 `row.ref` 与 `row["ref"]` 读取，
+SDK 不提供公共模型模块。结构化结果是普通 JSON record，同时支持 `row.source` 与 `row["source"]` 读取，
 `dict(row)` 可直接序列化。`OpenSACClient` 从 `opensac_sdk.client` 导入，不由包顶层重导出。
 
 所有 resource 实现集中在单一私有 `_resources.py` 中。`search`、`content` 等是 `sdk` 对象上的运行时
@@ -150,7 +150,6 @@ namespace，不再各占一个可导入模块；新增 capability 优先向现�
 | `content` | `grep_report` | core | 保留；零匹配与抓取失败可区分 |
 | `content` | `get_many` | advanced | 保留；整页读取 escape hatch |
 | `citations` | `resolve` | advanced | 保留；triage 和调试使用 |
-| `citations` | `resolve_requests` | advanced | 评估与 `resolve` 合并，0.6 不直接删除 |
 | `session` | `usage` | core | 保留；程序据此改变继续或停止策略 |
 | `llm` | `extract_many` | core/optional | pipeline model 可用时进入 core profile |
 | `llm` | `complete` | advanced | 保留；自由文本子程序 |
@@ -162,7 +161,7 @@ namespace，不再各占一个可导入模块；新增 capability 优先向现�
 | `output` | `submit` | core | 保留；唯一正式结果与 citation 提交入口 |
 
 0.6 删除 `snippets` 与 `grep`；它们不再出现在 SDK surface、broker capability、Skill 或测试 fixture 中。
-`resolve_requests` 仍有独立输入语义，因此作为 advanced operation 保留。
+0.6.2 将 citation 输入统一为 `{source}` 或 `{locator}`，因此只保留一个 `resolve` 操作。
 
 ### 4.3 Core profile
 
@@ -382,15 +381,16 @@ SDK 与 sandbox 镜像版本匹配，因此 0.6 采用明确 breaking migration�
 
 ```python
 # 0.5
-matches = sdk.content.grep(refs, pattern)
+matches = sdk.content.grep(sources, pattern)
 
 # 0.6 canonical
-report = sdk.content.grep_report(refs, pattern)
+report = sdk.content.grep_report(sources, pattern)
 matches = report.matches
 failures = report.failures
 ```
 
-`snippets` 不提供兼容 shim。调用者必须选择全局 `passages` 的候选 ref、limit 和 `max_per_ref`。
+`snippets` 不提供兼容 shim。调用者必须选择全局 `passages` 的候选 source、limit 和
+`max_per_source`。
 
 ### PR 4：Skill 渐进披露
 
