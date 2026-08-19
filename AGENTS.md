@@ -34,7 +34,11 @@ Tests use `pytest` with automatic `pytest-asyncio` support. Name files `test_<ar
 
 ## Commit & Pull Request Guidelines
 
-Use concise imperative commit subjects with an optional category prefix, matching project history (for example, `fix: handle broker socket` or `feat: add local retriever`). Keep commits focused. PRs should explain the problem, summarize the design, list validation commands, note configuration or security implications, and link the related issue or experiment when applicable. Include logs, screenshots, or reproducibility details for CLI, API, Docker, or documentation changes.
+Use concise imperative commit subjects with an optional category prefix, matching project history (for example, `fix: handle broker socket` or `feat: add local retriever`). Every human-authored commit must also include a detailed body that explains the motivation, summarizes the important changes, and lists the validation performed. Note configuration or security implications when relevant. Keep commits focused.
+
+When publishing a version update, first run the release checks in `docs/releasing.md` and commit all version and release-note changes. After that commit is present on the target release branch (normally `main`), create an annotated `vX.Y.Z` tag that points to the exact release commit and atomically push the branch and tag together, for example `git push --atomic origin main vX.Y.Z`. A tag push triggers the release workflow, so never tag an unmerged feature or pull-request branch. Verify that the tag does not already exist, and never move or reuse a published tag.
+
+PRs should explain the problem, summarize the design, list validation commands, note configuration or security implications, and link the related issue or experiment when applicable. Include logs, screenshots, or reproducibility details for CLI, API, Docker, or documentation changes.
 
 ## Security & Configuration Tips
 
