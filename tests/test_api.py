@@ -7,8 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from opensac.api import create_app
-from opensac.api.app import (
-    ApplicationRuntime,
+from opensac.api.app import ApplicationRuntime
+from opensac.api.errors import (
     ExecIndeterminateError,
     SessionCleanupError,
     SessionClosingError,

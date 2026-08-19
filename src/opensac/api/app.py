@@ -26,6 +26,18 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from openai import AsyncOpenAI
 
 from opensac import __version__
+from opensac.api.errors import (
+    ExecIdConflictError,
+    ExecIndeterminateError,
+    SessionCapacityError,
+    SessionCleanupError,
+    SessionClosingError,
+    SessionCreateConflictError,
+    SessionExpiredError,
+    SessionLostError,
+    WorkerDrainingError,
+    contract_error,
+)
 from opensac.backends import LocalSearchBackend, SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_path
 from opensac.broker.policy import BudgetExceeded
@@ -59,42 +71,6 @@ from opensac.sandbox.base import SandboxRequest, SandboxResult
 from opensac.store import StateStore
 
 logger = logging.getLogger(__name__)
-
-
-class SessionClosingError(RuntimeError):
-    pass
-
-
-class SessionCleanupError(RuntimeError):
-    pass
-
-
-class ExecIdConflictError(RuntimeError):
-    pass
-
-
-class ExecIndeterminateError(RuntimeError):
-    pass
-
-
-class WorkerDrainingError(RuntimeError):
-    pass
-
-
-class SessionCapacityError(RuntimeError):
-    pass
-
-
-class SessionCreateConflictError(RuntimeError):
-    pass
-
-
-class SessionLostError(RuntimeError):
-    pass
-
-
-class SessionExpiredError(RuntimeError):
-    pass
 
 
 class ApplicationRuntime:
@@ -1088,20 +1064,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["X-OpenSAC-Worker-ID"] = runtime.worker_id
         response.headers["X-OpenSAC-Worker-Epoch"] = runtime.worker_epoch
         return response
-
-    def contract_error(
-        status_code: int,
-        code: str,
-        message: str,
-        *,
-        retryable: bool,
-        headers: dict[str, str] | None = None,
-    ) -> HTTPException:
-        return HTTPException(
-            status_code=status_code,
-            detail={"code": code, "message": message, "retryable": retryable},
-            headers=headers,
-        )
 
     async def authorize(authorization: str | None = Header(default=None)) -> None:
         if not settings.api_key:
