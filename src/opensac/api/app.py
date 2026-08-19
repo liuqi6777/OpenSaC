@@ -26,6 +26,18 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from openai import AsyncOpenAI
 
 from opensac import __version__
+from opensac.api.errors import (
+    ExecIdConflictError,
+    ExecIndeterminateError,
+    SessionCapacityError,
+    SessionCleanupError,
+    SessionClosingError,
+    SessionCreateConflictError,
+    SessionExpiredError,
+    SessionLostError,
+    WorkerDrainingError,
+    contract_error,
+)
 from opensac.backends import LocalSearchBackend, SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_path
 from opensac.broker.policy import BudgetExceeded
@@ -59,42 +71,6 @@ from opensac.sandbox.base import SandboxRequest, SandboxResult
 from opensac.store import StateStore
 
 logger = logging.getLogger(__name__)
-
-
-class SessionClosingError(RuntimeError):
-    pass
-
-
-class SessionCleanupError(RuntimeError):
-    pass
-
-
-class ExecIdConflictError(RuntimeError):
-    pass
-
-
-class ExecIndeterminateError(RuntimeError):
-    pass
-
-
-class WorkerDrainingError(RuntimeError):
-    pass
-
-
-class SessionCapacityError(RuntimeError):
-    pass
-
-
-class SessionCreateConflictError(RuntimeError):
-    pass
-
-
-class SessionLostError(RuntimeError):
-    pass
-
-
-class SessionExpiredError(RuntimeError):
-    pass
 
 
 class ApplicationRuntime:
@@ -318,7 +294,7 @@ class ApplicationRuntime:
             "sandbox_image": self.settings.sandbox_image,
             "sandbox_image_digest": self.settings.sandbox_image_digest,
             "sandbox_contract": SANDBOX_CONTRACT,
-            "capability_contract": 4,
+            "capability_contract": 6,
             "capability_limits": {
                 "search": {
                     "max_queries_per_request": self.settings.search_max_queries_per_request,
@@ -1089,20 +1065,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["X-OpenSAC-Worker-Epoch"] = runtime.worker_epoch
         return response
 
-    def contract_error(
-        status_code: int,
-        code: str,
-        message: str,
-        *,
-        retryable: bool,
-        headers: dict[str, str] | None = None,
-    ) -> HTTPException:
-        return HTTPException(
-            status_code=status_code,
-            detail={"code": code, "message": message, "retryable": retryable},
-            headers=headers,
-        )
-
     async def authorize(authorization: str | None = Header(default=None)) -> None:
         if not settings.api_key:
             return
@@ -1146,7 +1108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not runtime.settings.model_name:
             capabilities = [method for method in capabilities if not method.startswith("llm.")]
         features = [
-            "capability_contract_v4",
+            "capability_contract_v6",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",

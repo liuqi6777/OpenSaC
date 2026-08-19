@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STABLE_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+DEPENDENCY_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 
 
 class ReleaseValidationError(ValueError):
@@ -19,6 +20,14 @@ class ReleaseValidationError(ValueError):
 class ReleaseMetadata:
     version: str
     sandbox_contract: int
+
+
+def _dependency_names(dependencies: list[str]) -> set[str]:
+    return {
+        match.group(0).lower().replace("_", "-")
+        for dependency in dependencies
+        if (match := DEPENDENCY_NAME.match(dependency)) is not None
+    }
 
 
 def _literal_assignment(path: Path, name: str) -> str | int:
@@ -53,20 +62,16 @@ def validate_release(tag: str | None = None) -> ReleaseMetadata:
         raise ReleaseValidationError(
             f"Release version {opensac_version!r} must use the stable X.Y.Z format"
         )
-    major, minor, _ = (int(part) for part in opensac_version.split("."))
-    expected_sdk_requirement = f"opensac-sdk>={major}.{minor}.0,<{major}.{minor + 1}.0"
     root_project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
     ]
-    sdk_requirements = [
-        dependency
-        for dependency in root_project["dependencies"]
-        if dependency.startswith("opensac-sdk")
-    ]
-    if sdk_requirements != [expected_sdk_requirement]:
-        raise ReleaseValidationError(
-            f"opensac-sdk dependency must be {expected_sdk_requirement!r}, got {sdk_requirements!r}"
-        )
+    sdk_project = tomllib.loads(
+        (REPO_ROOT / "packages/opensac-sdk/pyproject.toml").read_text(encoding="utf-8")
+    )["project"]
+    if "opensac-sdk" in _dependency_names(root_project["dependencies"]):
+        raise ReleaseValidationError("opensac must not depend on the sandbox client SDK")
+    if "opensac" in _dependency_names(sdk_project["dependencies"]):
+        raise ReleaseValidationError("opensac-sdk must not depend on the host package")
     if tag is not None and tag != f"v{opensac_version}":
         raise ReleaseValidationError(
             f"Git tag {tag!r} does not match package version 'v{opensac_version}'"

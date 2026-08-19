@@ -38,7 +38,7 @@ abstraction. It is not a reconstruction of Perplexity's internal search engine.
 
 - **Programmable retrieval** — generated Python can batch, filter, join, rank, and select evidence
   with ordinary control flow.
-- **A compact typed SDK** — `opensac_sdk` exposes search, content, state, optional structured LLM,
+- **A compact record SDK** — `opensac_sdk` exposes search, content, state, optional structured LLM,
   usage, and citation primitives.
 - **Hardened execution** — sandbox programs have no network, provider credentials, Docker socket,
   or unrestricted host filesystem access.
@@ -46,7 +46,7 @@ abstraction. It is not a reconstruction of Perplexity's internal search engine.
   printed or submitted data returns to the control model.
 - **Traceable evidence** — opaque references and broker-issued passage locators connect candidates
   to final citations.
-- **Research instrumentation** — budgets, typed partial failures, traces, phase timings, idempotent
+- **Research instrumentation** — budgets, structured partial failures, traces, phase timings, idempotent
   execution, and worker lifecycle controls support reproducible rollouts.
 
 ## Architecture
@@ -179,7 +179,7 @@ program = """
 from opensac_sdk import sdk
 
 hits = sdk.search("Who introduced the ReAct prompting method?", limit=5)
-sdk.output.submit({"hits": [hit.model_dump() for hit in hits]})
+sdk.output.submit({"hits": [dict(hit) for hit in hits]})
 """
 
 with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
@@ -206,15 +206,17 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | Namespace | Main operations | Role |
 | --- | --- | --- |
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
-| `sdk.content` | `passages`, `get_many`, `snippets`, `grep`, `read` | Rank, locate, and inspect evidence |
-| `sdk.llm` | `map`, `map_many`, `extract`, `extract_many` | Optional brokered model calls and schema-checked extraction |
+| `sdk.content` | `passages`, `read`, `grep_report` | Rank, locate, and inspect evidence without hiding partial failures |
+| `sdk.llm` | `extract_many`, `complete`, `complete_many` | Optional brokered model calls and schema-checked extraction |
+| `sdk.citations` | `resolve`, `resolve_requests` | Advanced inspection of previously retrieved citation handles |
 | `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
 | `sdk.session` | `usage` | Inspect strategy counts and remaining budgets |
 | `sdk.output` | `submit` | Return structured output and resolve trusted citations |
 
-Batch operations preserve input alignment and expose typed per-item failures. Empty search results
-are successful results. Passage citations must use locators returned by content operations. The
-current public contract and migration notes are in [OpenSAC 0.5](docs/opensac-0.5.md).
+Batch operations preserve input alignment and expose structured per-item failures. Empty search results
+are successful results. Passage citations must use locators returned by content operations. Core
+signatures and intentional advanced operations are split across the Search-as-Code Skill
+references.
 
 ### Agent integrations
 
@@ -222,10 +224,10 @@ OpenSAC can be driven through:
 
 1. a custom loop using the HTTP/Python client;
 2. `opensac agent-run` plus the CLI Search-as-Code skill;
-3. `opensac mcp` plus the MCP skill for Codex or Claude Code.
+3. `opensac mcp` plus the MCP skill for Codex.
 
-The public model-facing surface remains one operation, `sac_run(code)`. Conversation binding,
-session creation, lease renewal, and state-loss handling stay in the adapter. See the complete
+The MCP protocol exposes one operation, `sac_run(code)`. Conversation binding, session creation,
+lease renewal, and state-loss handling stay in the adapter. See the complete
 [Agent integration guide](docs/agent-integrations.md) or its
 [Chinese version](docs/agent-integrations.zh-CN.md).
 
@@ -259,7 +261,7 @@ or digest rather than `latest`.
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-uv sync --locked --extra dev
+uv sync --locked --all-packages --extra dev
 uv run ruff check .
 uv run pytest
 ```

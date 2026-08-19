@@ -27,13 +27,12 @@ uv run python scripts/release.py
 
 ## 发布正式版本
 
-1. 同时更新两个 `_version.py` 和版本说明。如果 minor 版本变化，还要更新根目录
-   `pyproject.toml` 中兼容的 `opensac-sdk` 版本范围。
+1. 同时更新两个 `_version.py` 和版本说明。
 2. 执行本地发布检查：
 
    ```bash
    uv lock
-   uv sync --locked --extra dev
+   uv sync --locked --all-packages --extra dev
    uv run ruff check .
    uv run pytest
    OPENSAC_DOCKER_E2E=1 uv run pytest tests/test_sandbox_docker_e2e.py

@@ -13,7 +13,7 @@
 Use Python 3.12+ and run commands from the repository root:
 
 ```bash
-uv sync --extra dev                 # Install project and development dependencies
+uv sync --all-packages --extra dev  # Install all workspace and development dependencies
 uv run pytest                       # Run the full test suite
 uv run pytest tests/test_api.py     # Run a focused test module
 uv run ruff check .                 # Run lint checks

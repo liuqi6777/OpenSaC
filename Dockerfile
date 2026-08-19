@@ -37,7 +37,7 @@ RUN groupadd --gid 10001 opensac \
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=builder /dist /dist
-RUN python -m pip install --no-cache-dir /dist/*.whl \
+RUN python -m pip install --no-cache-dir /dist/opensac-*.whl \
     && rm -rf /dist
 
 COPY docker/service-entrypoint.sh /usr/local/bin/opensac-container-entrypoint

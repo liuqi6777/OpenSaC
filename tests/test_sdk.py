@@ -1,35 +1,82 @@
 from __future__ import annotations
 
+import importlib
 import json
 from unittest.mock import patch
 
 import httpx
+import opensac_sdk
 import pytest
-from opensac_sdk.content import ContentResource
-from opensac_sdk.llm import LLMResource
-from opensac_sdk.models import (
-    CapabilityFailure,
-    ContentFailure,
-    ContentGrepReport,
-    ContentMatch,
-    ContentPassage,
-    ContentPassageReport,
-    ContentSnippet,
-    EvidenceLocator,
-    EvidenceLocatorError,
-    ExtractionError,
-    ExtractionResult,
-    PassageCoordinates,
-    RetrievalMetadata,
-    SearchBatch,
-    SearchHit,
-    SearchRequestInfo,
+from opensac_sdk._record import Record, record, wrap
+from opensac_sdk._resources import (
+    CitationsResource,
+    ContentResource,
+    LLMResource,
+    OutputResource,
+    SearchResource,
+    SessionResource,
+    StateResource,
 )
-from opensac_sdk.output import OutputResource
-from opensac_sdk.search import SearchResource
-from opensac_sdk.state import StateResource
+from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 from opensac_sdk.transport import BrokerError, UnixSocketTransport
-from pydantic import ValidationError
+
+RESOURCE_TYPES = {
+    "citations": CitationsResource,
+    "content": ContentResource,
+    "llm": LLMResource,
+    "output": OutputResource,
+    "search": SearchResource,
+    "session": SessionResource,
+    "state": StateResource,
+}
+
+
+def test_package_root_exposes_only_runtime_entrypoints() -> None:
+    assert opensac_sdk.__all__ == ["BrokerError", "sdk", "__version__"]
+    assert not hasattr(opensac_sdk, "SearchHit")
+    assert not hasattr(opensac_sdk, "OpenSACClient")
+    assert not hasattr(opensac_sdk, "LazyOpenSACClient")
+    removed_modules = [
+        "citations",
+        "content",
+        "llm",
+        "models",
+        "output",
+        "search",
+        "session",
+        "state",
+        "types",
+    ]
+    for module in removed_modules:
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(f"opensac_sdk.{module}")
+
+
+def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
+    declared = {(operation.resource, operation.method) for operation in SDK_SURFACE}
+    assert len(declared) == len(SDK_SURFACE)
+    assert len({operation.public_name for operation in SDK_SURFACE}) == len(SDK_SURFACE)
+
+    implemented = {
+        (resource, name)
+        for resource, resource_type in RESOURCE_TYPES.items()
+        for name, value in vars(resource_type).items()
+        if name == "__call__"
+        or (
+            not name.startswith("_")
+            and name != "__init__"
+            and (callable(value) or isinstance(value, (classmethod, staticmethod)))
+        )
+    }
+    assert declared == implemented
+
+
+def test_surface_manifest_keeps_model_core_small() -> None:
+    model_core = [operation for operation in SDK_SURFACE if operation.model_core]
+    assert len(model_core) <= 12
+    assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
+    assert not hasattr(ContentResource, "snippets")
+    assert not hasattr(ContentResource, "grep")
 
 
 class FakeTransport:
@@ -41,18 +88,22 @@ class FakeTransport:
         if method == "citations.resolve":
             requested = params.get("requests")
             ref = requested[0]["ref"] if requested else params["refs"][0]
-            return [{"ref": ref, "url": "https://example.com"}]
-        return [
-            {
-                "ref": "ref_1",
-                "backend": "web",
-                "title": "Title",
-                "url": "https://example.com",
-                "domain": "example.com",
-                "snippet": "text",
-                "rank": 1,
-            }
-        ]
+            return wrap([{"ref": ref, "url": "https://example.com"}])
+        return wrap(
+            [
+                {
+                    "ref": "ref_1",
+                    "backend": "web",
+                    "title": "Title",
+                    "url": "https://example.com",
+                    "docid": None,
+                    "domain": "example.com",
+                    "date": None,
+                    "snippet": "text",
+                    "rank": 1,
+                }
+            ]
+        )
 
 
 def test_unix_transport_reuses_one_http_client_for_all_calls() -> None:
@@ -121,6 +172,26 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
     assert raised.value.retry_after_seconds == 1.5
 
 
+def test_unix_transport_rejects_invalid_json_as_a_protocol_error() -> None:
+    response = httpx.Response(
+        200,
+        request=httpx.Request("POST", "http://opensac/v1/call"),
+        content=b"not-json",
+    )
+
+    class FakeClient:
+        def post(self, *_args, **_kwargs):
+            return response
+
+    with patch("opensac_sdk.transport.httpx.Client", return_value=FakeClient()):
+        transport = UnixSocketTransport("/tmp/broker.sock", "token")
+        with pytest.raises(BrokerError, match="invalid JSON") as raised:
+            transport.call("session.usage", {})
+
+    assert raised.value.code == "broker_protocol_error"
+    assert raised.value.retryable is False
+
+
 def test_search_resource_returns_typed_hits() -> None:
     transport = FakeTransport()
     hits = SearchResource(transport)("query", limit=3)
@@ -130,14 +201,11 @@ def test_search_resource_returns_typed_hits() -> None:
     ]
 
 
-def test_search_many_attaches_the_effective_request_to_each_batch() -> None:
+def test_search_many_returns_only_result_semantics() -> None:
     class ManyTransport:
         def call(self, method, params):
             assert method == "search.query_many"
-            return [
-                {"query": query, "hits": []}
-                for query in params["queries"]
-            ]
+            return wrap([{"query": query, "hits": []} for query in params["queries"]])
 
     batches = SearchResource(ManyTransport()).many(
         ["one", "two"],
@@ -146,26 +214,28 @@ def test_search_many_attaches_the_effective_request_to_each_batch() -> None:
         domains=["example.com"],
     )
 
-    assert [batch.request.model_dump() for batch in batches if batch.request] == [
-        {"limit": 12, "offset": 4, "domains": ["example.com"]},
-        {"limit": 12, "offset": 4, "domains": ["example.com"]},
+    assert [dict(batch) for batch in batches] == [
+        {"query": "one", "hits": []},
+        {"query": "two", "hits": []},
     ]
 
 
 def _hit(ref: str, rank: int, *, backend: str = "local", score: float | None = None):
-    return SearchHit(
-        ref=ref,
-        backend=backend,
-        title=ref,
-        rank=rank,
-        score=score,
-        retrieval=RetrievalMetadata(
-            mode="dense",
-            result_mode="query_aware",
-            score_name="backend_score",
-            higher_is_better=True,
-            comparable_across_queries=False,
-        ),
+    return record(
+        {
+            "ref": ref,
+            "backend": backend,
+            "title": ref,
+            "rank": rank,
+            "score": score,
+            "retrieval": {
+                "mode": "dense",
+                "result_mode": "query_aware",
+                "score_name": "backend_score",
+                "higher_is_better": True,
+                "comparable_across_queries": False,
+            },
+        }
     )
 
 
@@ -173,52 +243,40 @@ def test_search_rrf_fuses_refs_locally_and_preserves_provenance() -> None:
     transport = FakeTransport()
     search = SearchResource(transport)
     batches = [
-        SearchBatch(
-            query="alpha",
-            hits=[_hit("a", 1, score=0.9), _hit("a", 3), _hit("b", 2)],
-            request=SearchRequestInfo(limit=3, offset=0, domains=["example.com"]),
+        record(
+            {
+                "query": "alpha",
+                "hits": [_hit("a", 1, score=0.9), _hit("a", 3), _hit("b", 2)],
+                "failure": None,
+            }
         ),
-        SearchBatch(
-            query="beta",
-            hits=[_hit("b", 1), _hit("a", 2)],
-            request=SearchRequestInfo(limit=2, offset=10),
-        ),
-        SearchBatch(
-            query="failed",
-            failure=CapabilityFailure(
-                code="provider_timeout",
-                message="Provider request timed out",
-                retryable=True,
-                attempts=1,
-            ),
+        record({"query": "beta", "hits": [_hit("b", 1), _hit("a", 2)], "failure": None}),
+        record(
+            {
+                "query": "failed",
+                "hits": [],
+                "failure": {
+                    "code": "provider_timeout",
+                    "message": "Provider request timed out",
+                    "retryable": True,
+                    "attempts": 1,
+                },
+            }
         ),
     ]
 
     result = search.fuse_rrf(batches, weights=[1, 2, 1])
 
     assert transport.calls == []
-    assert [candidate.ref for candidate in result.candidates] == ["b", "a"]
-    assert [candidate.fused_rank for candidate in result.candidates] == [1, 2]
-    assert result.input_count == 5
-    assert result.unique_count == 2
-    assert result.duplicate_count == 3
-    assert result.batch_errors[0].model_dump() == {
-        "batch_index": 2,
-        "query": "failed",
-        "failure": {
-            "code": "provider_timeout",
-            "message": "Provider request timed out",
-            "retryable": True,
-            "attempts": 1,
-            "provider_status": None,
-            "retry_after_seconds": None,
-        },
-    }
+    assert [candidate.ref for candidate in result] == ["b", "a"]
+    assert [candidate.fused_rank for candidate in result] == [1, 2]
+    assert batches[2].failure is not None
 
-    candidate_a = result.candidates[1]
+    candidate_a = result[1]
+    assert isinstance(candidate_a, Record)
     assert candidate_a.rank == 1
     assert len(candidate_a.sources) == 2
-    assert candidate_a.sources[0].model_dump() == {
+    assert dict(candidate_a.sources[0]) == {
         "batch_index": 0,
         "query": "alpha",
         "backend": "local",
@@ -231,21 +289,15 @@ def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
     search = SearchResource(FakeTransport())
     tied = search.fuse_rrf(
         [
-            SearchBatch(query="first", hits=[_hit("z", 1)]),
-            SearchBatch(query="second", hits=[_hit("a", 1)]),
+            record({"query": "first", "hits": [_hit("z", 1)], "failure": None}),
+            record({"query": "second", "hits": [_hit("a", 1)], "failure": None}),
         ],
         limit=1,
     )
-    assert [candidate.ref for candidate in tied.candidates] == ["z"]
-    assert tied.unique_count == 2
+    assert [candidate.ref for candidate in tied] == ["z"]
 
     empty = search.fuse_rrf([])
-    assert empty.candidates == []
-    assert empty.model_dump(exclude={"candidates", "batch_errors"}) == {
-        "input_count": 0,
-        "unique_count": 0,
-        "duplicate_count": 0,
-    }
+    assert empty == []
 
 
 @pytest.mark.parametrize(
@@ -261,8 +313,8 @@ def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
 )
 def test_search_rrf_rejects_invalid_options(kwargs, message) -> None:
     batches = [
-        SearchBatch(query="one", hits=[_hit("a", 1)]),
-        SearchBatch(query="two", hits=[_hit("b", 1)]),
+        record({"query": "one", "hits": [_hit("a", 1)], "failure": None}),
+        record({"query": "two", "hits": [_hit("b", 1)], "failure": None}),
     ]
     with pytest.raises(ValueError, match=message):
         SearchResource(FakeTransport()).fuse_rrf(batches, **kwargs)
@@ -271,56 +323,27 @@ def test_search_rrf_rejects_invalid_options(kwargs, message) -> None:
 def test_search_rrf_refuses_non_positive_source_rank() -> None:
     with pytest.raises(ValueError, match="rank"):
         SearchResource(FakeTransport()).fuse_rrf(
-            [SearchBatch(query="bad", hits=[_hit("a", 0)])]
+            [record({"query": "bad", "hits": [_hit("a", 0)], "failure": None})]
         )
 
 
-def test_typed_batch_failure_is_preserved_by_rrf() -> None:
-    failure = CapabilityFailure(
-        code="provider_rate_limited",
-        message="Provider rate limit was exhausted",
-        retryable=True,
-        attempts=3,
-        provider_status=429,
-        retry_after_seconds=2.0,
+def test_search_rrf_skips_failed_batches_without_copying_their_errors() -> None:
+    failure = record(
+        {
+            "code": "provider_rate_limited",
+            "message": "Provider rate limit was exhausted",
+            "retryable": True,
+            "attempts": 3,
+            "provider_status": 429,
+            "retry_after_seconds": 2.0,
+        }
     )
-    batch = SearchBatch(
-        query="limited",
-        hits=[],
-        failure=failure,
-    )
+    batch = record({"query": "limited", "hits": [], "failure": failure})
 
     result = SearchResource(FakeTransport()).fuse_rrf([batch])
 
-    assert result.candidates == []
-    assert result.batch_errors[0].failure == failure
-
-
-def test_search_batch_rejects_removed_legacy_error_field() -> None:
-    with pytest.raises(ValidationError, match="error"):
-        SearchBatch.model_validate(
-            {"query": "legacy", "hits": [], "error": "string failure"}
-        )
-
-
-def test_content_failure_models_are_additive_and_json_round_trip() -> None:
-    failure = CapabilityFailure(
-        code="provider_timeout",
-        message="Provider request timed out",
-        retryable=True,
-        attempts=2,
-    )
-    snippet = ContentSnippet(
-        ref="ref_1",
-        text="",
-        metadata={"backend": "web"},
-        failure=failure,
-    )
-
-    parsed = ContentSnippet.model_validate_json(snippet.model_dump_json())
-
-    assert parsed.failure == failure
-    assert parsed.metadata == {"backend": "web"}
+    assert result == []
+    assert batch.failure == failure
 
 
 def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
@@ -330,30 +353,32 @@ def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
 
         def call(self, method, params):
             self.calls.append((method, params))
-            return {
-                "matches": [
-                    {
-                        "ref": "ref_1",
-                        "line": 3,
-                        "text": "target",
-                        "input_index": 0,
-                    }
-                ],
-                "failures": [
-                    {
-                        "input_index": 1,
-                        "ref": "ref_2",
-                        "failure": {
-                            "code": "provider_not_found",
-                            "message": "Document was not found",
-                            "retryable": False,
-                            "attempts": 1,
-                            "provider_status": 404,
-                        },
-                    }
-                ],
-                "input_count": 2,
-            }
+            return record(
+                {
+                    "matches": [
+                        {
+                            "ref": "ref_1",
+                            "line": 3,
+                            "text": "target",
+                            "input_index": 0,
+                        }
+                    ],
+                    "failures": [
+                        {
+                            "input_index": 1,
+                            "ref": "ref_2",
+                            "failure": {
+                                "code": "provider_not_found",
+                                "message": "Document was not found",
+                                "retryable": False,
+                                "attempts": 1,
+                                "provider_status": 404,
+                            },
+                        }
+                    ],
+                    "input_count": 2,
+                }
+            )
 
     transport = GrepTransport()
     report = ContentResource(transport).grep_report(
@@ -363,23 +388,12 @@ def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
         max_matches_per_ref=4,
     )
 
-    assert isinstance(report, ContentGrepReport)
-    assert report.matches == [
-        ContentMatch(ref="ref_1", line=3, text="target", input_index=0)
-    ]
-    assert report.failures == [
-        ContentFailure(
-            input_index=1,
-            ref="ref_2",
-            failure=CapabilityFailure(
-                code="provider_not_found",
-                message="Document was not found",
-                retryable=False,
-                attempts=1,
-                provider_status=404,
-            ),
-        )
-    ]
+    assert isinstance(report, Record)
+    assert report.matches[0].ref == "ref_1"
+    assert report.matches[0].line == 3
+    assert report.failures[0].input_index == 1
+    assert report.failures[0].failure.code == "provider_not_found"
+    assert report.failures[0].failure.provider_status == 404
     assert report.input_count == 2
     assert transport.calls == [
         (
@@ -394,42 +408,44 @@ def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
     ]
 
 
-def test_content_passages_returns_typed_ranked_report() -> None:
+def test_content_passages_returns_nested_records() -> None:
     class PassageTransport:
         def __init__(self) -> None:
             self.calls = []
 
         def call(self, method, params):
             self.calls.append((method, params))
-            return {
-                "query": "revenue singapore",
-                "passages": [
-                    {
-                        "ref": "ref_1",
-                        "title": "Annual report",
-                        "url": "https://example.com/report",
-                        "date": "2024",
-                        "text": "Singapore revenue was 42 million dollars.",
-                        "coordinates": {
-                            "start_line": 7,
-                            "start_character": 0,
-                            "end_line": 7,
-                            "end_character": 41,
-                        },
-                        "rank": 1,
-                        "score": 3.5,
-                        "ranker": "lexical:bm25",
-                        "locator": {
-                            "id": "evidence_1",
+            return record(
+                {
+                    "query": "revenue singapore",
+                    "passages": [
+                        {
                             "ref": "ref_1",
-                            "kind": "selected_passage",
-                        },
-                    }
-                ],
-                "failures": [],
-                "input_count": 2,
-                "unique_ref_count": 1,
-            }
+                            "title": "Annual report",
+                            "url": "https://example.com/report",
+                            "date": "2024",
+                            "text": "Singapore revenue was 42 million dollars.",
+                            "coordinates": {
+                                "start_line": 7,
+                                "start_character": 0,
+                                "end_line": 7,
+                                "end_character": 41,
+                            },
+                            "rank": 1,
+                            "score": 3.5,
+                            "ranker": "lexical:bm25",
+                            "locator": {
+                                "id": "evidence_1",
+                                "ref": "ref_1",
+                                "kind": "selected_passage",
+                            },
+                        }
+                    ],
+                    "failures": [],
+                    "input_count": 2,
+                    "unique_ref_count": 1,
+                }
+            )
 
     transport = PassageTransport()
     report = ContentResource(transport).passages(
@@ -439,9 +455,9 @@ def test_content_passages_returns_typed_ranked_report() -> None:
         max_per_ref=2,
     )
 
-    assert isinstance(report, ContentPassageReport)
-    assert isinstance(report.passages[0], ContentPassage)
-    assert isinstance(report.passages[0].coordinates, PassageCoordinates)
+    assert isinstance(report, Record)
+    assert isinstance(report.passages[0], Record)
+    assert isinstance(report.passages[0].coordinates, Record)
     assert report.passages[0].locator is not None
     assert report.input_count == 2
     assert report.unique_ref_count == 1
@@ -458,40 +474,9 @@ def test_content_passages_returns_typed_ranked_report() -> None:
     ]
 
 
-def test_passage_models_reject_invalid_coordinates_scores_and_counts() -> None:
-    with pytest.raises(ValidationError, match="non-empty range"):
-        PassageCoordinates(
-            start_line=2,
-            start_character=4,
-            end_line=2,
-            end_character=4,
-        )
-
-    valid = {
-        "ref": "ref_1",
-        "text": "evidence",
-        "coordinates": {
-            "start_line": 1,
-            "start_character": 0,
-            "end_line": 1,
-            "end_character": 8,
-        },
-        "rank": 1,
-        "ranker": "lexical:bm25",
-    }
-    with pytest.raises(ValidationError):
-        ContentPassage(**valid, score=float("nan"))
-    with pytest.raises(ValidationError, match="unique_ref_count"):
-        ContentPassageReport(
-            query="q",
-            input_count=1,
-            unique_ref_count=2,
-        )
-
-
 class ExtractionTransport:
     def __init__(self, result):
-        self.result = result
+        self.result = wrap(result)
         self.calls = []
 
     def call(self, method, params):
@@ -499,7 +484,7 @@ class ExtractionTransport:
         return self.result
 
 
-def test_extract_many_returns_typed_per_item_results_and_forwards_repair() -> None:
+def test_extract_many_returns_aligned_records_and_forwards_repair() -> None:
     transport = ExtractionTransport(
         [
             {"index": 0, "data": {"matches": True}, "error": None, "attempts": 1},
@@ -528,12 +513,10 @@ def test_extract_many_returns_typed_per_item_results_and_forwards_repair() -> No
         repair_attempts=1,
     )
 
-    assert results[0] == ExtractionResult(index=0, data={"matches": True}, attempts=1)
-    assert results[1].error == ExtractionError(
-        code="schema_mismatch",
-        message="matches is required",
-        retryable=False,
-    )
+    assert isinstance(results[0], Record)
+    assert results[0].data.matches is True
+    assert results[1].error.code == "schema_mismatch"
+    assert results[1].error.message == "matches is required"
     assert transport.calls[0] == (
         "llm.extract_many",
         {
@@ -563,18 +546,6 @@ def test_extract_many_rejects_non_json_values_before_transport() -> None:
         llm.extract_many([], instruction="x", schema={}, repair_attempts=2)
 
     assert transport.calls == []
-
-
-def test_extraction_result_requires_exactly_one_data_or_error() -> None:
-    with pytest.raises(ValidationError, match="exactly one"):
-        ExtractionResult(index=0, attempts=1)
-    with pytest.raises(ValidationError, match="exactly one"):
-        ExtractionResult(
-            index=0,
-            data={},
-            error=ExtractionError(code="x", message="x", retryable=False),
-            attempts=1,
-        )
 
 
 def test_state_round_trip_and_path_confinement(tmp_path) -> None:
@@ -652,11 +623,16 @@ def test_state_merge_keeps_rows_it_did_not_write(tmp_path) -> None:
 
 
 def test_state_merge_accepts_a_search_hit_directly(tmp_path) -> None:
-    """Same contract as ``write_jsonl``: no ``.model_dump()`` at the call site."""
+    """SDK results are ordinary mappings and need no conversion before persistence."""
     state = StateResource(str(tmp_path))
-    hit = SearchHit(
-        ref="ref_1", backend="local", title="t", url=None, docid="7", domain=None,
-        date=None, snippet="s", score=1.0, rank=1,
+    hit = record(
+        {
+            "ref": "ref_1",
+            "backend": "local",
+            "title": "t",
+            "docid": "7",
+            "rank": 1,
+        }
     )
     assert state.merge_jsonl("pool.jsonl", [hit]) == 1
     assert state.merge_jsonl("pool.jsonl", [hit]) == 1
@@ -692,7 +668,7 @@ def test_output_submission(tmp_path) -> None:
 def test_output_forwards_an_evidence_locator_without_flattening_it(tmp_path) -> None:
     path = tmp_path / "output.json"
     transport = FakeTransport()
-    locator = EvidenceLocator(id="ev_1", ref="ref_1", kind="selected_passage")
+    locator = record({"id": "ev_1", "ref": "ref_1", "kind": "selected_passage"})
 
     OutputResource(str(path), transport).submit(
         {"answer": 42},
@@ -718,50 +694,11 @@ def test_output_forwards_an_evidence_locator_without_flattening_it(tmp_path) -> 
     ]
 
 
-def test_content_models_accept_optional_evidence_locators() -> None:
-    locator = {"id": "ev_1", "ref": "ref_1", "kind": "selected_passage"}
-    snippet = ContentSnippet(ref="ref_1", text="passage", locator=locator)
-    match = ContentMatch(ref="ref_1", line=8, text="match", locator=locator)
-
-    assert snippet.locator is not None and snippet.locator.id == "ev_1"
-    assert match.locator is not None and match.locator.kind == "selected_passage"
-
-    with pytest.raises(ValidationError, match="at most 128"):
-        EvidenceLocator(
-            id="x" * 129,
-            ref="ref_1",
-            kind="selected_passage",
-        )
-
-
-def test_content_models_expose_typed_locator_capacity_errors() -> None:
-    locator_error = EvidenceLocatorError(
-        code="evidence_capacity_exhausted",
-        message="Session evidence capacity is exhausted",
-    )
-    snippet = ContentSnippet(
-        ref="ref_1",
-        text="passage",
-        locator=None,
-        locator_error=locator_error,
-    )
-    match = ContentMatch(
-        ref="ref_1",
-        line=8,
-        text="match",
-        locator=None,
-        locator_error=locator_error,
-    )
-
-    assert snippet.locator is None and snippet.locator_error == locator_error
-    assert match.locator is None and match.locator_error == locator_error
-
-
-def test_output_rejects_explicit_null_locator_but_omission_remains_legacy(tmp_path) -> None:
+def test_output_rejects_explicit_null_locator_but_allows_ref_only_citations(tmp_path) -> None:
     transport = FakeTransport()
     output = OutputResource(str(tmp_path / "output.json"), transport)
 
-    with pytest.raises(ValidationError, match="locator must be omitted"):
+    with pytest.raises(ValueError, match="locator must be omitted"):
         output.submit({}, citations=[{"ref": "ref_1", "locator": None}])
 
     assert transport.calls == []
@@ -795,14 +732,8 @@ def test_a_result_answers_to_either_spelling_of_a_field_read() -> None:
         hit["nonexistent"]
 
 
-def test_a_snippet_carries_the_date_of_the_hit_it_came_from() -> None:
-    """`SearchHit.date` exists because time-constrained tasks are common.
-
-    A snippet with `title` and `url` but no `date` reads like an oversight, and
-    a program written on that assumption dies rather than skipping a filter.
-    """
-    assert "date" in ContentSnippet.model_fields
-    snippet = ContentSnippet(ref="ref_1", text="body", date="1994")
+def test_a_content_record_carries_source_dates() -> None:
+    snippet = record({"ref": "ref_1", "text": "body", "date": "1994"})
     assert snippet.date == snippet["date"] == "1994"
 
 

@@ -32,13 +32,13 @@ If unavailable or reporting `context_*` or `configuration_error`, stop and repor
 - Use search snippets to triage sources, not to support document-content claims. Search metadata
   is sufficient only when the requested result is a discovery list.
 - Prefer `search.many` -> `search.fuse_rrf` -> `content.passages` for semantic evidence discovery.
-  Inspect each returned passage before using its locator. Keep `grep` and `read` for exact strings
-  and deliberate context expansion.
+  Inspect each returned passage before using its locator. Use `grep_report` and `read` for exact
+  strings and deliberate context expansion.
 - Read the passage used for every material claim. Cite only a non-empty passage that returned a
-  locator, and preserve `locator.model_dump(mode="json")` losslessly.
+  locator, and preserve `dict(locator)` losslessly.
 - Treat a locator as proof that a passage is bound to a retrieved document, not as proof that its
   source is credible or its claim is true. Prefer primary sources and corroborate disputed claims.
-- Inspect typed item failures and `BrokerError`. Empty hits and zero matches are successful
+- Inspect item failure records and `BrokerError`. Empty hits and zero matches are successful
   results. After a final failure, change the query, source, or candidate instead of repeating it.
 - Keep stdout compact. Stdout, stderr, and submitted output share one observation budget.
 
@@ -65,12 +65,9 @@ when verification depends on an exact spelling or more surrounding lines.
 
 ## Orchestrate with Python
 
-Use comprehensions and bounded combinations to build systematic queries. Use local predicates,
-dicts, sets, sorting, `filter`, `any`, `all`, and `zip(strict=True)` to select, join, rank, and
-measure coverage. Prefer `re`, dates, strings, and arithmetic to an LLM.
-
-Treat `sdk.llm.extract_many` as a semantic map, not an inner tool-calling agent. Validate its
-quotes, then let Python make at most a bounded follow-up capability call.
+Prefer deterministic Python for query construction, filtering, joins, ranking, and coverage.
+Treat `sdk.llm.extract_many` as a semantic map, not an inner tool-calling agent: validate its
+quotes, then make at most a bounded follow-up capability call.
 
 ## Use the workspace as program memory
 
@@ -96,7 +93,8 @@ once, resume missing work, or report OpenSAC as unavailable. Never invent an Ope
 ## Load details only when needed
 
 - Read [references/sdk-contract.md](references/sdk-contract.md) before using unfamiliar SDK
-  methods, fields, failure types, limits, or citation behavior.
+  core/helper methods, fields, failure types, limits, or citation behavior.
+- Read [references/advanced.md](references/advanced.md) only when a core workflow is insufficient.
 - Read [references/patterns.md](references/patterns.md) when a weaker model needs separate compact
   examples for exploration and verification/submission.
 - Read [references/python-recipes.md](references/python-recipes.md) when query variants should be

@@ -1,6 +1,6 @@
 # OpenSAC SDK
 
-`opensac-sdk` is the typed client embedded in OpenSAC's isolated execution sandbox. Generated
+`opensac-sdk` is the compact JSON-record client embedded in OpenSAC's isolated execution sandbox. Generated
 programs use it to call search, cross-document passage ranking, content inspection, state,
 extraction, usage, and citation capabilities over the authenticated broker socket.
 

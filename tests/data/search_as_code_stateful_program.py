@@ -62,8 +62,9 @@ except BrokerError as error:
     batches = []
 
 fusion = sdk.search.fuse_rrf(batches, k=60)
-for item in fusion.batch_errors:
-    print(f"query failed: {item.query} code={item.failure.code}")
+for batch in batches:
+    if batch.failure is not None:
+        print(f"query failed: {batch.query} code={batch.failure.code}")
 
 leader_refs = []
 for batch in batches:
@@ -73,8 +74,8 @@ for batch in batches:
         if hit.ref not in leader_refs:
             leader_refs.append(hit.ref)
 
-current_rank = {candidate.ref: candidate.fused_rank for candidate in fusion.candidates}
-for candidate in fusion.candidates:
+current_rank = {candidate.ref: candidate.fused_rank for candidate in fusion}
+for candidate in fusion:
     row = pool.setdefault(
         candidate.ref,
         {
@@ -210,7 +211,7 @@ for name, spec in constraints.items():
                 "requirement": spec["requirement"],
                 "ref": passage.ref,
                 "text": passage.text,
-                "locator": passage.locator.model_dump(mode="json"),
+                "locator": dict(passage.locator),
             }
             print(f"{name}: verified")
             break

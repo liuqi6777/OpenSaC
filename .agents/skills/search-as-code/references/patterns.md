@@ -40,7 +40,7 @@ try:
 except BrokerError as error:
     print(f"ERROR: search code={error.code} retryable={error.retryable}")
 else:
-    candidates = sdk.search.fuse_rrf(batches, k=60).candidates[:8]
+    candidates = sdk.search.fuse_rrf(batches, k=60)[:8]
     for item in candidates:
         snippet = " ".join((item.snippet or "").split())[:240]
         print(
@@ -78,7 +78,7 @@ try:
     fused = sdk.search.fuse_rrf(batches, k=60, limit=12)
     report = sdk.content.passages(
         goal,
-        [item.ref for item in fused.candidates],
+        [item.ref for item in fused],
         limit=8,
         max_per_ref=2,
     )
@@ -87,10 +87,10 @@ except BrokerError as error:
 else:
     for item in report.passages:
         excerpt = " ".join(item.text.split())[:700]
-        locator = item.locator.model_dump(mode="json") if item.locator else None
+        locator = dict(item.locator) if item.locator else None
         print(
             f"PASSAGE rank={item.rank} ref={item.ref!r} title={item.title!r} "
-            f"coordinates={item.coordinates.model_dump(mode='json')!r} "
+            f"coordinates={dict(item.coordinates)!r} "
             f"locator={locator!r} text={excerpt!r}"
         )
     failures = [item.failure.code for item in report.failures]
@@ -149,7 +149,7 @@ for name, pattern in checks.items():
         evidence[name] = {
             "ref": passage.ref,
             "text": passage.text,
-            "locator": passage.locator.model_dump(mode="json"),
+            "locator": dict(passage.locator),
         }
         break
 

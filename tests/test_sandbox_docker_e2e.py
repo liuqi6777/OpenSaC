@@ -43,7 +43,7 @@ def sandbox_image() -> str:
         )
 
 
-def test_built_image_exposes_contract_6_and_passage_models(sandbox_image: str) -> None:
+def test_built_image_exposes_contract_7_and_compact_sdk(sandbox_image: str) -> None:
     image = sandbox_image
     inspected = subprocess.run(
         [
@@ -58,7 +58,7 @@ def test_built_image_exposes_contract_6_and_passage_models(sandbox_image: str) -
         capture_output=True,
         text=True,
     )
-    assert inspected.stdout.strip() == "6"
+    assert inspected.stdout.strip() == "7"
 
     inspected_version = subprocess.run(
         [
@@ -76,26 +76,18 @@ def test_built_image_exposes_contract_6_and_passage_models(sandbox_image: str) -
     assert inspected_version.stdout.strip() == __version__
 
     script = (
-        "import json; "
-        "from opensac_sdk import CapabilityFailure, ContentFailure, "
-        "ContentGrepReport, ContentPassageReport, PassageCoordinates, "
-        "SearchBatch, SearchHit, __version__; "
-        "from opensac_sdk.search import SearchResource; "
-        "hit = SearchHit(ref='ref_a', backend='local', rank=1); "
-        "result = SearchResource(None).fuse_rrf([SearchBatch(query='q', hits=[hit])]); "
-        "failure = CapabilityFailure(code='provider_not_found', message='missing', "
-        "retryable=False, attempts=1, provider_status=404); "
-        "report = ContentGrepReport(matches=[], failures=[ContentFailure("
-        "input_index=0, ref='ref_a', failure=failure)], input_count=1); "
-        "passages = ContentPassageReport(query='q', input_count=0, "
-        "unique_ref_count=0); "
-        "coordinates = PassageCoordinates(start_line=1, start_character=0, "
-        "end_line=1, end_character=1); "
+        "import importlib.util, json; "
+        "from opensac_sdk import __version__; "
+        "from opensac_sdk._resources import SearchResource; "
+        "hit = {'ref': 'ref_a', 'backend': 'local', 'rank': 1}; "
+        "batch = {'query': 'q', 'hits': [hit], 'failure': None}; "
+        "result = SearchResource(None).fuse_rrf([batch]); "
         "print(json.dumps({'version': __version__, "
-        "'fusion': result.model_dump(mode='json'), "
-        "'report': report.model_dump(mode='json'), "
-        "'passages': passages.model_dump(mode='json'), "
-        "'coordinates': coordinates.model_dump(mode='json')}, sort_keys=True))"
+        "'fusion': result, "
+        "'types_module': importlib.util.find_spec('opensac_sdk.types') is not None, "
+        "'models_module': importlib.util.find_spec('opensac_sdk.models') is not None, "
+        "'search_module': importlib.util.find_spec('opensac_sdk.search') is not None}, "
+        "sort_keys=True))"
     )
     executed = subprocess.run(
         [
@@ -115,11 +107,11 @@ def test_built_image_exposes_contract_6_and_passage_models(sandbox_image: str) -
     )
     payload = json.loads(executed.stdout)
     assert payload["version"] == __version__
-    assert payload["fusion"]["candidates"][0]["ref"] == "ref_a"
-    assert payload["fusion"]["candidates"][0]["fused_rank"] == 1
-    assert payload["report"]["failures"][0]["failure"]["provider_status"] == 404
-    assert payload["passages"]["unique_ref_count"] == 0
-    assert payload["coordinates"]["end_character"] == 1
+    assert payload["fusion"][0]["ref"] == "ref_a"
+    assert payload["fusion"][0]["fused_rank"] == 1
+    assert payload["types_module"] is False
+    assert payload["models_module"] is False
+    assert payload["search_module"] is False
 
 
 def test_compose_service_executes_a_sandbox_program(sandbox_image: str) -> None:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, Header, HTTPException
-from opensac_sdk.models import RpcError, RpcRequest, RpcResponse
 
+from opensac._contracts import RpcError, RpcRequest, RpcResponse
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
 from opensac.broker.service import BrokerService
 

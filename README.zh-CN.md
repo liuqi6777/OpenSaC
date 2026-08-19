@@ -35,11 +35,11 @@ OpenSAC 实现了公开的
 ## 为什么使用 OpenSAC
 
 - **可编程检索**：生成的 Python 可以用普通控制流完成批量查询、过滤、关联、排序和证据选择。
-- **紧凑的类型化 SDK**：`opensac_sdk` 提供搜索、正文、状态、可选结构化 LLM、用量和引用原语。
+- **紧凑的 record SDK**：`opensac_sdk` 提供搜索、正文、状态、可选结构化 LLM、用量和引用原语。
 - **强化隔离执行**：沙箱程序无法访问网络、服务商密钥、Docker socket 或不受限的宿主机文件系统。
 - **上下文解耦**：大规模中间结果保留在工作空间中，只有程序明确打印或提交的数据返回控制模型。
 - **可追踪证据**：会话级不透明引用与 broker 签发的段落 locator 将候选结果连接到最终引用。
-- **研究级观测**：预算、类型化局部失败、trace、阶段耗时、幂等执行和 worker 生命周期支持可复现 rollout。
+- **研究级观测**：预算、结构化局部失败、trace、阶段耗时、幂等执行和 worker 生命周期支持可复现 rollout。
 
 ## 架构
 
@@ -166,7 +166,7 @@ program = """
 from opensac_sdk import sdk
 
 hits = sdk.search("谁提出了 ReAct prompting 方法？", limit=5)
-sdk.output.submit({"hits": [hit.model_dump() for hit in hits]})
+sdk.output.submit({"hits": [dict(hit) for hit in hits]})
 """
 
 with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
@@ -193,14 +193,15 @@ PY
 | 命名空间 | 主要操作 | 作用 |
 | --- | --- | --- |
 | `sdk.search` | `search`、`many`、`fuse_rrf` | 检索并融合候选，同时保留 provenance |
-| `sdk.content` | `passages`、`get_many`、`snippets`、`grep`、`read` | 排序、定位和检查证据 |
-| `sdk.llm` | `map`、`map_many`、`extract`、`extract_many` | 可选的 broker 模型调用与 schema 校验抽取 |
+| `sdk.content` | `passages`、`read`、`grep_report` | 排序、定位和检查证据，不隐藏部分抓取失败 |
+| `sdk.llm` | `extract_many`、`complete`、`complete_many` | 可选的 broker 模型调用与 schema 校验抽取 |
+| `sdk.citations` | `resolve`、`resolve_requests` | 高级检查已检索的引用句柄 |
 | `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
 | `sdk.session` | `usage` | 查看策略统计与剩余预算 |
 | `sdk.output` | `submit` | 返回结构化输出并解析可信引用 |
 
-批量操作保持输入对齐，并暴露类型化的逐项失败。空搜索结果属于成功结果。段落引用必须使用正文操作返回的
-locator。当前公共契约与迁移说明见 [OpenSAC 0.5](docs/opensac-0.5.md)。
+批量操作保持输入对齐，并暴露结构化的逐项失败。空搜索结果属于成功结果。段落引用必须使用正文操作返回的
+locator。精确 core 签名与有意保留的 advanced 操作分别位于 Search-as-Code Skill references。
 
 ### 智能体集成
 
@@ -208,9 +209,9 @@ OpenSAC 支持三种驱动方式：
 
 1. 自定义 agent loop，通过 HTTP/Python 客户端调用；
 2. `opensac agent-run` 配合 CLI 版 Search-as-Code skill；
-3. `opensac mcp` 配合 Codex 或 Claude Code 的 MCP skill。
+3. `opensac mcp` 配合 Codex 的 MCP skill。
 
-模型可见的公开接口仍只有 `sac_run(code)`。对话绑定、session 创建、lease 续租和状态丢失处理全部留在
+MCP 协议只暴露一个操作 `sac_run(code)`。对话绑定、session 创建、lease 续租和状态丢失处理全部留在
 适配层。完整配置见[智能体集成指南](docs/agent-integrations.zh-CN.md)或
 [英文版](docs/agent-integrations.md)。
 
@@ -242,7 +243,7 @@ OpenSAC 支持三种驱动方式：
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-uv sync --locked --extra dev
+uv sync --locked --all-packages --extra dev
 uv run ruff check .
 uv run pytest
 ```

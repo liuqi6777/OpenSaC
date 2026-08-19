@@ -5,8 +5,8 @@ import json
 
 import httpx
 import pytest
-from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
+from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
 from opensac.backends.local_http import LocalSearchBackend
 from opensac.backends.serper import SerperBackend
 from opensac.broker.service import (
@@ -461,13 +461,6 @@ async def test_content_dedupes_refs_and_grep_report_keeps_failure_indexes() -> N
     )
     assert only_failure["matches"] == []
     assert only_failure["failures"][0]["failure"]["code"] == "provider_not_found"
-    with pytest.raises(CapabilityProviderError) as legacy:
-        await service.call(
-            "token",
-            "content.grep",
-            {"refs": [refs[1]], "pattern": "target"},
-        )
-    assert legacy.value.code == "provider_not_found"
 
 
 async def test_systemic_content_failure_is_promoted_and_never_cached() -> None:

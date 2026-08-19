@@ -4,8 +4,8 @@ from typing import Any
 
 import httpx
 import pytest
-from opensac_sdk.models import SearchHit
 
+from opensac._contracts import SearchHit
 from opensac.backends import local_http
 from opensac.backends import serper as serper_module
 from opensac.backends.local_http import LocalSearchBackend, parse_document_frontmatter

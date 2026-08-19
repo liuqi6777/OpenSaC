@@ -4,10 +4,10 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from opensac_sdk.llm import LLMResource
-from opensac_sdk.models import ContentSnippet, SearchHit
+from opensac_sdk._resources import LLMResource
 from opensac_sdk.transport import BrokerError, UnixSocketTransport
 
+from opensac._contracts import ContentSnippet, SearchHit
 from opensac.broker import BrokerAlreadyRunning, BrokerRuntime, BrokerService
 from opensac.models import Session
 from opensac.provider import ProviderRequestError

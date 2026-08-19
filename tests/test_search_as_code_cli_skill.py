@@ -9,6 +9,7 @@ SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code-cli"
 MCP_SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
+ADVANCED_PATH = SKILL_DIR / "references" / "advanced.md"
 PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
 RECIPES_PATH = SKILL_DIR / "references" / "python-recipes.md"
 STATEFUL_PATH = SKILL_DIR / "references" / "stateful-research.md"
@@ -45,6 +46,7 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "`HTTP 401` or `HTTP 403`" in skill
     assert "without printing or embedding any credential" in skill
     assert "references/sdk-contract.md" in skill
+    assert "references/advanced.md" in skill
     assert "references/patterns.md" in skill
     assert "references/python-recipes.md" in skill
     assert "references/stateful-research.md" in skill
@@ -83,6 +85,7 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
         CONTRACT_PATH.read_bytes()
         == (MCP_SKILL_DIR / "references" / "sdk-contract.md").read_bytes()
     )
+    assert ADVANCED_PATH.read_bytes() == (MCP_SKILL_DIR / "references" / "advanced.md").read_bytes()
     assert PATTERNS_PATH.read_bytes() == (MCP_SKILL_DIR / "references" / "patterns.md").read_bytes()
     assert (
         RECIPES_PATH.read_bytes()

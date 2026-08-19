@@ -23,8 +23,8 @@ from opensac.agent_session import (
 )
 
 _CONTEXT_UNAVAILABLE_OBSERVATION = (
-    "[sac_run] context_unavailable: The MCP host did not provide a Codex thread_id "
-    "and no Claude Code session was bound. No OpenSAC session was created."
+    "[sac_run] context_unavailable: The MCP host did not provide a Codex thread_id. "
+    "No OpenSAC session was created."
 )
 
 
@@ -107,29 +107,14 @@ class OpenSACMCP:
             registry_name="mcp_sessions.sqlite3",
         )
         self._codex = CodexContextResolver()
-        self._claude_context_id: str | None = None
         self._closed = False
-
-    def bind_context(self, context_id: str) -> str:
-        if not isinstance(context_id, str) or not context_id.strip():
-            return "context_unavailable: context_id must be a non-empty string"
-        self._claude_context_id = context_id.strip()
-        return "Claude Code session context bound"
-
-    def _resolve_context(self, meta: Any) -> AgentContext | None:
-        codex = self._codex.resolve(meta)
-        if codex is not None:
-            return codex
-        if self._claude_context_id is not None:
-            return AgentContext(host="claude", context_id=self._claude_context_id)
-        return None
 
     async def run_code(self, code: str, meta: Any = None) -> str:
         if not isinstance(code, str) or not code.strip():
             return "[sac_run] Expected a non-empty string in the 'code' field."
         if self._closed:
             return "[sac_run] MCP adapter is closed."
-        context = self._resolve_context(meta)
+        context = self._codex.resolve(meta)
         if context is None:
             return _CONTEXT_UNAVAILABLE_OBSERVATION
         return await self._sessions.run_code(code, context)
@@ -155,8 +140,7 @@ def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
         "OpenSAC",
         instructions=(
             "Run Search-as-Code programs with sac_run. The current agent conversation is "
-            "bound by the MCP host; never create, pass, display, or delete OpenSAC sessions. "
-            "The bind_context tool is reserved for the Claude Code host hook."
+            "bound by the MCP host; never create, pass, display, or delete OpenSAC sessions."
         ),
         lifespan=lifespan,
         log_level="ERROR",
@@ -166,11 +150,6 @@ def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
     async def sac_run(code: str, ctx: Context) -> str:
         """Run Python code in this conversation's persistent OpenSAC workspace."""
         return await adapter.run_code(code, ctx.request_context.meta)
-
-    @server.tool(name="bind_context")
-    async def bind_context(context_id: str) -> str:
-        """INTERNAL: bind the Claude Code session id supplied by a host hook."""
-        return adapter.bind_context(context_id)
 
     return server
 

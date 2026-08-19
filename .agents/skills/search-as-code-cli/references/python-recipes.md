@@ -44,7 +44,7 @@ means “broaden the heuristic” or “the hard constraint is unsupported.”
 from opensac_sdk import sdk
 
 batches = sdk.search.many(queries, limit_per_query=10, concurrency=4)
-candidates = sdk.search.fuse_rrf(batches, k=60).candidates
+candidates = sdk.search.fuse_rrf(batches, k=60)
 wanted_years = {str(year) for year in range(2019, 2024)}
 preferred_domains = {"example.gov", "example.edu"}
 
@@ -137,7 +137,7 @@ if extraction_error is None:
                     "ref": passage.ref,
                     "text": passage.text,
                     "quote": quote,
-                    "locator": passage.locator.model_dump(mode="json"),
+                    "locator": dict(passage.locator),
                 }
             )
         elif data.get("next_action") == "search_more":
@@ -179,7 +179,7 @@ elif followup_queries:
         print(f"ERROR: follow-up search code={error.code} retryable={error.retryable}")
         print("NEXT: change the source or query strategy")
     else:
-        candidates = sdk.search.fuse_rrf(batches, k=60).candidates[:8]
+        candidates = sdk.search.fuse_rrf(batches, k=60)[:8]
         for item in candidates:
             print(f"CANDIDATE ref={item.ref!r} title={item.title!r}")
         print("NEXT: inspect follow-up candidates and choose refs/checks")

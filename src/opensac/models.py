@@ -33,34 +33,17 @@ class ResourceBudget(BaseModel):
     max_sandbox_seconds: float | None = Field(default=None, ge=0.0)
     max_workspace_bytes: int | None = Field(default=None, ge=0)
 
-# Every capability the broker dispatches, in one place. The broker asserts its
-# handler table against this tuple, so a capability cannot be added on one side
-# only: a method missing here would be invisible to the session manifest (and
-# therefore to the skill text), and a method listed here without a handler would
-# be advertised to the model and then fail on first use.
+
+# This is the host side of the JSON capability contract. Repository contract
+# tests keep it aligned with the version-matched sandbox SDK surface.
 CAPABILITY_METHODS: tuple[str, ...] = (
-    # One search, whichever backend this session was deployed against. The
-    # backend is a deployment fact, not something a program chooses: it reaches
-    # exactly one corpus, and naming that corpus in the method would make the
-    # generated program unportable across arms and the skill text differ by
-    # backend for no gain. Where a backend genuinely differs -- a domain filter,
-    # a depth ceiling -- it differs in a *parameter*, which the broker refuses
-    # explicitly rather than absorbing it. `hit.backend` still carries
-    # provenance, so nothing downstream loses track of where a document came
-    # from.
     "search.query",
     "search.query_many",
     "content.get_many",
-    "content.snippets",
     "content.passages",
     "content.read",
-    "content.grep",
     "content.grep_report",
     "citations.resolve",
-    # The program's own budget. Without it the only place the remaining quota
-    # appears is the observation the host renders for the control model, so the
-    # code that decides whether to search again cannot see what searching has
-    # already cost.
     "session.usage",
     "llm.complete",
     "llm.complete_many",

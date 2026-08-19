@@ -30,13 +30,12 @@ CI also runs this check on every pull request.
 
 ## Publish a release
 
-1. Update both `_version.py` files and the release notes. Update the compatible `opensac-sdk`
-   range in the root `pyproject.toml` when the minor version changes.
+1. Update both `_version.py` files and the release notes.
 2. Run the local release checks:
 
    ```bash
    uv lock
-   uv sync --locked --extra dev
+   uv sync --locked --all-packages --extra dev
    uv run ruff check .
    uv run pytest
    OPENSAC_DOCKER_E2E=1 uv run pytest tests/test_sandbox_docker_e2e.py

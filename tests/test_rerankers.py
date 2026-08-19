@@ -4,8 +4,8 @@ import json
 
 import httpx
 import pytest
-from opensac_sdk.models import ContentSnippet, SearchHit
 
+from opensac._contracts import ContentSnippet, SearchHit
 from opensac.broker.service import BrokerService
 from opensac.models import ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime

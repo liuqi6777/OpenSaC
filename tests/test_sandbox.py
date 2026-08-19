@@ -134,7 +134,7 @@ async def test_sandbox_image_contract_is_inspected_once(
 
     async def create_process(*command: str, **_: object) -> _CompletedProcess:
         calls.append(command)
-        return _CompletedProcess(stdout=b"6\n")
+        return _CompletedProcess(stdout=b"7\n")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     verifier = DockerImageContractVerifier("opensac-test")
@@ -153,9 +153,9 @@ async def test_missing_sandbox_image_is_pulled_before_contract_check(
     calls: list[tuple[str, ...]] = []
     results = iter(
         [
-            _CompletedProcess(returncode=1, stderr=b"No such image: published:0.5.0\n"),
+            _CompletedProcess(returncode=1, stderr=b"No such image: published:0.6.0\n"),
             _CompletedProcess(stdout=b"pulled\n"),
-            _CompletedProcess(stdout=b"6\n"),
+            _CompletedProcess(stdout=b"7\n"),
         ]
     )
 
@@ -165,11 +165,11 @@ async def test_missing_sandbox_image_is_pulled_before_contract_check(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
 
-    await DockerImageContractVerifier("published:0.5.0").ensure_compatible()
+    await DockerImageContractVerifier("published:0.6.0").ensure_compatible()
 
     assert [call[1:3] for call in calls] == [
         ("image", "inspect"),
-        ("pull", "published:0.5.0"),
+        ("pull", "published:0.6.0"),
         ("image", "inspect"),
     ]
 
@@ -179,7 +179,7 @@ async def test_sandbox_image_pull_failure_is_reported(
 ) -> None:
     results = iter(
         [
-            _CompletedProcess(returncode=1, stderr=b"No such object: private:0.5.0\n"),
+            _CompletedProcess(returncode=1, stderr=b"No such object: private:0.6.0\n"),
             _CompletedProcess(returncode=1, stderr=b"denied\n"),
         ]
     )
@@ -190,7 +190,7 @@ async def test_sandbox_image_pull_failure_is_reported(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
 
     with pytest.raises(SandboxImageContractError, match="Could not pull.*denied"):
-        await DockerImageContractVerifier("private:0.5.0").ensure_compatible()
+        await DockerImageContractVerifier("private:0.6.0").ensure_compatible()
 
 
 async def test_cold_sandbox_rejects_stale_image_before_workspace_setup(
@@ -211,7 +211,7 @@ async def test_cold_sandbox_rejects_stale_image_before_workspace_setup(
     result = await sandbox.execute(SandboxRequest("pass", workspace, "secret"))
 
     assert result.exit_code == 125
-    assert "has contract '2'; expected 6" in (result.launch_error or "")
+    assert "has contract '2'; expected 7" in (result.launch_error or "")
     assert not workspace.exists()
     assert len(calls) == 1
     assert calls[0][1:3] == ("image", "inspect")
