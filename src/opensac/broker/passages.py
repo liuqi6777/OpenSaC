@@ -133,12 +133,12 @@ def score_passage_candidates(
 def prefilter_passage_candidates(
     candidates: list[PassageCandidate],
     *,
-    max_per_ref: int,
+    max_per_source: int,
     limit: int,
 ) -> list[PassageCandidate]:
     grouped: dict[str, list[PassageCandidate]] = {}
     for candidate in candidates:
-        grouped.setdefault(candidate.hit.ref, []).append(candidate)
+        grouped.setdefault(candidate.hit.source, []).append(candidate)
 
     retained: list[PassageCandidate] = []
     for rows in grouped.values():
@@ -150,7 +150,7 @@ def prefilter_passage_candidates(
                     candidate.start,
                     candidate.end,
                 ),
-            )[: max(8, max_per_ref)]
+            )[: max(8, max_per_source)]
         )
     retained.sort(
         key=lambda candidate: (
@@ -166,7 +166,7 @@ def prefilter_passage_candidates(
 def select_passage_candidates(
     candidates: list[tuple[PassageCandidate, float]],
     *,
-    max_per_ref: int,
+    max_per_source: int,
     limit: int,
 ) -> list[tuple[PassageCandidate, float]]:
     ordered = sorted(
@@ -179,11 +179,11 @@ def select_passage_candidates(
         ),
     )
     selected: list[tuple[PassageCandidate, float]] = []
-    per_ref: Counter[str] = Counter()
+    per_source: Counter[str] = Counter()
     for candidate, score in ordered:
-        if per_ref[candidate.hit.ref] >= max_per_ref:
+        if per_source[candidate.hit.source] >= max_per_source:
             continue
-        per_ref[candidate.hit.ref] += 1
+        per_source[candidate.hit.source] += 1
         selected.append((candidate, score))
         if len(selected) >= limit:
             break

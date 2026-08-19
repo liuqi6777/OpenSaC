@@ -131,9 +131,7 @@ async def test_search_uses_server_shaped_fields_without_reprocessing(client) -> 
 
 async def test_search_does_not_parse_a_full_mode_snippet(client) -> None:
     """Even a frontmatter-looking snippet remains owned by the search server."""
-    client.search_hits = [
-        {"docid": 74492, "snippet": DOCUMENT_TEXT, "score": 0.8, "rank": 1}
-    ]
+    client.search_hits = [{"docid": 74492, "snippet": DOCUMENT_TEXT, "score": 0.8, "rank": 1}]
 
     hits = await LocalSearchBackend("http://localhost:8081").search("rumble", limit=5)
 
@@ -146,9 +144,7 @@ async def test_offset_deepens_the_request_and_keeps_ranks_absolute(client) -> No
     client.search_hits = [
         {"docid": index, "snippet": "body", "rank": index} for index in range(1, 21)
     ]
-    hits = await LocalSearchBackend("http://localhost:8081").search(
-        "q", limit=5, offset=10
-    )
+    hits = await LocalSearchBackend("http://localhost:8081").search("q", limit=5, offset=10)
 
     # The service has no offset parameter, so depth is asked for and sliced.
     assert client.requests[0][1] == {"query": "q", "top_k": 15}
@@ -210,7 +206,7 @@ async def test_local_backend_reuses_and_closes_one_http_client(client) -> None:
 async def test_content_keeps_the_header_in_the_text(client) -> None:
     """`content.read` addresses lines, so nothing may silently delete one."""
     client.document_text = DOCUMENT_TEXT
-    hit = SearchHit(ref="ref_x", backend="local", docid="1", title="", rank=1)
+    hit = SearchHit(source="doc_x", backend="local", docid="1", title="", rank=1)
     row = await LocalSearchBackend("http://localhost:8081").fetch(hit)
 
     assert row.text == DOCUMENT_TEXT
@@ -229,9 +225,7 @@ async def test_local_fetch_is_one_atomic_transport_operation(monkeypatch) -> Non
             return FakeResponse({"text": "body"})
 
     monkeypatch.setattr(local_http.httpx, "AsyncClient", Failing)
-    hits = [
-        SearchHit(ref=f"ref_{n}", backend="local", docid=str(n), rank=n) for n in (1, 2, 3)
-    ]
+    hits = [SearchHit(source=f"doc_{n}", backend="local", docid=str(n), rank=n) for n in (1, 2, 3)]
     backend = LocalSearchBackend("http://localhost:8081")
 
     assert (await backend.fetch(hits[0])).text == "body"
@@ -254,7 +248,7 @@ async def test_local_adapter_rejects_invalid_success_payload(monkeypatch) -> Non
         await backend.search("q", limit=1)
     assert search_error.value.code == "provider_invalid_response"
 
-    hit = SearchHit(ref="ref_1", backend="local", docid="1", rank=1)
+    hit = SearchHit(source="doc_1", backend="local", docid="1", rank=1)
     with pytest.raises(ProviderRequestError) as fetch_error:
         await backend.fetch(hit)
     assert fetch_error.value.code == "provider_invalid_response"
@@ -294,8 +288,8 @@ async def test_web_fetch_exposes_transport_and_typed_input_failures(monkeypatch)
 
     monkeypatch.setattr(serper_module.httpx, "AsyncClient", Blocked)
     hits = [
-        SearchHit(ref="ref_1", backend="web", url="https://example.com/a", rank=1),
-        SearchHit(ref="ref_2", backend="web", url=None, rank=2),
+        SearchHit(source="doc_1", backend="web", url="https://example.com/a", rank=1),
+        SearchHit(source="doc_2", backend="web", url=None, rank=2),
     ]
     backend = SerperBackend("key")
 
@@ -307,14 +301,14 @@ async def test_web_fetch_exposes_transport_and_typed_input_failures(monkeypatch)
 
 
 def test_bundled_fetch_preflight_validates_handles_and_credentials() -> None:
-    local_hit = SearchHit(ref="ref_local", backend="local", docid=None, rank=1)
+    local_hit = SearchHit(source="doc_local", backend="local", docid=None, rank=1)
     with pytest.raises(ProviderRequestError) as local_error:
         LocalSearchBackend("http://localhost:8081").preflight_fetch(local_hit)
     assert local_error.value.code == "invalid_request"
 
     for invalid_url in (None, "example.com/page", "javascript:alert(1)"):
         web_hit = SearchHit(
-            ref="ref_web",
+            source="doc_web",
             backend="web",
             url=invalid_url,
             rank=1,
@@ -324,7 +318,7 @@ def test_bundled_fetch_preflight_validates_handles_and_credentials() -> None:
         assert web_error.value.code == "invalid_request"
 
     configured_hit = SearchHit(
-        ref="ref_web",
+        source="doc_web",
         backend="web",
         url="https://example.com/page",
         rank=1,

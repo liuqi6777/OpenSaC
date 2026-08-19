@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -18,7 +18,9 @@ class RetrievalMetadata(BaseModel):
 
 
 class SearchHit(BaseModel):
-    ref: str
+    # Filled by the broker when search admits the hit into a session. Backends
+    # provide only their native URL/docid and never mint public addresses.
+    source: str = ""
     backend: str
     title: str = ""
     url: str | None = None
@@ -75,18 +77,18 @@ class SearchBatch(BaseModel):
 
 
 class ContentSnippet(BaseModel):
-    ref: str
+    source: str
     text: str
     url: str | None = None
     title: str = ""
     # Carried over from the hit this text came from, for the same reason
     # `SearchHit.date` exists. Without it a program that filters on time has to
-    # keep the hits alongside the snippets and join them by ref, and the shape
+    # keep the hits alongside the snippets and join them by source, and the shape
     # of the SDK is what suggests otherwise: a snippet that has `title` and
     # `url` but no `date` reads like an oversight, and a program written on
     # that assumption dies on `AttributeError` rather than missing a filter.
     date: str | None = None
-    locator: EvidenceLocator | None = None
+    locator: str | None = None
     locator_error: OperationError | None = None
     failure: CapabilityFailure | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -106,14 +108,12 @@ class ContentMatch(BaseModel):
     ``line`` is 1-indexed and is the same coordinate ``content.read`` takes as
     ``offset``, so locating and reading compose without arithmetic:
 
-        report = sdk.content.grep_report(refs, r"born in \\d{4}")
+        report = sdk.content.grep_report(sources, r"born in \\d{4}")
         match = report.matches[0]
-        window = sdk.content.read([match.ref], offset=max(1, match.line - 5))
+        window = sdk.content.read([match.source], offset=max(1, match.line - 5))
     """
 
-    ref: str
-    docid: str | None = None
-    url: str | None = None
+    source: str
     title: str = ""
     line: int
     text: str
@@ -121,17 +121,17 @@ class ContentMatch(BaseModel):
     # so a program can tell which side of the match a line came from.
     before: list[str] = Field(default_factory=list)
     after: list[str] = Field(default_factory=list)
-    locator: EvidenceLocator | None = None
+    locator: str | None = None
     locator_error: OperationError | None = None
-    # Populated by grep_report so duplicate input refs remain distinguishable.
+    # Populated by grep_report so duplicate input sources remain distinguishable.
     input_index: int | None = Field(default=None, ge=0)
 
 
 class ContentFailure(BaseModel):
-    """A ref that could not be fetched while other content work succeeded."""
+    """A source that could not be fetched while other content work succeeded."""
 
     input_index: int = Field(ge=0)
-    ref: str
+    source: str
     failure: CapabilityFailure
 
 
@@ -159,25 +159,24 @@ class PassageCoordinates(BaseModel):
 
 
 class ContentPassage(BaseModel):
-    """One globally ranked passage selected from a caller-authorized ref set."""
+    """One globally ranked passage selected from a caller-authorized source set."""
 
     model_config = ConfigDict(extra="forbid")
 
-    ref: str = Field(min_length=1)
+    source: str = Field(min_length=1, max_length=4_096)
     title: str = ""
-    url: str | None = None
     date: str | None = None
     text: str = Field(min_length=1)
     coordinates: PassageCoordinates
     rank: int = Field(ge=1)
     score: float = Field(allow_inf_nan=False)
     ranker: str = Field(min_length=1)
-    locator: EvidenceLocator | None = None
+    locator: str | None = Field(default=None, min_length=1, max_length=128)
     locator_error: OperationError | None = None
 
 
 class ContentPassageReport(BaseModel):
-    """Ranked passages plus typed fetch failures for the requested ref set."""
+    """Ranked passages plus typed fetch failures for the requested source set."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -185,29 +184,21 @@ class ContentPassageReport(BaseModel):
     passages: list[ContentPassage] = Field(default_factory=list)
     failures: list[ContentFailure] = Field(default_factory=list)
     input_count: int = Field(ge=0)
-    unique_ref_count: int = Field(ge=0)
+    unique_source_count: int = Field(ge=0)
 
     @model_validator(mode="after")
     def _validate_counts(self) -> Self:
-        if self.unique_ref_count > self.input_count:
-            raise ValueError("unique_ref_count cannot exceed input_count")
+        if self.unique_source_count > self.input_count:
+            raise ValueError("unique_source_count cannot exceed input_count")
         return self
 
 
 class ContentGrepReport(BaseModel):
-    """Matches plus refs that grep could not inspect."""
+    """Matches plus sources that grep could not inspect."""
 
     matches: list[ContentMatch] = Field(default_factory=list)
     failures: list[ContentFailure] = Field(default_factory=list)
     input_count: int = Field(ge=0)
-
-
-class EvidenceLocator(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    id: str = Field(min_length=1, max_length=128)
-    ref: str = Field(min_length=1, max_length=256)
-    kind: Literal["selected_passage"]
 
 
 class RpcRequest(BaseModel):

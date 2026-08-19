@@ -140,7 +140,6 @@ class SerperBackend:
     def _normalize_hit(self, hit: dict, rank: int) -> SearchHit:
         url = str(hit.get("link", "") or "")
         return SearchHit(
-            ref="",
             backend=self.name,
             title=str(hit.get("title", "") or ""),
             url=url,
@@ -172,7 +171,7 @@ class SerperBackend:
         if not isinstance(text, str):
             raise invalid_provider_response()
         return ContentSnippet(
-            ref=hit.ref,
+            source=hit.source,
             text=text,
             url=hit.url,
             title=hit.title,

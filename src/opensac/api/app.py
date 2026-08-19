@@ -171,7 +171,7 @@ class ApplicationRuntime:
             max_evidence_chars=settings.citation_max_evidence_chars,
             max_evidence_records=settings.citation_max_evidence_records,
             max_evidence_passage_bytes=settings.citation_max_evidence_passage_bytes,
-            max_content_refs_per_request=settings.content_max_refs_per_request,
+            max_content_sources_per_request=settings.content_max_sources_per_request,
             inflight_coalescing=settings.provider_inflight_coalescing,
             max_inflight_keys=settings.provider_max_inflight_keys,
             max_waiters_per_flight=settings.provider_max_waiters_per_key,
@@ -294,7 +294,7 @@ class ApplicationRuntime:
             "sandbox_image": self.settings.sandbox_image,
             "sandbox_image_digest": self.settings.sandbox_image_digest,
             "sandbox_contract": SANDBOX_CONTRACT,
-            "capability_contract": 6,
+            "capability_contract": 7,
             "capability_limits": {
                 "search": {
                     "max_queries_per_request": self.settings.search_max_queries_per_request,
@@ -318,9 +318,9 @@ class ApplicationRuntime:
                     ),
                 },
                 "content": {
-                    "max_refs_per_request": self.settings.content_max_refs_per_request,
+                    "max_sources_per_request": self.settings.content_max_sources_per_request,
                     "passage_limit": 100,
-                    "passage_max_per_ref": 10,
+                    "passage_max_per_source": 10,
                     "passage_chunk_chars": self.broker.passage_chunk_chars,
                     "passage_chunk_overlap_chars": (
                         self.broker.passage_chunk_overlap_chars
@@ -502,14 +502,14 @@ class ApplicationRuntime:
     def bind_session(self, session: Session) -> BrokerSession:
         """Attach a long-lived broker state to a session.
 
-        The harness owns the loop, so quotas and the search reference table have
+        The harness owns the loop, so quotas and the admitted source table have
         to survive across calls. Keying the broker state on the durable
-        `session.token` gives a program the ability to persist refs to its
+        `session.token` gives a program the ability to persist sources to its
         workspace in one turn and resolve them in a later one.
 
         Idempotent, so a session created before a process restart keeps working.
         Note that only the workspace survives such a restart: broker state is in
-        memory, so refs minted beforehand come back as unknown references.
+        memory, so previously admitted sources become unknown.
         """
         state = self.broker.sessions.get(session.token)
         if state is None:
@@ -1108,7 +1108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not runtime.settings.model_name:
             capabilities = [method for method in capabilities if not method.startswith("llm.")]
         features = [
-            "capability_contract_v6",
+            "capability_contract_v7",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",

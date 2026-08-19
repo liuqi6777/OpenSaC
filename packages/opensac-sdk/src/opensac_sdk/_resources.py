@@ -11,15 +11,16 @@ from .transport import UnixSocketTransport
 
 
 class SearchResource:
-    """Retrieve document handles and combine ranked search result sets.
+    """Find documents and combine ranked search result sets.
 
     Call ``sdk.search(query, limit=10, offset=0, domains=None)`` for one ranked
-    window. It returns hit records with opaque ``ref`` handles, source metadata,
-    snippets, scores, and ranks; an empty list is a successful no-match result.
+    window. Each hit has one public ``source``: a canonical web URL for web
+    results or a document ID for local results. An empty list is a successful
+    no-match result.
 
     Search is the only way documents enter the current session's authorized
-    evidence set. Returned ``ref`` values are opaque handles for ``sdk.content``
-    and citation operations; never invent or modify them.
+    evidence set. Pass returned ``source`` values unchanged to ``sdk.content``
+    and citation operations.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
@@ -39,8 +40,8 @@ class SearchResource:
         is accepted only by backends that support domain filtering.
 
         Returns:
-            Hits ordered by ``rank``. Each record includes ``ref``, ``backend``,
-            source metadata, ``snippet``, ``score``, ``rank``, ``retrieval``, and
+            Hits ordered by ``rank``. Each record includes ``source``, ``backend``,
+            ``title``, ``snippet``, ``score``, ``rank``, ``retrieval``, and
             ``metadata``. An empty list is a successful search with no matches.
 
         Raises:
@@ -103,8 +104,8 @@ class SearchResource:
         rank smoothing and ``limit`` truncates the fused list.
 
         Returns:
-            Search-hit records extended with ``sources``, ``fused_score``, and
-            1-based ``fused_rank``. References and source metadata are preserved.
+            Search-hit records extended with ``provenance``, ``fused_score``, and
+            1-based ``fused_rank``. Document sources and metadata are preserved.
 
         Raises:
             ValueError: Weights, ranks, ``k``, or ``limit`` are invalid.
@@ -124,15 +125,15 @@ class SearchResource:
             for hit_index, hit in enumerate(batch.hits):
                 if hit.rank < 1:
                     raise ValueError("Every fused search hit must have rank >= 1")
-                previous = best_in_batch.get(hit.ref)
+                previous = best_in_batch.get(hit.source)
                 if previous is None or (hit.rank, hit_index) < (
                     previous[1].rank,
                     previous[0],
                 ):
-                    best_in_batch[hit.ref] = (hit_index, hit)
+                    best_in_batch[hit.source] = (hit_index, hit)
 
             for hit_index, hit in best_in_batch.values():
-                source = record(
+                provenance = record(
                     {
                         "batch_index": batch_index,
                         "query": batch.query,
@@ -142,19 +143,19 @@ class SearchResource:
                     }
                 )
                 representative_key = (hit.rank, batch_index, hit_index)
-                candidate = candidates.get(hit.ref)
+                candidate = candidates.get(hit.source)
                 if candidate is None:
-                    candidates[hit.ref] = {
+                    candidates[hit.source] = {
                         "hit": hit,
                         "representative_key": representative_key,
                         "best_rank": hit.rank,
                         "earliest_batch": batch_index,
-                        "sources": [source],
+                        "provenance": [provenance],
                         "fused_score": weight / (k + hit.rank),
                     }
                     continue
 
-                candidate["sources"].append(source)
+                candidate["provenance"].append(provenance)
                 candidate["fused_score"] += weight / (k + hit.rank)
                 candidate["best_rank"] = min(candidate["best_rank"], hit.rank)
                 candidate["earliest_batch"] = min(candidate["earliest_batch"], batch_index)
@@ -175,7 +176,7 @@ class SearchResource:
             record(
                 {
                     **candidate["hit"],
-                    "sources": candidate["sources"],
+                    "provenance": candidate["provenance"],
                     "fused_score": candidate["fused_score"],
                     "fused_rank": fused_rank,
                 }
@@ -225,28 +226,28 @@ class ContentResource:
 
     Prefer ``passages`` for semantic discovery, ``grep_report`` for exact text,
     and ``read`` for deliberate line-window expansion. Content operations report
-    partial fetch failures instead of silently dropping unreadable references.
+    partial fetch failures instead of silently dropping unreadable sources.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
-    def get_many(self, refs: list[str]) -> list[Record]:
+    def get_many(self, sources: list[str]) -> list[Record]:
         """Fetch complete normalized documents for advanced local processing.
 
         Returns:
-            One content row per input ref, in input order. A successful row contains
+            One content row per input source, in input order. A successful row contains
             ``text`` and source metadata; an unreadable row has empty text and a
             structured ``failure``. Prefer narrower content operations when possible.
 
         Raises:
             BrokerError: The whole request failed or every failure was systemic.
         """
-        return self._transport.call("content.get_many", {"refs": refs})
+        return self._transport.call("content.get_many", {"sources": sources})
 
     def read(
         self,
-        refs: list[str],
+        sources: list[str],
         *,
         offset: int = 1,
         limit: int = 200,
@@ -258,7 +259,7 @@ class ContentResource:
         also bounds unusually long lines. Use ``metadata.next_offset`` to continue.
 
         Returns:
-            Ref-aligned content rows. ``metadata`` includes ``start_line``,
+            Source-aligned content rows. ``metadata`` includes ``start_line``,
             ``end_line``, ``total_lines``, and ``next_offset``. Inspect ``failure``
             on unreadable rows.
 
@@ -267,22 +268,22 @@ class ContentResource:
         """
         return self._transport.call(
             "content.read",
-            {"refs": refs, "offset": offset, "limit": limit, "max_chars": max_chars},
+            {"sources": sources, "offset": offset, "limit": limit, "max_chars": max_chars},
         )
 
     def grep_report(
         self,
-        refs: list[str],
+        sources: list[str],
         pattern: str,
         *,
         context: int = 0,
-        max_matches_per_ref: int = 20,
+        max_matches_per_source: int = 20,
     ) -> Record:
-        """Search document lines and preserve per-ref fetch failures.
+        """Search document lines and preserve per-source fetch failures.
 
         ``pattern`` is a case-insensitive regular expression; malformed regex is
         treated literally. ``context`` adds surrounding lines and
-        ``max_matches_per_ref`` bounds each document's contribution. Match line
+        ``max_matches_per_source`` bounds each document's contribution. Match line
         numbers are 1-indexed and can be passed directly to ``read``.
 
         Returns:
@@ -296,30 +297,30 @@ class ContentResource:
         return self._transport.call(
             "content.grep_report",
             {
-                "refs": refs,
+                "sources": sources,
                 "pattern": pattern,
                 "context": context,
-                "max_matches_per_ref": max_matches_per_ref,
+                "max_matches_per_source": max_matches_per_source,
             },
         )
 
     def passages(
         self,
         query: str,
-        refs: list[str],
+        sources: list[str],
         *,
         limit: int = 20,
-        max_per_ref: int = 3,
+        max_per_source: int = 3,
     ) -> Record:
-        """Rank citeable passages across a caller-supplied set of refs.
+        """Rank citeable passages across a caller-supplied set of sources.
 
-        The broker deduplicates refs in first-seen order, ranks successful documents
-        together, then applies ``max_per_ref``. ``limit`` bounds the whole report.
+        The broker deduplicates sources in first-seen order, ranks successful documents
+        together, then applies ``max_per_source``. ``limit`` bounds the whole report.
         Scores are comparable only within this report.
 
         Returns:
             A report with ``query``, ``passages``, ``failures``, ``input_count``, and
-            ``unique_ref_count``. Each passage includes exact ``text``, coordinates,
+            ``unique_source_count``. Each passage includes exact ``text``, coordinates,
             ranker metadata, and either ``locator`` or ``locator_error``. Never cite
             a passage whose locator is missing.
 
@@ -330,48 +331,38 @@ class ContentResource:
             "content.passages",
             {
                 "query": query,
-                "refs": refs,
+                "sources": sources,
                 "limit": limit,
-                "max_per_ref": max_per_ref,
+                "max_per_source": max_per_source,
             },
         )
 
 
 class CitationsResource:
-    """Resolve document refs and passage locators into trusted citation metadata.
+    """Resolve document sources and passage locators into trusted citation metadata.
 
     These are advanced inspection operations. Final research results normally pass
-    refs and locators directly to ``sdk.output.submit`` for resolution.
+    source or locator citations directly to ``sdk.output.submit`` for resolution.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
-    def resolve(self, refs: list[str]) -> list[Record]:
-        """Resolve ref-only search-preview citations in input order.
+    def resolve(self, citations: list[dict[str, Any]]) -> list[Record]:
+        """Resolve source or locator citations in input order.
+
+        Every item must contain exactly one field: ``{"source": source}`` resolves
+        search-preview evidence, while ``{"locator": locator}`` resolves exact
+        evidence returned by a content operation.
 
         Returns:
-            Trusted citation records containing source identity, URL, backend, and
-            search-preview evidence metadata.
+            Trusted citation records containing the source, URL or document ID,
+            backend, evidence, and evidence kind.
 
         Raises:
-            BrokerError: A ref is unknown to the current session or resolution fails.
+            BrokerError: A source or locator is unknown, stale, or invalid.
         """
-        return self._transport.call("citations.resolve", {"refs": refs})
-
-    def resolve_requests(self, requests: list[dict[str, Any]]) -> list[Record]:
-        """Resolve explicit ``ref`` and evidence-``locator`` citation requests.
-
-        Each request is ``{"ref": ref, "locator": locator}``. Omit ``locator`` for
-        legacy search-preview evidence; an explicit null locator is invalid.
-
-        Returns:
-            Trusted citation records aligned with the requests.
-
-        Raises:
-            BrokerError: A ref or locator is invalid, stale, or cannot be resolved.
-        """
-        return self._transport.call("citations.resolve", {"requests": requests})
+        return self._transport.call("citations.resolve", {"citations": citations})
 
 
 class LLMResource:
@@ -523,7 +514,7 @@ class StateResource:
     """Persist JSON and JSONL artifacts across executions in one live session.
 
     Paths are workspace-relative and cannot escape the session workspace. State is
-    program memory, not a database; refs and locators become invalid if the host
+    program memory, not a database; sources and locators become invalid if the host
     reports ``state_lost``.
     """
 
@@ -567,7 +558,7 @@ class StateResource:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(self._dump(rows))
 
-    def merge_jsonl(self, relative_path: str, rows: list[Any], key: str = "ref") -> int:
+    def merge_jsonl(self, relative_path: str, rows: list[Any], key: str = "source") -> int:
         """Upsert JSONL rows by ``key`` while preserving first-seen order.
 
         An absent file behaves like an empty pool. A repeated key replaces its row
@@ -685,13 +676,12 @@ class OutputResource:
     ) -> None:
         """Write the final output artifact and resolve its citations.
 
-        Call this once when research is complete. Each citation must contain a
-        session-issued ``ref`` and may include a non-null passage ``locator``.
-        Ref-only citations represent search-preview evidence and must not support a
-        claim about document content.
+        Call this once when research is complete. Every citation must contain
+        exactly one field: ``{"source": source}`` for search-preview evidence or
+        ``{"locator": locator}`` for exact evidence returned by content operations.
 
         Raises:
-            ValueError: A citation is malformed or contains an explicit null locator.
+            ValueError: A citation is malformed.
             BrokerError: Citation resolution fails.
             RuntimeError: Citations were requested without a broker transport.
         """
@@ -699,12 +689,7 @@ class OutputResource:
         if requested:
             if self._transport is None:
                 raise RuntimeError("Citation resolution requires a broker transport")
-            if any("locator" in citation for citation in requested):
-                resolved = self._transport.call("citations.resolve", {"requests": requested})
-            else:
-                resolved = self._transport.call(
-                    "citations.resolve", {"refs": [item["ref"] for item in requested]}
-                )
+            resolved = self._transport.call("citations.resolve", {"citations": requested})
         else:
             resolved = []
         self._output_path.write_text(
@@ -721,15 +706,17 @@ class OutputResource:
     def _citation(item: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(item, dict):
             raise ValueError("Every citation must be an object")
-        if set(item) - {"ref", "locator"}:
-            raise ValueError("Citations accept only ref and locator")
-        ref = item.get("ref")
-        if not isinstance(ref, str) or not ref:
-            raise ValueError("Every citation must contain a search result ref")
-        if "locator" in item and item["locator"] is None:
-            raise ValueError("locator must be omitted when no evidence locator is available")
-        if "locator" in item and not isinstance(item["locator"], dict):
-            raise ValueError("locator must be an object")
+        fields = set(item)
+        if fields == {"source"}:
+            source = item["source"]
+            if not isinstance(source, str) or not source or len(source) > 4096:
+                raise ValueError("source must be a non-empty string of at most 4096 characters")
+        elif fields == {"locator"}:
+            locator = item["locator"]
+            if not isinstance(locator, str) or not locator or len(locator) > 128:
+                raise ValueError("locator must be a non-empty string of at most 128 characters")
+        else:
+            raise ValueError("Every citation must contain exactly one of source or locator")
         return dict(item)
 
     @classmethod

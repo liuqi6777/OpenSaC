@@ -48,7 +48,7 @@ class FakeBackend:
 
     def _hit(self, query: str, rank: int) -> SearchHit:
         return SearchHit(
-            ref="",
+            source="",
             backend=self.name,
             title=query,
             url=f"https://example.com/{rank}" if self.name == "web" else None,
@@ -61,8 +61,8 @@ class FakeBackend:
         ranks = range(offset + 1, min(offset + limit, self.depth) + 1)
         return [self._hit(query, rank) for rank in ranks]
 
-    async def content(self, hits, *, query=None):
-        return [ContentSnippet(ref=hit.ref, text=f"content:{query}", url=hit.url) for hit in hits]
+    async def fetch(self, hit, *, query=None):
+        return ContentSnippet(source=hit.source, text=f"content:{query}", url=hit.url)
 
 
 class BrokenBackend:
@@ -73,7 +73,8 @@ class BrokenBackend:
     async def search(self, query, *, limit, offset=0, domains=None):
         raise RuntimeError("backend exploded")
 
-    async def content(self, hits, *, query=None):
+    async def fetch(self, hit, *, query=None):
+        del hit, query
         raise RuntimeError("backend exploded")
 
 
@@ -93,7 +94,7 @@ class PassageCorpusBackend:
         del query, domains
         return [
             SearchHit(
-                ref="",
+                source="",
                 backend="web",
                 title=f"Frozen page {index}",
                 url=f"https://example.test/{index}",
@@ -104,33 +105,25 @@ class PassageCorpusBackend:
             for index in range(offset, min(offset + limit, len(self.documents)))
         ]
 
-    async def content(self, hits, *, query=None):
+    async def fetch(self, hit, *, query=None):
         del query
-        rows = []
-        for hit in hits:
-            index = int(str(hit.url).rsplit("/", 1)[-1])
-            self.fetched.append(index)
-            if index in self.fail:
-                rows.append(
-                    ContentSnippet(
-                        ref=hit.ref,
-                        text="",
-                        title=hit.title,
-                        url=hit.url,
-                        metadata={"fetch_error": "secret upstream response"},
-                    )
-                )
-            else:
-                rows.append(
-                    ContentSnippet(
-                        ref=hit.ref,
-                        text=self.documents[index],
-                        title=hit.title,
-                        url=hit.url,
-                        date=hit.date,
-                    )
-                )
-        return rows
+        index = int(str(hit.url).rsplit("/", 1)[-1])
+        self.fetched.append(index)
+        if index in self.fail:
+            return ContentSnippet(
+                source=hit.source,
+                text="",
+                title=hit.title,
+                url=hit.url,
+                metadata={"fetch_error": "secret upstream response"},
+            )
+        return ContentSnippet(
+            source=hit.source,
+            text=self.documents[index],
+            title=hit.title,
+            url=hit.url,
+            date=hit.date,
+        )
 
 
 def make_session(*, backends=None, mechanisms=None, budget=None):
@@ -144,19 +137,57 @@ def make_session(*, backends=None, mechanisms=None, budget=None):
     )
 
 
-async def test_broker_scopes_references_and_fetches_content() -> None:
+async def test_broker_scopes_sources_and_fetches_content() -> None:
     service = BrokerService({"web": FakeBackend("web")})
     service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "query", "limit": 3})
-    assert hits[0]["ref"].startswith("ref_")
+    assert hits[0]["source"] == "https://example.com/1"
+    assert "ref" not in hits[0]
+    assert "url" not in hits[0]
     content = await service.call(
         "token",
         "content.read",
-        {"refs": [hits[0]["ref"]]},
+        {"sources": [hits[0]["source"]]},
     )
     assert content[0]["text"] == "content:None"
-    citations = await service.call("token", "citations.resolve", {"refs": [hits[0]["ref"]]})
+    citations = await service.call(
+        "token",
+        "citations.resolve",
+        {"citations": [{"source": hits[0]["source"]}]},
+    )
     assert citations[0]["url"] == "https://example.com/1"
+
+
+def test_source_collision_does_not_mutate_session_identity_map() -> None:
+    service = BrokerService({"web": FakeBackend("web")})
+    state = service.register_session(make_session())
+    source = "https://example.com/document"
+    first = SearchHit(backend="web", url=source, docid="one", rank=1)
+    second = SearchHit(backend="web", url=source, docid="two", rank=2)
+
+    assert state.remember(first, identity="web:docid:one", candidate_source=source) == source
+    with pytest.raises(ValueError, match="colliding document sources"):
+        state.remember(second, identity="web:docid:two", candidate_source=source)
+
+    assert state.source_by_identity == {"web:docid:one": source}
+    assert state.identity_by_source == {source: "web:docid:one"}
+    assert state.documents_by_source == {source: first}
+
+
+async def test_broker_rejects_legacy_source_and_citation_parameters() -> None:
+    service = BrokerService({"web": FakeBackend("web")})
+    service.register_session(make_session())
+
+    with pytest.raises(ValueError, match="legacy content"):
+        await service.call("token", "content.get_many", {"refs": []})
+    with pytest.raises(ValueError, match="legacy content"):
+        await service.call(
+            "token",
+            "content.passages",
+            {"query": "evidence", "sources": [], "max_per_ref": 1},
+        )
+    with pytest.raises(ValueError, match="legacy citation"):
+        await service.call("token", "citations.resolve", {"requests": []})
 
 
 async def test_search_fails_loudly_when_the_session_backend_is_not_configured() -> None:
@@ -175,20 +206,14 @@ async def test_search_fails_loudly_when_the_session_backend_is_not_configured() 
 
 async def test_failed_search_consumes_hard_budget_before_backend_side_effect() -> None:
     service = BrokerService({"web": BrokenBackend()})
-    state = service.register_session(
-        make_session(budget=ResourceBudget(max_search_queries=1))
-    )
+    state = service.register_session(make_session(budget=ResourceBudget(max_search_queries=1)))
 
     with pytest.raises(ProviderRequestError) as failed:
-        await service.call(
-            "token", "search.query", {"query": "first"}, execution_id="exec-1"
-        )
+        await service.call("token", "search.query", {"query": "first"}, execution_id="exec-1")
     assert failed.value.code == "provider_invalid_response"
     assert failed.value.attempts == 1
     with pytest.raises(BudgetExceeded, match="max_search_queries"):
-        await service.call(
-            "token", "search.query", {"query": "retry"}, execution_id="exec-1"
-        )
+        await service.call("token", "search.query", {"query": "retry"}, execution_id="exec-1")
 
     assert state.policy.usage.search_calls == 1
     assert state.policy.remaining()["max_search_queries"] == 0
@@ -209,21 +234,14 @@ async def test_concurrent_search_budget_reservations_never_overspend() -> None:
         async def search(self, query, *, limit, offset=0, domains=None):
             self.calls += 1
             await asyncio.sleep(0)
-            return await super().search(
-                query, limit=limit, offset=offset, domains=domains
-            )
+            return await super().search(query, limit=limit, offset=offset, domains=domains)
 
     backend = CountingBackend()
     service = BrokerService({"web": backend})
-    state = service.register_session(
-        make_session(budget=ResourceBudget(max_search_queries=1))
-    )
+    state = service.register_session(make_session(budget=ResourceBudget(max_search_queries=1)))
 
     results = await asyncio.gather(
-        *(
-            service.call("token", "search.query", {"query": f"query-{index}"})
-            for index in range(8)
-        ),
+        *(service.call("token", "search.query", {"query": f"query-{index}"}) for index in range(8)),
         return_exceptions=True,
     )
 
@@ -244,9 +262,7 @@ async def test_search_refuses_a_domain_filter_the_backend_cannot_honour() -> Non
     service = BrokerService({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
     with pytest.raises(ValueError, match="no domain filter"):
-        await service.call(
-            "token", "search.query", {"query": "q", "domains": ["example.com"]}
-        )
+        await service.call("token", "search.query", {"query": "q", "domains": ["example.com"]})
     # The same call without the argument is fine, so the refusal is about the
     # parameter rather than about the backend.
     assert await service.call("token", "search.query", {"query": "q"})
@@ -272,9 +288,7 @@ async def test_search_rejects_query_and_depth_budgets_before_backend_call() -> N
 
         async def search(self, query, *, limit, offset=0, domains=None):
             self.calls += 1
-            return await super().search(
-                query, limit=limit, offset=offset, domains=domains
-            )
+            return await super().search(query, limit=limit, offset=offset, domains=domains)
 
     backend = Counting()
     service = BrokerService(
@@ -287,13 +301,9 @@ async def test_search_rejects_query_and_depth_budgets_before_backend_call() -> N
     with pytest.raises(ValueError, match="5 characters"):
         await service.call("token", "search.query", {"query": "abcde"})
     with pytest.raises(ValueError, match="retrieval depth 21"):
-        await service.call(
-            "token", "search.query", {"query": "ok", "limit": 10, "offset": 11}
-        )
+        await service.call("token", "search.query", {"query": "ok", "limit": 10, "offset": 11})
     with pytest.raises(ValueError, match="domains must be a list"):
-        await service.call(
-            "token", "search.query", {"query": "ok", "domains": "example.com"}
-        )
+        await service.call("token", "search.query", {"query": "ok", "domains": "example.com"})
 
     assert backend.calls == 0
     assert state.policy.usage.search_calls == 0
@@ -315,9 +325,7 @@ async def test_search_many_rejects_hard_budgets_before_fanout() -> None:
             {"queries": ["a", "b", "c"]},
             execution_id="oversized-batch",
         )
-    batches = await service.call(
-        "token", "search.query_many", {"queries": ["ok", "abcde"]}
-    )
+    batches = await service.call("token", "search.query_many", {"queries": ["ok", "abcde"]})
     assert batches[0]["failure"] is None
     assert batches[1]["failure"]["code"] == "invalid_request"
     assert batches[1]["failure"]["attempts"] == 0
@@ -386,7 +394,7 @@ async def test_web_search_many_registers_provenance_in_input_order() -> None:
                 await asyncio.sleep(0.02)
             return [
                 SearchHit(
-                    ref="",
+                    source="",
                     backend="web",
                     title=query,
                     url="https://example.com/shared",
@@ -406,8 +414,8 @@ async def test_web_search_many_registers_provenance_in_input_order() -> None:
         execution_id="exec-query-order",
     )
 
-    assert batches[0]["hits"][0]["ref"] == batches[1]["hits"][0]["ref"]
-    assert state.references[batches[0]["hits"][0]["ref"]].title == "first"
+    assert batches[0]["hits"][0]["source"] == batches[1]["hits"][0]["source"]
+    assert state.documents_by_source[batches[0]["hits"][0]["source"]].title == "first"
     event = service.take_trace("token", "exec-query-order")[0]
     assert [hit.query_index for hit in event.hits] == [0, 1]
     assert [hit.retrieval_mode for hit in event.hits] == ["organic", "organic"]
@@ -422,15 +430,12 @@ async def test_local_search_many_prefers_backend_batch_and_preserves_order() -> 
 
         async def search(self, query, *, limit, offset=0, domains=None):
             self.single_calls += 1
-            return await super().search(
-                query, limit=limit, offset=offset, domains=domains
-            )
+            return await super().search(query, limit=limit, offset=offset, domains=domains)
 
         async def search_many(self, queries, *, limit, offset=0, domains=None):
             self.batch_calls.append(list(queries))
             return [
-                SearchBatch(query=query, hits=[self._hit(query, offset + 1)])
-                for query in queries
+                SearchBatch(query=query, hits=[self._hit(query, offset + 1)]) for query in queries
             ]
 
     backend = BatchLocal()
@@ -602,7 +607,7 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
         await service.call(
             "token",
             "content.get_many",
-            {"refs": ["missing"]},
+            {"sources": ["missing"]},
             execution_id="exec-1",
         )
 
@@ -623,15 +628,15 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
 @pytest.mark.parametrize(
     "params",
     [
-        {"query": "", "refs": []},
-        {"query": None, "refs": []},
-        {"query": "q", "refs": [], "limit": 0},
-        {"query": "q", "refs": [], "limit": "invalid"},
-        {"query": "q", "refs": [], "limit": True},
-        {"query": "q", "refs": [], "limit": 101},
-        {"query": "q", "refs": [], "max_per_ref": 0},
-        {"query": "q", "refs": [], "max_per_ref": None},
-        {"query": "q", "refs": [], "max_per_ref": 11},
+        {"query": "", "sources": []},
+        {"query": None, "sources": []},
+        {"query": "q", "sources": [], "limit": 0},
+        {"query": "q", "sources": [], "limit": "invalid"},
+        {"query": "q", "sources": [], "limit": True},
+        {"query": "q", "sources": [], "limit": 101},
+        {"query": "q", "sources": [], "max_per_source": 0},
+        {"query": "q", "sources": [], "max_per_source": None},
+        {"query": "q", "sources": [], "max_per_source": 11},
     ],
 )
 async def test_passages_reject_invalid_public_parameters(params) -> None:
@@ -642,7 +647,7 @@ async def test_passages_reject_invalid_public_parameters(params) -> None:
         await service.call("token", "content.passages", params)
 
 
-async def test_passages_empty_refs_and_exact_duplicates_are_successful() -> None:
+async def test_passages_empty_sources_and_exact_duplicates_are_successful() -> None:
     backend = PassageCorpusBackend(["alpha evidence", "beta evidence"])
     service = BrokerService({"web": backend})
     state = service.register_session(make_session())
@@ -651,16 +656,16 @@ async def test_passages_empty_refs_and_exact_duplicates_are_successful() -> None
     empty = await service.call(
         "token",
         "content.passages",
-        {"query": "evidence", "refs": []},
+        {"query": "evidence", "sources": []},
     )
     report = await service.call(
         "token",
         "content.passages",
         {
             "query": "evidence",
-            "refs": [hits[0]["ref"], hits[0]["ref"], hits[1]["ref"]],
+            "sources": [hits[0]["source"], hits[0]["source"], hits[1]["source"]],
             "limit": 2,
-            "max_per_ref": 1,
+            "max_per_source": 1,
         },
     )
 
@@ -669,30 +674,30 @@ async def test_passages_empty_refs_and_exact_duplicates_are_successful() -> None
         "passages": [],
         "failures": [],
         "input_count": 0,
-        "unique_ref_count": 0,
+        "unique_source_count": 0,
     }
     assert report["input_count"] == 3
-    assert report["unique_ref_count"] == 2
-    assert [row["ref"] for row in report["passages"]] == [
-        hits[0]["ref"],
-        hits[1]["ref"],
+    assert report["unique_source_count"] == 2
+    assert [row["source"] for row in report["passages"]] == [
+        hits[0]["source"],
+        hits[1]["source"],
     ]
     assert backend.fetched == [0, 1]
     assert state.policy.usage.content_fetches == 2
     assert state.policy.usage.intra_call_deduplicated_items == 1
 
 
-async def test_passages_apply_ref_limit_before_deduplication() -> None:
+async def test_passages_apply_source_limit_before_deduplication() -> None:
     backend = PassageCorpusBackend(["alpha"])
-    service = BrokerService({"web": backend}, max_content_refs_per_request=2)
+    service = BrokerService({"web": backend}, max_content_sources_per_request=2)
     service.register_session(make_session())
-    ref = (await service.call("token", "search.query", {"query": "seed"}))[0]["ref"]
+    source = (await service.call("token", "search.query", {"query": "seed"}))[0]["source"]
 
     with pytest.raises(ValueError, match="maximum of 2"):
         await service.call(
             "token",
             "content.passages",
-            {"query": "alpha", "refs": [ref, ref, ref]},
+            {"query": "alpha", "sources": [source, source, source]},
         )
 
 
@@ -706,31 +711,29 @@ async def test_passages_bm25_supports_english_and_chinese_queries() -> None:
     service = BrokerService({"web": backend})
     service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "seed", "limit": 2})
-    refs = [hit["ref"] for hit in hits]
+    sources = [hit["source"] for hit in hits]
 
     english = await service.call(
         "token",
         "content.passages",
-        {"query": "Singapore revenue", "refs": refs, "limit": 1},
+        {"query": "Singapore revenue", "sources": sources, "limit": 1},
         execution_id="passages-lexical",
     )
     chinese = await service.call(
         "token",
         "content.passages",
-        {"query": "新加坡 营收", "refs": refs, "limit": 1},
+        {"query": "新加坡 营收", "sources": sources, "limit": 1},
     )
 
-    assert english["passages"][0]["ref"] == refs[0]
-    assert chinese["passages"][0]["ref"] == refs[1]
+    assert english["passages"][0]["source"] == sources[0]
+    assert chinese["passages"][0]["source"] == sources[1]
     assert english["passages"][0]["ranker"] == "lexical:bm25"
     assert chinese["passages"][0]["score"] > 0
     trace = service.take_trace("token", "passages-lexical")[0]
-    assert not any(
-        attempt.operation == "web.rerank" for attempt in trace.provider_attempts
-    )
+    assert not any(attempt.operation == "web.rerank" for attempt in trace.provider_attempts)
 
 
-async def test_passages_stably_break_ties_and_apply_max_per_ref_after_ranking() -> None:
+async def test_passages_stably_break_ties_and_apply_max_per_source_after_ranking() -> None:
     backend = PassageCorpusBackend(["a" * 180, "b" * 180])
     service = BrokerService(
         {"web": backend},
@@ -739,21 +742,26 @@ async def test_passages_stably_break_ties_and_apply_max_per_ref_after_ranking() 
     )
     service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "seed", "limit": 2})
-    refs = [hit["ref"] for hit in hits]
+    sources = [hit["source"] for hit in hits]
 
     first = await service.call(
         "token",
         "content.passages",
-        {"query": "unmatched", "refs": refs, "limit": 4, "max_per_ref": 2},
+        {"query": "unmatched", "sources": sources, "limit": 4, "max_per_source": 2},
     )
     second = await service.call(
         "token",
         "content.passages",
-        {"query": "unmatched", "refs": refs, "limit": 4, "max_per_ref": 2},
+        {"query": "unmatched", "sources": sources, "limit": 4, "max_per_source": 2},
     )
 
     assert first["passages"] == second["passages"]
-    assert [row["ref"] for row in first["passages"]] == [refs[0], refs[0], refs[1], refs[1]]
+    assert [row["source"] for row in first["passages"]] == [
+        sources[0],
+        sources[0],
+        sources[1],
+        sources[1],
+    ]
     assert [row["rank"] for row in first["passages"]] == [1, 2, 3, 4]
     assert [row["coordinates"]["start_character"] for row in first["passages"][:2]] == [
         0,
@@ -769,31 +777,24 @@ async def test_passages_keep_partial_fetch_failures_and_issue_resolvable_locator
     service = BrokerService({"web": backend})
     service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "seed", "limit": 3})
-    refs = [hit["ref"] for hit in hits]
+    sources = [hit["source"] for hit in hits]
 
     report = await service.call(
         "token",
         "content.passages",
-        {"query": "alpha", "refs": refs, "limit": 2, "max_per_ref": 1},
+        {"query": "alpha", "sources": sources, "limit": 2, "max_per_source": 1},
         execution_id="passages-partial",
     )
 
     assert report["failures"][0]["input_index"] == 1
-    assert report["failures"][0]["ref"] == refs[1]
+    assert report["failures"][0]["source"] == sources[1]
     assert report["failures"][0]["failure"]["code"] == "provider_rejected"
-    assert [row["ref"] for row in report["passages"]] == [refs[0], refs[2]]
+    assert [row["source"] for row in report["passages"]] == [sources[0], sources[2]]
     assert all(row["locator"] is not None for row in report["passages"])
     resolved = await service.call(
         "token",
         "citations.resolve",
-        {
-            "requests": [
-                {
-                    "ref": report["passages"][0]["ref"],
-                    "locator": report["passages"][0]["locator"],
-                }
-            ]
-        },
+        {"citations": [{"locator": report["passages"][0]["locator"]}]},
     )
     assert resolved[0]["evidence"] == report["passages"][0]["text"]
     trace = service.take_trace("token", "passages-partial")[0]
@@ -819,18 +820,16 @@ async def test_passages_only_register_final_rows_and_report_capacity_exhaustion(
         "content.passages",
         {
             "query": "alpha",
-            "refs": [hit["ref"] for hit in hits],
+            "sources": [hit["source"] for hit in hits],
             "limit": 2,
-            "max_per_ref": 1,
+            "max_per_source": 1,
         },
     )
 
     assert len(state.evidence) == 1
     assert report["passages"][0]["locator"] is not None
     assert report["passages"][1].get("locator") is None
-    assert report["passages"][1]["locator_error"]["code"] == (
-        "evidence_capacity_exhausted"
-    )
+    assert report["passages"][1]["locator_error"]["code"] == ("evidence_capacity_exhausted")
 
 
 async def test_passage_reranker_maps_scores_by_index_even_when_results_are_unordered() -> None:
@@ -858,14 +857,14 @@ async def test_passage_reranker_maps_scores_by_index_even_when_results_are_unord
         "content.passages",
         {
             "query": "alpha",
-            "refs": [hit["ref"] for hit in hits],
+            "sources": [hit["source"] for hit in hits],
             "limit": 2,
-            "max_per_ref": 1,
+            "max_per_source": 1,
         },
         execution_id="passages-rerank",
     )
 
-    assert [row["ref"] for row in report["passages"]] == [hits[1]["ref"], hits[0]["ref"]]
+    assert [row["source"] for row in report["passages"]] == [hits[1]["source"], hits[0]["source"]]
     assert [row["score"] for row in report["passages"]] == [9.0, 1.0]
     trace = service.take_trace("token", "passages-rerank")[0]
     rerank_attempts = [
@@ -874,7 +873,7 @@ async def test_passage_reranker_maps_scores_by_index_even_when_results_are_unord
     assert rerank_attempts[0].request_indexes == [0, 1]
 
 
-async def test_passage_prefilter_keeps_eight_per_ref_then_caps_globally_at_100() -> None:
+async def test_passage_prefilter_keeps_eight_per_source_then_caps_globally_at_100() -> None:
     class CapturingReranker:
         name = "test:capture"
         provider_identity = "test:capture"
@@ -888,10 +887,7 @@ async def test_passage_prefilter_keeps_eight_per_ref_then_caps_globally_at_100()
         async def rerank(self, query, documents):
             del query
             self.documents = list(documents)
-            return [
-                PassageRerankResult(index=index, score=0.0)
-                for index in range(len(documents))
-            ]
+            return [PassageRerankResult(index=index, score=0.0) for index in range(len(documents))]
 
     reranker = CapturingReranker()
     backend = PassageCorpusBackend([chr(97 + index) * 200 for index in range(13)])
@@ -909,9 +905,9 @@ async def test_passage_prefilter_keeps_eight_per_ref_then_caps_globally_at_100()
         "content.passages",
         {
             "query": "unmatched",
-            "refs": [hit["ref"] for hit in hits],
+            "sources": [hit["source"] for hit in hits],
             "limit": 1,
-            "max_per_ref": 3,
+            "max_per_source": 3,
         },
     )
 
@@ -926,11 +922,11 @@ async def test_jina_mode_has_no_silent_lexical_fallback_but_empty_pages_succeed(
         passage_reranker=JinaPassageReranker(),
     )
     empty.register_session(make_session())
-    empty_ref = (await empty.call("token", "search.query", {"query": "seed"}))[0]["ref"]
+    empty_source = (await empty.call("token", "search.query", {"query": "seed"}))[0]["source"]
     report = await empty.call(
         "token",
         "content.passages",
-        {"query": "answer", "refs": [empty_ref]},
+        {"query": "answer", "sources": [empty_source]},
     )
     assert report["passages"] == []
 
@@ -939,12 +935,12 @@ async def test_jina_mode_has_no_silent_lexical_fallback_but_empty_pages_succeed(
         passage_reranker=JinaPassageReranker(),
     )
     state = configured.register_session(make_session())
-    ref = (await configured.call("token", "search.query", {"query": "seed"}))[0]["ref"]
+    source = (await configured.call("token", "search.query", {"query": "seed"}))[0]["source"]
     with pytest.raises(ProviderRequestError) as raised:
         await configured.call(
             "token",
             "content.passages",
-            {"query": "answer", "refs": [ref]},
+            {"query": "answer", "sources": [source]},
             execution_id="passages-missing-jina",
         )
 
@@ -953,9 +949,7 @@ async def test_jina_mode_has_no_silent_lexical_fallback_but_empty_pages_succeed(
     assert state.evidence == {}
     trace = configured.take_trace("token", "passages-missing-jina")[0]
     assert trace.status == "error"
-    assert not any(
-        attempt.operation == "web.rerank" for attempt in trace.provider_attempts
-    )
+    assert not any(attempt.operation == "web.rerank" for attempt in trace.provider_attempts)
 
 
 async def test_llm_complete_many_preserves_prompt_order() -> None:
@@ -1367,7 +1361,7 @@ class RankedBackend:
     async def search(self, query, *, limit, offset=0, domains=None):
         return [
             SearchHit(
-                ref="",
+                source="",
                 backend="web",
                 title=f"{query}-{index}",
                 url=url,
@@ -1379,89 +1373,75 @@ class RankedBackend:
             if index >= offset
         ]
 
-    async def content(self, hits, *, query=None):
-        return [ContentSnippet(ref=hit.ref, text="body", url=hit.url) for hit in hits]
+    async def fetch(self, hit, *, query=None):
+        return ContentSnippet(source=hit.source, text="body", url=hit.url)
 
 
-async def test_the_same_document_keeps_one_ref_across_queries() -> None:
-    """Two queries surfacing one page must hand back one handle.
-
-    With a fresh random ref per sighting the program cannot tell that it already
-    has the page, so it re-fetches it and double-counts the evidence -- and no
-    two runs of the same recorded search produce the same refs, which is what
-    makes a trajectory unreplayable.
-    """
+async def test_the_same_document_keeps_one_source_across_queries() -> None:
+    """Two queries surfacing one page must return one stable public address."""
     service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
     state = service.register_session(make_session())
 
     first = await service.call("token", "search.query", {"query": "one"})
     second = await service.call("token", "search.query", {"query": "two"})
 
-    assert first[0]["ref"] == second[0]["ref"]
-    assert len(state.references) == 1
+    assert first[0]["source"] == second[0]["source"]
+    assert len(state.source_by_identity) == 1
 
 
-async def test_refs_are_opaque_and_reproducible() -> None:
-    """Same document, different process: same handle."""
+async def test_web_sources_are_canonical_and_reproducible() -> None:
+    """Equivalent URL spellings expose the same useful public address."""
     urls = ["https://Example.com/a?utm_source=news&id=7#section"]
     left = BrokerService({"web": RankedBackend(urls)})
     left.register_session(make_session())
     right = BrokerService({"web": RankedBackend(urls)})
     right.register_session(make_session())
 
-    one = (await left.call("token", "search.query", {"query": "q"}))[0]["ref"]
-    two = (await right.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    one = (await left.call("token", "search.query", {"query": "q"}))[0]["source"]
+    two = (await right.call("token", "search.query", {"query": "q"}))[0]["source"]
 
     assert one == two
-    assert one.startswith("ref_")
-    # Opaque: nothing a program could have constructed for itself.
-    assert "example.com" not in one
+    assert one == "https://example.com/a?id=7"
 
 
-async def test_a_docid_reaches_the_document_a_ref_reaches() -> None:
-    """The handle the model can actually re-type must work.
-
-    A ref has to be unguessable, which makes it long and random-looking, and a
-    program carries it across turns by copying it through its own output. The
-    docid is right there in the same hit and is what a model reaches for. Both
-    now resolve to one document, so the design keeps the property it needs
-    (unforgeable) without charging for one it does not (verbatim transcription).
-    """
+async def test_local_source_is_the_document_id() -> None:
+    """Local search and content share one source field instead of parallel IDs."""
     service = BrokerService({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q"})
 
-    by_ref = await service.call("token", "content.get_many", {"refs": [hits[0]["ref"]]})
-    by_docid = await service.call("token", "content.get_many", {"refs": [hits[0]["docid"]]})
-    by_ref_again = await service.call("token", "citations.resolve", {"refs": [hits[0]["docid"]]})
+    assert hits[0]["source"] == "1"
+    assert "docid" not in hits[0]
+    rows = await service.call("token", "content.get_many", {"sources": [hits[0]["source"]]})
+    citations = await service.call(
+        "token",
+        "citations.resolve",
+        {"citations": [{"source": hits[0]["source"]}]},
+    )
 
-    assert by_docid == by_ref
-    # A citation resolved from a docid still reports the canonical ref, so
-    # provenance does not fork by which key the caller happened to use.
-    assert by_ref_again[0]["ref"] == hits[0]["ref"]
+    assert rows[0]["source"] == "1"
+    assert citations[0]["source"] == "1"
 
 
 async def test_a_document_this_session_never_searched_is_still_refused() -> None:
-    """The admission rule is unchanged; only the lookup key is wider.
+    """Knowing a source is not authorization without a prior search hit.
 
-    `_resolve_refs` raising is the enforcement point of the capability
-    boundary, not parameter validation: the sandbox has no network, so search
-    is the only door. If a docid the corpus contains were reachable without
-    being retrieved, a program could walk the docid space and any recall
-    measurement over it would be meaningless.
+    The sandbox has no network, so search remains the only admission door. If a
+    docid the corpus contains were reachable without being retrieved, a program
+    could walk the docid space and invalidate recall measurements.
     """
     service = BrokerService({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
     await service.call("token", "search.query", {"query": "q"})
 
-    with pytest.raises(ValueError, match="Unknown references"):
-        await service.call("token", "content.get_many", {"refs": ["999"]})
+    with pytest.raises(ValueError, match="Unknown sources"):
+        await service.call("token", "content.get_many", {"sources": ["999"]})
 
 
 async def test_offset_reaches_ranks_a_bare_limit_cannot() -> None:
     """Depth is authorisation, not convenience.
 
-    Because a ref is minted only for a returned hit, `limit` is both what a
+    Because a source is admitted only for a returned hit, `limit` is both what a
     program can see and what it is allowed to fetch. Without an offset, a
     document at rank 15 is not merely inconvenient to reach, it is unreachable.
     """
@@ -1469,16 +1449,14 @@ async def test_offset_reaches_ranks_a_bare_limit_cannot() -> None:
     state = service.register_session(make_session(backends=["local"]))
 
     shallow = await service.call("token", "search.query", {"query": "q", "limit": 10})
-    deep = await service.call(
-        "token", "search.query", {"query": "q", "limit": 10, "offset": 10}
-    )
+    deep = await service.call("token", "search.query", {"query": "q", "limit": 10, "offset": 10})
 
     assert [hit["rank"] for hit in shallow] == list(range(1, 11))
     # Ranks stay absolute: the second window reports 11..20, not 1..10 again.
     assert [hit["rank"] for hit in deep] == list(range(11, 21))
-    assert not {hit["ref"] for hit in shallow} & {hit["ref"] for hit in deep}
+    assert not {hit["source"] for hit in shallow} & {hit["source"] for hit in deep}
     # And the deeper hits are now fetchable, which is the point.
-    assert deep[0]["docid"] in state.by_docid
+    assert deep[0]["source"] in state.documents_by_source
 
 
 async def test_grep_report_line_numbers_are_read_offsets() -> None:
@@ -1497,20 +1475,20 @@ async def test_grep_report_line_numbers_are_read_offsets() -> None:
         max_depth = None
 
         async def search(self, query, *, limit, offset=0, domains=None):
-            return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
+            return [SearchHit(source="", backend="local", docid="d1", snippet="s", rank=1)]
 
-        async def content(self, hits, *, query=None):
-            return [ContentSnippet(ref=hit.ref, text="\n".join(lines)) for hit in hits]
+        async def fetch(self, hit, *, query=None):
+            return ContentSnippet(source=hit.source, text="\n".join(lines))
 
     service = BrokerService({"local": Paged()})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q"})
-    ref = hits[0]["ref"]
+    source = hits[0]["source"]
 
     report = await service.call(
         "token",
         "content.grep_report",
-        {"refs": [ref], "pattern": r"target \w+", "context": 1},
+        {"sources": [source], "pattern": r"target \w+", "context": 1},
     )
     matches = report["matches"]
     assert len(matches) == 1
@@ -1519,7 +1497,7 @@ async def test_grep_report_line_numbers_are_read_offsets() -> None:
     assert matches[0]["after"] == ["line 26"]
 
     window = await service.call(
-        "token", "content.read", {"refs": [ref], "offset": matches[0]["line"], "limit": 2}
+        "token", "content.read", {"sources": [source], "offset": matches[0]["line"], "limit": 2}
     )
     assert window[0]["text"].splitlines()[0] == "the target phrase is here"
     assert window[0]["metadata"]["start_line"] == 25
@@ -1535,21 +1513,21 @@ async def test_read_reports_where_to_continue_and_where_to_stop() -> None:
         max_depth = None
 
         async def search(self, query, *, limit, offset=0, domains=None):
-            return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
+            return [SearchHit(source="", backend="local", docid="d1", snippet="s", rank=1)]
 
-        async def content(self, hits, *, query=None):
-            return [ContentSnippet(ref=hit.ref, text="\n".join("abcde")) for hit in hits]
+        async def fetch(self, hit, *, query=None):
+            return ContentSnippet(source=hit.source, text="\n".join("abcde"))
 
     service = BrokerService({"local": Doc()})
     service.register_session(make_session(backends=["local"]))
-    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    head = await service.call("token", "content.read", {"refs": [ref], "limit": 3})
+    head = await service.call("token", "content.read", {"sources": [source], "limit": 3})
     assert head[0]["text"] == "a\nb\nc"
     assert head[0]["metadata"]["next_offset"] == 4
 
     tail = await service.call(
-        "token", "content.read", {"refs": [ref], "offset": 4, "limit": 3}
+        "token", "content.read", {"sources": [source], "offset": 4, "limit": 3}
     )
     assert tail[0]["text"] == "d\ne"
     assert tail[0]["metadata"]["next_offset"] is None
@@ -1564,17 +1542,17 @@ async def test_grep_report_falls_back_to_a_literal_search_for_a_bad_pattern() ->
         max_depth = None
 
         async def search(self, query, *, limit, offset=0, domains=None):
-            return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
+            return [SearchHit(source="", backend="local", docid="d1", snippet="s", rank=1)]
 
-        async def content(self, hits, *, query=None):
-            return [ContentSnippet(ref=hit.ref, text="written in C++ (1985)") for hit in hits]
+        async def fetch(self, hit, *, query=None):
+            return ContentSnippet(source=hit.source, text="written in C++ (1985)")
 
     service = BrokerService({"local": Doc()})
     service.register_session(make_session(backends=["local"]))
-    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
     report = await service.call(
-        "token", "content.grep_report", {"refs": [ref], "pattern": "C++ ("}
+        "token", "content.grep_report", {"sources": [source], "pattern": "C++ ("}
     )
     matches = report["matches"]
     assert [match["line"] for match in matches] == [1]
@@ -1582,15 +1560,12 @@ async def test_grep_report_falls_back_to_a_literal_search_for_a_bad_pattern() ->
 
 async def test_selected_passage_locator_resolves_exact_evidence_and_rejects_tampering() -> None:
     class EvidenceBackend(FakeBackend):
-        async def content(self, hits, *, query=None):
-            return [
-                ContentSnippet(
-                    ref=hit.ref,
-                    text=f"document {hit.rank} line one\ndocument {hit.rank} line two",
-                    url=hit.url,
-                )
-                for hit in hits
-            ]
+        async def fetch(self, hit, *, query=None):
+            return ContentSnippet(
+                source=hit.source,
+                text=f"document {hit.rank} line one\ndocument {hit.rank} line two",
+                url=hit.url,
+            )
 
     service = BrokerService({"web": EvidenceBackend("web", depth=2)})
     service.register_session(make_session())
@@ -1598,7 +1573,7 @@ async def test_selected_passage_locator_resolves_exact_evidence_and_rejects_tamp
     rows = await service.call(
         "token",
         "content.read",
-        {"refs": [hits[0]["ref"]], "offset": 2, "limit": 1},
+        {"sources": [hits[0]["source"]], "offset": 2, "limit": 1},
         execution_id="exec-evidence-issue",
     )
     locator = rows[0]["locator"]
@@ -1617,7 +1592,7 @@ async def test_selected_passage_locator_resolves_exact_evidence_and_rejects_tamp
     selected = await service.call(
         "token",
         "citations.resolve",
-        {"requests": [{"ref": hits[0]["ref"], "locator": locator}]},
+        {"citations": [{"locator": locator}]},
         execution_id="exec-evidence-validate",
     )
     assert selected[0]["evidence"] == rows[0]["text"] == "document 1 line two"
@@ -1629,76 +1604,57 @@ async def test_selected_passage_locator_resolves_exact_evidence_and_rejects_tamp
     # explicit context-decoupling ablation remains the one intentional echo arm.
     assert validated.result_payload is None
     assert "document 1 line two" not in validated.model_dump_json()
-    legacy = await service.call(
-        "token", "citations.resolve", {"refs": [hits[0]["ref"]]}
+    preview = await service.call(
+        "token",
+        "citations.resolve",
+        {"citations": [{"source": hits[0]["source"]}]},
     )
-    assert legacy[0]["evidence_kind"] == "search_preview"
-    assert legacy[0]["evidence"] == "snippet"
+    assert preview[0]["evidence_kind"] == "search_preview"
+    assert preview[0]["evidence"] == "snippet"
 
     with pytest.raises(ValueError, match="Unknown evidence locator"):
         await service.call(
             "token",
             "citations.resolve",
-            {
-                "requests": [
-                    {
-                        "ref": hits[0]["ref"],
-                        "locator": {**locator, "id": "evidence_unknown"},
-                    }
-                ]
-            },
+            {"citations": [{"locator": "evidence_unknown"}]},
             execution_id="exec-evidence-invalid",
         )
     invalid = service.take_trace("token", "exec-evidence-invalid")[0]
     assert invalid.evidence_records[0].status == "error"
     assert invalid.evidence_records[0].error_code == "unknown_locator"
-    with pytest.raises(ValueError, match="does not belong"):
+    with pytest.raises(ValueError, match="exactly source or locator"):
         await service.call(
             "token",
             "citations.resolve",
-            {"requests": [{"ref": hits[1]["ref"], "locator": locator}]},
+            {"citations": [{"source": hits[1]["source"], "locator": locator}]},
         )
-    with pytest.raises(ValueError, match="exactly id, ref, and kind"):
+    with pytest.raises(ValueError, match="bounded string"):
         await service.call(
             "token",
             "citations.resolve",
-            {
-                "requests": [
-                    {
-                        "ref": hits[0]["ref"],
-                        "locator": {**locator, "extra": "tampered"},
-                    }
-                ]
-            },
+            {"citations": [{"locator": {"id": locator}}]},
         )
-    with pytest.raises(ValueError, match="too long"):
+    with pytest.raises(ValueError, match="bounded string"):
         await service.call(
             "token",
             "citations.resolve",
-            {
-                "requests": [
-                    {
-                        "ref": hits[0]["ref"],
-                        "locator": {**locator, "id": "x" * 129},
-                    }
-                ]
-            },
+            {"citations": [{"locator": "x" * 129}]},
         )
 
 
 async def test_read_uses_character_locator_when_one_line_is_truncated() -> None:
     class LongLineBackend(FakeBackend):
-        async def content(self, hits, *, query=None):
-            return [ContentSnippet(ref=hit.ref, text="x" * 30 + "\nnext") for hit in hits]
+        async def fetch(self, hit, *, query=None):
+            return ContentSnippet(source=hit.source, text="x" * 30 + "\nnext")
 
     service = BrokerService({"web": LongLineBackend("web")})
     service.register_session(make_session())
-    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
     rows = await service.call(
         "token",
         "content.read",
-        {"refs": [ref], "limit": 1, "max_chars": 10},
+        {"sources": [source], "limit": 1, "max_chars": 10},
         execution_id="exec-partial-line",
     )
 
@@ -1716,39 +1672,37 @@ async def test_read_uses_character_locator_when_one_line_is_truncated() -> None:
     resolved = await service.call(
         "token",
         "citations.resolve",
-        {"requests": [{"ref": ref, "locator": rows[0]["locator"]}]},
+        {"citations": [{"locator": rows[0]["locator"]}]},
     )
     assert resolved[0]["evidence"] == "x" * 10
 
 
 async def test_grep_report_locator_cites_context_and_honours_size_limit() -> None:
     class EvidenceBackend(FakeBackend):
-        async def content(self, hits, *, query=None):
-            return [ContentSnippet(ref=hit.ref, text="before\ntarget\nafter") for hit in hits]
+        async def fetch(self, hit, *, query=None):
+            return ContentSnippet(source=hit.source, text="before\ntarget\nafter")
 
     service = BrokerService({"web": EvidenceBackend("web")}, max_evidence_chars=19)
     service.register_session(make_session())
-    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
     report = await service.call(
         "token",
         "content.grep_report",
-        {"refs": [ref], "pattern": "target", "context": 1},
+        {"sources": [source], "pattern": "target", "context": 1},
     )
     matches = report["matches"]
     resolved = await service.call(
         "token",
         "citations.resolve",
-        {"requests": [{"ref": ref, "locator": matches[0]["locator"]}]},
+        {"citations": [{"locator": matches[0]["locator"]}]},
     )
     assert resolved[0]["evidence"] == "before\ntarget\nafter"
 
     too_small = BrokerService({"web": EvidenceBackend("web")}, max_evidence_chars=5)
     too_small.register_session(make_session())
-    small_ref = (
-        await too_small.call("token", "search.query", {"query": "q"})
-    )[0]["ref"]
+    small_source = (await too_small.call("token", "search.query", {"query": "q"}))[0]["source"]
     small_report = await too_small.call(
-        "token", "content.grep_report", {"refs": [small_ref], "pattern": "target"}
+        "token", "content.grep_report", {"sources": [small_source], "pattern": "target"}
     )
     small_matches = small_report["matches"]
     assert small_matches[0].get("locator") is None
@@ -1769,31 +1723,23 @@ class CountingBackend:
 
     async def search(self, query, *, limit, offset=0, domains=None):
         return [
-            SearchHit(ref="", backend="local", docid=str(index), snippet="s", rank=index)
+            SearchHit(source="", backend="local", docid=str(index), snippet="s", rank=index)
             for index in range(offset + 1, offset + limit + 1)
         ]
 
-    async def content(self, hits, *, query=None):
-        rows = []
-        for hit in hits:
-            self.fetched.append(hit.docid)
-            if hit.docid in self.fail:
-                rows.append(
-                    ContentSnippet(
-                        ref=hit.ref,
-                        text="",
-                        metadata={"docid": hit.docid, "fetch_error": "HTTPError: 403"},
-                    )
-                )
-            else:
-                rows.append(
-                    ContentSnippet(
-                        ref=hit.ref,
-                        text=f"body of {hit.docid}",
-                        metadata={"docid": hit.docid},
-                    )
-                )
-        return rows
+    async def fetch(self, hit, *, query=None):
+        self.fetched.append(hit.docid)
+        if hit.docid in self.fail:
+            return ContentSnippet(
+                source=hit.source,
+                text="",
+                metadata={"docid": hit.docid, "fetch_error": "HTTPError: 403"},
+            )
+        return ContentSnippet(
+            source=hit.source,
+            text=f"body of {hit.docid}",
+            metadata={"docid": hit.docid},
+        )
 
 
 async def test_a_document_is_retrieved_once_per_session() -> None:
@@ -1807,11 +1753,11 @@ async def test_a_document_is_retrieved_once_per_session() -> None:
     service = BrokerService({"local": backend})
     state = service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q", "limit": 3})
-    refs = [hit["ref"] for hit in hits]
+    sources = [hit["source"] for hit in hits]
 
-    await service.call("token", "content.get_many", {"refs": refs})
-    await service.call("token", "content.grep_report", {"refs": refs, "pattern": "body"})
-    await service.call("token", "content.read", {"refs": refs})
+    await service.call("token", "content.get_many", {"sources": sources})
+    await service.call("token", "content.grep_report", {"sources": sources, "pattern": "body"})
+    await service.call("token", "content.read", {"sources": sources})
 
     assert backend.fetched == ["1", "2", "3"]
     # Both numbers are reported: one follows the program's behaviour, the other
@@ -1832,17 +1778,17 @@ async def test_every_requested_document_comes_back_in_order() -> None:
     service = BrokerService({"local": backend})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q", "limit": 3})
-    refs = [hit["ref"] for hit in hits]
+    sources = [hit["source"] for hit in hits]
 
-    rows = await service.call("token", "content.get_many", {"refs": refs})
+    rows = await service.call("token", "content.get_many", {"sources": sources})
 
-    assert [row["ref"] for row in rows] == refs
+    assert [row["source"] for row in rows] == sources
     assert rows[1]["failure"]["message"] == "Provider rejected one document."
     assert "HTTPError" not in json.dumps(rows[1])
     assert rows[1]["text"] == ""
     # A failure is not cached: a transient timeout must not be frozen for the
     # rest of the rollout.
-    await service.call("token", "content.get_many", {"refs": refs})
+    await service.call("token", "content.get_many", {"sources": sources})
     assert backend.fetched == ["1", "2", "3", "2"]
 
 
@@ -1855,7 +1801,7 @@ async def test_all_permanent_document_failures_remain_typed_aligned_rows() -> No
     rows = await service.call(
         "token",
         "content.get_many",
-        {"refs": [hit["ref"] for hit in hits]},
+        {"sources": [hit["source"] for hit in hits]},
         execution_id="sanitized-content",
     )
 
@@ -1881,17 +1827,17 @@ async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
         max_depth = None
 
         async def search(self, query, *, limit, offset=0, domains=None):
-            return [SearchHit(ref="", backend="local", docid="d1", snippet="s", rank=1)]
+            return [SearchHit(source="", backend="local", docid="d1", snippet="s", rank=1)]
 
-        async def content(self, hits, *, query=None):
-            return [ContentSnippet(ref=hit.ref, text="\n".join(["x" * 500] * 20)) for hit in hits]
+        async def fetch(self, hit, *, query=None):
+            return ContentSnippet(source=hit.source, text="\n".join(["x" * 500] * 20))
 
     service = BrokerService({"local": Fat()})
     service.register_session(make_session(backends=["local"]))
-    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
     rows = await service.call(
-        "token", "content.read", {"refs": [ref], "limit": 20, "max_chars": 1200}
+        "token", "content.read", {"sources": [source], "limit": 20, "max_chars": 1200}
     )
     assert len(rows[0]["text"]) <= 1200
     assert rows[0]["metadata"]["truncated_by_max_chars"] is True
@@ -1911,7 +1857,7 @@ async def test_a_program_can_read_what_it_has_spent() -> None:
     service = BrokerService({"local": FakeBackend("local", depth=5)})
     service.register_session(make_session(backends=["local"]))
     await service.call("token", "search.query", {"query": "q", "limit": 2})
-    await service.call("token", "content.get_many", {"refs": ["1"]})
+    await service.call("token", "content.get_many", {"sources": ["1"]})
 
     usage = await service.call("token", "session.usage", {})
 
@@ -1990,7 +1936,7 @@ async def test_trace_records_which_documents_a_content_call_opened() -> None:
     await service.call(
         "token",
         "content.get_many",
-        {"refs": ["2", "3"]},
+        {"sources": ["2", "3"]},
         execution_id="exec-read",
     )
     event = service.take_trace("token", "exec-read")[0]
@@ -2002,7 +1948,7 @@ async def test_trace_records_which_documents_a_content_call_opened() -> None:
 
 
 async def test_trace_records_which_documents_a_citation_resolved() -> None:
-    """`citations.resolve` takes handles too, so provenance is traceable the same way."""
+    """Source citations keep the same private trace identity as content calls."""
     service = BrokerService({"local": FakeBackend("local", depth=2)})
     service.register_session(make_session(backends=["local"]))
     await service.call("token", "search.query", {"query": "q", "limit": 2})
@@ -2010,7 +1956,7 @@ async def test_trace_records_which_documents_a_citation_resolved() -> None:
     await service.call(
         "token",
         "citations.resolve",
-        {"refs": ["1"]},
+        {"citations": [{"source": "1"}]},
         execution_id="exec-cite",
     )
     event = service.take_trace("token", "exec-cite")[0]
@@ -2021,8 +1967,8 @@ async def test_trace_records_which_documents_a_citation_resolved() -> None:
 async def test_a_failed_event_records_why_and_not_only_the_type() -> None:
     """`error_type` alone collapses cases whose remedies differ.
 
-    Every one of these is a `ValueError`: an unknown handle means the program
-    lost a reference, an empty pattern means it built the call wrong. A trace
+    Every one of these is a `ValueError`: an unknown source means the program
+    lost an address, an empty pattern means it built the call wrong. A trace
     that stored only the type would report them as one failure mode.
     """
     service = BrokerService({"local": FakeBackend("local", depth=2)})
@@ -2033,14 +1979,14 @@ async def test_a_failed_event_records_why_and_not_only_the_type() -> None:
         await service.call(
             "token",
             "content.get_many",
-            {"refs": ["nope"]},
+            {"sources": ["nope"]},
             execution_id="exec-unknown",
         )
     with pytest.raises(ValueError):
         await service.call(
             "token",
             "content.grep_report",
-            {"refs": ["1"], "pattern": ""},
+            {"sources": ["1"], "pattern": ""},
             execution_id="exec-pattern",
         )
 
@@ -2048,7 +1994,7 @@ async def test_a_failed_event_records_why_and_not_only_the_type() -> None:
     pattern = service.take_trace("token", "exec-pattern")[0]
 
     assert unknown.error_type == pattern.error_type == "ValueError"
-    assert "Unknown references: nope" in (unknown.error or "")
+    assert "Unknown sources: nope" in (unknown.error or "")
     assert "pattern must not be empty" in (pattern.error or "")
     # A call that resolved nothing opened nothing.
     assert unknown.hits == []
@@ -2070,7 +2016,6 @@ def test_a_trace_error_message_is_bounded_but_never_empty() -> None:
     assert BrokerService._trace_error_message(ValueError()) is None
 
 
-
 async def test_batching_disabled_forces_one_item_per_call() -> None:
     """The switch bounds fan-out; it does not remove the method.
 
@@ -2079,9 +2024,7 @@ async def test_batching_disabled_forces_one_item_per_call() -> None:
     two things at once.
     """
     service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
-    service.register_session(
-        make_session(mechanisms=Mechanisms(batching=False))
-    )
+    service.register_session(make_session(mechanisms=Mechanisms(batching=False)))
 
     with pytest.raises(MechanismDisabled, match="at most one item"):
         await service.call(
@@ -2118,13 +2061,9 @@ async def test_context_decoupling_disabled_echoes_results_into_the_trace() -> No
     caller can put them in the control model's conversation.
     """
     service = BrokerService({"web": RankedBackend(["https://example.com/a"])})
-    service.register_session(
-        make_session(mechanisms=Mechanisms(context_decoupling=False))
-    )
+    service.register_session(make_session(mechanisms=Mechanisms(context_decoupling=False)))
 
-    hits = await service.call(
-        "token", "search.query", {"query": "q"}, execution_id="exec-echo"
-    )
+    hits = await service.call("token", "search.query", {"query": "q"}, execution_id="exec-echo")
     event = service.take_trace("token", "exec-echo")[0]
     assert event.result_payload == hits
     assert event.result_payload_truncated is False
@@ -2143,9 +2082,7 @@ async def test_oversized_payload_is_capped_and_says_so() -> None:
         {"web": RankedBackend([f"https://example.com/{index}" for index in range(50)])},
         max_context_payload_bytes=200,
     )
-    service.register_session(
-        make_session(mechanisms=Mechanisms(context_decoupling=False))
-    )
+    service.register_session(make_session(mechanisms=Mechanisms(context_decoupling=False)))
     await service.call(
         "token", "search.query", {"query": "q", "limit": 50}, execution_id="exec-big"
     )
@@ -2183,57 +2120,49 @@ def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
     assert Mechanisms(batching=False).capabilities() == list(CAPABILITY_METHODS)
 
 
-async def test_a_ref_with_the_prefix_dropped_still_resolves() -> None:
-    """The one spelling repair allowed, because it is not a guess.
+async def test_equivalent_url_spelling_resolves_the_admitted_source() -> None:
+    service = BrokerService(
+        {"web": RankedBackend(["https://Example.com/a?utm_source=x&id=7#fragment"])}
+    )
+    service.register_session(make_session())
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    Restoring a constant prefix is an exact hit on a full key: it resolves to
-    one document or to none. Programs lose the prefix by slicing their own
-    output or reading a truncated column, and the fix costs nothing.
-    """
+    alternate = "HTTPS://EXAMPLE.COM/a?id=7#other"
+    assert await service.call(
+        "token", "content.get_many", {"sources": [alternate]}
+    ) == await service.call("token", "content.get_many", {"sources": [source]})
+
+
+async def test_a_mistyped_source_is_refused_rather_than_repaired() -> None:
     service = BrokerService({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q"})
-    ref = hits[0]["ref"]
+    source = hits[0]["source"]
 
-    bare = await service.call("token", "content.get_many", {"refs": [ref.removeprefix("ref_")]})
-    assert bare == await service.call("token", "content.get_many", {"refs": [ref]})
-
-
-async def test_a_mistyped_ref_is_refused_rather_than_repaired() -> None:
-    """Nearest-match would nearly always be right, which is why it is absent.
-
-    A few hundred refs in a 16-hex space means an edit-distance-1 neighbour is
-    almost certainly the intended document -- and "almost certainly" about
-    *which document* is the wrong trade. It converts an error the program can
-    see into a silent read of, and citation to, a document nobody asked for.
-    """
-    service = BrokerService({"local": FakeBackend("local")})
-    service.register_session(make_session(backends=["local"]))
-    hits = await service.call("token", "search.query", {"query": "q"})
-    ref = hits[0]["ref"]
-
-    one_character_off = ref[:-1] + ("0" if ref[-1] != "0" else "1")
-    with pytest.raises(ValueError, match="Unknown references"):
-        await service.call("token", "content.get_many", {"refs": [one_character_off]})
-    # A truncated ref is a prefix of a real one and is refused for the same
+    one_character_off = source[:-1] + ("0" if source[-1] != "0" else "1")
+    with pytest.raises(ValueError, match="Unknown sources"):
+        await service.call("token", "content.get_many", {"sources": [one_character_off]})
+    # A truncated source is a prefix of a real one and is refused for the same
     # reason: a prefix that is unique today can be ambiguous later.
-    with pytest.raises(ValueError, match="Unknown references"):
-        await service.call("token", "content.get_many", {"refs": [ref[:-2]]})
+    with pytest.raises(ValueError, match="Unknown sources"):
+        await service.call("token", "content.get_many", {"sources": [source[:-2]]})
 
 
-async def test_a_single_handle_passed_unwrapped_is_not_read_character_by_character() -> None:
+async def test_a_single_source_passed_unwrapped_is_not_read_character_by_character() -> None:
     """A bare string is iterable, so the error it produced named nothing.
 
-    `Unknown references: r, e, f` tells a program neither what was wrong nor
-    which handle failed. Accepting the unwrapped form resolves the same
+    `Unknown sources: d, o, c` tells a program neither what was wrong nor
+    which source failed. Accepting the unwrapped form resolves the same
     document the wrapped form would, so nothing new becomes reachable.
     """
     service = BrokerService({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q"})
 
-    unwrapped = await service.call("token", "content.get_many", {"refs": hits[0]["ref"]})
-    assert unwrapped == await service.call("token", "content.get_many", {"refs": [hits[0]["ref"]]})
+    unwrapped = await service.call("token", "content.get_many", {"sources": hits[0]["source"]})
+    assert unwrapped == await service.call(
+        "token", "content.get_many", {"sources": [hits[0]["source"]]}
+    )
 
 
 async def test_a_snippet_carries_the_date_of_the_hit_that_found_it() -> None:
@@ -2241,7 +2170,7 @@ async def test_a_snippet_carries_the_date_of_the_hit_that_found_it() -> None:
     service = BrokerService({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q"})
-    rows = await service.call("token", "content.get_many", {"refs": [hits[0]["ref"]]})
+    rows = await service.call("token", "content.get_many", {"sources": [hits[0]["source"]]})
     assert rows[0].get("date") == hits[0].get("date")
 
 
@@ -2269,7 +2198,7 @@ class _CoalescingBatchBackend:
             query=query,
             hits=[
                 SearchHit(
-                    ref="",
+                    source="",
                     backend="local",
                     title=query,
                     docid=f"doc-{query}",
@@ -2290,7 +2219,7 @@ class _CoalescingBatchBackend:
         return [self._batch(query) for query in queries]
 
     async def fetch(self, hit, *, query=None):
-        return ContentSnippet(ref=hit.ref, text=f"body:{hit.docid}")
+        return ContentSnippet(source=hit.source, text=f"body:{hit.docid}")
 
 
 class _CoalescingSearchBackend:
@@ -2315,7 +2244,7 @@ class _CoalescingSearchBackend:
             raise
         return [
             SearchHit(
-                ref="",
+                source="",
                 backend="web",
                 title=query,
                 url=f"https://example.com/{query}",
@@ -2326,7 +2255,7 @@ class _CoalescingSearchBackend:
         ]
 
     async def fetch(self, hit, *, query=None):
-        return ContentSnippet(ref=hit.ref, text="body", url=hit.url)
+        return ContentSnippet(source=hit.source, text="body", url=hit.url)
 
 
 class _CoalescingContentBackend(FakeBackend):
@@ -2343,7 +2272,7 @@ class _CoalescingContentBackend(FakeBackend):
         self.fetch_started.set()
         await self.fetch_release.wait()
         return ContentSnippet(
-            ref=hit.ref,
+            source=hit.source,
             text="shared full document",
             url=hit.url,
             metadata={"nested": {"value": 1}},
@@ -2405,9 +2334,7 @@ async def test_inflight_admission_is_atomic_before_provider_side_effect() -> Non
         max_inflight_keys=1,
     )
     state = service.register_session(make_session(backends=["local"]))
-    leader = asyncio.create_task(
-        service.call("token", "search.query", {"query": "alpha"})
-    )
+    leader = asyncio.create_task(service.call("token", "search.query", {"query": "alpha"}))
     await _wait_for_condition(lambda: len(backend.calls) == 1)
 
     with pytest.raises(InflightCapacityError):
@@ -2432,9 +2359,7 @@ async def test_inflight_waiter_limit_counts_unique_call_not_duplicate_rows() -> 
         max_waiters_per_flight=2,
     )
     state = service.register_session(make_session(backends=["local"]))
-    leader = asyncio.create_task(
-        service.call("token", "search.query", {"query": "same"})
-    )
+    leader = asyncio.create_task(service.call("token", "search.query", {"query": "same"}))
     await _wait_for_condition(lambda: len(backend.calls) == 1)
     duplicate_follower = asyncio.create_task(
         service.call(
@@ -2443,9 +2368,7 @@ async def test_inflight_waiter_limit_counts_unique_call_not_duplicate_rows() -> 
             {"queries": ["same", "same"]},
         )
     )
-    await _wait_for_condition(
-        lambda: next(iter(state.flights.values())).waiters == 2
-    )
+    await _wait_for_condition(lambda: next(iter(state.flights.values())).waiters == 2)
 
     with pytest.raises(InflightCapacityError):
         await service.call("token", "search.query", {"query": "same"})
@@ -2497,8 +2420,7 @@ async def test_cancelling_leader_detaches_without_cancelling_follower() -> None:
         )
     )
     await _wait_for_condition(
-        lambda: len(state.flights) == 1
-        and next(iter(state.flights.values())).waiters == 2
+        lambda: len(state.flights) == 1 and next(iter(state.flights.values())).waiters == 2
     )
 
     await service.cancel_execution("token", "leader")
@@ -2553,9 +2475,7 @@ async def test_last_waiter_cancel_cleans_flight_during_publish_lock_race() -> No
     backend = _CoalescingSearchBackend()
     service = BrokerService({"web": backend}, inflight_coalescing=True)
     state = service.register_session(make_session())
-    call = asyncio.create_task(
-        service.call("token", "search.query", {"query": "race"})
-    )
+    call = asyncio.create_task(service.call("token", "search.query", {"query": "race"}))
     await backend.started.wait()
     entry = next(iter(state.flights.values()))
 
@@ -2583,13 +2503,13 @@ async def test_content_coalescing_counts_only_real_backend_leader_and_copies_row
     service = BrokerService({"web": backend}, inflight_coalescing=True)
     state = service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "doc"})
-    ref = hits[0]["ref"]
+    source = hits[0]["source"]
 
     first = asyncio.create_task(
         service.call(
             "token",
             "content.get_many",
-            {"refs": [ref]},
+            {"sources": [source]},
             execution_id="content-leader",
         )
     )
@@ -2598,13 +2518,12 @@ async def test_content_coalescing_counts_only_real_backend_leader_and_copies_row
         service.call(
             "token",
             "content.get_many",
-            {"refs": [ref]},
+            {"sources": [source]},
             execution_id="content-follower",
         )
     )
     await _wait_for_condition(
-        lambda: len(state.flights) == 1
-        and next(iter(state.flights.values())).waiters == 2
+        lambda: len(state.flights) == 1 and next(iter(state.flights.values())).waiters == 2
     )
     backend.fetch_release.set()
     first_rows, second_rows = await asyncio.gather(first, second)
@@ -2626,12 +2545,9 @@ async def test_content_leader_caches_before_flight_cleanup_lock_queue() -> None:
     backend = _CoalescingContentBackend()
     service = BrokerService({"web": backend}, inflight_coalescing=True)
     state = service.register_session(make_session())
-    ref = (await service.call("token", "search.query", {"query": "doc"}))[0][
-        "ref"
-    ]
-    leader = asyncio.create_task(
-        service.call("token", "content.get_many", {"refs": [ref]})
-    )
+    source = (await service.call("token", "search.query", {"query": "doc"}))[0]["source"]
+    identity = state.identity_by_source[source]
+    leader = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
     await backend.fetch_started.wait()
 
     # Hold the registry lock so the completed transport's cleanup is queued.
@@ -2641,11 +2557,11 @@ async def test_content_leader_caches_before_flight_cleanup_lock_queue() -> None:
     await state.flight_lock.acquire()
     try:
         backend.fetch_release.set()
-        await _wait_for_condition(lambda: ref in state.content_cache)
+        await _wait_for_condition(lambda: identity in state.content_cache)
         assert len(state.flights) == 1
 
         third = asyncio.create_task(
-            service.call("token", "content.get_many", {"refs": [ref]})
+            service.call("token", "content.get_many", {"sources": [source]})
         )
         await _wait_for_condition(third.done)
         assert (await third)[0]["text"] == "shared full document"
@@ -2661,9 +2577,7 @@ async def test_content_refreshes_stale_misses_after_usage_reservation() -> None:
     backend = _CoalescingContentBackend()
     service = BrokerService({"web": backend}, inflight_coalescing=True)
     state = service.register_session(make_session())
-    ref = (await service.call("token", "search.query", {"query": "doc"}))[0][
-        "ref"
-    ]
+    source = (await service.call("token", "search.query", {"query": "doc"}))[0]["source"]
     original_record = state.policy.record_content_fetches
     follower_reserved = asyncio.Event()
     resume_follower = asyncio.Event()
@@ -2678,13 +2592,9 @@ async def test_content_refreshes_stale_misses_after_usage_reservation() -> None:
             await resume_follower.wait()
 
     state.policy.record_content_fetches = gated_record
-    leader = asyncio.create_task(
-        service.call("token", "content.get_many", {"refs": [ref]})
-    )
+    leader = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
     await backend.fetch_started.wait()
-    follower = asyncio.create_task(
-        service.call("token", "content.get_many", {"refs": [ref]})
-    )
+    follower = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
     await follower_reserved.wait()
 
     backend.fetch_release.set()
@@ -2700,12 +2610,8 @@ async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> No
     backend = _CoalescingContentBackend()
     service = BrokerService({"web": backend}, inflight_coalescing=True)
     state = service.register_session(make_session())
-    ref = (await service.call("token", "search.query", {"query": "doc"}))[0][
-        "ref"
-    ]
-    leader = asyncio.create_task(
-        service.call("token", "content.get_many", {"refs": [ref]})
-    )
+    source = (await service.call("token", "search.query", {"query": "doc"}))[0]["source"]
+    leader = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
     await backend.fetch_started.wait()
 
     original_admit = service._admit_flights
@@ -2718,9 +2624,7 @@ async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> No
         return await original_admit(state_arg, requests, group_new=group_new)
 
     service._admit_flights = gated_admit
-    follower = asyncio.create_task(
-        service.call("token", "content.get_many", {"refs": [ref]})
-    )
+    follower = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
     await follower_at_admission.wait()
 
     # The follower already classified the row as a miss, but has not acquired
