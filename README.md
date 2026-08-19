@@ -206,15 +206,18 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | Namespace | Main operations | Role |
 | --- | --- | --- |
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
-| `sdk.content` | `passages`, `get_many`, `snippets`, `grep`, `read` | Rank, locate, and inspect evidence |
-| `sdk.llm` | `map`, `map_many`, `extract`, `extract_many` | Optional brokered model calls and schema-checked extraction |
+| `sdk.content` | `passages`, `read`, `grep_report` | Rank, locate, and inspect evidence without hiding partial failures |
+| `sdk.llm` | `extract_many`, `complete`, `complete_many` | Optional brokered model calls and schema-checked extraction |
+| `sdk.citations` | `resolve`, `resolve_requests` | Advanced inspection of previously retrieved citation handles |
 | `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
 | `sdk.session` | `usage` | Inspect strategy counts and remaining budgets |
 | `sdk.output` | `submit` | Return structured output and resolve trusted citations |
 
 Batch operations preserve input alignment and expose typed per-item failures. Empty search results
 are successful results. Passage citations must use locators returned by content operations. The
-current public contract and migration notes are in [OpenSAC 0.5](docs/opensac-0.5.md).
+table highlights preferred and intentional advanced operations; the exact contract, including
+compatibility methods, is in the Search-as-Code Skill SDK reference. Migration notes are in
+[OpenSAC 0.5](docs/opensac-0.5.md).
 
 ### Agent integrations
 

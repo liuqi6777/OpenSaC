@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from opensac_sdk._surface import BROKER_METHODS
 from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
 
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
@@ -2308,6 +2309,7 @@ async def test_capability_methods_stay_in_step_with_the_handler_table() -> None:
 
 
 def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
+    assert CAPABILITY_METHODS == BROKER_METHODS
     assert Mechanisms().capabilities() == list(CAPABILITY_METHODS)
     without_llm = Mechanisms(llm_subroutine=False).capabilities()
     assert not any(method.startswith("llm.") for method in without_llm)

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Self
 
+from opensac_sdk._surface import BROKER_METHODS
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -33,39 +34,11 @@ class ResourceBudget(BaseModel):
     max_sandbox_seconds: float | None = Field(default=None, ge=0.0)
     max_workspace_bytes: int | None = Field(default=None, ge=0)
 
-# Every capability the broker dispatches, in one place. The broker asserts its
-# handler table against this tuple, so a capability cannot be added on one side
-# only: a method missing here would be invisible to the session manifest (and
-# therefore to the skill text), and a method listed here without a handler would
-# be advertised to the model and then fail on first use.
-CAPABILITY_METHODS: tuple[str, ...] = (
-    # One search, whichever backend this session was deployed against. The
-    # backend is a deployment fact, not something a program chooses: it reaches
-    # exactly one corpus, and naming that corpus in the method would make the
-    # generated program unportable across arms and the skill text differ by
-    # backend for no gain. Where a backend genuinely differs -- a domain filter,
-    # a depth ceiling -- it differs in a *parameter*, which the broker refuses
-    # explicitly rather than absorbing it. `hit.backend` still carries
-    # provenance, so nothing downstream loses track of where a document came
-    # from.
-    "search.query",
-    "search.query_many",
-    "content.get_many",
-    "content.snippets",
-    "content.passages",
-    "content.read",
-    "content.grep",
-    "content.grep_report",
-    "citations.resolve",
-    # The program's own budget. Without it the only place the remaining quota
-    # appears is the observation the host renders for the control model, so the
-    # code that decides whether to search again cannot see what searching has
-    # already cost.
-    "session.usage",
-    "llm.complete",
-    "llm.complete_many",
-    "llm.extract_many",
-)
+
+# The version-matched SDK owns the broker method names because it is the caller
+# that must expose every capability. The broker asserts its handler table
+# against this tuple on every dispatch path.
+CAPABILITY_METHODS: tuple[str, ...] = BROKER_METHODS
 
 # method -> the params key holding its batch. Used to bound fan-out when
 # batching is disabled, so the ablation lands on "may I fan out in one call"

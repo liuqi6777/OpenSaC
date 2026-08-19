@@ -9,6 +9,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from opensac_sdk import BrokerError
+from opensac_sdk._surface import MODEL_CORE_METHODS
 from opensac_sdk.models import (
     CapabilityFailure,
     ContentFailure,
@@ -385,6 +386,13 @@ def test_documented_model_fields_match_the_sdk() -> None:
     assert "Execution observations show artifact paths, not their contents" in contract
     assert "not a separate database" in contract
     assert "`sdk.workspace` resource" in contract
+
+
+def test_model_core_surface_is_present_in_the_exact_contract() -> None:
+    contract = CONTRACT_PATH.read_text(encoding="utf-8")
+
+    for public_name in MODEL_CORE_METHODS:
+        assert f"{public_name}(" in contract
 
 
 def test_patterns_compile_and_pass_sandbox_validation() -> None:

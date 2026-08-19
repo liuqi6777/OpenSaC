@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
+from opensac_sdk.citations import CitationsResource
 from opensac_sdk.content import ContentResource
 from opensac_sdk.llm import LLMResource
 from opensac_sdk.models import (
@@ -27,9 +29,49 @@ from opensac_sdk.models import (
 )
 from opensac_sdk.output import OutputResource
 from opensac_sdk.search import SearchResource
+from opensac_sdk.session import SessionResource
 from opensac_sdk.state import StateResource
 from opensac_sdk.transport import BrokerError, UnixSocketTransport
 from pydantic import ValidationError
+
+RESOURCE_TYPES = {
+    "citations": CitationsResource,
+    "content": ContentResource,
+    "llm": LLMResource,
+    "output": OutputResource,
+    "search": SearchResource,
+    "session": SessionResource,
+    "state": StateResource,
+}
+
+
+def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
+    declared = {(operation.resource, operation.method) for operation in SDK_SURFACE}
+    assert len(declared) == len(SDK_SURFACE)
+    assert len({operation.public_name for operation in SDK_SURFACE}) == len(SDK_SURFACE)
+
+    implemented = {
+        (resource, name)
+        for resource, resource_type in RESOURCE_TYPES.items()
+        for name, value in vars(resource_type).items()
+        if name == "__call__"
+        or (
+            not name.startswith("_")
+            and name != "__init__"
+            and (callable(value) or isinstance(value, (classmethod, staticmethod)))
+        )
+    }
+    assert declared == implemented
+
+
+def test_surface_manifest_keeps_core_small_and_legacy_actionable() -> None:
+    model_core = [operation for operation in SDK_SURFACE if operation.model_core]
+    assert len(model_core) <= 12
+    assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
+
+    legacy = [operation for operation in SDK_SURFACE if operation.tier is SurfaceTier.LEGACY]
+    assert legacy
+    assert all(operation.replacement for operation in legacy)
 
 
 class FakeTransport:

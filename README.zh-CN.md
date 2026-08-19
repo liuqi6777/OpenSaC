@@ -193,14 +193,16 @@ PY
 | 命名空间 | 主要操作 | 作用 |
 | --- | --- | --- |
 | `sdk.search` | `search`、`many`、`fuse_rrf` | 检索并融合候选，同时保留 provenance |
-| `sdk.content` | `passages`、`get_many`、`snippets`、`grep`、`read` | 排序、定位和检查证据 |
-| `sdk.llm` | `map`、`map_many`、`extract`、`extract_many` | 可选的 broker 模型调用与 schema 校验抽取 |
+| `sdk.content` | `passages`、`read`、`grep_report` | 排序、定位和检查证据，不隐藏部分抓取失败 |
+| `sdk.llm` | `extract_many`、`complete`、`complete_many` | 可选的 broker 模型调用与 schema 校验抽取 |
+| `sdk.citations` | `resolve`、`resolve_requests` | 高级检查已检索的引用句柄 |
 | `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
 | `sdk.session` | `usage` | 查看策略统计与剩余预算 |
 | `sdk.output` | `submit` | 返回结构化输出并解析可信引用 |
 
 批量操作保持输入对齐，并暴露类型化的逐项失败。空搜索结果属于成功结果。段落引用必须使用正文操作返回的
-locator。当前公共契约与迁移说明见 [OpenSAC 0.5](docs/opensac-0.5.md)。
+locator。表格突出推荐接口和有意保留的高级接口；包含兼容方法的精确契约见 Search-as-Code Skill SDK reference，
+迁移说明见 [OpenSAC 0.5](docs/opensac-0.5.md)。
 
 ### 智能体集成
 
