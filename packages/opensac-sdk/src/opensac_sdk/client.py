@@ -15,6 +15,8 @@ from .transport import UnixSocketTransport
 
 
 class OpenSACClient:
+    """Constructed SDK client that owns broker transport and resource namespaces."""
+
     def __init__(
         self,
         transport: UnixSocketTransport,
@@ -50,6 +52,13 @@ class OpenSACClient:
 
 
 class LazyOpenSACClient:
+    """OpenSAC sandbox entry point, available as ``opensac_sdk.sdk``.
+
+    Namespaces are ``search``, ``content``, ``citations``, ``session``, ``llm``,
+    ``state``, and ``output``. Read one namespace or method ``.__doc__`` when exact
+    runtime behavior is needed; doing so does not call the broker.
+    """
+
     def __init__(self) -> None:
         self._client: OpenSACClient | None = None
         self._client_lock = threading.Lock()

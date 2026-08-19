@@ -83,6 +83,9 @@ unavailable; never invent an OpenSAC locator.
 
 ## Load details only when needed
 
+For installed-version details, print one method's `__doc__`; it makes no broker call. Never dump
+all runtime docs because they share the stdout observation budget.
+
 - Read [references/sdk-contract.md](references/sdk-contract.md) before using unfamiliar SDK
   core/helper methods, fields, failure types, limits, or citation behavior.
 - Read [references/advanced.md](references/advanced.md) only when a core workflow is insufficient.

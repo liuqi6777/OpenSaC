@@ -11,6 +11,7 @@ records: both `row.ref` and `row["ref"]` read the same field, and `dict(row)` se
 - [Failure and alignment semantics](#failure-and-alignment-semantics)
 - [Retrieval and evidence limits](#retrieval-and-evidence-limits)
 - [Workspace state, output, and lifecycle](#workspace-state-output-and-lifecycle)
+- [Runtime documentation](#runtime-documentation)
 - [Sandbox constraints](#sandbox-constraints)
 
 ## Core and helper capabilities
@@ -160,6 +161,20 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   outside the program and are not `BrokerError`. The model-visible adapter surface does not accept
   an execution ID, so a failed observation can have an unknown execution outcome. Inspect
   persisted progress in a new recovery stage instead of replaying the same program.
+
+## Runtime documentation
+
+The installed SDK carries bounded documentation on every agent-facing resource and operation.
+Inspect only the interface needed by the next stage:
+
+```python
+print(sdk.__doc__)                       # namespace overview
+print(sdk.search.__doc__)                # resource purpose and boundary
+print(sdk.content.passages.__doc__)      # exact operation semantics
+```
+
+Reading `__doc__` does not execute a capability or call the broker. `help()` remains blocked,
+and printing many docstrings can consume the observation budget; prefer one exact method at a time.
 
 ## Sandbox constraints
 

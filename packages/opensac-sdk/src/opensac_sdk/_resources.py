@@ -11,6 +11,17 @@ from .transport import UnixSocketTransport
 
 
 class SearchResource:
+    """Retrieve document handles and combine ranked search result sets.
+
+    Call ``sdk.search(query, limit=10, offset=0, domains=None)`` for one ranked
+    window. It returns hit records with opaque ``ref`` handles, source metadata,
+    snippets, scores, and ranks; an empty list is a successful no-match result.
+
+    Search is the only way documents enter the current session's authorized
+    evidence set. Returned ``ref`` values are opaque handles for ``sdk.content``
+    and citation operations; never invent or modify them.
+    """
+
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
@@ -22,6 +33,19 @@ class SearchResource:
         offset: int = 0,
         domains: list[str] | None = None,
     ) -> list[Record]:
+        """Search one query and return a ranked window of hit records.
+
+        ``offset`` is depth in the full ranking, not a page number. ``domains``
+        is accepted only by backends that support domain filtering.
+
+        Returns:
+            Hits ordered by ``rank``. Each record includes ``ref``, ``backend``,
+            source metadata, ``snippet``, ``score``, ``rank``, ``retrieval``, and
+            ``metadata``. An empty list is a successful search with no matches.
+
+        Raises:
+            BrokerError: The whole search failed or the request was rejected.
+        """
         return self._transport.call(
             "search.query",
             {"query": query, "limit": limit, "offset": offset, "domains": domains},
@@ -36,6 +60,22 @@ class SearchResource:
         concurrency: int = 5,
         domains: list[str] | None = None,
     ) -> list[Record]:
+        """Search several queries with bounded broker-side concurrency.
+
+        ``limit_per_query`` and ``offset`` define each ranked window.
+        ``concurrency`` bounds simultaneous provider work; ``domains`` has the
+        same backend-dependent semantics as single-query search.
+
+        Returns:
+            One batch per input query, in input order. A batch contains ``query``,
+            ``hits``, and ``failure``. A per-query failure has no hits; inspect its
+            ``code``, ``message``, ``retryable``, and attempt metadata. Empty hits
+            with ``failure is None`` are successful.
+
+        Raises:
+            BrokerError: The complete batch call failed before aligned results
+                could be returned.
+        """
         return self._transport.call(
             "search.query_many",
             {
@@ -55,7 +95,20 @@ class SearchResource:
         k: int = 60,
         limit: int | None = None,
     ) -> list[Record]:
-        """Fuse successful search batches locally with reciprocal-rank fusion."""
+        """Fuse successful search batches locally with reciprocal-rank fusion.
+
+        This deterministic helper makes no broker call. Failed batches are skipped
+        and remain available to the caller through their original ``failure``
+        fields. ``weights`` must align one-to-one with ``batches``; ``k`` controls
+        rank smoothing and ``limit`` truncates the fused list.
+
+        Returns:
+            Search-hit records extended with ``sources``, ``fused_score``, and
+            1-based ``fused_rank``. References and source metadata are preserved.
+
+        Raises:
+            ValueError: Weights, ranks, ``k``, or ``limit`` are invalid.
+        """
         parsed_batches = [record(batch) for batch in batches]
         normalized_weights = self._validate_fusion_options(
             len(parsed_batches), weights=weights, k=k, limit=limit
@@ -168,10 +221,27 @@ class SearchResource:
 
 
 class ContentResource:
+    """Locate and read evidence from documents authorized by search.
+
+    Prefer ``passages`` for semantic discovery, ``grep_report`` for exact text,
+    and ``read`` for deliberate line-window expansion. Content operations report
+    partial fetch failures instead of silently dropping unreadable references.
+    """
+
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
     def get_many(self, refs: list[str]) -> list[Record]:
+        """Fetch complete normalized documents for advanced local processing.
+
+        Returns:
+            One content row per input ref, in input order. A successful row contains
+            ``text`` and source metadata; an unreadable row has empty text and a
+            structured ``failure``. Prefer narrower content operations when possible.
+
+        Raises:
+            BrokerError: The whole request failed or every failure was systemic.
+        """
         return self._transport.call("content.get_many", {"refs": refs})
 
     def read(
@@ -182,6 +252,19 @@ class ContentResource:
         limit: int = 200,
         max_chars: int = 100_000,
     ) -> list[Record]:
+        """Read the same 1-indexed line window from each referenced document.
+
+        ``offset`` is the first line and ``limit`` bounds line count; ``max_chars``
+        also bounds unusually long lines. Use ``metadata.next_offset`` to continue.
+
+        Returns:
+            Ref-aligned content rows. ``metadata`` includes ``start_line``,
+            ``end_line``, ``total_lines``, and ``next_offset``. Inspect ``failure``
+            on unreadable rows.
+
+        Raises:
+            BrokerError: The whole request failed or every failure was systemic.
+        """
         return self._transport.call(
             "content.read",
             {"refs": refs, "offset": offset, "limit": limit, "max_chars": max_chars},
@@ -195,6 +278,21 @@ class ContentResource:
         context: int = 0,
         max_matches_per_ref: int = 20,
     ) -> Record:
+        """Search document lines and preserve per-ref fetch failures.
+
+        ``pattern`` is a case-insensitive regular expression; malformed regex is
+        treated literally. ``context`` adds surrounding lines and
+        ``max_matches_per_ref`` bounds each document's contribution. Match line
+        numbers are 1-indexed and can be passed directly to ``read``.
+
+        Returns:
+            A report with ``matches``, ``failures``, and ``input_count``. Each match
+            includes source metadata, ``line``, ``text``, context, ``input_index``,
+            and either ``locator`` or ``locator_error``. Zero matches is success.
+
+        Raises:
+            BrokerError: The report could not be produced.
+        """
         return self._transport.call(
             "content.grep_report",
             {
@@ -213,6 +311,21 @@ class ContentResource:
         limit: int = 20,
         max_per_ref: int = 3,
     ) -> Record:
+        """Rank citeable passages across a caller-supplied set of refs.
+
+        The broker deduplicates refs in first-seen order, ranks successful documents
+        together, then applies ``max_per_ref``. ``limit`` bounds the whole report.
+        Scores are comparable only within this report.
+
+        Returns:
+            A report with ``query``, ``passages``, ``failures``, ``input_count``, and
+            ``unique_ref_count``. Each passage includes exact ``text``, coordinates,
+            ranker metadata, and either ``locator`` or ``locator_error``. Never cite
+            a passage whose locator is missing.
+
+        Raises:
+            BrokerError: The report could not be produced.
+        """
         return self._transport.call(
             "content.passages",
             {
@@ -225,17 +338,49 @@ class ContentResource:
 
 
 class CitationsResource:
+    """Resolve document refs and passage locators into trusted citation metadata.
+
+    These are advanced inspection operations. Final research results normally pass
+    refs and locators directly to ``sdk.output.submit`` for resolution.
+    """
+
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
     def resolve(self, refs: list[str]) -> list[Record]:
+        """Resolve ref-only search-preview citations in input order.
+
+        Returns:
+            Trusted citation records containing source identity, URL, backend, and
+            search-preview evidence metadata.
+
+        Raises:
+            BrokerError: A ref is unknown to the current session or resolution fails.
+        """
         return self._transport.call("citations.resolve", {"refs": refs})
 
     def resolve_requests(self, requests: list[dict[str, Any]]) -> list[Record]:
+        """Resolve explicit ``ref`` and evidence-``locator`` citation requests.
+
+        Each request is ``{"ref": ref, "locator": locator}``. Omit ``locator`` for
+        legacy search-preview evidence; an explicit null locator is invalid.
+
+        Returns:
+            Trusted citation records aligned with the requests.
+
+        Raises:
+            BrokerError: A ref or locator is invalid, stale, or cannot be resolved.
+        """
         return self._transport.call("citations.resolve", {"requests": requests})
 
 
 class LLMResource:
+    """Use the optional pipeline model for bounded semantic subroutines.
+
+    Prefer deterministic Python whenever it is sufficient. Use ``extract_many`` for
+    structured results; free-form completion methods are advanced operations.
+    """
+
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
@@ -247,6 +392,18 @@ class LLMResource:
         temperature: float = 0.2,
         max_tokens: int | None = None,
     ) -> str:
+        """Run one free-form pipeline-model completion.
+
+        ``system`` supplies optional instructions, ``temperature`` controls sampling,
+        and ``max_tokens`` optionally bounds the response. Prefer ``extract_many``
+        when downstream code expects structured data.
+
+        Returns:
+            The model's response text.
+
+        Raises:
+            BrokerError: The deployment has no pipeline model or completion fails.
+        """
         return self._transport.call(
             "llm.complete",
             {
@@ -266,6 +423,17 @@ class LLMResource:
         max_tokens: int | None = None,
         concurrency: int = 4,
     ) -> list[str]:
+        """Run aligned free-form completions with bounded concurrency.
+
+        ``system``, ``temperature``, and ``max_tokens`` apply to every prompt.
+        ``concurrency`` bounds simultaneous model requests.
+
+        Returns:
+            One response string per prompt, in input order.
+
+        Raises:
+            BrokerError: The deployment has no pipeline model or the batch fails.
+        """
         return self._transport.call(
             "llm.complete_many",
             {
@@ -287,6 +455,21 @@ class LLMResource:
         max_tokens: int | None = None,
         repair_attempts: int = 0,
     ) -> list[Record]:
+        """Map items to a caller-defined JSON object schema.
+
+        ``schema`` and every item must be JSON serializable. The schema root must be
+        an object. ``repair_attempts`` is 0 or 1; results remain aligned even when an
+        individual item does not satisfy the schema. ``instruction`` and ``schema``
+        apply to every item, while ``concurrency`` and ``max_tokens`` bound execution.
+
+        Returns:
+            Rows containing ``index``, ``data``, ``error``, and ``attempts``. Exactly
+            one of ``data`` or ``error`` is present for each row.
+
+        Raises:
+            ValueError: Local arguments are not JSON serializable or valid.
+            BrokerError: Extraction infrastructure fails for the whole call.
+        """
         if repair_attempts not in {0, 1}:
             raise ValueError("repair_attempts must be 0 or 1")
         if not isinstance(schema, dict):
@@ -317,14 +500,33 @@ class LLMResource:
 
 
 class SessionResource:
+    """Inspect strategy usage and remaining hard allowances for this session."""
+
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
     def usage(self) -> dict[str, Any]:
+        """Return current capability spend, remaining budgets, and terminal state.
+
+        Returns:
+            A record containing ``exec_calls``, ``search_calls``,
+            ``content_fetches``, ``llm_calls``, ``pipeline_model_tokens``,
+            ``documents_seen``, ``budget_remaining``, and ``terminal_reason``.
+
+        Raises:
+            BrokerError: Session usage cannot be read.
+        """
         return self._transport.call("session.usage", {})
 
 
 class StateResource:
+    """Persist JSON and JSONL artifacts across executions in one live session.
+
+    Paths are workspace-relative and cannot escape the session workspace. State is
+    program memory, not a database; refs and locators become invalid if the host
+    reports ``state_lost``.
+    """
+
     def __init__(self, workspace: str) -> None:
         self._workspace = Path(workspace).resolve()
 
@@ -339,17 +541,44 @@ class StateResource:
         return "".join(json.dumps(row, ensure_ascii=True, default=str) + "\n" for row in rows)
 
     def write_jsonl(self, relative_path: str, rows: list[Any]) -> None:
+        """Replace a JSONL artifact with ``rows``, creating parent directories.
+
+        SDK records can be written directly. Use ``append_jsonl`` to extend an event
+        log and ``merge_jsonl`` to upsert a keyed candidate pool.
+
+        Raises:
+            ValueError: The path escapes the workspace.
+        """
         path = self._path(relative_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(self._dump(rows), encoding="utf-8")
 
     def append_jsonl(self, relative_path: str, rows: list[Any]) -> None:
+        """Append rows to a JSONL artifact without reading or rewriting it.
+
+        The file and parent directories are created when absent. This operation does
+        not deduplicate rows; use ``merge_jsonl`` for keyed state.
+
+        Raises:
+            ValueError: The path escapes the workspace.
+        """
         path = self._path(relative_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(self._dump(rows))
 
     def merge_jsonl(self, relative_path: str, rows: list[Any], key: str = "ref") -> int:
+        """Upsert JSONL rows by ``key`` while preserving first-seen order.
+
+        An absent file behaves like an empty pool. A repeated key replaces its row
+        without moving it; pre-existing keyless rows are preserved.
+
+        Returns:
+            The total row count after the merge.
+
+        Raises:
+            ValueError: A new row lacks ``key`` or the path escapes the workspace.
+        """
         merged: dict[Any, Any] = {}
         path = self._path(relative_path)
         if path.is_file():
@@ -375,9 +604,19 @@ class StateResource:
         return len(merged)
 
     def exists(self, relative_path: str) -> bool:
+        """Return whether a workspace-relative state file exists.
+
+        Raises:
+            ValueError: The path escapes the workspace.
+        """
         return self._path(relative_path).is_file()
 
     def list(self, prefix: str = "") -> list[str]:
+        """List sorted workspace-relative artifact paths under ``prefix``.
+
+        Runtime files whose names start with ``.opensac-`` are hidden. An absent
+        workspace returns an empty list.
+        """
         if not self._workspace.exists():
             return []
         return sorted(
@@ -389,10 +628,25 @@ class StateResource:
         )
 
     def read_jsonl(self, relative_path: str) -> list[Any]:
+        """Read non-empty JSONL lines as recursively wrapped JSON values.
+
+        Returned objects support both ``row.field`` and ``row["field"]`` reads.
+
+        Raises:
+            FileNotFoundError: The artifact does not exist.
+            ValueError: The path escapes the workspace or a line is invalid JSON.
+        """
         with self._path(relative_path).open("r", encoding="utf-8") as handle:
             return [wrap(json.loads(line)) for line in handle if line.strip()]
 
     def write_json(self, relative_path: str, value: Any) -> None:
+        """Replace a JSON artifact, creating parent directories when needed.
+
+        SDK records and ordinary JSON values can be written directly.
+
+        Raises:
+            ValueError: The path escapes the workspace.
+        """
         path = self._path(relative_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -401,6 +655,14 @@ class StateResource:
         )
 
     def read_json(self, relative_path: str) -> Any:
+        """Read a JSON artifact and recursively wrap its object values.
+
+        Returned objects support both attribute and mapping field reads.
+
+        Raises:
+            FileNotFoundError: The artifact does not exist.
+            ValueError: The path escapes the workspace or the file is invalid JSON.
+        """
         return wrap(json.loads(self._path(relative_path).read_text(encoding="utf-8")))
 
     @classmethod
@@ -409,6 +671,8 @@ class StateResource:
 
 
 class OutputResource:
+    """Submit the final structured result and broker-resolved citations."""
+
     def __init__(self, output_path: str, transport: UnixSocketTransport | None = None) -> None:
         self._output_path = Path(output_path)
         self._transport = transport
@@ -419,6 +683,18 @@ class OutputResource:
         *,
         citations: list[dict[str, Any]] | None = None,
     ) -> None:
+        """Write the final output artifact and resolve its citations.
+
+        Call this once when research is complete. Each citation must contain a
+        session-issued ``ref`` and may include a non-null passage ``locator``.
+        Ref-only citations represent search-preview evidence and must not support a
+        claim about document content.
+
+        Raises:
+            ValueError: A citation is malformed or contains an explicit null locator.
+            BrokerError: Citation resolution fails.
+            RuntimeError: Citations were requested without a broker transport.
+        """
         requested = [self._citation(item) for item in citations or []]
         if requested:
             if self._transport is None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 from unittest.mock import patch
 
@@ -77,6 +78,49 @@ def test_surface_manifest_keeps_model_core_small() -> None:
     assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
     assert not hasattr(ContentResource, "snippets")
     assert not hasattr(ContentResource, "grep")
+
+
+def test_public_resources_and_operations_have_bounded_runtime_docs() -> None:
+    for resource, resource_type in RESOURCE_TYPES.items():
+        resource_doc = inspect.getdoc(resource_type)
+        assert resource_doc, f"sdk.{resource} has no runtime documentation"
+        assert len(resource_doc) <= 800, f"sdk.{resource} documentation is too large"
+
+    for operation in SDK_SURFACE:
+        if operation.tier is SurfaceTier.INTERNAL:
+            continue
+        operation_doc = inspect.getdoc(
+            getattr(RESOURCE_TYPES[operation.resource], operation.method)
+        )
+        assert operation_doc, f"{operation.public_name} has no runtime documentation"
+        assert 80 <= len(operation_doc) <= 1_600, (
+            f"{operation.public_name} documentation must be useful without flooding stdout"
+        )
+
+
+def test_sdk_entrypoint_doc_lists_runtime_namespaces_without_initializing() -> None:
+    assert opensac_sdk.sdk.__doc__ is not None
+    assert "search" in opensac_sdk.sdk.__doc__
+    assert "output" in opensac_sdk.sdk.__doc__
+
+
+def test_lazy_sdk_exposes_resource_and_method_docs_without_a_broker_call() -> None:
+    opensac_sdk.sdk.close()
+    try:
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENSAC_BROKER_SOCKET": "/tmp/doc-probe.sock",
+                "OPENSAC_SESSION_TOKEN": "doc-probe",
+                "OPENSAC_WORKSPACE": "/tmp/doc-probe-workspace",
+            },
+        ):
+            search_doc = opensac_sdk.sdk.search.__doc__ or ""
+            assert "sdk.search(query" in search_doc
+            assert "opaque" in search_doc
+            assert "input query" in (opensac_sdk.sdk.search.many.__doc__ or "")
+    finally:
+        opensac_sdk.sdk.close()
 
 
 class FakeTransport:
