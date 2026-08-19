@@ -176,8 +176,9 @@ class ContentMatch(SubscriptableModel):
     ``line`` is 1-indexed and is the same coordinate ``content.read`` takes as
     ``offset``, so locating and reading compose without arithmetic:
 
-        matches = sdk.content.grep(refs, r"born in \\d{4}")
-        window = sdk.content.read([matches[0].ref], offset=matches[0].line - 5)
+        report = sdk.content.grep_report(refs, r"born in \\d{4}")
+        match = report.matches[0]
+        window = sdk.content.read([match.ref], offset=max(1, match.line - 5))
     """
 
     ref: str

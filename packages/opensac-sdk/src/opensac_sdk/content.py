@@ -5,25 +5,25 @@ from .transport import UnixSocketTransport
 
 
 class ContentResource:
-    """Five ways to read documents, from global passage rank to a line window.
+    """Retrieve, locate, and inspect evidence from authorized documents.
 
-    `passages` globally ranks windows across a ref set. `get_many` and `snippets`
-    return a whole page or one legacy page-local window. `grep` and `read` are
-    the pair for exact strings and surrounding context. Line numbers are
-    1-indexed and shared by passages, grep, and read.
+    New programs normally compose `passages`, `grep_report`, and `read`.
+    `passages` ranks evidence across documents, `grep_report` locates exact
+    strings without hiding fetch failures, and `read` expands a line window.
+    Line numbers are 1-indexed and shared by all three operations.
 
-    A document retrieved once is cached for the rest of the session, so reading
-    the same pool repeatedly is cheap after the first pass. `get_many`,
-    `snippets`, and `read` return one row per requested document, in order; a
-    page that could not be retrieved comes back with empty `text` and typed
-    `failure`. `grep` instead returns zero or more matches per document, so an
-    absent ref means no line matched rather than a missing row.
+    `get_many` is an advanced whole-document operation. `snippets` and `grep`
+    remain available for 0.5 compatibility, but new code should use `passages`
+    and `grep_report` respectively.
+
+    Documents are cached for the session after their first retrieval.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
     def get_many(self, refs: list[str]) -> list[ContentSnippet]:
+        """Fetch whole documents in input order; prefer narrower core operations."""
         result = self._transport.call("content.get_many", {"refs": refs})
         return [ContentSnippet.model_validate(item) for item in result]
 
@@ -58,7 +58,7 @@ class ContentResource:
         context: int = 0,
         max_matches_per_ref: int = 20,
     ) -> list[ContentMatch]:
-        """Matching lines across many documents, with their line numbers.
+        """Legacy match-only view; prefer `grep_report` for typed fetch failures.
 
         Case-insensitive; a pattern that is not valid regex is searched
         literally rather than raising.
@@ -102,6 +102,7 @@ class ContentResource:
         max_tokens: int = 4000,
         max_tokens_per_page: int = 1000,
     ) -> list[ContentSnippet]:
+        """Legacy page-local windows; prefer globally ranked `passages`."""
         result = self._transport.call(
             "content.snippets",
             {

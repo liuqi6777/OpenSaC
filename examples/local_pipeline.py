@@ -26,20 +26,28 @@ for batch in batches:
 ranked = sorted(best.values(), key=lambda hit: hit.score or 0, reverse=True)[:5]
 print(f"{len(ranked)} unique documents from {len(queries)} queries")
 
-snippets = sdk.content.snippets(
+report = sdk.content.passages(
     "vector index types and their tradeoffs",
     [hit.ref for hit in ranked],
-    max_tokens_per_page=300,
+    limit=15,
+    max_per_ref=3,
 )
 
-sdk.state.write_jsonl("evidence.jsonl", [item.model_dump() for item in snippets])
+sdk.state.write_jsonl(
+    "evidence.jsonl",
+    [item.model_dump(mode="json") for item in report.passages],
+)
 sdk.output.submit(
     {
         "documents": [
-            {"docid": hit.docid, "score": hit.score, "snippet": hit.snippet[:200]}
-            for hit in ranked
+            {"docid": hit.docid, "score": hit.score, "snippet": hit.snippet[:200]} for hit in ranked
         ],
-        "evidence_chars": sum(len(item.text) for item in snippets),
+        "evidence_chars": sum(len(item.text) for item in report.passages),
+        "fetch_failures": [item.model_dump(mode="json") for item in report.failures],
     },
-    citations=[{"ref": item.ref} for item in snippets if item.ref],
+    citations=[
+        {"ref": item.ref, "locator": item.locator}
+        for item in report.passages
+        if item.locator is not None
+    ],
 )
