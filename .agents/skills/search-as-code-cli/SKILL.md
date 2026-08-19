@@ -27,15 +27,15 @@ If unavailable or reporting `context_*` or `configuration_error`, stop and repor
 - Read the rendered `[sac_run]` observation instead of trusting only the shell status. A reported
   sandbox `exit_code`, stderr, adapter failure, or missing submitted output can change the next
   stage.
-- Treat search refs and evidence locators as opaque. Never invent, edit, shorten, or reconstruct
-  them.
+- Search sources are canonical URLs or local IDs. Reuse them unchanged; authorization
+  still requires the current session's search. Locator strings are opaque.
 - Use search snippets to triage sources, not to support document-content claims. Search metadata
   is sufficient only when the requested result is a discovery list.
 - Prefer `search.many` -> `search.fuse_rrf` -> `content.passages` for semantic evidence discovery.
   Inspect each returned passage before using its locator. Use `grep_report` and `read` for exact
   strings and deliberate context expansion.
 - Read the passage used for every material claim. Cite only a non-empty passage that returned a
-  locator, and preserve `dict(locator)` losslessly.
+  locator, and preserve that string unchanged.
 - Treat a locator as proof that a passage is bound to a retrieved document, not as proof that its
   source is credible or its claim is true. Prefer primary sources and corroborate disputed claims.
 - Inspect item failure records and `BrokerError`. Empty hits and zero matches are successful
@@ -54,12 +54,12 @@ A final research result must use `submit`; stdout is not a substitute.
 ## Split on model judgment
 
 Keep each `agent-run` program short. Pause when titles, snippets, or passages must be understood
-before choosing the next query, ref, pattern, or rule. An exploratory search-only stage is valid;
+before choosing the next query, source, pattern, or rule. An exploratory search-only stage is valid;
 do not append grep merely for completeness. Continue when an explicit rule determines the next
-inputs: search can fuse/filter, while known refs and patterns can grep/read in one program.
+inputs: search can fuse/filter, while known sources and patterns can grep/read in one program.
 
 Frame constraints and source policy first. Use 2-4 queries for a known entity and 6-12 only for
-ambiguous discovery. Fuse a bounded shortlist, rank passages across its refs, inspect the original
+ambiguous discovery. Fuse a bounded shortlist, rank passages across its sources, inspect the original
 passage text, and submit only after every material claim has a locator. Use bounded grep/read calls
 when verification depends on an exact spelling or more surrounding lines.
 
@@ -77,13 +77,13 @@ Observations show artifact paths, not their contents.
 
 For multi-call work, derive a stable `research_id` and use `runs/<research_id>/`. At each stage
 start, list and load its manifest, bounded candidate pool, verified evidence, and attempted
-`(constraint, ref)` pairs. Before ending with `NEXT:`, persist every useful update and confirm the
+`(constraint, source)` pairs. Before ending with `NEXT:`, persist every useful update and confirm the
 expected artifact paths appear in the observation. Submit from the evidence ledger only after
 coverage is complete. Python variables do not survive a call.
 
-Stored refs and locators remain usable only while the same host-bound session is live. If the
+Stored sources and locators remain usable only while the same host-bound session is live. If the
 observation reports `state_lost`, the submitted program was not replayed; treat the workspace and
-reference generation as gone, start clean, and do not resubmit the same program blindly.
+source generation as gone, start clean, and do not resubmit the same program blindly.
 
 An adapter `HTTP 401` or `HTTP 403` means host credential setup failed; stop.
 Report it without printing or embedding any credential. Other adapter failures occur outside the
@@ -107,5 +107,5 @@ all runtime docs because they share the stdout observation budget.
   continue across multiple `agent-run` calls and needs a workspace-backed candidate/evidence
   ledger.
 
-Avoid printing raw result objects, unbounded ref lists, or whole pages, stopping after one
+Avoid printing raw result objects, unbounded source lists, or whole pages, stopping after one
 constraint, or treating RRF agreement as independent-source corroboration.

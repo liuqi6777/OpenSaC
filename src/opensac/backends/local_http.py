@@ -250,7 +250,6 @@ class LocalSearchBackend:
         known_fields = {"docid", "title", "date", "snippet", "score", "rank"}
         date = hit.get("date")
         return SearchHit(
-            ref="",
             backend=self.name,
             docid=str(hit["docid"]),
             title=str(hit.get("title", "") or ""),
@@ -280,11 +279,11 @@ class LocalSearchBackend:
         if not isinstance(raw_text, str):
             raise invalid_provider_response()
         fields, _ = parse_document_frontmatter(raw_text)
-        metadata: dict[str, object] = {"docid": hit.docid, "backend": self.name}
+        metadata: dict[str, object] = {"backend": self.name}
         if date := hit.date or fields.get("date"):
             metadata["date"] = date
         return ContentSnippet(
-            ref=hit.ref,
+            source=hit.source,
             # The header is left in the text on purpose: it is part of the
             # document, and `content.read` addresses documents by line number,
             # so deleting it here would shift offsets computed from a `grep`.

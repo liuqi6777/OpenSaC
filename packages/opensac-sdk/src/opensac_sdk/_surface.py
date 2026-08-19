@@ -47,12 +47,6 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
         model_core=True,
     ),
     OperationSpec("citations", "resolve", SurfaceTier.ADVANCED, "citations.resolve"),
-    OperationSpec(
-        "citations",
-        "resolve_requests",
-        SurfaceTier.ADVANCED,
-        "citations.resolve",
-    ),
     OperationSpec("session", "usage", SurfaceTier.CORE, "session.usage", model_core=True),
     OperationSpec("state", "write_jsonl", SurfaceTier.HELPER),
     OperationSpec("state", "append_jsonl", SurfaceTier.HELPER),

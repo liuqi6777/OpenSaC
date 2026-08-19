@@ -117,7 +117,7 @@ def test_lazy_sdk_exposes_resource_and_method_docs_without_a_broker_call() -> No
         ):
             search_doc = opensac_sdk.sdk.search.__doc__ or ""
             assert "sdk.search(query" in search_doc
-            assert "opaque" in search_doc
+            assert "canonical web URL" in search_doc
             assert "input query" in (opensac_sdk.sdk.search.many.__doc__ or "")
     finally:
         opensac_sdk.sdk.close()
@@ -130,17 +130,15 @@ class FakeTransport:
     def call(self, method, params):
         self.calls.append((method, params))
         if method == "citations.resolve":
-            requested = params.get("requests")
-            ref = requested[0]["ref"] if requested else params["refs"][0]
-            return wrap([{"ref": ref, "url": "https://example.com"}])
+            requested = params["citations"]
+            source = requested[0].get("source", "https://example.com")
+            return wrap([{"source": source, "url": "https://example.com"}])
         return wrap(
             [
                 {
-                    "ref": "ref_1",
+                    "source": "source_1",
                     "backend": "web",
                     "title": "Title",
-                    "url": "https://example.com",
-                    "docid": None,
                     "domain": "example.com",
                     "date": None,
                     "snippet": "text",
@@ -239,7 +237,7 @@ def test_unix_transport_rejects_invalid_json_as_a_protocol_error() -> None:
 def test_search_resource_returns_typed_hits() -> None:
     transport = FakeTransport()
     hits = SearchResource(transport)("query", limit=3)
-    assert hits[0].ref == "ref_1"
+    assert hits[0].source == "source_1"
     assert transport.calls == [
         ("search.query", {"query": "query", "limit": 3, "offset": 0, "domains": None})
     ]
@@ -264,12 +262,12 @@ def test_search_many_returns_only_result_semantics() -> None:
     ]
 
 
-def _hit(ref: str, rank: int, *, backend: str = "local", score: float | None = None):
+def _hit(source: str, rank: int, *, backend: str = "local", score: float | None = None):
     return record(
         {
-            "ref": ref,
+            "source": source,
             "backend": backend,
-            "title": ref,
+            "title": source,
             "rank": rank,
             "score": score,
             "retrieval": {
@@ -283,7 +281,7 @@ def _hit(ref: str, rank: int, *, backend: str = "local", score: float | None = N
     )
 
 
-def test_search_rrf_fuses_refs_locally_and_preserves_provenance() -> None:
+def test_search_rrf_fuses_sources_locally_and_preserves_provenance() -> None:
     transport = FakeTransport()
     search = SearchResource(transport)
     batches = [
@@ -312,15 +310,15 @@ def test_search_rrf_fuses_refs_locally_and_preserves_provenance() -> None:
     result = search.fuse_rrf(batches, weights=[1, 2, 1])
 
     assert transport.calls == []
-    assert [candidate.ref for candidate in result] == ["b", "a"]
+    assert [candidate.source for candidate in result] == ["b", "a"]
     assert [candidate.fused_rank for candidate in result] == [1, 2]
     assert batches[2].failure is not None
 
     candidate_a = result[1]
     assert isinstance(candidate_a, Record)
     assert candidate_a.rank == 1
-    assert len(candidate_a.sources) == 2
-    assert dict(candidate_a.sources[0]) == {
+    assert len(candidate_a.provenance) == 2
+    assert dict(candidate_a.provenance[0]) == {
         "batch_index": 0,
         "query": "alpha",
         "backend": "local",
@@ -338,7 +336,7 @@ def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
         ],
         limit=1,
     )
-    assert [candidate.ref for candidate in tied] == ["z"]
+    assert [candidate.source for candidate in tied] == ["z"]
 
     empty = search.fuse_rrf([])
     assert empty == []
@@ -390,7 +388,7 @@ def test_search_rrf_skips_failed_batches_without_copying_their_errors() -> None:
     assert batch.failure == failure
 
 
-def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
+def test_content_grep_report_returns_matches_and_source_aligned_failures() -> None:
     class GrepTransport:
         def __init__(self) -> None:
             self.calls = []
@@ -401,7 +399,7 @@ def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
                 {
                     "matches": [
                         {
-                            "ref": "ref_1",
+                            "source": "source_1",
                             "line": 3,
                             "text": "target",
                             "input_index": 0,
@@ -410,7 +408,7 @@ def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
                     "failures": [
                         {
                             "input_index": 1,
-                            "ref": "ref_2",
+                            "source": "source_2",
                             "failure": {
                                 "code": "provider_not_found",
                                 "message": "Document was not found",
@@ -426,14 +424,14 @@ def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
 
     transport = GrepTransport()
     report = ContentResource(transport).grep_report(
-        ["ref_1", "ref_2"],
+        ["source_1", "source_2"],
         "target",
         context=2,
-        max_matches_per_ref=4,
+        max_matches_per_source=4,
     )
 
     assert isinstance(report, Record)
-    assert report.matches[0].ref == "ref_1"
+    assert report.matches[0].source == "source_1"
     assert report.matches[0].line == 3
     assert report.failures[0].input_index == 1
     assert report.failures[0].failure.code == "provider_not_found"
@@ -443,10 +441,10 @@ def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
         (
             "content.grep_report",
             {
-                "refs": ["ref_1", "ref_2"],
+                "sources": ["source_1", "source_2"],
                 "pattern": "target",
                 "context": 2,
-                "max_matches_per_ref": 4,
+                "max_matches_per_source": 4,
             },
         )
     ]
@@ -464,9 +462,8 @@ def test_content_passages_returns_nested_records() -> None:
                     "query": "revenue singapore",
                     "passages": [
                         {
-                            "ref": "ref_1",
+                            "source": "source_1",
                             "title": "Annual report",
-                            "url": "https://example.com/report",
                             "date": "2024",
                             "text": "Singapore revenue was 42 million dollars.",
                             "coordinates": {
@@ -478,25 +475,21 @@ def test_content_passages_returns_nested_records() -> None:
                             "rank": 1,
                             "score": 3.5,
                             "ranker": "lexical:bm25",
-                            "locator": {
-                                "id": "evidence_1",
-                                "ref": "ref_1",
-                                "kind": "selected_passage",
-                            },
+                            "locator": "evidence_1",
                         }
                     ],
                     "failures": [],
                     "input_count": 2,
-                    "unique_ref_count": 1,
+                    "unique_source_count": 1,
                 }
             )
 
     transport = PassageTransport()
     report = ContentResource(transport).passages(
         "revenue singapore",
-        ["ref_1", "ref_1"],
+        ["source_1", "source_1"],
         limit=5,
-        max_per_ref=2,
+        max_per_source=2,
     )
 
     assert isinstance(report, Record)
@@ -504,15 +497,15 @@ def test_content_passages_returns_nested_records() -> None:
     assert isinstance(report.passages[0].coordinates, Record)
     assert report.passages[0].locator is not None
     assert report.input_count == 2
-    assert report.unique_ref_count == 1
+    assert report.unique_source_count == 1
     assert transport.calls == [
         (
             "content.passages",
             {
                 "query": "revenue singapore",
-                "refs": ["ref_1", "ref_1"],
+                "sources": ["source_1", "source_1"],
                 "limit": 5,
-                "max_per_ref": 2,
+                "max_per_source": 2,
             },
         )
     ]
@@ -627,16 +620,16 @@ def test_state_merge_upserts_a_pool_across_turns(tmp_path) -> None:
     """
     state = StateResource(str(tmp_path))
     # No file yet: an absent pool is an empty one, so nothing branches.
-    assert state.merge_jsonl("pool.jsonl", [{"ref": "a", "n": 1}, {"ref": "b", "n": 1}]) == 2
+    assert state.merge_jsonl("pool.jsonl", [{"source": "a", "n": 1}, {"source": "b", "n": 1}]) == 2
     # A document a second query returned replaces its row in place rather than
     # adding a second one, and does not move ahead of documents found later.
-    assert state.merge_jsonl("pool.jsonl", [{"ref": "c", "n": 1}, {"ref": "a", "n": 2}]) == 3
+    assert state.merge_jsonl("pool.jsonl", [{"source": "c", "n": 1}, {"source": "a", "n": 2}]) == 3
     assert state.read_jsonl("pool.jsonl") == [
-        {"ref": "a", "n": 2},
-        {"ref": "b", "n": 1},
-        {"ref": "c", "n": 1},
+        {"source": "a", "n": 2},
+        {"source": "b", "n": 1},
+        {"source": "c", "n": 1},
     ]
-    # Any field can be the identity; ``ref`` is only the common one.
+    # Any field can be the identity; ``source`` is only the common one.
     state.merge_jsonl("docs.jsonl", [{"docid": "7", "seen": 1}], key="docid")
     assert state.merge_jsonl("docs.jsonl", [{"docid": "7", "seen": 2}], key="docid") == 1
 
@@ -658,11 +651,11 @@ def test_state_merge_refuses_rows_it_cannot_deduplicate(tmp_path) -> None:
 def test_state_merge_keeps_rows_it_did_not_write(tmp_path) -> None:
     """A file written by an earlier, differently-shaped program is not data to drop."""
     state = StateResource(str(tmp_path))
-    state.write_jsonl("pool.jsonl", [{"note": "from an earlier turn"}, {"ref": "a"}])
-    assert state.merge_jsonl("pool.jsonl", [{"ref": "a", "n": 2}]) == 2
+    state.write_jsonl("pool.jsonl", [{"note": "from an earlier turn"}, {"source": "a"}])
+    assert state.merge_jsonl("pool.jsonl", [{"source": "a", "n": 2}]) == 2
     assert state.read_jsonl("pool.jsonl") == [
         {"note": "from an earlier turn"},
-        {"ref": "a", "n": 2},
+        {"source": "a", "n": 2},
     ]
 
 
@@ -671,16 +664,15 @@ def test_state_merge_accepts_a_search_hit_directly(tmp_path) -> None:
     state = StateResource(str(tmp_path))
     hit = record(
         {
-            "ref": "ref_1",
+            "source": "source_1",
             "backend": "local",
             "title": "t",
-            "docid": "7",
             "rank": 1,
         }
     )
     assert state.merge_jsonl("pool.jsonl", [hit]) == 1
     assert state.merge_jsonl("pool.jsonl", [hit]) == 1
-    assert state.read_jsonl("pool.jsonl")[0].docid == "7"
+    assert state.read_jsonl("pool.jsonl")[0].source == "source_1"
 
 
 def test_state_can_be_asked_what_is_there(tmp_path) -> None:
@@ -702,56 +694,59 @@ def test_state_can_be_asked_what_is_there(tmp_path) -> None:
 def test_output_submission(tmp_path) -> None:
     path = tmp_path / "output.json"
     transport = FakeTransport()
-    OutputResource(str(path), transport).submit({"answer": 42}, citations=[{"ref": "ref_1"}])
+    OutputResource(str(path), transport).submit({"answer": 42}, citations=[{"source": "source_1"}])
     payload = json.loads(path.read_text())
     assert payload["output"] == {"answer": 42}
     assert payload["citations"][0]["url"] == "https://example.com"
-    assert transport.calls == [("citations.resolve", {"refs": ["ref_1"]})]
+    assert transport.calls == [("citations.resolve", {"citations": [{"source": "source_1"}]})]
 
 
-def test_output_forwards_an_evidence_locator_without_flattening_it(tmp_path) -> None:
+def test_output_forwards_an_evidence_locator(tmp_path) -> None:
     path = tmp_path / "output.json"
     transport = FakeTransport()
-    locator = record({"id": "ev_1", "ref": "ref_1", "kind": "selected_passage"})
 
     OutputResource(str(path), transport).submit(
         {"answer": 42},
-        citations=[{"ref": "ref_1", "locator": locator}],
+        citations=[{"locator": "ev_1"}],
     )
 
     assert transport.calls == [
         (
             "citations.resolve",
-            {
-                "requests": [
-                    {
-                        "ref": "ref_1",
-                        "locator": {
-                            "id": "ev_1",
-                            "ref": "ref_1",
-                            "kind": "selected_passage",
-                        },
-                    }
-                ]
-            },
+            {"citations": [{"locator": "ev_1"}]},
         )
     ]
 
 
-def test_output_rejects_explicit_null_locator_but_allows_ref_only_citations(tmp_path) -> None:
+def test_output_rejects_ambiguous_citations_and_accepts_source_only(tmp_path) -> None:
     transport = FakeTransport()
     output = OutputResource(str(tmp_path / "output.json"), transport)
 
-    with pytest.raises(ValueError, match="locator must be omitted"):
-        output.submit({}, citations=[{"ref": "ref_1", "locator": None}])
+    with pytest.raises(ValueError, match="exactly one"):
+        output.submit({}, citations=[{"source": "source_1", "locator": None}])
+    with pytest.raises(ValueError, match="at most 128"):
+        output.submit({}, citations=[{"locator": {"id": "ev_1"}}])
 
     assert transport.calls == []
-    output.submit({}, citations=[{"ref": "ref_1"}])
-    assert transport.calls == [("citations.resolve", {"refs": ["ref_1"]})]
+    output.submit({}, citations=[{"source": "source_1"}])
+    assert transport.calls == [("citations.resolve", {"citations": [{"source": "source_1"}]})]
+
+
+def test_citations_resource_has_one_request_shape() -> None:
+    transport = FakeTransport()
+    result = CitationsResource(transport).resolve([{"source": "source_1"}, {"locator": "ev_1"}])
+
+    assert result[0].source == "source_1"
+    assert transport.calls == [
+        (
+            "citations.resolve",
+            {"citations": [{"source": "source_1"}, {"locator": "ev_1"}]},
+        )
+    ]
 
 
 def test_output_rejects_unscoped_citation(tmp_path) -> None:
-    with pytest.raises(ValueError, match="ref"):
+    with pytest.raises(ValueError, match="exactly one"):
         OutputResource(str(tmp_path / "output.json"), FakeTransport()).submit(
             {}, citations=[{"url": "https://invented.example"}]
         )
@@ -765,11 +760,11 @@ def test_a_result_answers_to_either_spelling_of_a_field_read() -> None:
     `'SearchHit' object is not subscriptable`, which ends the turn.
     """
     hit = SearchResource(FakeTransport())("query")[0]
-    assert hit["ref"] == hit.ref == "ref_1"
+    assert hit["source"] == hit.source == "source_1"
     assert hit.get("title") == "Title"
     assert hit.get("nonexistent") is None
     assert hit.get("nonexistent", "fallback") == "fallback"
-    assert "ref" in hit and "nonexistent" not in hit
+    assert "source" in hit and "nonexistent" not in hit
     assert dict(hit)["rank"] == 1
     # Neither spelling can reach past the fields, so they cannot disagree.
     with pytest.raises(KeyError):
@@ -777,7 +772,7 @@ def test_a_result_answers_to_either_spelling_of_a_field_read() -> None:
 
 
 def test_a_content_record_carries_source_dates() -> None:
-    snippet = record({"ref": "ref_1", "text": "body", "date": "1994"})
+    snippet = record({"source": "source_1", "text": "body", "date": "1994"})
     assert snippet.date == snippet["date"] == "1994"
 
 
@@ -785,7 +780,7 @@ def test_a_result_written_to_the_workspace_comes_back_readable(tmp_path) -> None
     """The round trip is where the type is lost, so it must not lose the access.
 
     JSON cannot carry a Python type, so a hit written in one turn returns as a
-    mapping in the next. Programs go on writing `row.ref` because that is how
+    mapping in the next. Programs go on writing `row.source` because that is how
     every other line around it is written.
     """
     state = StateResource(str(tmp_path))
@@ -794,10 +789,10 @@ def test_a_result_written_to_the_workspace_comes_back_readable(tmp_path) -> None
     # Passed straight in: `default=str` would have written the repr instead,
     # and a later turn subscripting that string would get a character.
     state.write_jsonl("pool.jsonl", [hit])
-    assert json.loads((tmp_path / "pool.jsonl").read_text())["ref"] == "ref_1"
+    assert json.loads((tmp_path / "pool.jsonl").read_text())["source"] == "source_1"
 
     row = state.read_jsonl("pool.jsonl")[0]
-    assert row.ref == row["ref"] == "ref_1"
+    assert row.source == row["source"] == "source_1"
     assert row.rank == 1
     # Still an ordinary dict: it survives json, unpacking and the dict methods.
     assert isinstance(row, dict)
@@ -808,7 +803,7 @@ def test_a_result_written_to_the_workspace_comes_back_readable(tmp_path) -> None
 
 def test_a_row_says_what_it_has_when_a_field_is_missing(tmp_path) -> None:
     state = StateResource(str(tmp_path))
-    state.write_jsonl("pool.jsonl", [{"ref": "ref_1", "rank": 2}])
+    state.write_jsonl("pool.jsonl", [{"source": "source_1", "rank": 2}])
     row = state.read_jsonl("pool.jsonl")[0]
     with pytest.raises(AttributeError, match="rank"):
         _ = row.raank

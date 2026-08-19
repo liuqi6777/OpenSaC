@@ -74,9 +74,7 @@ class _ProviderTraceBuffer:
         self.event = event
 
 
-_EVENT_MODEL_TOKENS: ContextVar[int] = ContextVar(
-    "opensac_event_model_tokens", default=0
-)
+_EVENT_MODEL_TOKENS: ContextVar[int] = ContextVar("opensac_event_model_tokens", default=0)
 # Hits minted while serving the capability currently on the stack. `_search_many`
 # calls `_search` directly rather than re-entering `call`, so a fan-out
 # accumulates into the one event that represents it, which is what makes
@@ -85,9 +83,7 @@ _EVENT_MODEL_TOKENS: ContextVar[int] = ContextVar(
 # Defaults to None rather than to a list: a mutable default is shared by every
 # context that never calls `.set()`, so a search reached outside `call` would
 # append to one process-global list that nothing ever drains.
-_EVENT_HITS: ContextVar[list[HitRecord] | None] = ContextVar(
-    "opensac_event_hits", default=None
-)
+_EVENT_HITS: ContextVar[list[HitRecord] | None] = ContextVar("opensac_event_hits", default=None)
 _EVENT_MODEL_ATTEMPTS: ContextVar[list[ModelAttemptRecord] | None] = ContextVar(
     "opensac_event_model_attempts", default=None
 )
@@ -112,9 +108,7 @@ _EVENT_COALESCED: ContextVar[list[CoalescedRequestRecord] | None] = ContextVar(
 _EVENT_SESSION_TOKEN: ContextVar[str | None] = ContextVar(
     "opensac_event_session_token", default=None
 )
-_EVENT_EXECUTION_ID: ContextVar[str | None] = ContextVar(
-    "opensac_event_execution_id", default=None
-)
+_EVENT_EXECUTION_ID: ContextVar[str | None] = ContextVar("opensac_event_execution_id", default=None)
 
 # Query parameters that identify a referrer rather than a document. Stripping
 # them keeps two links to the same page from being counted as two documents.
@@ -137,6 +131,9 @@ _TRACKING_PARAMS = frozenset(
         "spm",
     }
 )
+
+_MAX_SOURCE_CHARS = 4_096
+_MAX_ERROR_SOURCE_CHARS = 160
 
 
 class ExtractionInfrastructureError(RuntimeError):
@@ -182,9 +179,7 @@ class CapabilityProviderError(RuntimeError):
             code=str(failure.get("code") or "provider_invalid_response"),
             message=str(failure.get("message") or "Provider operation failed."),
             retryable=bool(failure.get("retryable")),
-            attempts=(
-                int(failure.get("attempts") or 0) if attempts is None else attempts
-            ),
+            attempts=(int(failure.get("attempts") or 0) if attempts is None else attempts),
             provider_status=failure.get("provider_status"),
             retry_after_seconds=failure.get("retry_after_seconds"),
         )
@@ -202,11 +197,7 @@ class CapabilityProviderError(RuntimeError):
             raise ValueError("at least one provider failure is required")
         retryable = all(bool(failure.get("retryable")) for failure in failures)
         representative = next(
-            (
-                failure
-                for failure in failures
-                if not bool(failure.get("retryable"))
-            ),
+            (failure for failure in failures if not bool(failure.get("retryable"))),
             failures[0],
         )
         aggregate = dict(representative)
@@ -237,7 +228,7 @@ class InflightCapacityError(RuntimeError):
 
 @dataclass(frozen=True)
 class EvidenceRecord:
-    ref: str
+    identity: str
     kind: str
     text: str
     coordinates: dict[str, Any]
@@ -308,22 +299,12 @@ class _ModelOutput:
 class BrokerSession:
     session: Session
     policy: CapabilityPolicy
-    references: dict[str, SearchHit] = field(default_factory=dict)
-    # Secondary indexes over the same hits, so a program can address a document
-    # by the identifier it can actually see and re-type. A ref is opaque by
-    # design -- the program must not be able to construct one -- but opacity and
-    # transcribability are different requirements, and encoding both into one
-    # string served neither: the handle has to be unguessable for the broker and
-    # short and reliable for the model.
-    #
-    # This does not widen what a program may reach. Admission is still "this
-    # session searched it up": a docid never returned by a search is absent from
-    # these tables and still raises. Only the lookup key changed, so backend
-    # routing, `require_backend`, and citation provenance all keep working off
-    # the same stored `SearchHit`.
-    by_docid: dict[str, SearchHit] = field(default_factory=dict)
-    by_url: dict[str, SearchHit] = field(default_factory=dict)
-    # Document text already retrieved in this session, keyed by ref. Scoped to
+    # One public source per admitted private identity. Search is the only writer,
+    # so knowing or inventing a URL/docid does not authorize a provider fetch.
+    documents_by_source: dict[str, SearchHit] = field(default_factory=dict)
+    source_by_identity: dict[str, str] = field(default_factory=dict)
+    identity_by_source: dict[str, str] = field(default_factory=dict)
+    # Document text already retrieved in this session, keyed by private identity. Scoped to
     # the session because that is the rollout: the pool a program builds is the
     # thing it reads repeatedly, and nothing about one question's reading should
     # reach another's.
@@ -337,9 +318,7 @@ class BrokerSession:
     evidence_passage_bytes: int = 0
     flights: dict[str, _FlightEntry] = field(default_factory=dict)
     flight_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    flight_waiters_by_execution: dict[str, set[_FlightWaiter]] = field(
-        default_factory=dict
-    )
+    flight_waiters_by_execution: dict[str, set[_FlightWaiter]] = field(default_factory=dict)
     traces: dict[str, list[CapabilityEvent]] = field(default_factory=dict)
     trace_sequence: int = 0
 
@@ -351,38 +330,38 @@ class BrokerSession:
         self.trace_sequence += 1
         return self.trace_sequence
 
-    def cache_content(self, row: dict[str, Any], budget: int) -> None:
+    def cache_content(self, identity: str, row: dict[str, Any], budget: int) -> None:
         """Keep a fetched document for the rest of the session, within budget.
 
         Past the budget nothing is evicted and nothing new is stored: the
         rollout degrades to fetching every time, which is merely the old
         behaviour, rather than to a cache that spends its time thrashing.
         """
-        ref = str(row.get("ref") or "")
         text = row.get("text") or ""
-        if not ref or ref in self.content_cache or row.get("failure") is not None:
+        if not identity or identity in self.content_cache or row.get("failure") is not None:
             return
         size = len(str(text).encode("utf-8"))
         if self.content_cache_bytes + size > budget:
             return
-        self.content_cache[ref] = row
+        self.content_cache[identity] = row
         self.content_cache_bytes += size
 
-    def remember(self, hit: SearchHit) -> None:
-        """Index one hit under every handle it can be reached by.
+    def remember(self, hit: SearchHit, *, identity: str, candidate_source: str) -> str:
+        """Admit one document and return its stable public source."""
 
-        ``setdefault`` throughout: first sighting wins. The stored hit is only
-        used to reach content and to resolve a citation, and both are properties
-        of the document rather than of the query that surfaced it, so keeping
-        the first makes the tables independent of the order queries happened to
-        complete. The dict returned to the program still carries this query's
-        own rank and snippet.
-        """
-        self.references.setdefault(hit.ref, hit)
-        if hit.docid:
-            self.by_docid.setdefault(str(hit.docid), hit)
-        if hit.url:
-            self.by_url.setdefault(hit.url, hit)
+        source = self.source_by_identity.get(identity)
+        if source is not None:
+            return source
+
+        source = candidate_source
+        previous_identity = self.identity_by_source.get(source)
+        if previous_identity is not None and previous_identity != identity:
+            raise ValueError("Search backend returned colliding document sources")
+        hit.source = source
+        self.source_by_identity[identity] = source
+        self.identity_by_source[source] = identity
+        self.documents_by_source[source] = hit
+        return source
 
 
 class BrokerService:
@@ -412,7 +391,7 @@ class BrokerService:
         max_evidence_chars: int = 16_000,
         max_evidence_records: int = 4_096,
         max_evidence_passage_bytes: int = 33_554_432,
-        max_content_refs_per_request: int = 256,
+        max_content_sources_per_request: int = 256,
         inflight_coalescing: bool = False,
         max_inflight_keys: int = 256,
         max_waiters_per_flight: int = 64,
@@ -464,7 +443,7 @@ class BrokerService:
             "max_evidence_chars": max_evidence_chars,
             "max_evidence_records": max_evidence_records,
             "max_evidence_passage_bytes": max_evidence_passage_bytes,
-            "max_content_refs_per_request": max_content_refs_per_request,
+            "max_content_sources_per_request": max_content_sources_per_request,
             "max_inflight_keys": max_inflight_keys,
             "max_waiters_per_flight": max_waiters_per_flight,
         }
@@ -489,14 +468,9 @@ class BrokerService:
 
     async def aclose(self) -> None:
         """Close backend-owned connection pools once the broker stops."""
-        await asyncio.gather(
-            *(self._cancel_all_flights(state) for state in self.sessions.values())
-        )
+        await asyncio.gather(*(self._cancel_all_flights(state) for state in self.sessions.values()))
         pending = {
-            task
-            for tasks in self.execution_tasks.values()
-            for task in tasks
-            if not task.done()
+            task for tasks in self.execution_tasks.values() for task in tasks if not task.done()
         }
         for task in pending:
             task.cancel()
@@ -565,9 +539,7 @@ class BrokerService:
         state = self.sessions.get(token)
         if state is not None:
             async with state.flight_lock:
-                flight_waiters = list(
-                    state.flight_waiters_by_execution.get(execution_id, set())
-                )
+                flight_waiters = list(state.flight_waiters_by_execution.get(execution_id, set()))
             await asyncio.gather(
                 *(self._detach_flight_waiter(state, waiter) for waiter in flight_waiters)
             )
@@ -667,9 +639,7 @@ class BrokerService:
         evidence_context = _EVENT_EVIDENCE.set([])
         passages_context = _EVENT_PASSAGES.set([])
         provider_trace = _ProviderTraceBuffer()
-        provider_attempts_context = _EVENT_PROVIDER_ATTEMPTS.set(
-            provider_trace.records
-        )
+        provider_attempts_context = _EVENT_PROVIDER_ATTEMPTS.set(provider_trace.records)
         provider_trace_context = _EVENT_PROVIDER_TRACE.set(provider_trace)
         deduplicated_context = _EVENT_DEDUPLICATED.set([])
         coalesced_context = _EVENT_COALESCED.set([])
@@ -929,9 +899,7 @@ class BrokerService:
                 )
                 waiters[key] = waiter
                 if execution_id:
-                    state.flight_waiters_by_execution.setdefault(
-                        execution_id, set()
-                    ).add(waiter)
+                    state.flight_waiters_by_execution.setdefault(execution_id, set()).add(waiter)
 
         if attached:
             state.policy.record_coalesced(len(attached))
@@ -966,9 +934,7 @@ class BrokerService:
                 try:
                     results = await execute()
                     if set(results) != group.keys:
-                        raise RuntimeError(
-                            "in-flight transport group returned an invalid key set"
-                        )
+                        raise RuntimeError("in-flight transport group returned an invalid key set")
                 except asyncio.CancelledError:
                     cancelled = True
                 except BaseException as exc:
@@ -1042,15 +1008,11 @@ class BrokerService:
             entry = waiter.entry
             entry.waiters = max(0, entry.waiters - 1)
             if waiter.execution_id:
-                execution_waiters = state.flight_waiters_by_execution.get(
-                    waiter.execution_id
-                )
+                execution_waiters = state.flight_waiters_by_execution.get(waiter.execution_id)
                 if execution_waiters is not None:
                     execution_waiters.discard(waiter)
                     if not execution_waiters:
-                        state.flight_waiters_by_execution.pop(
-                            waiter.execution_id, None
-                        )
+                        state.flight_waiters_by_execution.pop(waiter.execution_id, None)
             group = entry.group
             task = group.task
             if (
@@ -1234,11 +1196,14 @@ class BrokerService:
     def _trace_input_count(method: str, params: dict[str, Any]) -> int:
         if method.startswith("search."):
             return len(params.get("queries", [])) if method.endswith("_many") else 1
-        if method == "citations.resolve" and "requests" in params:
-            return len(params.get("requests", []))
-        if method.startswith("content.") or method == "citations.resolve":
-            refs = params.get("refs", [])
-            return 1 if isinstance(refs, str) else len(refs) if isinstance(refs, list) else 0
+        if method == "citations.resolve":
+            citations = params.get("citations", [])
+            return len(citations) if isinstance(citations, list) else 0
+        if method.startswith("content."):
+            sources = params.get("sources", [])
+            return (
+                1 if isinstance(sources, str) else len(sources) if isinstance(sources, list) else 0
+            )
         if method in {"llm.complete_many", "llm.extract_many"}:
             key = "prompts" if method == "llm.complete_many" else "items"
             return len(params.get(key, []))
@@ -1375,9 +1340,13 @@ class BrokerService:
     ) -> list[dict[str, Any]]:
         recorded = _EVENT_HITS.get()
         for hit in hits:
+            candidate_source = self._source_for(hit)
             identity = self._identity(hit)
-            hit.ref = self._ref_for(identity)
-            state.remember(hit)
+            hit.source = state.remember(
+                hit,
+                identity=identity,
+                candidate_source=candidate_source,
+            )
             if recorded is not None:
                 recorded.append(
                     HitRecord(
@@ -1388,7 +1357,18 @@ class BrokerService:
                         retrieval_mode=self._effective_retrieval_mode(hit),
                     )
                 )
-        return [hit.model_dump(mode="json") for hit in hits]
+        return [self._search_hit_wire(hit) for hit in hits]
+
+    @staticmethod
+    def _search_hit_wire(hit: SearchHit) -> dict[str, Any]:
+        """Expose one source address without leaking alternate identity fields."""
+
+        payload = hit.model_dump(mode="json", exclude={"url", "docid"})
+        metadata = dict(payload.get("metadata") or {})
+        for key in ("ref", "url", "docid", "source"):
+            metadata.pop(key, None)
+        payload["metadata"] = metadata
+        return payload
 
     @staticmethod
     def _effective_retrieval_mode(hit: SearchHit) -> str | None:
@@ -1412,9 +1392,7 @@ class BrokerService:
         """Execute one search without mutating the session reference table."""
         backend_name, backend = self._search_backend(state)
         state.policy.require_backend(backend_name)
-        _, prepared_backend, query, domains, limit, offset = self._prepare_search(
-            state, params
-        )
+        _, prepared_backend, query, domains, limit, offset = self._prepare_search(state, params)
         if prepared_backend is not backend:
             raise RuntimeError("Session search backend changed during request preparation.")
         if record_usage:
@@ -1464,9 +1442,7 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        backend_name, _backend, query, domains, limit, offset = self._prepare_search(
-            state, params
-        )
+        backend_name, _backend, query, domains, limit, offset = self._prepare_search(state, params)
         await state.policy.record_search()
         normalized_domains = (
             sorted({str(domain).strip() for domain in domains if str(domain).strip()})
@@ -1517,9 +1493,7 @@ class BrokerService:
 
             self._start_flight_group(state, group, execute)
 
-        batch = SearchBatch.model_validate(
-            await self._await_flight(state, admission.waiters[key])
-        )
+        batch = SearchBatch.model_validate(await self._await_flight(state, admission.waiters[key]))
         if batch.failure is not None:
             raise CapabilityProviderError.from_failure(
                 batch.failure.model_dump(mode="json"),
@@ -1544,19 +1518,37 @@ class BrokerService:
             if key.lower() not in _TRACKING_PARAMS
         )
         encoded = "&".join(f"{key}={value}" for key, value in query)
-        return urlunsplit(
-            (parts.scheme.lower(), parts.netloc.lower(), parts.path, encoded, "")
-        )
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, encoded, ""))
+
+    @classmethod
+    def _source_for(cls, hit: SearchHit) -> str:
+        """Return the source-native public address for a backend hit."""
+
+        if hit.url:
+            parts = urlsplit(hit.url.strip())
+            if parts.scheme.lower() not in {"http", "https"} or not parts.netloc:
+                raise ValueError("Search backend returned a non-HTTP document URL")
+            source = cls._canonical_url(hit.url)
+        elif hit.docid:
+            source = str(hit.docid).strip()
+        else:
+            raise ValueError("Search backend returned a hit without a URL or docid")
+        if not source:
+            raise ValueError("Search backend returned an empty document source")
+        if len(source) > _MAX_SOURCE_CHARS:
+            raise ValueError(
+                f"Search backend returned a source longer than {_MAX_SOURCE_CHARS} characters"
+            )
+        return source
 
     @classmethod
     def _identity(cls, hit: SearchHit) -> str:
         """A stable key for the document behind a hit.
 
         Two jobs, and the second is the one that is easy to miss. It lets
-        duplicate candidates be counted across queries -- but it is also what
-        makes a reference reproducible: with a random handle per sighting, two
-        replays of the same recorded search produce different refs, and any
-        program that sorts or keys on a ref stops being deterministic.
+        duplicate candidates be counted across queries -- but it also gives
+        internal caches and traces a reproducible key independent of the public
+        URL or document ID.
 
         Backends are never merged. A local docid and a web URL can describe the
         same text, but nothing here can prove it, and a wrong merge is silent.
@@ -1565,21 +1557,7 @@ class BrokerService:
             return f"{hit.backend}:docid:{hit.docid}"
         if hit.url:
             return f"{hit.backend}:url:{cls._canonical_url(hit.url)}"
-        # A backend that returns neither is degenerate, but falling back to a
-        # random key would quietly reintroduce the unreproducibility this method
-        # exists to remove.
-        digest = hashlib.sha256(f"{hit.title}\n{hit.snippet}".encode()).hexdigest()[:32]
-        return f"{hit.backend}:text:{digest}"
-
-    @staticmethod
-    def _ref_for(identity: str) -> str:
-        """An opaque, session-independent handle derived from the identity.
-
-        Opaque because a program must not construct one; derived because the
-        same document has to come back as the same ref for deduplication and
-        replay to work at all.
-        """
-        return f"ref_{hashlib.sha256(identity.encode()).hexdigest()[:16]}"
+        raise ValueError("Search backend returned a hit without a URL or docid")
 
     async def _search_query_many(
         self, state: BrokerSession, params: dict[str, Any]
@@ -1698,9 +1676,7 @@ class BrokerService:
                 request=request,
                 concurrency=min(max(int(params.get("concurrency", 5)), 1), 20),
             )
-        elif leaders and backend_name == "local" and isinstance(
-            backend, BatchSearchBackend
-        ):
+        elif leaders and backend_name == "local" and isinstance(backend, BatchSearchBackend):
             leader_rows = await self._search_many_batched(
                 state,
                 backend,
@@ -1712,9 +1688,7 @@ class BrokerService:
                 request=request,
             )
         else:
-            gate = asyncio.Semaphore(
-                min(max(int(params.get("concurrency", 5)), 1), 20)
-            )
+            gate = asyncio.Semaphore(min(max(int(params.get("concurrency", 5)), 1), 20))
 
             async def one(index: int) -> SearchBatch:
                 async with gate:
@@ -1757,30 +1731,32 @@ class BrokerService:
         finalized = [batch for batch in batches if batch is not None]
         for index, batch in enumerate(finalized):
             if batch.failure is None:
-                batch.hits = [
-                    SearchHit.model_validate(hit)
-                    for hit in self._record_search_hits(
-                        state,
-                        list(batch.hits),
-                        query_index=index,
-                    )
-                ]
+                self._record_search_hits(
+                    state,
+                    list(batch.hits),
+                    query_index=index,
+                )
 
         provider_failures = [
             batch.failure.model_dump(mode="json")
             for index, batch in enumerate(finalized)
             if index in fingerprints and batch.failure is not None
         ]
-        if provider_failures and len(provider_failures) == len(fingerprints) and all(
-            self._is_systemic_search_failure(failure)
-            for failure in provider_failures
+        if (
+            provider_failures
+            and len(provider_failures) == len(fingerprints)
+            and all(self._is_systemic_search_failure(failure) for failure in provider_failures)
         ):
             attempts = len(_EVENT_PROVIDER_ATTEMPTS.get() or [])
             raise CapabilityProviderError.from_failures(
                 provider_failures,
                 attempts=attempts,
             )
-        return [batch.model_dump(mode="json") for batch in finalized]
+        payloads = [batch.model_dump(mode="json") for batch in finalized]
+        for payload, batch in zip(payloads, finalized, strict=True):
+            if batch.failure is None:
+                payload["hits"] = [self._search_hit_wire(hit) for hit in batch.hits]
+        return payloads
 
     async def _search_many_coalesced(
         self,
@@ -1805,10 +1781,7 @@ class BrokerService:
         }
         admission = await self._admit_flights(
             state,
-            {
-                key_for_index[index]: (fingerprints[index], [index])
-                for index in leaders
-            },
+            {key_for_index[index]: (fingerprints[index], [index]) for index in leaders},
             group_new=backend_name == "local" and isinstance(backend, BatchSearchBackend),
         )
         index_for_key = {key: index for index, key in key_for_index.items()}
@@ -1834,9 +1807,7 @@ class BrokerService:
                         operation_id=group.operation_id,
                         track_execution=False,
                     )
-                    return {
-                        key_for_index[index]: row for index, row in rows.items()
-                    }
+                    return {key_for_index[index]: row for index, row in rows.items()}
 
                 self._start_flight_group(state, group, execute_local)
                 continue
@@ -1984,54 +1955,38 @@ class BrokerService:
                     break
         return rows
 
-    @staticmethod
-    def _lookup(state: BrokerSession, handle: str) -> SearchHit | None:
-        """One handle to the hit behind it, or None if this session never saw it.
+    @classmethod
+    def _normalize_source(cls, value: Any) -> str:
+        source = str(value).strip()
+        if len(source) > _MAX_SOURCE_CHARS:
+            raise ValueError(f"source must be at most {_MAX_SOURCE_CHARS} characters")
+        parts = urlsplit(source)
+        if parts.scheme.lower() in {"http", "https"} and parts.netloc:
+            return cls._canonical_url(source)
+        return source
 
-        Three tables, one admission rule. The raise below is the enforcement
-        point of the capability boundary -- the sandbox has no network, so a
-        search is the only way a document can enter reach -- and widening the
-        set of accepted *keys* does not widen the set of reachable *documents*.
-        A docid the corpus contains but no query in this session returned is
-        still refused, which is what keeps a recall metric meaningful.
+    @classmethod
+    def _lookup(cls, state: BrokerSession, source: str) -> SearchHit | None:
+        """Resolve one admitted source without authorizing arbitrary fetching."""
 
-        The `ref_` fallback is the one spelling repair allowed here, and it is
-        allowed because it is not a guess: it is an exact hit on a full key
-        after restoring a constant prefix, so it resolves to one document or to
-        none. Fuzzy repair is deliberately absent. Programs mistype these
-        handles constantly -- a third of the rejected ones are a single
-        character from a real ref -- and with a few hundred refs in a 16-hex
-        space a nearest-match would nearly always be right. Nearly always right
-        about *which document* is the wrong trade: it converts an error the
-        program can see and recover from into a silent read of, and citation
-        to, a document nobody asked for. The transcription problem is real and
-        is fixed by not making programs copy handles, not here.
-        """
-        return (
-            state.references.get(handle)
-            or state.by_docid.get(handle)
-            or state.by_url.get(handle)
-            # A ref with the prefix dropped, which is what printing
-            # `ref.split("_")[1]` or reading a truncated column produces.
-            or state.references.get(f"ref_{handle}")
-        )
+        return state.documents_by_source.get(cls._normalize_source(source))
 
-    def _resolve_refs(self, state: BrokerSession, refs: list[str]) -> list[SearchHit]:
-        # A bare string is iterable, so without this a single handle passed
-        # unwrapped is resolved one character at a time and the program is told
-        # `Unknown references: r, e, f`, which names nothing it can act on.
-        # Accepting it resolves the same document the wrapped form would.
-        if isinstance(refs, str):
-            refs = [refs]
-        resolved = [(handle, self._lookup(state, str(handle))) for handle in refs]
-        missing = [handle for handle, hit in resolved if hit is None]
+    def _resolve_sources(
+        self,
+        state: BrokerSession,
+        sources: list[str],
+    ) -> list[SearchHit]:
+        if isinstance(sources, str):
+            sources = [sources]
+        resolved = [(source, self._lookup(state, str(source))) for source in sources]
+        missing = [source for source, hit in resolved if hit is None]
         if missing:
+            rendered = ", ".join(str(source)[:_MAX_ERROR_SOURCE_CHARS] for source in missing[:3])
             raise ValueError(
-                f"Unknown references: {', '.join(str(handle) for handle in missing[:3])}. "
-                "Pass a ref, docid, or URL that a search in this session returned."
+                f"Unknown sources: {rendered}. Pass a source that search returned in this session."
             )
         hits = [hit for _, hit in resolved if hit is not None]
-        # Every consumer of a handle passes through here -- the four content
+        # Every consumer of a source passes through here -- the four content
         # methods and `citations.resolve` -- so this is the one place that knows
         # which documents a non-search event touched.
         #
@@ -2040,9 +1995,6 @@ class BrokerService:
         # could always answer "did the gold document ever surface"; without this
         # it could not answer "was it ever opened", and those two questions have
         # completely different remedies. Reconstructing it afterwards is not
-        # possible: refs are opaque in the transcript and the ref->docid table
-        # dies with the session.
-        #
         # `rank` is the rank of the sighting `remember()` kept, i.e. where the
         # document first appeared, not a property of this call. That is the
         # useful reading -- "the program opened something it had seen at rank 34"
@@ -2055,21 +2007,34 @@ class BrokerService:
             )
         return hits
 
-    def _resolve_content_refs(
-        self, state: BrokerSession, refs: Any
-    ) -> list[SearchHit]:
-        if isinstance(refs, str):
-            normalized = [refs]
-        elif isinstance(refs, list):
-            normalized = refs
+    def _resolve_content_sources(self, state: BrokerSession, sources: Any) -> list[SearchHit]:
+        if isinstance(sources, str):
+            normalized = [sources]
+        elif isinstance(sources, list):
+            normalized = sources
         else:
-            raise ValueError("content refs must be a list or a single ref")
-        if len(normalized) > self.max_content_refs_per_request:
+            raise ValueError("content sources must be a list or a single source")
+        if len(normalized) > self.max_content_sources_per_request:
             raise ValueError(
-                f"content request contains {len(normalized)} refs, exceeding the "
-                f"broker maximum of {self.max_content_refs_per_request}"
+                f"content request contains {len(normalized)} sources, exceeding the "
+                f"broker maximum of {self.max_content_sources_per_request}"
             )
-        return self._resolve_refs(state, normalized)
+        return self._resolve_sources(state, normalized)
+
+    @staticmethod
+    def _content_sources_argument(
+        params: dict[str, Any],
+        *,
+        legacy_options: tuple[str, ...] = (),
+    ) -> Any:
+        legacy = [key for key in ("refs", *legacy_options) if key in params]
+        if legacy:
+            raise ValueError(
+                f"Unsupported legacy content parameter(s): {', '.join(sorted(legacy))}"
+            )
+        if "sources" not in params:
+            raise ValueError("content requests must provide sources")
+        return params["sources"]
 
     async def _session_usage(
         self,
@@ -2094,7 +2059,7 @@ class BrokerService:
             "content_fetches": usage.content_fetches,
             "llm_calls": usage.llm_calls,
             "pipeline_model_tokens": usage.pipeline_model_tokens,
-            "documents_seen": len(state.references),
+            "documents_seen": len(state.source_by_identity),
             "budget_remaining": state.policy.remaining(),
             "terminal_reason": state.policy.terminal_reason,
         }
@@ -2104,39 +2069,35 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        if "requests" in params:
-            raw_requests = params.get("requests")
-            if not isinstance(raw_requests, list):
-                raise ValueError("citation requests must be a list")
-            requests = raw_requests
-        else:
-            raw_refs = params.get("refs", [])
-            if isinstance(raw_refs, str):
-                raw_refs = [raw_refs]
-            if not isinstance(raw_refs, list):
-                raise ValueError("citation refs must be a list")
-            requests = [{"ref": ref} for ref in raw_refs]
-
+        legacy = [key for key in ("refs", "requests") if key in params]
+        if legacy:
+            raise ValueError(
+                f"Unsupported legacy citation parameter(s): {', '.join(sorted(legacy))}"
+            )
+        if "citations" not in params:
+            raise ValueError("citation requests must provide citations")
+        requests = params["citations"]
+        if not isinstance(requests, list):
+            raise ValueError("citations must be a list")
         resolved: list[dict[str, Any]] = []
         for request in requests:
             if not isinstance(request, dict):
                 raise ValueError("Each citation request must be an object")
-            if set(request) - {"ref", "locator"}:
-                raise ValueError("Citation requests accept only ref and locator")
-            handle = request.get("ref")
-            if not isinstance(handle, str) or not handle:
-                raise ValueError("Every citation request must contain a non-empty ref")
-            hit = self._resolve_refs(state, [handle])[0]
-            if "locator" not in request:
+            if set(request) == {"source"}:
+                source = request["source"]
+                if not isinstance(source, str) or not source:
+                    raise ValueError("Citation source must be a non-empty string")
+                hit = self._resolve_sources(state, [source])[0]
                 resolved.append(self._citation_wire(hit, hit.snippet, "search_preview"))
                 continue
+            if set(request) != {"locator"}:
+                raise ValueError("Citation requests contain exactly source or locator")
             locator = request["locator"]
-            if locator is None:
-                raise ValueError(
-                    "Citation locator must be omitted for legacy preview citations; "
-                    "explicit null is not valid passage evidence"
-                )
-            record = self._verify_evidence_locator(state, hit.ref, locator)
+            record = self._verify_evidence_locator(state, locator)
+            source = state.source_by_identity.get(record.identity)
+            hit = state.documents_by_source.get(source or "")
+            if hit is None:
+                raise RuntimeError("Evidence locator lost its admitted document")
             citation = self._citation_wire(hit, record.text, record.kind)
             citation["locator"] = locator
             resolved.append(citation)
@@ -2149,7 +2110,7 @@ class BrokerService:
         evidence_kind: str,
     ) -> dict[str, Any]:
         return {
-            "ref": hit.ref,
+            "source": hit.source,
             "title": hit.title,
             "url": hit.url,
             "docid": hit.docid,
@@ -2161,16 +2122,13 @@ class BrokerService:
     def _verify_evidence_locator(
         self,
         state: BrokerSession,
-        ref: str,
         locator: Any,
     ) -> EvidenceRecord:
-        locator_id = locator.get("id") if isinstance(locator, dict) else None
         registered: EvidenceRecord | None = None
 
         def reject(message: str, code: str) -> None:
             self._record_evidence_trace(
-                locator_id=locator_id if isinstance(locator_id, str) else None,
-                ref=ref,
+                locator_id=locator if isinstance(locator, str) else None,
                 action="validate",
                 status="error",
                 record=registered,
@@ -2178,31 +2136,14 @@ class BrokerService:
             )
             raise ValueError(message)
 
-        if not isinstance(locator, dict) or set(locator) != {"id", "ref", "kind"}:
-            reject(
-                "Evidence locator must contain exactly id, ref, and kind",
-                "invalid_locator",
-            )
-        if not all(isinstance(locator[key], str) for key in ("id", "ref", "kind")):
-            reject("Evidence locator fields must be strings", "invalid_locator")
-        if not locator["id"] or len(locator["id"]) > 128:
-            reject("Evidence locator id is empty or too long", "invalid_locator")
-        registered = state.evidence.get(locator["id"])
-        if locator["kind"] != "selected_passage":
-            reject("Unsupported evidence locator kind", "invalid_locator_kind")
-        if locator["ref"] != ref:
-            reject(
-                "Evidence locator does not belong to the requested ref",
-                "locator_ref_mismatch",
-            )
+        if not isinstance(locator, str) or not locator or len(locator) > 128:
+            reject("Evidence locator must be a non-empty bounded string", "invalid_locator")
+        registered = state.evidence.get(locator)
         if registered is None:
             reject("Unknown evidence locator", "unknown_locator")
         assert registered is not None
-        if registered.ref != locator["ref"] or registered.kind != locator["kind"]:
-            reject("Evidence locator has been altered", "altered_locator")
         self._record_evidence_trace(
-            locator_id=locator["id"],
-            ref=ref,
+            locator_id=locator,
             action="validate",
             status="ok",
             record=registered,
@@ -2213,7 +2154,6 @@ class BrokerService:
     def _record_evidence_trace(
         *,
         locator_id: str | None,
-        ref: str,
         action: str,
         status: str,
         record: EvidenceRecord | None,
@@ -2225,7 +2165,7 @@ class BrokerService:
         traced.append(
             EvidenceTraceRecord(
                 locator_id=locator_id[:128] if locator_id else None,
-                ref=ref,
+                identity=record.identity if record else None,
                 action=action,
                 status=status,
                 coordinates=dict(record.coordinates) if record else {},
@@ -2239,18 +2179,18 @@ class BrokerService:
         self,
         state: BrokerSession,
         *,
-        ref: str,
+        identity: str,
         text: str,
         document_text: str,
         coordinates: dict[str, Any],
-    ) -> tuple[dict[str, str] | None, dict[str, Any] | None]:
+    ) -> tuple[str | None, dict[str, Any] | None]:
         if not text or len(text) > self.max_evidence_chars:
             return None, None
         document_fingerprint = hashlib.sha256(document_text.encode("utf-8")).hexdigest()
         passage_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
         material = json.dumps(
             {
-                "ref": ref,
+                "identity": identity,
                 "kind": "selected_passage",
                 "coordinates": coordinates,
                 "document_fingerprint": document_fingerprint,
@@ -2259,11 +2199,12 @@ class BrokerService:
             sort_keys=True,
             separators=(",", ":"),
         )
-        locator_id = "evidence_" + hashlib.sha256(
-            f"{state.session.token}\0{material}".encode()
-        ).hexdigest()[:24]
+        locator_id = (
+            "evidence_"
+            + hashlib.sha256(f"{state.session.token}\0{material}".encode()).hexdigest()[:24]
+        )
         record = EvidenceRecord(
-            ref=ref,
+            identity=identity,
             kind="selected_passage",
             text=text,
             coordinates=dict(coordinates),
@@ -2271,12 +2212,10 @@ class BrokerService:
             passage_fingerprint=passage_fingerprint,
         )
         existing = state.evidence.get(locator_id)
-        locator = {"id": locator_id, "ref": ref, "kind": "selected_passage"}
         if existing is not None:
             if existing != record:
                 self._record_evidence_trace(
                     locator_id=locator_id,
-                    ref=ref,
                     action="issue",
                     status="error",
                     record=existing,
@@ -2285,22 +2224,19 @@ class BrokerService:
                 raise RuntimeError("Evidence locator collision detected")
             self._record_evidence_trace(
                 locator_id=locator_id,
-                ref=ref,
                 action="issue",
                 status="ok",
                 record=existing,
             )
-            return locator, None
+            return locator_id, None
 
         passage_bytes = len(text.encode("utf-8"))
         if (
             len(state.evidence) >= self.max_evidence_records
-            or state.evidence_passage_bytes + passage_bytes
-            > self.max_evidence_passage_bytes
+            or state.evidence_passage_bytes + passage_bytes > self.max_evidence_passage_bytes
         ):
             self._record_evidence_trace(
                 locator_id=locator_id,
-                ref=ref,
                 action="issue",
                 status="error",
                 record=record,
@@ -2320,19 +2256,19 @@ class BrokerService:
         )
         self._record_evidence_trace(
             locator_id=locator_id,
-            ref=ref,
             action="issue",
             status="ok",
             record=record,
         )
-        return locator, None
+        return locator_id, None
 
     async def _content_get_many(
         self,
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        hits = self._resolve_content_refs(state, params.get("refs", []))
+        sources = self._content_sources_argument(params)
+        hits = self._resolve_content_sources(state, sources)
         return await self._fetch_content(state, hits, query=None)
 
     async def _rerank_passages(
@@ -2407,39 +2343,42 @@ class BrokerService:
                 f"of {self.max_search_query_chars}"
             )
         raw_limit = params.get("limit", 20)
-        raw_max_per_ref = params.get("max_per_ref", 3)
+        raw_max_per_source = params.get("max_per_source", 3)
         if (
             isinstance(raw_limit, bool)
             or not isinstance(raw_limit, int)
-            or isinstance(raw_max_per_ref, bool)
-            or not isinstance(raw_max_per_ref, int)
+            or isinstance(raw_max_per_source, bool)
+            or not isinstance(raw_max_per_source, int)
         ):
-            raise ValueError("limit and max_per_ref must be integers")
+            raise ValueError("limit and max_per_source must be integers")
         limit = raw_limit
-        max_per_ref = raw_max_per_ref
+        max_per_source = raw_max_per_source
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
-        if not 1 <= max_per_ref <= 10:
-            raise ValueError("max_per_ref must be between 1 and 10")
+        if not 1 <= max_per_source <= 10:
+            raise ValueError("max_per_source must be between 1 and 10")
 
-        raw_refs = params.get("refs", [])
+        raw_sources = self._content_sources_argument(
+            params,
+            legacy_options=("max_per_ref",),
+        )
         input_count = (
             1
-            if isinstance(raw_refs, str)
-            else len(raw_refs)
-            if isinstance(raw_refs, list)
+            if isinstance(raw_sources, str)
+            else len(raw_sources)
+            if isinstance(raw_sources, list)
             else 0
         )
-        hits = self._resolve_content_refs(state, raw_refs)
+        hits = self._resolve_content_sources(state, raw_sources)
         unique: list[tuple[int, SearchHit]] = []
-        leader_by_ref: dict[str, int] = {}
+        leader_by_source: dict[str, int] = {}
         for input_index, hit in enumerate(hits):
-            leader_index = leader_by_ref.get(hit.ref)
+            leader_index = leader_by_source.get(hit.source)
             if leader_index is None:
-                leader_by_ref[hit.ref] = input_index
+                leader_by_source[hit.source] = input_index
                 unique.append((input_index, hit))
                 continue
-            fingerprint = self._fingerprint({"ref": hit.ref})
+            fingerprint = self._fingerprint({"source": hit.source})
             self._record_deduplicated_request(
                 request_index=input_index,
                 leader_index=leader_index,
@@ -2452,7 +2391,7 @@ class BrokerService:
             return ContentPassageReport(
                 query=query,
                 input_count=input_count,
-                unique_ref_count=0,
+                unique_source_count=0,
             ).model_dump(mode="json")
 
         rows = await self._fetch_content(
@@ -2469,13 +2408,13 @@ class BrokerService:
                 failures.append(
                     {
                         "input_index": input_index,
-                        "ref": hit.ref,
+                        "source": hit.source,
                         "failure": failure,
                     }
                 )
                 continue
             document_text = normalize_document_text(str(row.get("text") or ""))
-            normalized_documents[hit.ref] = document_text
+            normalized_documents[hit.source] = document_text
             for text, start, end, coordinates in segment_passages(
                 document_text,
                 chunk_chars=self.passage_chunk_chars,
@@ -2497,13 +2436,13 @@ class BrokerService:
 
         retained = prefilter_passage_candidates(
             score_passage_candidates(query, candidates),
-            max_per_ref=max_per_ref,
+            max_per_source=max_per_source,
             limit=self.passage_prefilter_limit,
         )
         ranker_name, reranked = await self._rerank_passages(state, query, retained)
         selected = select_passage_candidates(
             reranked,
-            max_per_ref=max_per_ref,
+            max_per_source=max_per_source,
             limit=limit,
         )
 
@@ -2513,9 +2452,9 @@ class BrokerService:
             coordinates = candidate.coordinates.model_dump(mode="json")
             locator, locator_error = self._register_evidence(
                 state,
-                ref=candidate.hit.ref,
+                identity=self._identity(candidate.hit),
                 text=candidate.text,
-                document_text=normalized_documents[candidate.hit.ref],
+                document_text=normalized_documents[candidate.hit.source],
                 coordinates={
                     "type": "line_characters",
                     "basis": "normalized_text",
@@ -2523,9 +2462,8 @@ class BrokerService:
                 },
             )
             row = ContentPassage(
-                ref=candidate.hit.ref,
+                source=candidate.hit.source,
                 title=candidate.title,
-                url=candidate.url,
                 date=candidate.date,
                 text=candidate.text,
                 coordinates=candidate.coordinates,
@@ -2540,7 +2478,6 @@ class BrokerService:
                 traced.append(
                     PassageTraceRecord(
                         identity=self._identity(candidate.hit),
-                        ref=candidate.hit.ref,
                         ranker=ranker_name,
                         rank=rank,
                         score=score,
@@ -2555,7 +2492,7 @@ class BrokerService:
             passages=passages,
             failures=failures,
             input_count=input_count,
-            unique_ref_count=len(unique),
+            unique_source_count=len(unique),
         ).model_dump(mode="json")
 
     # `read` and `grep_report` share a 1-indexed line contract: a match line is
@@ -2571,7 +2508,8 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        hits = self._resolve_content_refs(state, params.get("refs", []))
+        sources = self._content_sources_argument(params)
+        hits = self._resolve_content_sources(state, sources)
         rows = await self._fetch_content(state, hits, query=None)
         # 1-indexed, and an offset below 1 is clamped rather than refused: a
         # program computing `match.line - 5` near the top of a document is
@@ -2585,7 +2523,7 @@ class BrokerService:
         # manage -- generous enough that ordinary reading never meets it.
         max_chars = min(max(int(params.get("max_chars", 100_000)), 1), 400_000)
         windows: list[dict[str, Any]] = []
-        for row in rows:
+        for hit, row in zip(hits, rows, strict=True):
             document_text = str(row.get("text") or "")
             lines = self._document_lines(row)
             total = len(lines)
@@ -2637,7 +2575,7 @@ class BrokerService:
             )
             locator, locator_error = self._register_evidence(
                 state,
-                ref=str(row.get("ref") or ""),
+                identity=self._identity(hit),
                 text=text,
                 document_text=document_text,
                 coordinates=coordinates,
@@ -2669,7 +2607,11 @@ class BrokerService:
         pattern = str(params.get("pattern", ""))
         if not pattern:
             raise ValueError("pattern must not be empty")
-        hits = self._resolve_content_refs(state, params.get("refs", []))
+        sources = self._content_sources_argument(
+            params,
+            legacy_options=("max_matches_per_ref",),
+        )
+        hits = self._resolve_content_sources(state, sources)
         rows = await self._fetch_content(
             state,
             hits,
@@ -2681,10 +2623,10 @@ class BrokerService:
         # Bounded per document rather than in total: an unbounded grep over 50
         # candidates is how a program fills its own output budget with one call,
         # and a global cap would let the first document starve the other 49.
-        max_per_ref = min(max(int(params.get("max_matches_per_ref", 20)), 1), 200)
+        max_per_source = min(max(int(params.get("max_matches_per_source", 20)), 1), 200)
         matches: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
-        for input_index, row in enumerate(rows):
+        for input_index, (hit, row) in enumerate(zip(hits, rows, strict=True)):
             failure = row.get("failure")
             if failure is None and row.get("metadata", {}).get("fetch_error"):
                 failure = {
@@ -2697,16 +2639,15 @@ class BrokerService:
                 failures.append(
                     {
                         "input_index": input_index,
-                        "ref": row.get("ref", ""),
+                        "source": row.get("source", ""),
                         "failure": failure,
                     }
                 )
                 continue
             lines = self._document_lines(row)
-            metadata = row.get("metadata", {})
             found = 0
             for index, line in enumerate(lines):
-                if found >= max_per_ref:
+                if found >= max_per_source:
                     break
                 if not regex.search(line):
                     continue
@@ -2714,9 +2655,7 @@ class BrokerService:
                 before = lines[max(0, index - context) : index] if context else []
                 after = lines[index + 1 : index + 1 + context] if context else []
                 match = {
-                    "ref": row.get("ref", ""),
-                    "docid": metadata.get("docid"),
-                    "url": row.get("url"),
+                    "source": row.get("source", ""),
                     "title": row.get("title", ""),
                     "line": index + 1,
                     "text": line,
@@ -2727,7 +2666,7 @@ class BrokerService:
                 evidence = "\n".join([*before, line, *after])
                 locator, locator_error = self._register_evidence(
                     state,
-                    ref=str(row.get("ref") or ""),
+                    identity=self._identity(hit),
                     text=evidence,
                     document_text=str(row.get("text") or ""),
                     coordinates={
@@ -2742,11 +2681,10 @@ class BrokerService:
                 if locator_error is not None:
                     match["locator_error"] = locator_error
                 matches.append(match)
-        raw_refs = params.get("refs", [])
         return {
             "matches": matches,
             "failures": failures,
-            "input_count": 1 if isinstance(raw_refs, str) else len(raw_refs),
+            "input_count": 1 if isinstance(sources, str) else len(sources),
         }
 
     async def _fetch_content(
@@ -2763,7 +2701,7 @@ class BrokerService:
         program can pair results with what it asked for. Caller order, so
         pairing is positional and not a join. And a document already read in
         this session is served from the cache: `grep` and `read` exist to be
-        used repeatedly over one pool, and refetching it per stage is
+        used repeatedly over one pool, and fetching it again per stage is
         affordable against a local index but is three times the bill and the
         latency against a paid scrape API.
         """
@@ -2775,7 +2713,7 @@ class BrokerService:
                 {
                     "backend": hit.backend,
                     "revision": self.backend_revision,
-                    "ref": hit.ref,
+                    "identity": self._identity(hit),
                 }
             )
             keys.append(fingerprint)
@@ -2795,7 +2733,7 @@ class BrokerService:
         misses = {
             key: value
             for key, value in leaders.items()
-            if value[1].ref not in state.content_cache
+            if self._identity(value[1]) not in state.content_cache
         }
         await state.policy.record_content_fetches(len(hits), 0)
         # The logical-usage reservation above may yield while another caller's
@@ -2806,7 +2744,7 @@ class BrokerService:
         misses = {
             key: value
             for key, value in misses.items()
-            if value[1].ref not in state.content_cache
+            if self._identity(value[1]) not in state.content_cache
         }
 
         async def fetch_one(
@@ -2832,21 +2770,12 @@ class BrokerService:
 
             async def request() -> ContentSnippet:
                 fetch = getattr(backend, "fetch", None)
-                if callable(fetch):
-                    result = await fetch(hit, query=query)
-                else:
-                    # Compatibility for third-party/test backends written to
-                    # the 0.2 batch protocol. Bundled adapters never use this.
-                    content = getattr(backend, "content", None)
-                    if not callable(content):
-                        raise ValueError("backend has no atomic content fetch operation")
-                    returned = await content([hit], query=query)
-                    if not isinstance(returned, list) or len(returned) != 1:
-                        raise ValueError("backend returned an invalid content row count")
-                    result = returned[0]
+                if not callable(fetch):
+                    raise ValueError("backend has no atomic content fetch operation")
+                result = await fetch(hit, query=query)
                 row = ContentSnippet.model_validate(result)
-                if row.ref != hit.ref:
-                    raise ValueError("backend changed the requested content ref")
+                if row.source != hit.source:
+                    raise ValueError("backend changed the requested content source")
                 return row
 
             validate_fetch = getattr(backend, "preflight_fetch", None)
@@ -2869,7 +2798,7 @@ class BrokerService:
                     request_value={
                         "backend": hit.backend,
                         "revision": self.backend_revision,
-                        "ref": hit.ref,
+                        "identity": self._identity(hit),
                     },
                     request=request,
                     preflight=preflight,
@@ -2882,15 +2811,18 @@ class BrokerService:
                     self._provider_failure(exc),
                 )
 
-            row = snippet.model_dump(mode="json")
+            row = snippet.model_dump(mode="json", exclude={"url"})
+            metadata = dict(row.get("metadata") or {})
+            for metadata_key in ("ref", "url", "docid", "source"):
+                metadata.pop(metadata_key, None)
+            row["metadata"] = metadata
             legacy_error = row.get("metadata", {}).get("fetch_error")
             if row.get("failure") is None and legacy_error:
                 attempts = max(
                     (
                         record.attempt
                         for record in (_EVENT_PROVIDER_ATTEMPTS.get() or [])
-                        if input_index in record.request_indexes
-                        and record.operation == operation
+                        if input_index in record.request_indexes and record.operation == operation
                     ),
                     default=1,
                 )
@@ -2936,7 +2868,8 @@ class BrokerService:
                 flight_key = next(iter(group.keys))
                 fingerprint = fingerprint_for_flight_key[flight_key]
                 input_index, hit = misses[fingerprint]
-                cached = state.content_cache.get(hit.ref)
+                identity = self._identity(hit)
+                cached = state.content_cache.get(identity)
                 if cached is not None:
 
                     async def execute_cached_content(
@@ -2972,7 +2905,11 @@ class BrokerService:
                     # futures. A caller queued behind flight cleanup therefore
                     # observes either the active flight or the cache, never a
                     # gap between the two.
-                    state.cache_content(row, self.session_content_cache_bytes)
+                    state.cache_content(
+                        self._identity(hit),
+                        row,
+                        self.session_content_cache_bytes,
+                    )
                     return {flight_key: row}
 
                 self._start_flight_group(state, group, execute_content)
@@ -2989,20 +2926,22 @@ class BrokerService:
             fetched = dict(zip(misses, returned_rows, strict=True))
         else:
             returned = await asyncio.gather(
-                *(
-                    fetch_one(key, input_index, hit)
-                    for key, (input_index, hit) in misses.items()
-                )
+                *(fetch_one(key, input_index, hit) for key, (input_index, hit) in misses.items())
             )
             fetched = dict(returned)
-        for row in fetched.values():
-            state.cache_content(row, self.session_content_cache_bytes)
+        for fingerprint, row in fetched.items():
+            _input_index, hit = misses[fingerprint]
+            state.cache_content(
+                self._identity(hit),
+                row,
+                self.session_content_cache_bytes,
+            )
 
         rows: list[dict[str, Any]] = []
         for key, hit in zip(keys, hits, strict=True):
-            source = state.content_cache.get(hit.ref) or fetched.get(key)
-            if source is None:
-                source = self._content_failure_row(
+            stored = state.content_cache.get(self._identity(hit)) or fetched.get(key)
+            if stored is None:
+                stored = self._content_failure_row(
                     hit,
                     {
                         "code": "provider_invalid_response",
@@ -3011,7 +2950,7 @@ class BrokerService:
                         "attempts": 0,
                     },
                 )
-            row = copy.deepcopy(source)
+            row = copy.deepcopy(stored)
             if row.get("date") is None and hit.date is not None:
                 row["date"] = hit.date
             rows.append(row)
@@ -3034,14 +2973,14 @@ class BrokerService:
         failure: dict[str, Any],
     ) -> dict[str, Any]:
         return ContentSnippet(
-            ref=hit.ref,
+            source=hit.source,
             text="",
             url=hit.url,
             title=hit.title,
             date=hit.date,
             failure=failure,
             metadata={"backend": hit.backend},
-        ).model_dump(mode="json")
+        ).model_dump(mode="json", exclude={"url"})
 
     async def _chat(
         self,
@@ -3153,9 +3092,7 @@ class BrokerService:
             "description",
         }
     )
-    _SCHEMA_TYPES = frozenset(
-        {"object", "array", "string", "integer", "number", "boolean", "null"}
-    )
+    _SCHEMA_TYPES = frozenset({"object", "array", "string", "integer", "number", "boolean", "null"})
     _REPAIRABLE_EXTRACTION_ERRORS = frozenset(
         {"empty_output", "invalid_json", "non_object", "schema_mismatch"}
     )
@@ -3187,9 +3124,7 @@ class BrokerService:
                 )
             unknown = sorted(set(node) - self._SCHEMA_KEYWORDS)
             if unknown:
-                raise ValueError(
-                    f"schema keyword '{unknown[0]}' at {path} is not supported"
-                )
+                raise ValueError(f"schema keyword '{unknown[0]}' at {path} is not supported")
             declared_type = node.get("type")
             base_type: str | None = None
             if declared_type is not None:
@@ -3225,9 +3160,7 @@ class BrokerService:
                     raise ValueError("only JSON Schema Draft 2020-12 is supported")
             if "description" in node and not isinstance(node["description"], str):
                 raise ValueError(f"schema description at {path} must be a string")
-            if "enum" in node and (
-                not isinstance(node["enum"], list) or not node["enum"]
-            ):
+            if "enum" in node and (not isinstance(node["enum"], list) or not node["enum"]):
                 raise ValueError(f"schema enum at {path} must be a non-empty list")
 
             object_keys = {"properties", "required", "additionalProperties"} & set(node)
@@ -3250,9 +3183,7 @@ class BrokerService:
             if "additionalProperties" in node and not isinstance(
                 node["additionalProperties"], bool
             ):
-                raise ValueError(
-                    f"schema additionalProperties at {path} must be a boolean"
-                )
+                raise ValueError(f"schema additionalProperties at {path} must be a boolean")
 
             if "items" in node:
                 if base_type not in {None, "array"}:
@@ -3323,8 +3254,7 @@ class BrokerService:
             raise ValueError("repair_attempts must be 0 or 1")
         if repair_attempts > self.max_extract_repair_attempts:
             raise ValueError(
-                f"repair_attempts exceeds the broker maximum of "
-                f"{self.max_extract_repair_attempts}"
+                f"repair_attempts exceeds the broker maximum of {self.max_extract_repair_attempts}"
             )
         try:
             concurrency = int(params.get("concurrency", 4))

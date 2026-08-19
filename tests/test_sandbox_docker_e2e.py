@@ -43,7 +43,7 @@ def sandbox_image() -> str:
         )
 
 
-def test_built_image_exposes_contract_7_and_compact_sdk(sandbox_image: str) -> None:
+def test_built_image_exposes_contract_8_and_compact_sdk(sandbox_image: str) -> None:
     image = sandbox_image
     inspected = subprocess.run(
         [
@@ -58,7 +58,7 @@ def test_built_image_exposes_contract_7_and_compact_sdk(sandbox_image: str) -> N
         capture_output=True,
         text=True,
     )
-    assert inspected.stdout.strip() == "7"
+    assert inspected.stdout.strip() == "8"
 
     inspected_version = subprocess.run(
         [
@@ -79,7 +79,7 @@ def test_built_image_exposes_contract_7_and_compact_sdk(sandbox_image: str) -> N
         "import importlib.util, json; "
         "from opensac_sdk import __version__; "
         "from opensac_sdk._resources import SearchResource; "
-        "hit = {'ref': 'ref_a', 'backend': 'local', 'rank': 1}; "
+        "hit = {'source': 'doc_a', 'backend': 'local', 'rank': 1}; "
         "batch = {'query': 'q', 'hits': [hit], 'failure': None}; "
         "result = SearchResource(None).fuse_rrf([batch]); "
         "print(json.dumps({'version': __version__, "
@@ -107,7 +107,7 @@ def test_built_image_exposes_contract_7_and_compact_sdk(sandbox_image: str) -> N
     )
     payload = json.loads(executed.stdout)
     assert payload["version"] == __version__
-    assert payload["fusion"][0]["ref"] == "ref_a"
+    assert payload["fusion"][0]["source"] == "doc_a"
     assert payload["fusion"][0]["fused_rank"] == 1
     assert payload["types_module"] is False
     assert payload["models_module"] is False

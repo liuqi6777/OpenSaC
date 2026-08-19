@@ -48,7 +48,7 @@ Core SDK surface:
 - Use `sdk.llm.extract_many(...)` only for bounded semantic mapping.
 - Persist optional research state with `sdk.state`—there is no `sdk.workspace` API. Inspect
   recovery usage with `sdk.session.usage()`.
-- Finish with `sdk.output.submit(output, citations=[{"ref": ref, "locator": locator}])`.
+- Finish with `sdk.output.submit(output, citations=[{"locator": locator}])`.
 
 ## Work in deliberate stages
 
@@ -57,8 +57,8 @@ program.
 
 - Continue inside the same program when an explicit Python rule can choose the next input. It is
   good to search, fuse, filter, grep, and read together when those transitions are mechanical.
-- Stop when choosing the next query, ref, pattern, or rule requires language judgment. Print at
-  most eight useful summaries with exact refs and end with one `NEXT:` line naming that decision.
+- Stop when choosing the next query, source, pattern, or rule requires language judgment. Print at
+  most eight useful summaries with exact sources and end with one `NEXT:` line naming that decision.
 - A search-only stage is valid. Do not append grep merely for completeness.
 
 ## Tiny examples
@@ -68,9 +68,9 @@ When search results need interpretation, stop after a bounded preview:
 ```python
 queries = ['"exact phrase" entity', "entity alternate wording"]
 batches = sdk.search.many(queries, limit_per_query=5)
-for item in sdk.search.fuse_rrf(batches).candidates[:5]:
-    print(f"CANDIDATE ref={item.ref!r} title={item.title!r}")
-print("NEXT: choose refs and checks")
+for item in sdk.search.fuse_rrf(batches)[:5]:
+    print(f"CANDIDATE source={item.source!r} title={item.title!r}")
+print("NEXT: choose sources and checks")
 ```
 
 For a one-claim task with known inputs, keep mechanical verification together:
@@ -78,13 +78,13 @@ For a one-claim task with known inputs, keep mechanical verification together:
 ```python
 import re
 
-refs = ["copy-ref-exactly"]
+sources = ["copy-source-exactly"]
 pattern = r"target phrase"
-report = sdk.content.grep_report(refs, pattern, context=2)
+report = sdk.content.grep_report(sources, pattern, context=2)
 passage = None
 for match in report.matches[:4]:
     item = sdk.content.read(
-        [match.ref], offset=max(match.line - 8, 1), limit=30, max_chars=12_000
+        [match.source], offset=max(match.line - 8, 1), limit=30, max_chars=12_000
     )[0]
     if (
         item.failure is None
@@ -95,24 +95,22 @@ for match in report.matches[:4]:
         break
 
 if passage is None:
-    print("NEXT: revise refs or pattern")
+    print("NEXT: revise sources or pattern")
 else:
     sdk.output.submit(
-        {"evidence": [{"ref": passage.ref, "text": passage.text}]},
-        citations=[
-            {"ref": passage.ref, "locator": passage.locator.model_dump(mode="json")}
-        ],
+        {"evidence": [{"source": passage.source, "text": passage.text}]},
+        citations=[{"locator": passage.locator}],
     )
 ```
 
 Use bounded comprehensions, `filter`, dicts, sets, `sorted`, `any`, and `all` to generate queries,
-join by ref, rank candidates, and measure coverage. Prefer `re`, dates, strings, and arithmetic to
-an extraction call. `extract_many` cannot call tools or create trusted refs or locators: validate
-its quoted evidence, clean and cap any proposed follow-up inputs, then make only bounded SDK calls.
+join by source, rank candidates, and measure coverage. Prefer `re`, dates, strings, and arithmetic
+to an extraction call. `extract_many` cannot call tools or create trusted sources or locators:
+validate its quoted evidence, clean and cap proposed follow-up inputs, then make bounded SDK calls.
 
 ## Keep the evidence boundary intact
 
-- Treat refs and locators as opaque. Never invent, edit, shorten, or reconstruct them.
+- Search sources are canonical URLs or local IDs; reuse them unchanged. Locator strings are opaque.
 - Search metadata and snippets are for triage, or for a requested discovery list; they do not
   support claims about document content.
 - For every material document-content claim, read a non-empty passage and preserve its returned
@@ -133,17 +131,17 @@ its quoted evidence, clean and cap any proposed follow-up inputs, then make only
 ## Use workspace only when observation handoff is insufficient
 
 Default to bounded stdout handoff. Even an Explore then Verify flow can remain stateless when the
-chosen refs and checks fit safely in one observation. Passing five selected refs to the next stage
-needs no workspace; accumulating a 200-document pool and evidence across stages usually does.
+chosen sources and checks fit safely in one observation. Passing five selected sources to the next
+stage needs no workspace; accumulating a 200-document pool and evidence across stages usually does.
 
-Upgrade to `sdk.state` only when a growing candidate pool, evidence ledger, or attempted-ref history
-must survive several stages, avoid replay, or recover after uncertain execution. Derive a stable
-`runs/<research_id>/` namespace from the task, stable requirements, and source policy. At each
-stage, list and load the needed manifest, pool, evidence, and attempts before capability calls;
+Upgrade to `sdk.state` only when a growing candidate pool, evidence ledger, or attempted-source
+history must survive several stages, avoid replay, or recover after uncertain execution. Derive a
+stable `runs/<research_id>/` namespace from the task, stable requirements, and source policy. At
+each stage, list and load the needed manifest, pool, evidence, and attempts before capability calls;
 persist progress before `NEXT:` and submit only from a complete evidence ledger. Observations show
 workspace paths, not file contents, and Python variables do not survive calls.
 
-Refs, locators, and workspace artifacts remain valid only in this live session. On explicit
+Sources, locators, and workspace artifacts remain valid only in this live session. On explicit
 `state_lost`, start clean. If a timeout or adapter failure has an unknown execution outcome, do not
 replay blindly: inspect the namespace and usage once, then resume only missing work. After a final
 capability failure, change the query, source, or candidate instead of repeating it.
@@ -176,9 +174,7 @@ class SacRunTool:
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": (
-                    "Run one Python research stage in the current OpenSAC session."
-                ),
+                "description": ("Run one Python research stage in the current OpenSAC session."),
                 "parameters": {
                     "type": "object",
                     "properties": {

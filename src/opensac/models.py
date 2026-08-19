@@ -250,9 +250,9 @@ class ExecCreate(BaseModel):
 
     The agent harness is the control plane: it generates the program and
     OpenSAC supplies the sandbox, SDK, and capability broker. Session state --
-    the workspace filesystem and search reference table -- persists across exec
+    the workspace filesystem and admitted source table -- persists across exec
     calls, so a program can serialize intermediate results in one turn and
-    resolve their refs several turns later.
+    resolve their sources several turns later.
     """
 
     code: str = Field(min_length=1)
@@ -317,7 +317,7 @@ class EvidenceTraceRecord(BaseModel):
     """Evidence lifecycle metadata suitable for persistent research traces."""
 
     locator_id: str | None = None
-    ref: str
+    identity: str | None = None
     action: str
     status: str
     coordinates: dict[str, Any] = Field(default_factory=dict)
@@ -330,7 +330,6 @@ class PassageTraceRecord(BaseModel):
     """Ranked-passage metadata without retrieved document text."""
 
     identity: str
-    ref: str
     ranker: str
     rank: int = Field(ge=1)
     score: float

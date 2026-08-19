@@ -6,10 +6,10 @@ Read this reference only when the core workflow cannot express the task. Import 
 ## Whole-document content
 
 Use a whole-document fetch only when deliberate local processing needs the complete normalized
-text. It returns one record per input ref, with a `failure` record on unreadable rows:
+text. It returns one record per input source, with a `failure` record on unreadable rows:
 
 ```python
-sdk.content.get_many(refs) -> list[record]
+sdk.content.get_many(sources) -> list[record]
 ```
 
 ## Citation resolution
@@ -18,8 +18,7 @@ sdk.content.get_many(refs) -> list[record]
 a host integration explicitly needs resolved citation rows:
 
 ```python
-sdk.citations.resolve(refs) -> list[dict]
-sdk.citations.resolve_requests(requests) -> list[dict]
+sdk.citations.resolve([{"source": source}, {"locator": locator}]) -> list[record]
 ```
 
 ## Free-form pipeline model

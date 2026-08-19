@@ -52,7 +52,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v6",
+            "capability_contract_v7",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
@@ -74,23 +74,21 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
-        assert payload["environment"]["sandbox_contract"] == 7
-        assert payload["environment"]["capability_contract"] == 6
+        assert payload["environment"]["sandbox_contract"] == 8
+        assert payload["environment"]["capability_contract"] == 7
         capability_limits = payload["environment"]["capability_limits"]
         assert capability_limits["extract_many"]["max_items"] == 12
         assert capability_limits["evidence"]["max_chars"] == 4096
         assert capability_limits["evidence"]["max_records"] == 4096
-        assert capability_limits["content"]["max_refs_per_request"] == 256
+        assert capability_limits["content"]["max_sources_per_request"] == 256
         assert capability_limits["content"]["passage_limit"] == 100
-        assert capability_limits["content"]["passage_max_per_ref"] == 10
+        assert capability_limits["content"]["passage_max_per_source"] == 10
         assert capability_limits["content"]["passage_chunk_chars"] == 2_000
         assert payload["environment"]["passage_ranker"] == "lexical"
-        assert payload["environment"]["provider_policies"]["local.search"][
-            "retry_profile"
-        ] == "none"
-        assert payload["environment"]["provider_policies"]["local.search"][
-            "max_attempts"
-        ] == 1
+        assert (
+            payload["environment"]["provider_policies"]["local.search"]["retry_profile"] == "none"
+        )
+        assert payload["environment"]["provider_policies"]["local.search"]["max_attempts"] == 1
         assert not any(method.startswith("llm.") for method in payload["capabilities"])
 
 
@@ -183,7 +181,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.6.1"
+    assert schema["info"]["version"] == "0.6.2"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
@@ -250,9 +248,7 @@ async def test_concurrent_session_create_request_id_produces_one_directory(tmp_p
     )
     request = SessionCreate(request_id="same-rollout")
     try:
-        results = await asyncio.gather(
-            *(runtime.create_session(request) for _ in range(20))
-        )
+        results = await asyncio.gather(*(runtime.create_session(request) for _ in range(20)))
         assert {session.id for session, _ in results} == {results[0][0].id}
         assert sum(created for _, created in results) == 1
         assert len(runtime.store.sessions()) == 1
@@ -288,17 +284,13 @@ def test_worker_restart_invalidates_old_epoch_sessions(tmp_path) -> None:
         worker_id="worker-a",
     )
     with TestClient(create_app(settings)) as client:
-        created = client.post(
-            "/v1/sessions", json={"request_id": "restart-me"}
-        ).json()
+        created = client.post("/v1/sessions", json={"request_id": "restart-me"}).json()
         old_epoch = created["worker_epoch"]
 
     with TestClient(create_app(settings)) as restarted:
         health = restarted.get("/healthz").json()
         response = restarted.get(f"/v1/sessions/{created['id']}")
-        create_retry = restarted.post(
-            "/v1/sessions", json={"request_id": "restart-me"}
-        )
+        create_retry = restarted.post("/v1/sessions", json={"request_id": "restart-me"})
         create_conflict = restarted.post(
             "/v1/sessions",
             json={"request_id": "restart-me", "lease_seconds": 60},
@@ -332,7 +324,7 @@ class RecordingSandbox:
             stderr="",
             duration_seconds=1.5,
             output={"records": 3},
-            citations=[{"ref": "ref_1", "url": "https://example.com"}],
+            citations=[{"source": "doc_1", "url": "https://example.com"}],
         )
 
 
@@ -461,7 +453,7 @@ def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None
         assert payload["succeeded"] is True
         assert payload["stdout"] == "ran\n"
         assert payload["output"] == {"records": 3}
-        assert payload["citations"][0]["ref"] == "ref_1"
+        assert payload["citations"][0]["source"] == "doc_1"
         assert payload["artifacts"] == ["evidence.jsonl"]
         assert payload["trace"] == []
         assert set(payload["timings"]) >= {
@@ -628,9 +620,7 @@ def test_workspace_and_sandbox_budgets_are_reported_on_the_exec_result(tmp_path)
         assert sandbox.requests[0].timeout_seconds == 0.5
         assert response.json()["usage"]["workspace_bytes"] == 3
         assert response.json()["session_state"] == "exhausted"
-        assert response.json()["terminal_reason"] == (
-            "budget_exhausted:max_workspace_bytes"
-        )
+        assert response.json()["terminal_reason"] == ("budget_exhausted:max_workspace_bytes")
 
 
 @pytest.mark.asyncio
@@ -773,9 +763,9 @@ def test_workspace_can_be_read_back_before_the_session_is_deleted(tmp_path) -> N
 
 
 def test_exec_keeps_one_broker_session_across_turns(tmp_path) -> None:
-    """Refs and quota must survive across calls or filesystem serde is useless.
+    """Sources and quota must survive across calls or filesystem serde is useless.
 
-    A program that writes refs to JSONL in turn 1 and resolves them in turn 3
+    A program that writes sources to JSONL in turn 1 and resolves them in turn 3
     only works if both turns talk to the same broker session.
     """
     with exec_client(tmp_path, RecordingSandbox()) as client:
@@ -789,9 +779,12 @@ def test_exec_keeps_one_broker_session_across_turns(tmp_path) -> None:
 
         client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"})
         assert runtime.broker.sessions[token] is first
-        assert client.post(
-            f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"}
-        ).json()["usage"]["search_calls"] == 7
+        assert (
+            client.post(f"/v1/sessions/{session_id}/exec", json={"code": "pass\n"}).json()["usage"][
+                "search_calls"
+            ]
+            == 7
+        )
 
         client.delete(f"/v1/sessions/{session_id}")
         assert token not in runtime.broker.sessions
@@ -941,9 +934,7 @@ async def test_abort_preempts_graceful_delete_waiting_for_exec(tmp_path) -> None
         await asyncio.sleep(0)
         assert deleting.done() is False
 
-        aborted, deleted = await asyncio.gather(
-            runtime.abort_session(session.id), deleting
-        )
+        aborted, deleted = await asyncio.gather(runtime.abort_session(session.id), deleting)
         assert running.cancelled()
         assert sorted((aborted, deleted)) == [False, True]
         assert sandbox.close_calls == [session.id]
@@ -1094,9 +1085,7 @@ async def test_per_session_lease_expires_without_global_ttl(tmp_path) -> None:
     runtime = ApplicationRuntime(
         Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
     )
-    session, _ = await runtime.create_session(
-        SessionCreate(lease_seconds=30)
-    )
+    session, _ = await runtime.create_session(SessionCreate(lease_seconds=30))
     runtime.store.touch_session(session.id, at=now - timedelta(seconds=31))
     try:
         assert await runtime.reap_expired_sessions(now=now) == [session.id]
@@ -1173,9 +1162,7 @@ async def test_stop_closes_model_client_when_broker_shutdown_fails(tmp_path) -> 
 async def test_lifespan_cleans_up_after_partial_start_failure(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    app = create_app(
-        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
-    )
+    app = create_app(Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock"))
     runtime = app.state.runtime
     stopped = False
 
@@ -1224,9 +1211,7 @@ class TurnMarkingSandbox:
         turn = len(self.requests)
         self.requests.append(request)
         (request.workspace / f"turn-{turn}.txt").write_text("x", encoding="utf-8")
-        return SandboxResult(
-            exit_code=0, stdout="", stderr="", duration_seconds=0.5
-        )
+        return SandboxResult(exit_code=0, stdout="", stderr="", duration_seconds=0.5)
 
 
 def test_every_program_is_archived_with_the_name_it_ran_under(tmp_path) -> None:

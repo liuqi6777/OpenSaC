@@ -41,7 +41,7 @@ READ_LIMIT_PER_CONSTRAINT = 6
 artifacts = set(sdk.state.list(f"{root}/"))
 sdk.state.write_json(manifest_path, research_manifest)
 pool = {
-    row.ref: dict(row)
+    row.source: dict(row)
     for row in (sdk.state.read_jsonl(pool_path) if pool_path in artifacts else [])
 }
 
@@ -66,22 +66,21 @@ for batch in batches:
     if batch.failure is not None:
         print(f"query failed: {batch.query} code={batch.failure.code}")
 
-leader_refs = []
+leader_sources = []
 for batch in batches:
     if batch.failure is not None:
         continue
     for hit in batch.hits[:2]:
-        if hit.ref not in leader_refs:
-            leader_refs.append(hit.ref)
+        if hit.source not in leader_sources:
+            leader_sources.append(hit.source)
 
-current_rank = {candidate.ref: candidate.fused_rank for candidate in fusion}
+current_rank = {candidate.source: candidate.fused_rank for candidate in fusion}
 for candidate in fusion:
     row = pool.setdefault(
-        candidate.ref,
+        candidate.source,
         {
-            "ref": candidate.ref,
+            "source": candidate.source,
             "title": "",
-            "url": None,
             "domain": None,
             "date": None,
             "snippet": "",
@@ -89,7 +88,6 @@ for candidate in fusion:
         },
     )
     row["title"] = candidate.title or row.get("title", "")
-    row["url"] = candidate.url or row.get("url")
     row["domain"] = candidate.domain or row.get("domain")
     row["date"] = candidate.date or row.get("date")
     if candidate.snippet:
@@ -102,25 +100,25 @@ merged = [dict(row) for row in sdk.state.read_jsonl(pool_path)]
 ordered = sorted(
     merged,
     key=lambda row: (
-        0 if row["ref"] in current_rank else 1,
-        current_rank.get(row["ref"], 1_000_000),
+        0 if row["source"] in current_rank else 1,
+        current_rank.get(row["source"], 1_000_000),
         -float(row.get("score") or 0.0),
-        row["ref"],
+        row["source"],
     ),
 )
 
-selected_refs = []
-for ref in leader_refs:
-    if ref in pool and ref not in selected_refs and len(selected_refs) < POOL_LIMIT:
-        selected_refs.append(ref)
+selected_sources = []
+for source in leader_sources:
+    if source in pool and source not in selected_sources and len(selected_sources) < POOL_LIMIT:
+        selected_sources.append(source)
 for row in ordered:
-    if row["ref"] not in selected_refs and len(selected_refs) < POOL_LIMIT:
-        selected_refs.append(row["ref"])
-selected = set(selected_refs)
-bounded_pool = [row for row in ordered if row["ref"] in selected]
+    if row["source"] not in selected_sources and len(selected_sources) < POOL_LIMIT:
+        selected_sources.append(row["source"])
+selected = set(selected_sources)
+bounded_pool = [row for row in ordered if row["source"] in selected]
 sdk.state.write_jsonl(pool_path, bounded_pool)
-ordered_refs = [row["ref"] for row in bounded_pool]
-pool_by_ref = {row["ref"]: row for row in bounded_pool}
+ordered_sources = [row["source"] for row in bounded_pool]
+pool_by_source = {row["source"]: row for row in bounded_pool}
 
 print(f"research={research_id} pool={len(bounded_pool)} new={len(current_rank)}")
 for row in bounded_pool[:5]:
@@ -144,7 +142,7 @@ attempted = {}
 for name in constraints:
     row = loaded_attempts.get(name, {})
     attempted[name] = (
-        set(row.get("refs", [])) if row.get("fingerprint") == fingerprints[name] else set()
+        set(row.get("sources", [])) if row.get("fingerprint") == fingerprints[name] else set()
     )
 
 for name, spec in constraints.items():
@@ -154,7 +152,7 @@ for name, spec in constraints.items():
 
     pattern = spec["pattern"]
     compiled = re.compile(pattern, re.IGNORECASE)
-    available = [ref for ref in ordered_refs if ref not in attempted[name]]
+    available = [source for source in ordered_sources if source not in attempted[name]]
     available = available[:SCAN_LIMIT_PER_CONSTRAINT]
     if not available:
         print(f"{name}: no untried candidates; change the queries")
@@ -180,13 +178,13 @@ for name, spec in constraints.items():
         for match in report.matches:
             if reads_for_constraint >= READ_LIMIT_PER_CONSTRAINT:
                 break
-            if match.ref in seen_matches:
+            if match.source in seen_matches:
                 continue
-            seen_matches.add(match.ref)
+            seen_matches.add(match.source)
             reads_for_constraint += 1
             try:
                 passage = sdk.content.read(
-                    [match.ref],
+                    [match.source],
                     offset=max(match.line - 10, 1),
                     limit=40,
                     max_chars=16_000,
@@ -209,9 +207,9 @@ for name, spec in constraints.items():
             evidence[name] = {
                 "fingerprint": fingerprints[name],
                 "requirement": spec["requirement"],
-                "ref": passage.ref,
+                "source": passage.source,
                 "text": passage.text,
-                "locator": dict(passage.locator),
+                "locator": passage.locator,
             }
             print(f"{name}: verified")
             break
@@ -224,8 +222,8 @@ if evidence:
 sdk.state.write_json(
     attempts_path,
     {
-        name: {"fingerprint": fingerprints[name], "refs": sorted(refs)}
-        for name, refs in attempted.items()
+        name: {"fingerprint": fingerprints[name], "sources": sorted(sources)}
+        for name, sources in attempted.items()
     },
 )
 
@@ -240,13 +238,12 @@ if evidence and not missing:
                 {
                     "constraint": name,
                     "requirement": row["requirement"],
-                    "ref": row["ref"],
-                    "title": pool_by_ref.get(row["ref"], {}).get("title"),
-                    "url": pool_by_ref.get(row["ref"], {}).get("url"),
+                    "source": row["source"],
+                    "title": pool_by_source.get(row["source"], {}).get("title"),
                     "text": row["text"][:2_000],
                 }
                 for name, row in evidence.items()
             ],
         },
-        citations=[{"ref": row["ref"], "locator": row["locator"]} for row in evidence.values()],
+        citations=[{"locator": row["locator"]} for row in evidence.values()],
     )

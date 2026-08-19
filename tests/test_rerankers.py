@@ -31,7 +31,7 @@ class _TwoPageBackend:
         del query, domains
         return [
             SearchHit(
-                ref="",
+                source="",
                 backend="web",
                 title=f"Page {index}",
                 url=f"https://example.test/{index}",
@@ -41,17 +41,14 @@ class _TwoPageBackend:
             for index in range(offset, min(offset + limit, 2))
         ]
 
-    async def content(self, hits, *, query=None):
+    async def fetch(self, hit, *, query=None):
         del query
-        return [
-            ContentSnippet(
-                ref=hit.ref,
-                title=hit.title,
-                url=hit.url,
-                text=f"rankable private passage from {hit.title}",
-            )
-            for hit in hits
-        ]
+        return ContentSnippet(
+            source=hit.source,
+            title=hit.title,
+            url=hit.url,
+            text=f"rankable private passage from {hit.title}",
+        )
 
 
 def _mocked_reranker(
@@ -208,9 +205,9 @@ async def test_jina_reranking_uses_provider_retries_and_body_free_trace() -> Non
             "content.passages",
             {
                 "query": "rankable passage",
-                "refs": [hit["ref"] for hit in hits],
+                "sources": [hit["source"] for hit in hits],
                 "limit": 2,
-                "max_per_ref": 1,
+                "max_per_source": 1,
             },
             execution_id="jina-retry",
         )
@@ -219,7 +216,7 @@ async def test_jina_reranking_uses_provider_retries_and_body_free_trace() -> Non
         await service.aclose()
 
     assert calls == 3
-    assert [row["ref"] for row in report["passages"]] == [hits[1]["ref"], hits[0]["ref"]]
+    assert [row["source"] for row in report["passages"]] == [hits[1]["source"], hits[0]["source"]]
     rerank_attempts = [
         attempt for attempt in trace.provider_attempts if attempt.operation == "web.rerank"
     ]
@@ -251,12 +248,12 @@ async def test_jina_final_http_error_is_typed_and_does_not_expose_response_body(
     )
     service.register_session(_session())
     try:
-        ref = (await service.call("token", "search.query", {"query": "seed"}))[0]["ref"]
+        source = (await service.call("token", "search.query", {"query": "seed"}))[0]["source"]
         with pytest.raises(ProviderRequestError) as raised:
             await service.call(
                 "token",
                 "content.passages",
-                {"query": "rankable", "refs": [ref]},
+                {"query": "rankable", "sources": [source]},
                 execution_id="jina-final-error",
             )
         trace = service.take_trace("token", "jina-final-error")[0]

@@ -19,7 +19,6 @@ from opensac._contracts import (
     ContentGrepReport,
     ContentMatch,
     ContentSnippet,
-    EvidenceLocator,
     OperationError,
     SearchBatch,
     SearchHit,
@@ -48,7 +47,7 @@ def _explore_pattern() -> str:
 
 
 def _verify_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Verify selected refs and submit")
+    return _code_block(PATTERNS_PATH, "## Verify selected sources and submit")
 
 
 def _rank_pattern() -> str:
@@ -88,7 +87,7 @@ class FakeSearch:
                     query=query,
                     hits=[
                         SearchHit(
-                            ref=f"ref_{prefix}unique_{index}",
+                            source=f"doc_{prefix}unique_{index}",
                             backend="local",
                             title=f"unique {index}",
                             url=f"https://example.test/{prefix}unique-{index}",
@@ -98,7 +97,7 @@ class FakeSearch:
                             rank=1,
                         ),
                         SearchHit(
-                            ref=f"ref_{prefix}consensus",
+                            source=f"doc_{prefix}consensus",
                             backend="local",
                             title="consensus",
                             url=f"https://example.test/{prefix}consensus",
@@ -118,7 +117,7 @@ class FakeSearch:
                 query=query,
                 hits=[
                     SearchHit(
-                        ref=f"ref_{prefix}{query_index}_{hit_index}",
+                        source=f"doc_{prefix}{query_index}_{hit_index}",
                         backend="local",
                         title=f"result {query_index}-{hit_index}",
                         url=(f"https://example.test/{prefix}{query_index}-{hit_index}"),
@@ -143,7 +142,7 @@ class FakeContent:
         self,
         *,
         missing_year: bool = False,
-        same_ref: bool = False,
+        same_source: bool = False,
         year_from_turn: int = 1,
         partial_failure: bool = False,
         locator_exhausted: bool = False,
@@ -151,7 +150,7 @@ class FakeContent:
         grep_error: bool = False,
     ) -> None:
         self.missing_year = missing_year
-        self.same_ref = same_ref
+        self.same_source = same_source
         self.year_from_turn = year_from_turn
         self.partial_failure = partial_failure
         self.locator_exhausted = locator_exhausted
@@ -159,14 +158,14 @@ class FakeContent:
         self.grep_error = grep_error
         self.turn = 1
         self.grep_calls: list[tuple[str, tuple[str, ...]]] = []
-        self.read_refs: list[str] = []
+        self.read_sources: list[str] = []
 
     @property
     def grep_widths(self) -> list[int]:
-        return [len(refs) for _, refs in self.grep_calls]
+        return [len(sources) for _, sources in self.grep_calls]
 
-    def grep_report(self, refs: list[str], pattern: str, **_kwargs: object) -> ContentGrepReport:
-        self.grep_calls.append((pattern, tuple(refs)))
+    def grep_report(self, sources: list[str], pattern: str, **_kwargs: object) -> ContentGrepReport:
+        self.grep_calls.append((pattern, tuple(sources)))
         if self.grep_error:
             raise BrokerError(
                 "content provider unavailable",
@@ -178,25 +177,25 @@ class FakeContent:
         if self.no_matches or (is_year and (self.missing_year or self.turn < self.year_from_turn)):
             matches = []
         else:
-            ref = refs[0] if self.same_ref or not is_year or len(refs) == 1 else refs[1]
+            source = (
+                sources[0] if self.same_source or not is_year or len(sources) == 1 else sources[1]
+            )
             line = 120 if is_year else 12
             matches = [
                 ContentMatch(
-                    input_index=refs.index(ref),
-                    ref=ref,
-                    title=ref,
+                    input_index=sources.index(source),
+                    source=source,
+                    title=source,
                     line=line,
                     text="1998" if is_year else "target phrase",
-                    locator=EvidenceLocator(
-                        id=f"grep-{ref}-{line}", ref=ref, kind="selected_passage"
-                    ),
+                    locator=f"grep-{source}-{line}",
                 )
             ]
         failures = (
             [
                 ContentFailure(
-                    input_index=len(refs) - 1,
-                    ref=refs[-1],
+                    input_index=len(sources) - 1,
+                    source=sources[-1],
                     failure=CapabilityFailure(
                         code="provider_timeout",
                         message="document fetch timed out",
@@ -211,19 +210,19 @@ class FakeContent:
         return ContentGrepReport(
             matches=matches,
             failures=failures,
-            input_count=len(refs),
+            input_count=len(sources),
         )
 
-    def read(self, refs: list[str], **kwargs: object) -> list[ContentSnippet]:
-        ref = refs[0]
-        self.read_refs.append(ref)
+    def read(self, sources: list[str], **kwargs: object) -> list[ContentSnippet]:
+        source = sources[0]
+        self.read_sources.append(source)
         offset = int(kwargs["offset"])
-        text = f"{'1998' if offset > 50 else 'target phrase'} evidence for {ref}"
+        text = f"{'1998' if offset > 50 else 'target phrase'} evidence for {source}"
         if self.locator_exhausted:
             return [
                 ContentSnippet(
-                    ref=ref,
-                    title=ref,
+                    source=source,
+                    title=source,
                     text=text,
                     locator_error=OperationError(
                         code="evidence_capacity_exhausted",
@@ -234,12 +233,10 @@ class FakeContent:
             ]
         return [
             ContentSnippet(
-                ref=ref,
-                title=ref,
+                source=source,
+                title=source,
                 text=text,
-                locator=EvidenceLocator(
-                    id=f"read-{ref}-{offset}", ref=ref, kind="selected_passage"
-                ),
+                locator=f"read-{source}-{offset}",
             )
         ]
 
@@ -257,7 +254,7 @@ def _run_pattern(
     *,
     program: str | None = None,
     missing_year: bool = False,
-    same_ref: bool = False,
+    same_source: bool = False,
     year_from_turn: int = 1,
     turns: int = 1,
     partial_failure: bool = False,
@@ -273,7 +270,7 @@ def _run_pattern(
     )
     content = FakeContent(
         missing_year=missing_year,
-        same_ref=same_ref,
+        same_source=same_source,
         year_from_turn=year_from_turn,
         partial_failure=partial_failure,
         locator_exhausted=locator_exhausted,
@@ -352,7 +349,7 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
 
     assert "opensac_sdk.types" not in contract
     assert "There is no public SDK model hierarchy" in contract
-    assert 'both `row.ref` and `row["ref"]`' in contract
+    assert 'both `row.source` and `row["source"]`' in contract
     assert "Fused candidate" in contract
     assert "Passage report" in contract
     assert "structured interface to the session workspace" in contract
@@ -433,7 +430,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert len(verify.splitlines()) <= 75
     assert "sdk.search.many(" not in verify
     assert "NEXT:" in verify
-    assert "dict(passage.locator)" in verify
+    assert '"locator": passage.locator' in verify
     assert verify.index("sdk.content.grep_report(") < verify.index("sdk.content.read(")
     assert verify.index("sdk.content.read(") < verify.index("sdk.output.submit(")
     assert verify.count("sdk.output.submit(") == 1
@@ -450,7 +447,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.state.write_jsonl(pool_path, bounded_pool)" in stateful
     assert '"requirements": {name: spec["requirement"]' in stateful
     assert '"source_policy": source_policy' in stateful
-    assert "ordered_refs" in stateful
+    assert "ordered_sources" in stateful
     assert "attempted[name]" in stateful
     assert "grep_report(list(pool)" not in stateful
     assert "sdk.output.submit(" in stateful
@@ -496,9 +493,9 @@ def test_workspace_probe_recovers_saved_research_progress(tmp_path: Path) -> Non
     root = f"runs/{research_id}"
     state = StateResource(str(tmp_path))
     state.write_json(f"{root}/manifest.json", {"task": "test"})
-    state.write_jsonl(f"{root}/pool.jsonl", [{"ref": "ref_1"}])
-    state.write_json(f"{root}/evidence.json", {"phrase": {"ref": "ref_1"}})
-    state.write_json(f"{root}/attempts.json", {"phrase": {"refs": ["ref_1"]}})
+    state.write_jsonl(f"{root}/pool.jsonl", [{"source": "doc_1"}])
+    state.write_json(f"{root}/evidence.json", {"phrase": {"source": "doc_1"}})
+    state.write_json(f"{root}/attempts.json", {"phrase": {"sources": ["doc_1"]}})
 
     program = _workspace_probe().replace("copy-the-task-derived-id", research_id)
     _, _, output, printed = _run_pattern(tmp_path, program=program)
@@ -570,11 +567,11 @@ def test_verify_pattern_submits_instead_of_printing_final_evidence(tmp_path: Pat
 
     assert printed == ""
     assert len(content.grep_calls) == 2
-    assert content.read_refs
+    assert content.read_sources
     assert len(output.submissions) == 1
     submitted, citations = output.submissions[0]
     assert {row["constraint"] for row in submitted["evidence"]} == {"phrase", "year"}
-    assert all(citation["locator"]["id"].startswith("read-") for citation in citations)
+    assert all(citation["locator"].startswith("read-") for citation in citations)
 
 
 def test_verify_pattern_ends_in_next_when_model_judgment_is_needed(tmp_path: Path) -> None:
@@ -596,11 +593,10 @@ def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -
 
     pool = sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
     assert len(pool) == 4
-    assert pool[0].ref == "ref_consensus"
+    assert pool[0].source == "doc_consensus"
     assert set(pool[0]) == {
-        "ref",
+        "source",
         "title",
-        "url",
         "domain",
         "date",
         "snippet",
@@ -608,27 +604,24 @@ def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -
     }
     assert content.grep_widths == [4, 4]
     assert "pool=4" in printed
-    assert "ref_" not in printed
+    assert "doc_" not in printed
 
     evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
     assert set(evidence) == {"phrase", "year"}
     assert len(output.submissions) == 1
     _, citations = output.submissions[0]
-    assert all(
-        citation["ref"] == citation["locator"]["ref"]
-        and citation["locator"]["id"].startswith("read-")
-        for citation in citations
-    )
+    assert all(set(citation) == {"locator"} for citation in citations)
+    assert all(citation["locator"].startswith("read-") for citation in citations)
 
 
 def test_pattern_pool_score_is_idempotent_across_replayed_stages(tmp_path: Path) -> None:
     sdk, _, _, _ = _run_pattern(tmp_path)
     pool_path = _artifact(sdk.state, "pool.jsonl")
-    first = {row.ref: row.score for row in sdk.state.read_jsonl(pool_path)}
+    first = {row.source: row.score for row in sdk.state.read_jsonl(pool_path)}
 
     sdk, _, _, _ = _run_pattern(tmp_path, turns=2)
     replayed = {
-        row.ref: row.score for row in sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
+        row.source: row.score for row in sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
     }
 
     assert replayed == first
@@ -643,21 +636,21 @@ def test_pattern_does_not_submit_with_an_unsupported_constraint(tmp_path: Path) 
     assert set(evidence) == {"phrase"}
     attempts = sdk.state.read_json(_artifact(sdk.state, "attempts.json"))
     assert attempts.year.fingerprint
-    assert attempts.year.refs
+    assert attempts.year.sources
 
 
 def test_pattern_verifies_far_apart_constraints_in_the_same_document(tmp_path: Path) -> None:
-    sdk, _, output, _ = _run_pattern(tmp_path, same_ref=True)
+    sdk, _, output, _ = _run_pattern(tmp_path, same_source=True)
 
     evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
-    assert {row.ref for row in evidence.values()} == {"ref_consensus"}
+    assert {row.source for row in evidence.values()} == {"doc_consensus"}
     assert all(
-        set(row) == {"fingerprint", "requirement", "ref", "text", "locator"}
+        set(row) == {"fingerprint", "requirement", "source", "text", "locator"}
         for row in evidence.values()
     )
     assert len(output.submissions) == 1
     _, citations = output.submissions[0]
-    assert len({citation["locator"]["id"] for citation in citations}) == 2
+    assert len({citation["locator"] for citation in citations}) == 2
 
 
 def test_pattern_unions_new_evidence_across_turns(tmp_path: Path) -> None:
@@ -675,8 +668,8 @@ def test_pattern_unions_new_evidence_across_turns(tmp_path: Path) -> None:
     assert len(citations) == 2
     evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
     assert set(evidence) == {"phrase", "year"}
-    assert evidence.phrase.ref.startswith("ref_turn_1_")
-    assert evidence.year.ref.startswith("ref_turn_2_")
+    assert evidence.phrase.source.startswith("doc_turn_1_")
+    assert evidence.year.source.startswith("doc_turn_2_")
 
 
 def test_pattern_reports_partial_fetch_failure_and_keeps_matches(tmp_path: Path) -> None:
@@ -711,20 +704,20 @@ def test_pattern_bounds_pool_and_content_batches(tmp_path: Path) -> None:
     assert not output.submissions
 
 
-def test_pattern_does_not_rescan_attempted_refs(tmp_path: Path) -> None:
+def test_pattern_does_not_rescan_attempted_sources(tmp_path: Path) -> None:
     _, content, output, printed = _run_pattern(
         tmp_path,
         turns=2,
         missing_year=True,
     )
 
-    year_calls = [refs for pattern, refs in content.grep_calls if "1998" in pattern]
+    year_calls = [sources for pattern, sources in content.grep_calls if "1998" in pattern]
     assert len(year_calls) == 1
     assert "year: no untried candidates; change the queries" in printed
     assert not output.submissions
 
 
-def test_pattern_does_not_replay_refs_after_call_wide_content_failure(tmp_path: Path) -> None:
+def test_pattern_does_not_replay_sources_after_call_wide_content_failure(tmp_path: Path) -> None:
     _, content, output, printed = _run_pattern(
         tmp_path,
         turns=2,

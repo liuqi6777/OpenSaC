@@ -99,7 +99,7 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
     for path, heading in (
         (PATTERNS_PATH, "## Explore candidates"),
         (PATTERNS_PATH, "## Rank passages across fused candidates"),
-        (PATTERNS_PATH, "## Verify selected refs and submit"),
+        (PATTERNS_PATH, "## Verify selected sources and submit"),
     ):
         program = _fenced_block(path, "python", heading=heading)
         compile(program, "<search-as-code-cli-pattern>", "exec")

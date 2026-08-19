@@ -22,17 +22,17 @@ contents; every later program must explicitly load the files it needs.
 | Artifact | Durable decision | Update rule |
 | --- | --- | --- |
 | `manifest.json` | Task, stable requirements, source policy | Write once per namespace |
-| `pool.jsonl` | Bounded candidate metadata and refs | Merge, rerank, then prune |
+| `pool.jsonl` | Bounded candidate metadata and sources | Merge, rerank, then prune |
 | `evidence.json` | Verified passages and locators | Keep matching fingerprints |
-| `attempts.json` | Refs tried for each matching rule | Save before capability calls |
+| `attempts.json` | Sources tried for each matching rule | Save before capability calls |
 
 For every stage:
 
 - Derive the ID from the exact task, stable requirements, and source policy—not queries or regexes.
 - Start with `sdk.state.list(f"{root}/")`, then read the artifacts the stage needs.
 - Save progress before printing `NEXT:` or exiting. Python variables do not survive calls.
-- Keep pools bounded and skip attempted `(constraint, ref)` pairs.
-- Treat stored refs and locators as valid only in the same live broker session.
+- Keep pools bounded and skip attempted `(constraint, source)` pairs.
+- Treat stored sources and locators as valid only in the same live broker session.
 - Use bounded `print` output for progress; use `sdk.output.submit` for the final result.
 
 ## 1. Search or extend the candidate pool
@@ -66,12 +66,11 @@ if manifest_path not in artifacts:
 queries = ['"exact phrase" entity', "entity alternate wording", "rare clue organization"]
 batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
 fusion = sdk.search.fuse_rrf(batches, k=60)
-rank_now = {candidate.ref: candidate.fused_rank for candidate in fusion}
+rank_now = {candidate.source: candidate.fused_rank for candidate in fusion}
 new_rows = [
     {
-        "ref": candidate.ref,
+        "source": candidate.source,
         "title": candidate.title,
-        "url": candidate.url,
         "domain": candidate.domain,
         "snippet": candidate.snippet[:400],
         "score": candidate.fused_score,
@@ -82,8 +81,8 @@ sdk.state.merge_jsonl(pool_path, new_rows)
 pool = [dict(row) for row in sdk.state.read_jsonl(pool_path)]
 pool.sort(
     key=lambda row: (
-        0 if row["ref"] in rank_now else 1,
-        rank_now.get(row["ref"], 1_000_000),
+        0 if row["source"] in rank_now else 1,
+        rank_now.get(row["source"], 1_000_000),
         -float(row.get("score") or 0.0),
     )
 )
@@ -98,7 +97,7 @@ print("NEXT: inspect candidates, verify a constraint, or refine the queries")
 ## 2. Verify one missing constraint
 
 Adapt `name`, `requirement`, and `pattern`, then run this stage for one missing constraint. Its
-fingerprint invalidates only that constraint when the rule changes. Attempted refs are saved before
+fingerprint invalidates only that constraint when the rule changes. Attempted sources are saved before
 content calls so the next stage does not silently rescan them.
 
 ```python
@@ -126,17 +125,17 @@ fingerprint = hashlib.sha256(json.dumps(rule, sort_keys=True).encode()).hexdiges
 if evidence.get(name, {}).get("fingerprint") != fingerprint:
     evidence.pop(name, None)
 saved = attempts.get(name, {})
-attempted = set(saved.get("refs", [])) if saved.get("fingerprint") == fingerprint else set()
-refs = [row.ref for row in pool if row.ref not in attempted][:40]
+attempted = set(saved.get("sources", [])) if saved.get("fingerprint") == fingerprint else set()
+sources = [row.source for row in pool if row.source not in attempted][:40]
 
-if refs:
-    attempted.update(refs)
-    attempts[name] = {"fingerprint": fingerprint, "refs": sorted(attempted)}
+if sources:
+    attempted.update(sources)
+    attempts[name] = {"fingerprint": fingerprint, "sources": sorted(attempted)}
     sdk.state.write_json(attempts_path, attempts)
-    report = sdk.content.grep_report(refs, pattern, context=2)
+    report = sdk.content.grep_report(sources, pattern, context=2)
     for match in report.matches[:6]:
         passage = sdk.content.read(
-            [match.ref], offset=max(match.line - 10, 1), limit=40, max_chars=16_000
+            [match.source], offset=max(match.line - 10, 1), limit=40, max_chars=16_000
         )[0]
         if (
             passage.failure is None
@@ -146,9 +145,9 @@ if refs:
             evidence[name] = {
                 "fingerprint": fingerprint,
                 "requirement": requirement,
-                "ref": passage.ref,
+                "source": passage.source,
                 "text": passage.text,
-                "locator": dict(passage.locator),
+                "locator": passage.locator,
             }
             sdk.state.write_json(evidence_path, evidence)
             break
@@ -207,14 +206,14 @@ else:
                 {
                     "constraint": name,
                     "requirement": evidence[name]["requirement"],
-                    "ref": evidence[name]["ref"],
+                    "source": evidence[name]["source"],
                     "text": evidence[name]["text"][:2_000],
                 }
                 for name in required
             ],
         },
         citations=[
-            {"ref": evidence[name]["ref"], "locator": evidence[name]["locator"]}
+            {"locator": evidence[name]["locator"]}
             for name in required
         ],
     )

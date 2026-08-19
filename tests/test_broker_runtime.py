@@ -21,7 +21,7 @@ class SocketBackend:
     async def search(self, query, *, limit, offset=0, domains=None):
         return [
             SearchHit(
-                ref="",
+                source="",
                 backend="local",
                 docid="doc-1",
                 snippet=query,
@@ -29,8 +29,8 @@ class SocketBackend:
             )
         ]
 
-    async def content(self, hits, *, query=None):
-        return [ContentSnippet(ref=hit.ref, text="full document") for hit in hits]
+    async def fetch(self, hit, *, query=None):
+        return ContentSnippet(source=hit.source, text="full document")
 
 
 async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
@@ -53,7 +53,8 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
             {"query": "needle", "limit": 1},
         )
         assert result[0]["snippet"] == "needle"
-        assert result[0]["ref"].startswith("ref_")
+        assert result[0]["source"] == "doc-1"
+        assert "docid" not in result[0]
     finally:
         await runtime.stop()
 

@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     citation_max_evidence_chars: int = Field(default=16_000, ge=1)
     citation_max_evidence_records: int = Field(default=4_096, ge=1)
     citation_max_evidence_passage_bytes: int = Field(default=33_554_432, ge=1)
-    content_max_refs_per_request: int = Field(default=256, ge=1)
+    content_max_sources_per_request: int = Field(default=256, ge=1)
     # Concurrent document fetches inside one `content.*` call. The broker's own
     # semaphore admits a whole call as one unit, so without this a program
     # asking for fifty pages opens fifty simultaneous requests to the provider,

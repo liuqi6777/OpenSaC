@@ -44,7 +44,7 @@ class LocalBackend:
     @staticmethod
     def _hit(docid: str, rank: int) -> SearchHit:
         return SearchHit(
-            ref="",
+            source="",
             backend="local",
             docid=docid,
             title=f"document {docid}",
@@ -75,7 +75,7 @@ class LocalBackend:
         if failure := self.failures.get(docid):
             raise failure
         return ContentSnippet(
-            ref=hit.ref,
+            source=hit.source,
             text=self.documents[docid],
             title=hit.title,
             metadata={"backend": "local", "docid": docid},
@@ -117,22 +117,35 @@ async def test_broker_runs_bundled_search_preflight_before_provider_usage() -> N
 
 
 async def test_broker_runs_bundled_content_preflight_before_transport() -> None:
-    backend = LocalSearchBackend("http://provider.invalid")
+    class RejectingLocalBackend(LocalSearchBackend):
+        @staticmethod
+        def preflight_fetch(hit: SearchHit) -> None:
+            del hit
+            raise ProviderRequestError(
+                "invalid_request",
+                "Local search result cannot be fetched.",
+                retryable=False,
+            )
+
+    backend = RejectingLocalBackend("http://provider.invalid")
     service = BrokerService({"local": backend})
     state = service.register_session(make_session())
+    hit = SearchHit(
+        source="1",
+        backend="local",
+        docid="1",
+        rank=1,
+    )
     state.remember(
-        SearchHit(
-            ref="ref_without_docid",
-            backend="local",
-            docid=None,
-            rank=1,
-        )
+        hit,
+        identity=service._identity(hit),
+        candidate_source="1",
     )
 
     rows = await service.call(
         "token",
         "content.get_many",
-        {"refs": ["ref_without_docid"]},
+        {"sources": ["1"]},
         execution_id="content-preflight",
     )
 
@@ -209,7 +222,8 @@ async def test_fake_http_provider_retries_one_real_local_microbatch() -> None:
         {"queries": ["alpha", "beta"], "top_k": 10},
     ]
     assert [row["query"] for row in rows] == ["alpha", "alpha", "beta"]
-    assert [row["hits"][0]["docid"] for row in rows] == ["1", "1", "2"]
+    assert [row["hits"][0]["source"] for row in rows] == ["1", "1", "2"]
+    assert all("docid" not in row["hits"][0] for row in rows)
     assert state.policy.usage.search_calls == 3
     assert state.policy.usage.search_provider_attempts == 2
     assert state.policy.usage.provider_retries == 1
@@ -223,14 +237,14 @@ async def test_fake_http_provider_retries_one_real_local_microbatch() -> None:
 
 def test_provider_fingerprint_normalizes_model_mapping_order() -> None:
     first = SearchHit(
-        ref="ref_x",
+        source="doc_1",
         backend="local",
         docid="1",
         rank=1,
         metadata={"alpha": 1, "beta": 2},
     )
     second = SearchHit(
-        ref="ref_x",
+        source="doc_1",
         backend="local",
         docid="1",
         rank=1,
@@ -284,7 +298,7 @@ async def test_safe_retry_changes_attempt_usage_not_logical_search_usage() -> No
                 raise httpx.ConnectError("secret endpoint detail")
             return [
                 SearchHit(
-                    ref="",
+                    source="",
                     backend="web",
                     url="https://example.com/result",
                     snippet="secret response body must not enter trace",
@@ -421,7 +435,7 @@ async def test_cancelled_provider_backoff_is_counted_without_a_retry_attempt() -
     assert len(trace.provider_attempts) == 1
 
 
-async def test_content_dedupes_refs_and_grep_report_keeps_failure_indexes() -> None:
+async def test_content_dedupes_sources_and_grep_report_keeps_failure_indexes() -> None:
     backend = LocalBackend(documents={"1": "target line", "2": "unreadable"})
     backend.failures["2"] = ProviderRequestError(
         "provider_not_found",
@@ -431,22 +445,19 @@ async def test_content_dedupes_refs_and_grep_report_keeps_failure_indexes() -> N
     service = BrokerService({"local": backend})
     state = service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
-    refs = [hit["ref"] for hit in hits]
+    sources = [hit["source"] for hit in hits]
 
     report = await service.call(
         "token",
         "content.grep_report",
-        {"refs": [refs[0], refs[1], refs[1]], "pattern": "target"},
+        {"sources": [sources[0], sources[1], sources[1]], "pattern": "target"},
         execution_id="grep-report",
     )
 
     assert report["input_count"] == 3
     assert report["matches"][0]["input_index"] == 0
     assert [failure["input_index"] for failure in report["failures"]] == [1, 2]
-    assert all(
-        failure["failure"]["code"] == "provider_not_found"
-        for failure in report["failures"]
-    )
+    assert all(failure["failure"]["code"] == "provider_not_found" for failure in report["failures"])
     assert backend.fetches == ["1", "2"]
     assert state.policy.usage.content_fetches == 3
     assert state.policy.usage.content_backend_fetches == 2
@@ -457,7 +468,7 @@ async def test_content_dedupes_refs_and_grep_report_keeps_failure_indexes() -> N
     only_failure = await service.call(
         "token",
         "content.grep_report",
-        {"refs": [refs[1]], "pattern": "target"},
+        {"sources": [sources[1]], "pattern": "target"},
     )
     assert only_failure["matches"] == []
     assert only_failure["failures"][0]["failure"]["code"] == "provider_not_found"
@@ -472,16 +483,16 @@ async def test_systemic_content_failure_is_promoted_and_never_cached() -> None:
     )
     service = BrokerService({"local": backend})
     state = service.register_session(make_session())
-    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
     with pytest.raises(CapabilityProviderError) as caught:
-        await service.call("token", "content.get_many", {"refs": [ref]})
+        await service.call("token", "content.get_many", {"sources": [source]})
     assert caught.value.code == "provider_unavailable"
     assert caught.value.attempts == 1
     assert state.content_cache == {}
 
     with pytest.raises(CapabilityProviderError):
-        await service.call("token", "content.get_many", {"refs": [ref]})
+        await service.call("token", "content.get_many", {"sources": [source]})
     assert backend.fetches == ["1", "1"]
 
 
@@ -508,16 +519,16 @@ async def test_permanent_content_failures_remain_aligned_rows(
     service = BrokerService({"local": backend})
     service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
-    refs = [hit["ref"] for hit in hits]
+    sources = [hit["source"] for hit in hits]
 
-    failed = await service.call("token", "content.get_many", {"refs": refs})
+    failed = await service.call("token", "content.get_many", {"sources": sources})
 
     assert [row["failure"]["code"] for row in failed] == [code, code]
     assert [row["failure"]["attempts"] for row in failed] == [attempts, attempts]
     assert all(row["text"] == "" for row in failed)
 
     backend.failures.pop("1")
-    partial = await service.call("token", "content.get_many", {"refs": refs})
+    partial = await service.call("token", "content.get_many", {"sources": sources})
     assert partial[0]["text"] == "one"
     assert partial[0].get("failure") is None
     assert partial[1]["failure"]["code"] == code
@@ -536,17 +547,17 @@ async def test_evidence_capacity_uses_utf8_bytes_and_keeps_old_locators() -> Non
     first = await service.call(
         "token",
         "content.read",
-        {"refs": [hits[0]["ref"]], "limit": 1},
+        {"sources": [hits[0]["source"]], "limit": 1},
     )
     duplicate = await service.call(
         "token",
         "content.read",
-        {"refs": [hits[0]["ref"]], "limit": 1},
+        {"sources": [hits[0]["source"]], "limit": 1},
     )
     exhausted = await service.call(
         "token",
         "content.read",
-        {"refs": [hits[1]["ref"]], "limit": 1},
+        {"sources": [hits[1]["source"]], "limit": 1},
     )
 
     assert first[0]["locator"] == duplicate[0]["locator"]
@@ -562,18 +573,14 @@ async def test_evidence_capacity_uses_utf8_bytes_and_keeps_old_locators() -> Non
     selected = await service.call(
         "token",
         "citations.resolve",
-        {
-            "requests": [
-                {"ref": hits[0]["ref"], "locator": first[0]["locator"]}
-            ]
-        },
+        {"citations": [{"locator": first[0]["locator"]}]},
     )
     assert selected[0]["evidence"] == "é"
-    with pytest.raises(ValueError, match="explicit null"):
+    with pytest.raises(ValueError, match="bounded string"):
         await service.call(
             "token",
             "citations.resolve",
-            {"requests": [{"ref": hits[1]["ref"], "locator": None}]},
+            {"citations": [{"locator": None}]},
         )
 
 
@@ -582,32 +589,32 @@ def test_evidence_locator_collision_never_overwrites_the_existing_binding() -> N
     state = service.register_session(make_session())
     locator, error = service._register_evidence(
         state,
-        ref="ref_x",
+        identity="local:docid:1",
         text="original",
         document_text="document",
         coordinates={"type": "lines", "start_line": 1, "end_line": 1},
     )
     assert locator is not None and error is None
     conflicting = EvidenceRecord(
-        ref="ref_x",
+        identity="local:docid:1",
         kind="selected_passage",
         text="conflicting",
         coordinates={"type": "lines", "start_line": 9, "end_line": 9},
         document_fingerprint="d" * 64,
         passage_fingerprint="p" * 64,
     )
-    state.evidence[locator["id"]] = conflicting
+    state.evidence[locator] = conflicting
 
     with pytest.raises(RuntimeError, match="collision"):
         service._register_evidence(
             state,
-            ref="ref_x",
+            identity="local:docid:1",
             text="original",
             document_text="document",
             coordinates={"type": "lines", "start_line": 1, "end_line": 1},
         )
 
-    assert state.evidence[locator["id"]] is conflicting
+    assert state.evidence[locator] is conflicting
 
 
 async def test_evidence_capacity_admission_is_atomic_across_concurrent_reads() -> None:
@@ -625,7 +632,7 @@ async def test_evidence_capacity_admission_is_atomic_across_concurrent_reads() -
             service.call(
                 "token",
                 "content.read",
-                {"refs": [hit["ref"]], "limit": 1},
+                {"sources": [hit["source"]], "limit": 1},
             )
             for hit in hits
         )
@@ -638,17 +645,17 @@ async def test_evidence_capacity_admission_is_atomic_across_concurrent_reads() -
     assert state.evidence_passage_bytes <= 100
 
 
-async def test_content_ref_limit_rejects_before_usage_or_provider_side_effect() -> None:
+async def test_content_source_limit_rejects_before_usage_or_provider_side_effect() -> None:
     backend = LocalBackend()
-    service = BrokerService({"local": backend}, max_content_refs_per_request=2)
+    service = BrokerService({"local": backend}, max_content_sources_per_request=2)
     state = service.register_session(make_session())
-    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    with pytest.raises(ValueError, match="3 refs"):
+    with pytest.raises(ValueError, match="3 sources"):
         await service.call(
             "token",
             "content.get_many",
-            {"refs": [ref, ref, ref]},
+            {"sources": [source, source, source]},
         )
 
     assert state.policy.usage.content_fetches == 0
@@ -660,10 +667,10 @@ async def test_content_cache_budget_counts_utf8_bytes() -> None:
     backend = LocalBackend(documents={"1": "é"})
     service = BrokerService({"local": backend}, session_content_cache_bytes=1)
     service.register_session(make_session())
-    ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    await service.call("token", "content.get_many", {"refs": [ref]})
-    await service.call("token", "content.get_many", {"refs": [ref]})
+    await service.call("token", "content.get_many", {"sources": [source]})
+    await service.call("token", "content.get_many", {"sources": [source]})
 
     # The passage is one Unicode code point but two UTF-8 bytes, so it cannot
     # enter a one-byte cache and must be fetched again.

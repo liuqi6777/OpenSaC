@@ -20,7 +20,7 @@ class FrozenPageBackend:
         del query, domains
         return [
             SearchHit(
-                ref="",
+                source="",
                 backend="web",
                 title=f"Frozen evidence page {index}",
                 url=f"https://example.test/frozen/{index}",
@@ -30,17 +30,14 @@ class FrozenPageBackend:
             for index in range(offset, min(offset + limit, len(self.documents)))
         ]
 
-    async def content(self, hits, *, query=None):
+    async def fetch(self, hit, *, query=None):
         del query
-        return [
-            ContentSnippet(
-                ref=hit.ref,
-                title=hit.title,
-                url=hit.url,
-                text=self.documents[int(str(hit.url).rsplit("/", 1)[-1])],
-            )
-            for hit in hits
-        ]
+        return ContentSnippet(
+            source=hit.source,
+            title=hit.title,
+            url=hit.url,
+            text=self.documents[int(str(hit.url).rsplit("/", 1)[-1])],
+        )
 
 
 def _session() -> Session:
@@ -62,29 +59,31 @@ async def test_frozen_gold_passages_are_retrieved_and_resolvable() -> None:
         document = "\n\n".join(section["text"] * section["repeat"] for section in case["sections"])
         service = BrokerService({"web": FrozenPageBackend([document])})
         service.register_session(_session())
-        ref = (await service.call("token", "search.query", {"query": case["query"]}))[0]["ref"]
+        source = (await service.call("token", "search.query", {"query": case["query"]}))[0][
+            "source"
+        ]
 
         report = await service.call(
             "token",
             "content.passages",
             {
                 "query": case["query"],
-                "refs": [ref],
+                "sources": [source],
                 "limit": 5,
-                "max_per_ref": 5,
+                "max_per_source": 5,
             },
         )
 
         assert any(case["gold_span"] in row["text"] for row in report["passages"])
-        requests = [
-            {"ref": row["ref"], "locator": row["locator"]}
+        citations = [
+            {"locator": row["locator"]}
             for row in report["passages"]
             if row.get("locator") is not None
         ]
         resolved = await service.call(
             "token",
             "citations.resolve",
-            {"requests": requests},
+            {"citations": citations},
         )
         assert all(
             item["evidence"] == row["text"]
