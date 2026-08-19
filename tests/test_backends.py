@@ -6,10 +6,10 @@ import httpx
 import pytest
 
 from opensac._contracts import SearchHit
-from opensac.backends import local_http
-from opensac.backends import serper as serper_module
-from opensac.backends.local_http import LocalSearchBackend, parse_document_frontmatter
-from opensac.backends.serper import SerperBackend
+from opensac.backends.search import local_http
+from opensac.backends.search import serper as serper_module
+from opensac.backends.search.local_http import LocalSearchBackend, parse_document_frontmatter
+from opensac.backends.search.serper import SerperBackend
 from opensac.provider import ProviderRequestError
 
 # What `/get_document` returns: the full document, including its YAML header.

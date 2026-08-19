@@ -8,7 +8,8 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from opensac.backends.base import ClosableSearchBackend, SearchBackend
+from opensac.backends.rerank.base import ClosablePassageReranker, PassageReranker
+from opensac.backends.search.base import ClosableSearchBackend, SearchBackend
 from opensac.broker.call_context import CallContext, call_scope, trace_error_message
 from opensac.broker.content import ContentCapabilities
 from opensac.broker.llm import LLMCapabilities
@@ -19,7 +20,6 @@ from opensac.broker.session import BrokerSession
 from opensac.metrics import CapacityGate
 from opensac.models import CAPABILITY_METHODS, CapabilityEvent, Session
 from opensac.provider import ProviderPolicy, ProviderRuntime
-from opensac.rerankers import ClosablePassageReranker, PassageReranker
 
 CapabilityHandler = Callable[[BrokerSession, dict[str, Any]], Awaitable[Any]]
 

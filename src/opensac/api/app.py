@@ -38,7 +38,9 @@ from opensac.api.errors import (
     WorkerDrainingError,
     contract_error,
 )
-from opensac.backends import LocalSearchBackend, SerperBackend
+from opensac.backends.rerank.jina import JinaPassageReranker
+from opensac.backends.search.local_http import LocalSearchBackend
+from opensac.backends.search.serper import SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_path
 from opensac.broker.policy import BudgetExceeded
 from opensac.broker.session import BrokerSession
@@ -60,7 +62,6 @@ from opensac.models import (
     utc_now,
 )
 from opensac.provider import ProviderPolicy, ProviderRuntime
-from opensac.rerankers import JinaPassageReranker
 from opensac.sandbox import (
     SANDBOX_CONTRACT,
     DockerSandbox,

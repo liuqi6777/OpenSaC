@@ -6,10 +6,10 @@ import httpx
 import pytest
 
 from opensac._contracts import ContentSnippet, SearchHit
+from opensac.backends.rerank.jina import JinaPassageReranker
 from opensac.broker.service import BrokerService
 from opensac.models import ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
-from opensac.rerankers import JinaPassageReranker
 
 
 def _session() -> Session:

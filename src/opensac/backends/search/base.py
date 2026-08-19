@@ -1,3 +1,5 @@
+"""Contracts implemented by broker-facing search backends."""
+
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable

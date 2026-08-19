@@ -1,3 +1,5 @@
+"""Adapters for Serper search and its currently coupled Jina reader."""
+
 from __future__ import annotations
 
 import hashlib
@@ -43,9 +45,7 @@ class SerperBackend:
     def provider_identity(self) -> str:
         """Opaque limiter key for the endpoint and configured credential."""
 
-        material = "\0".join(
-            (self.search_url, self.reader_url, self.api_key, self.jina_api_key)
-        )
+        material = "\0".join((self.search_url, self.reader_url, self.api_key, self.jina_api_key))
         digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
         return f"web:{digest}"
 
