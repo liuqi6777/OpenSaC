@@ -224,10 +224,10 @@ OpenSAC can be driven through:
 
 1. a custom loop using the HTTP/Python client;
 2. `opensac agent-run` plus the CLI Search-as-Code skill;
-3. `opensac mcp` plus the MCP skill for Codex or Claude Code.
+3. `opensac mcp` plus the MCP skill for Codex.
 
-The public model-facing surface remains one operation, `sac_run(code)`. Conversation binding,
-session creation, lease renewal, and state-loss handling stay in the adapter. See the complete
+The MCP protocol exposes one operation, `sac_run(code)`. Conversation binding, session creation,
+lease renewal, and state-loss handling stay in the adapter. See the complete
 [Agent integration guide](docs/agent-integrations.md) or its
 [Chinese version](docs/agent-integrations.zh-CN.md).
 

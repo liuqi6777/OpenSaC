@@ -173,20 +173,6 @@ async def test_codex_context_reuses_and_isolates_sessions_without_leaking_ids(
     assert b"top-secret-api-key" not in state_bytes
 
 
-async def test_claude_binding_is_host_namespaced_and_never_echoed(tmp_path: Path) -> None:
-    server = FakeOpenSAC()
-    bridge = _bridge(tmp_path, server)
-    try:
-        assert bridge.bind_context("claude-session-secret") == "Claude Code session context bound"
-        observation = await bridge.run_code("work")
-    finally:
-        await bridge.aclose()
-
-    assert "claude-session-secret" not in observation
-    assert server.create_payloads[0]["request_id"].startswith("agent:claude:")
-    assert "claude-session-secret" not in server.create_payloads[0]["request_id"]
-
-
 async def test_missing_host_context_fails_closed_without_http(tmp_path: Path) -> None:
     server = FakeOpenSAC()
     bridge = _bridge(tmp_path, server)
@@ -372,12 +358,11 @@ async def test_stdio_handshake_exposes_code_only_sac_run_schema(tmp_path: Path) 
         ):
             await session.initialize()
             tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+            assert set(tools) == {"sac_run"}
             sac_run = tools["sac_run"]
             assert set(sac_run.inputSchema["properties"]) == {"code"}
             assert sac_run.inputSchema["required"] == ["code"]
             assert "session_id" not in json.dumps(sac_run.inputSchema)
-            assert "bind_context" in tools
-
             result = await session.call_tool("sac_run", {"code": "print('no context')"})
             assert not result.isError
             assert "context_unavailable" in result.content[0].text  # type: ignore[union-attr]

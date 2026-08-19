@@ -327,7 +327,7 @@ def test_skill_is_small_and_routes_detailed_contracts() -> None:
     assert len(skill) < 6_000
     assert "MCP tool `sac_run(code)`" in skill
     assert "Never create, resume, or delete REST sessions" in skill
-    assert "Never call `bind_context`" in skill
+    assert "request metadata" in skill
     assert "state_lost" in skill
     assert "submitted program was not replayed" in skill
     assert "execution outcome may be" in skill

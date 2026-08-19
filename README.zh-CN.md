@@ -209,9 +209,9 @@ OpenSAC 支持三种驱动方式：
 
 1. 自定义 agent loop，通过 HTTP/Python 客户端调用；
 2. `opensac agent-run` 配合 CLI 版 Search-as-Code skill；
-3. `opensac mcp` 配合 Codex 或 Claude Code 的 MCP skill。
+3. `opensac mcp` 配合 Codex 的 MCP skill。
 
-模型可见的公开接口仍只有 `sac_run(code)`。对话绑定、session 创建、lease 续租和状态丢失处理全部留在
+MCP 协议只暴露一个操作 `sac_run(code)`。对话绑定、session 创建、lease 续租和状态丢失处理全部留在
 适配层。完整配置见[智能体集成指南](docs/agent-integrations.zh-CN.md)或
 [英文版](docs/agent-integrations.md)。
 

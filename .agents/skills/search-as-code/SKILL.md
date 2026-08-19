@@ -6,8 +6,8 @@ description: Compose evidence-grounded OpenSAC research programs through the sac
 # Search as Code
 
 Invoke the model-visible MCP tool `sac_run(code)` and pass only a complete Python research
-program. Never create, resume, or delete REST sessions. Never call `bind_context`; the MCP host
-binds the current agent conversation.
+program. Never create, resume, or delete REST sessions. The MCP host binds the current agent
+conversation through request metadata.
 
 Begin programs with:
 

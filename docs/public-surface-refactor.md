@@ -110,7 +110,7 @@ CAPABILITY_METHODS     需要 broker 权限、预算和 trace 的 RPC 方法
 ```
 
 三者不能再用“SDK surface”笼统指代。`search.fuse_rrf` 和 `state.*` 可以是 SDK public operation，
-但不是 broker capability；`bind_context` 是 host control operation，不属于 model core。
+但不是 broker capability；来自 MCP request metadata 的 host binding 也不属于 model surface。
 
 ## 4. 目标 SDK 契约
 
@@ -214,22 +214,15 @@ sac_run
 
 Codex 已可从 MCP request metadata 解析 task identity，应直接满足该目标。
 
-### 6.2 Claude Code 约束
+### 6.2 Claude Code 通道
 
-当前 Claude Code 集成通过 `PreToolUse` 的 `mcp_tool` hook 调用同一 server 上的 `bind_context`。因此，
-直接注销该工具会破坏 session 隔离；在没有替代的宿主绑定通道前，不能为了数量好看而删除它。
+Claude Code hook 可以读取 `session_id`，但 MCP tool hook 只能调用已注册、可 discovery 的 server tool；
+当前 MCP request metadata 没有等价的 conversation identity。0.6 不为此保留第二个协议工具，也不使用进程级
+固定 context、工作目录或“最近一次绑定”等会破坏并发隔离的回退。
 
-实施顺序为：
-
-1. 先把文档事实修正为“协议 discovery 有 host-only `bind_context`，模型只应调用 `sac_run`”。
-2. 调研并验证 Claude Code 是否能通过 request metadata、server 启动环境或模型不可见的控制通道传递
-   `${session_id}`。
-3. 只有替代路径同时满足隔离、并发会话、重启恢复和不持久化原始 ID，才从公开 MCP server 移除
-   `bind_context`。
-4. 若宿主没有安全替代能力，0.6 保留该 host-only tool，并把“严格单工具 discovery”列为外部阻塞项，
-   不伪造已完成状态。
-
-禁止使用进程级固定 context、工作目录或“最近一次绑定”作为回退；这些方案会让并发对话共享 session。
+因此 MCP adapter 只支持能提供 request metadata 的 Codex。Claude Code 使用已有 `agent-run` CLI adapter，
+由 `CLAUDE_CODE_SESSION_ID` 在 host 侧完成绑定。未来只有出现标准、模型不可伪造的 metadata 通道时才重新增加
+Claude Code MCP 支持，且不得增加第二个 model-controlled tool。
 
 ## 7. Host Python client 分层
 
@@ -397,14 +390,11 @@ failures = report.failures
 
 ### PR 5：MCP binding
 
-先完成 Claude Code 替代通道的验证。若可行：
-
 - 从 `create_server()` 注销 `bind_context`；
-- 删除对应 tool schema 测试并增加单工具 discovery 断言；
+- 删除 Claude MCP 的可变进程级 context；
+- 增加精确单工具 discovery 断言；
 - 保留 context resolver 和 generation registry；
-- 更新 Codex/Claude 配置文档。
-
-若不可行，本 PR 只修正文档和测试命名，明确 host-only 暴露，不改变安全边界。
+- Codex 保持 MCP，Claude Code 明确使用 CLI adapter。
 
 ### PR 6：Broker 与 API 职责拆分
 
@@ -524,7 +514,7 @@ uv run pytest tests/test_sandbox_docker_e2e.py
 - PR 6 按 capability family 独立迁移，可逐模块 revert，不使用跨全仓库的一次性重写。
 - Content 删除可通过完整 revert 对应提交回滚，不在新代码上临时叠加 wrapper。
 - 类型路径迁移若需回滚，同样 revert 顶层导出提交，不增加双路径重导出。
-- MCP binding 迁移必须保留旧配置的 fail-closed 行为，不能在失败时创建进程共享 session。
+- MCP binding 删除可整提交回滚；不以进程共享 session 恢复 Claude Code MCP。
 - Host client 分层不改变 HTTP route，调用者可回退到上一版 client。
 
 ## 13. 完成标准
@@ -537,7 +527,7 @@ uv run pytest tests/test_sandbox_docker_e2e.py
 4. 常规 research workflow 不需要从包顶层导入结果模型。
 5. core content workflow 不隐藏 partial fetch failure。
 6. broker capability、SDK helper 和 host control operation 在文档中明确区分。
-7. MCP 对 `bind_context` 的实际 discovery 状态被准确描述；未解决外部宿主阻塞时不得声称只有一个协议工具。
+7. MCP `list_tools()` 精确返回 `sac_run`，缺少 Codex metadata 时 fail closed。
 8. 已删除方法在 SDK、broker、Skill、examples、测试和非历史文档中的引用清零。
 9. host admin 操作不再与常规执行方法共用同一个默认 facade。
 10. migration note 提供所有 breaking import 和方法替代示例。
