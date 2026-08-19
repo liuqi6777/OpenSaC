@@ -25,12 +25,12 @@ OpenSAC 实现了公开的
 抽象，但并不试图复刻 Perplexity 的内部搜索引擎。
 
 > [!IMPORTANT]
-> OpenSAC 是一项持续推进中的工作（当前版本 `0.5.0`）。我们正在积极开发系统并评测其效果，项目将
-> 持续更新；API、部署契约和研究材料也可能继续演进。
+> OpenSAC 是一项持续推进中的工作。我们正在积极开发系统并评测其效果，项目将持续更新；API、部署
+> 契约和研究材料也可能继续演进。
 
 > [!NOTE]
-> **发布状态：**[`v0.5.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.5.0) 已发布，
-> GHCR 上的服务镜像与沙箱镜像均可公开拉取且版本一致。
+> **发布状态：**[最新版本](https://github.com/liuqi6777/OpenSaC/releases/latest)已发布，GHCR 上的
+> 服务镜像与沙箱镜像均可公开拉取且版本一致。
 
 ## 为什么使用 OpenSAC
 
@@ -72,7 +72,7 @@ OpenSAC 有意不负责 agent loop。外部控制平面选择模型、生成程�
 
 ## 快速开始
 
-公开的 `v0.5.0` 镜像包含 OpenSAC API/broker 和隔离执行沙箱。
+已发布镜像包含 OpenSAC API/broker 和隔离执行沙箱。
 
 环境要求：Docker Engine 或 Docker Desktop、兼容 POSIX 的 shell，以及 Serper + Jina 凭证。
 
@@ -116,7 +116,7 @@ docker run --detach \
   --env OPENSAC_SEARCH_BACKEND=web \
   --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
   --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
-  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.5.0 \
+  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:latest \
   --publish 127.0.0.1:8000:8000 \
   --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
   --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
@@ -124,7 +124,7 @@ docker run --detach \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:0.5.0
+  ghcr.io/liuqi6777/opensac:latest
 ```
 
 等待几秒后，无需在宿主机安装客户端即可检查服务：
@@ -219,19 +219,19 @@ MCP 协议只暴露一个操作 `sac_run(code)`。对话绑定、session 创建�
 
 | 方式 | 状态 | 适用场景 |
 | --- | --- | --- |
-| Docker CLI | `v0.5.0` 已可用 | 无本地配置文件的最快启动方式 |
-| Docker Compose | `v0.5.0` 已可用 | 声明式、可复现部署 |
+| Docker CLI | 可用 | 无本地配置文件的最快启动方式 |
+| Docker Compose | 可用 | 声明式、可复现部署 |
 | Git 源码 | 可用 | 开发、实验和尚未发布的改动 |
 
 <details>
 <summary><strong>发布镜像与版本策略</strong></summary>
 
-`v0.5.0` 已发布适用于 Linux `amd64` 和 `arm64` 的多架构镜像：
+稳定版本会发布适用于 Linux `amd64` 和 `arm64` 的多架构镜像：
 
-- API/broker 镜像 `ghcr.io/liuqi6777/opensac:0.5.0`；
-- 强化执行镜像 `ghcr.io/liuqi6777/opensac-sandbox:0.5.0`。
+- API/broker 便捷通道 `ghcr.io/liuqi6777/opensac:latest`；
+- 强化执行便捷通道 `ghcr.io/liuqi6777/opensac-sandbox:latest`。
 
-标签触发的工作流还会更新 `latest`，GitHub 也会为发布版本生成常规源码归档。
+每次发布还会生成不可变的版本标签，GitHub 也会生成常规源码归档。
 
 服务镜像和沙箱镜像的版本应保持一致。生产环境应固定不可变版本或 digest，不要依赖 `latest`。
 
@@ -260,7 +260,6 @@ uv run pytest
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |
 | 配置可选的本地检索器 | [本地稠密检索](docs/local-search.md) |
-| 迁移到当前能力契约 | [OpenSAC 0.5](docs/opensac-0.5.md) |
 | 运行 rollout worker | [RL environment workers](docs/rl-environment-workers.md) |
 | 发布正式版本 | [版本发布流程](docs/releasing.zh-CN.md) |
 
