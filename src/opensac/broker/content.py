@@ -9,7 +9,8 @@ import re
 from typing import Any
 
 from opensac._contracts import ContentPassage, ContentPassageReport, ContentSnippet, SearchHit
-from opensac.backends.base import SearchBackend
+from opensac.backends.rerank.base import PassageReranker
+from opensac.backends.search.base import SearchBackend
 from opensac.broker.call_context import current_call
 from opensac.broker.documents import document_identity, resolve_sources
 from opensac.broker.passages import (
@@ -24,7 +25,6 @@ from opensac.broker.provider_execution import CapabilityProviderError, ProviderE
 from opensac.broker.session import BrokerSession, EvidenceRecord, FlightGroup
 from opensac.models import EvidenceTraceRecord, PassageTraceRecord, ProviderAttemptRecord
 from opensac.provider import ProviderRequestError
-from opensac.rerankers import PassageReranker
 
 
 def _provider_attempts() -> list[ProviderAttemptRecord]:

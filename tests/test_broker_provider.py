@@ -7,8 +7,8 @@ import httpx
 import pytest
 
 from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
-from opensac.backends.local_http import LocalSearchBackend
-from opensac.backends.serper import SerperBackend
+from opensac.backends.search.local_http import LocalSearchBackend
+from opensac.backends.search.serper import SerperBackend
 from opensac.broker.documents import document_identity
 from opensac.broker.provider_execution import CapabilityProviderError, ProviderExecutor
 from opensac.broker.service import BrokerService

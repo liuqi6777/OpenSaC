@@ -24,7 +24,8 @@ import secrets
 import tempfile
 from pathlib import Path
 
-from opensac.backends import LocalSearchBackend, SerperBackend
+from opensac.backends.search.local_http import LocalSearchBackend
+from opensac.backends.search.serper import SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService
 from opensac.config import Settings
 from opensac.models import Session

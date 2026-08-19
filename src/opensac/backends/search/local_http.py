@@ -1,3 +1,5 @@
+"""HTTP adapter for the local search and document service."""
+
 from __future__ import annotations
 
 import hashlib
@@ -176,9 +178,7 @@ class LocalSearchBackend:
             if returned_query != query:
                 raise invalid_provider_response()
             raw_hits = row.get("hits", [])
-            if not isinstance(raw_hits, list) or not all(
-                isinstance(hit, dict) for hit in raw_hits
-            ):
+            if not isinstance(raw_hits, list) or not all(isinstance(hit, dict) for hit in raw_hits):
                 raise invalid_provider_response()
             try:
                 hits = [

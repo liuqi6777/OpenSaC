@@ -6,7 +6,7 @@ import uuid
 from typing import Any
 
 from opensac._contracts import SearchBatch, SearchHit
-from opensac.backends.base import BatchSearchBackend, SearchBackend
+from opensac.backends.search.base import BatchSearchBackend, SearchBackend
 from opensac.broker.call_context import current_call
 from opensac.broker.documents import document_identity, source_for
 from opensac.broker.provider_execution import CapabilityProviderError, ProviderExecutor

@@ -9,6 +9,8 @@ import pytest
 from opensac_sdk._surface import BROKER_METHODS
 
 from opensac._contracts import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
+from opensac.backends.rerank.base import PassageRerankResult
+from opensac.backends.rerank.jina import JinaPassageReranker
 from opensac.broker.call_context import trace_error_message
 from opensac.broker.documents import canonical_url
 from opensac.broker.llm import ExtractionInfrastructureError
@@ -22,7 +24,6 @@ from opensac.models import (
     Session,
 )
 from opensac.provider import ProviderRequestError
-from opensac.rerankers import JinaPassageReranker, PassageRerankResult
 
 
 class FakeBackend:

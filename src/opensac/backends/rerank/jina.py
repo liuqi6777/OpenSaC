@@ -6,8 +6,8 @@ from typing import Any
 
 import httpx
 
+from opensac.backends.rerank.base import PassageRerankResult
 from opensac.provider import ProviderRequestError, invalid_provider_response
-from opensac.rerankers.base import PassageRerankResult
 
 
 class JinaPassageReranker:

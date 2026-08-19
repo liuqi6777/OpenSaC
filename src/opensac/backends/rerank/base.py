@@ -1,4 +1,4 @@
-"""Provider boundary for optional semantic passage rerankers."""
+"""Provider boundary for optional semantic passage rerank backends."""
 
 from __future__ import annotations
 
