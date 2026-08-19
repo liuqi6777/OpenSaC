@@ -85,10 +85,7 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
         CONTRACT_PATH.read_bytes()
         == (MCP_SKILL_DIR / "references" / "sdk-contract.md").read_bytes()
     )
-    assert (
-        ADVANCED_PATH.read_bytes()
-        == (MCP_SKILL_DIR / "references" / "advanced.md").read_bytes()
-    )
+    assert ADVANCED_PATH.read_bytes() == (MCP_SKILL_DIR / "references" / "advanced.md").read_bytes()
     assert PATTERNS_PATH.read_bytes() == (MCP_SKILL_DIR / "references" / "patterns.md").read_bytes()
     assert (
         RECIPES_PATH.read_bytes()
