@@ -35,7 +35,7 @@ def _posix_program() -> str:
 def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
 
-    assert len(skill) < 6_000
+    assert len(skill) < 6_500
     assert "opensac agent-run <<'OPENSAC_PY'" in skill
     assert "Never create or manage REST sessions" in skill
     assert "stable `research_id`" in skill
@@ -57,6 +57,7 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "Observations show artifact paths, not their contents" in skill
     assert "Before ending with `NEXT:`" in skill
     assert "no `sdk.workspace` API" in skill
+    assert "search.fuse_rrf` -> `content.passages" in skill
     assert "Codex, Claude Code, or another shell-capable agent" in skill.split("---", 2)[1]
     assert "SAC_API_" not in skill
     assert "SAC_CLI_" not in skill
@@ -94,6 +95,7 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
 
     for path, heading in (
         (PATTERNS_PATH, "## Explore candidates"),
+        (PATTERNS_PATH, "## Rank passages across fused candidates"),
         (PATTERNS_PATH, "## Verify selected refs and submit"),
     ):
         program = _fenced_block(path, "python", heading=heading)

@@ -1,6 +1,6 @@
 # Deployment
 
-OpenSAC `v0.4.0` is publicly available as version-matched service and sandbox images on GHCR.
+OpenSAC `v0.5.0` is publicly available as version-matched service and sandbox images on GHCR.
 The Docker CLI provides a no-checkout, no-configuration-file quick start. Docker Compose remains
 available for declarative deployments. Both run the API and capability broker from the service
 image and start an isolated sandbox container for each execution. Neither builds nor runs the
@@ -64,7 +64,7 @@ docker run --detach \
   --env OPENSAC_SEARCH_BACKEND=web \
   --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
   --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
-  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.4.0 \
+  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.5.0 \
   --publish 127.0.0.1:8000:8000 \
   --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
   --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
@@ -72,7 +72,7 @@ docker run --detach \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:0.4.0
+  ghcr.io/liuqi6777/opensac:0.5.0
 ```
 
 After a few seconds, verify the service with the Python runtime already installed in the image:
@@ -100,11 +100,11 @@ source repository, build an image, or install Python packages:
 mkdir opensac-deploy
 cd opensac-deploy
 curl -fsSLo compose.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.4.0/compose.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.5.0/compose.yaml
 curl -fsSLo .env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.4.0/.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.5.0/.env.example
 curl -fsSLo compose.env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.4.0/compose.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.5.0/compose.env.example
 mkdir -p "$PWD/.opensac"
 ```
 

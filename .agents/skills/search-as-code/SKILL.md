@@ -21,6 +21,9 @@ from opensac_sdk import BrokerError, sdk
   reconstruct them.
 - Use search snippets to triage sources, not to support claims about document content. Search
   metadata is sufficient only when the requested result is a discovery list.
+- Prefer `search.many` -> `search.fuse_rrf` -> `content.passages` for semantic evidence discovery.
+  Inspect each returned passage before using its locator. Keep `grep` and `read` for exact strings
+  and deliberate context expansion.
 - Read the passage used for each material claim. Cite only a non-empty passage that returned a
   locator, and preserve `locator.model_dump(mode="json")` losslessly.
 - Treat a locator as proof that a passage is bound to a retrieved document, not as proof that the
@@ -47,8 +50,9 @@ append grep merely for completeness. Continue when an explicit rule determines t
 search can fuse/filter, while known refs and patterns can grep/read in one program.
 
 Frame constraints and source policy first. Use 2-4 queries for a known entity and 6-12 only for
-ambiguous discovery. Bound shortlists, grep small batches, read around useful 1-indexed lines, and
-submit only after every material claim has a locator.
+ambiguous discovery. Fuse a bounded shortlist, rank passages across its refs, inspect the original
+passage text, and submit only after every material claim has a locator. Use bounded grep/read calls
+when verification depends on an exact spelling or more surrounding lines.
 
 ## Orchestrate with Python
 

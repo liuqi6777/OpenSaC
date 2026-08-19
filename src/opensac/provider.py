@@ -30,6 +30,7 @@ RetryProfile = Literal["none", "safe"]
 ProviderOperation = Literal[
     "web.search",
     "web.scrape",
+    "web.rerank",
     "local.search",
     "local.document",
 ]
@@ -37,6 +38,7 @@ ProviderOperation = Literal[
 _PROVIDER_OPERATIONS = {
     "web.search",
     "web.scrape",
+    "web.rerank",
     "local.search",
     "local.document",
 }

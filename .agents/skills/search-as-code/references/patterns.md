@@ -9,6 +9,8 @@ must recover a growing candidate or evidence ledger.
 
 - **Explore** when the next query, ref, or matching rule depends on understanding search results.
   Show a bounded shortlist and stop for model judgment.
+- **Rank passages** when a fused shortlist is available but the relevant document sections are
+  not. Search, fuse, and passage ranking can stay in one deterministic stage.
 - **Verify** when refs and checks are already concrete. Let Python grep, read, validate, and submit
   without an unnecessary model round trip.
 
@@ -54,6 +56,48 @@ else:
         )
     else:
         print(f"NEXT: rewrite or broaden the queries; failed_queries={failed}")
+```
+
+## Rank passages across fused candidates
+
+This is the default semantic evidence funnel. Passage text is exact document text, but the score
+only orders this one report; inspect the text and source before trusting or citing it.
+
+```python
+from opensac_sdk import BrokerError, sdk
+
+goal = "replace with the evidence question"
+queries = [
+    "entity relation exact terms",
+    "entity relation alternate wording",
+    "rare clue likely primary source",
+]
+
+try:
+    batches = sdk.search.many(queries, limit_per_query=10, concurrency=4)
+    fused = sdk.search.fuse_rrf(batches, k=60, limit=12)
+    report = sdk.content.passages(
+        goal,
+        [item.ref for item in fused.candidates],
+        limit=8,
+        max_per_ref=2,
+    )
+except BrokerError as error:
+    print(f"ERROR: evidence retrieval code={error.code} retryable={error.retryable}")
+else:
+    for item in report.passages:
+        excerpt = " ".join(item.text.split())[:700]
+        locator = item.locator.model_dump(mode="json") if item.locator else None
+        print(
+            f"PASSAGE rank={item.rank} ref={item.ref!r} title={item.title!r} "
+            f"coordinates={item.coordinates.model_dump(mode='json')!r} "
+            f"locator={locator!r} text={excerpt!r}"
+        )
+    failures = [item.failure.code for item in report.failures]
+    print(
+        "NEXT: inspect source quality and passage entailment; use grep/read for exact "
+        f"checks or context, then submit verified locators; failures={failures[:4]}"
+    )
 ```
 
 ## Verify selected refs and submit

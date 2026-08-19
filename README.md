@@ -26,12 +26,12 @@ OpenSAC implements the public
 abstraction. It is not a reconstruction of Perplexity's internal search engine.
 
 > [!IMPORTANT]
-> OpenSAC is ongoing work (currently at version `0.4.0`). We are actively developing the system and
+> OpenSAC is ongoing work (currently at version `0.5.0`). We are actively developing the system and
 > evaluating its effectiveness, with continued updates planned. APIs, deployment contracts, and
 > research artifacts may also continue to evolve.
 
 > [!NOTE]
-> **Release status:** [`v0.4.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.4.0) is
+> **Release status:** [`v0.5.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.5.0) is
 > available with public, version-matched service and sandbox images on GHCR.
 
 ## Why OpenSAC
@@ -82,7 +82,7 @@ credentials, retries, rate limits, and resource enforcement stay on the service 
 
 ## Quick start
 
-The public `v0.4.0` images provide the OpenSAC API/broker and the isolated execution sandbox.
+The public `v0.5.0` images provide the OpenSAC API/broker and the isolated execution sandbox.
 
 Requirements: Docker Engine or Docker Desktop, a POSIX-compatible shell, and Serper + Jina
 credentials.
@@ -127,7 +127,7 @@ docker run --detach \
   --env OPENSAC_SEARCH_BACKEND=web \
   --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
   --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
-  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.4.0 \
+  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.5.0 \
   --publish 127.0.0.1:8000:8000 \
   --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
   --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
@@ -135,7 +135,7 @@ docker run --detach \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:0.4.0
+  ghcr.io/liuqi6777/opensac:0.5.0
 ```
 
 After a few seconds, verify the service without installing a host-side client:
@@ -206,7 +206,7 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | Namespace | Main operations | Role |
 | --- | --- | --- |
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
-| `sdk.content` | `get_many`, `snippets`, `grep`, `read` | Fetch, locate, and inspect evidence |
+| `sdk.content` | `passages`, `get_many`, `snippets`, `grep`, `read` | Rank, locate, and inspect evidence |
 | `sdk.llm` | `map`, `map_many`, `extract`, `extract_many` | Optional brokered model calls and schema-checked extraction |
 | `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
 | `sdk.session` | `usage` | Inspect strategy counts and remaining budgets |
@@ -214,7 +214,7 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 
 Batch operations preserve input alignment and expose typed per-item failures. Empty search results
 are successful results. Passage citations must use locators returned by content operations. The
-current public contract and migration notes are in [OpenSAC 0.4](docs/opensac-0.4.md).
+current public contract and migration notes are in [OpenSAC 0.5](docs/opensac-0.5.md).
 
 ### Agent integrations
 
@@ -233,17 +233,17 @@ session creation, lease renewal, and state-loss handling stay in the adapter. Se
 
 | Path | Status | Best for |
 | --- | --- | --- |
-| Docker CLI | Available in `v0.4.0` | Fastest start with no local configuration files |
-| Docker Compose | Available in `v0.4.0` | Declarative, repeatable deployment |
+| Docker CLI | Available in `v0.5.0` | Fastest start with no local configuration files |
+| Docker Compose | Available in `v0.5.0` | Declarative, repeatable deployment |
 | Git source | Available | Development, experiments, and unreleased changes |
 
 <details>
 <summary><strong>Published images and versioning</strong></summary>
 
-The `v0.4.0` release publishes multi-architecture Linux images for `amd64` and `arm64`:
+The `v0.5.0` release publishes multi-architecture Linux images for `amd64` and `arm64`:
 
-- `ghcr.io/liuqi6777/opensac:0.4.0` as the API/broker image;
-- `ghcr.io/liuqi6777/opensac-sandbox:0.4.0` as the hardened execution image.
+- `ghcr.io/liuqi6777/opensac:0.5.0` as the API/broker image;
+- `ghcr.io/liuqi6777/opensac-sandbox:0.5.0` as the hardened execution image.
 
 The tag-triggered workflow also updates `latest`, and GitHub creates normal source archives for the
 release.
@@ -277,7 +277,7 @@ layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Connect Codex, Claude Code, CLI, or a custom agent | [Agent integrations](docs/agent-integrations.md) |
 | Configure the optional local retriever | [Local dense search](docs/local-search.md) |
-| Migrate to the current capability contract | [OpenSAC 0.4](docs/opensac-0.4.md) |
+| Migrate to the current capability contract | [OpenSAC 0.5](docs/opensac-0.5.md) |
 | Operate rollout workers | [RL environment workers](docs/rl-environment-workers.md) |
 | Publish a version | [Release process](docs/releasing.md) |
 

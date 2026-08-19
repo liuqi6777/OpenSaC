@@ -12,11 +12,14 @@ from opensac_sdk.models import (
     ContentFailure,
     ContentGrepReport,
     ContentMatch,
+    ContentPassage,
+    ContentPassageReport,
     ContentSnippet,
     EvidenceLocator,
     EvidenceLocatorError,
     ExtractionError,
     ExtractionResult,
+    PassageCoordinates,
     RetrievalMetadata,
     SearchBatch,
     SearchHit,
@@ -389,6 +392,101 @@ def test_content_grep_report_returns_matches_and_ref_aligned_failures() -> None:
             },
         )
     ]
+
+
+def test_content_passages_returns_typed_ranked_report() -> None:
+    class PassageTransport:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def call(self, method, params):
+            self.calls.append((method, params))
+            return {
+                "query": "revenue singapore",
+                "passages": [
+                    {
+                        "ref": "ref_1",
+                        "title": "Annual report",
+                        "url": "https://example.com/report",
+                        "date": "2024",
+                        "text": "Singapore revenue was 42 million dollars.",
+                        "coordinates": {
+                            "start_line": 7,
+                            "start_character": 0,
+                            "end_line": 7,
+                            "end_character": 41,
+                        },
+                        "rank": 1,
+                        "score": 3.5,
+                        "ranker": "lexical:bm25",
+                        "locator": {
+                            "id": "evidence_1",
+                            "ref": "ref_1",
+                            "kind": "selected_passage",
+                        },
+                    }
+                ],
+                "failures": [],
+                "input_count": 2,
+                "unique_ref_count": 1,
+            }
+
+    transport = PassageTransport()
+    report = ContentResource(transport).passages(
+        "revenue singapore",
+        ["ref_1", "ref_1"],
+        limit=5,
+        max_per_ref=2,
+    )
+
+    assert isinstance(report, ContentPassageReport)
+    assert isinstance(report.passages[0], ContentPassage)
+    assert isinstance(report.passages[0].coordinates, PassageCoordinates)
+    assert report.passages[0].locator is not None
+    assert report.input_count == 2
+    assert report.unique_ref_count == 1
+    assert transport.calls == [
+        (
+            "content.passages",
+            {
+                "query": "revenue singapore",
+                "refs": ["ref_1", "ref_1"],
+                "limit": 5,
+                "max_per_ref": 2,
+            },
+        )
+    ]
+
+
+def test_passage_models_reject_invalid_coordinates_scores_and_counts() -> None:
+    with pytest.raises(ValidationError, match="non-empty range"):
+        PassageCoordinates(
+            start_line=2,
+            start_character=4,
+            end_line=2,
+            end_character=4,
+        )
+
+    valid = {
+        "ref": "ref_1",
+        "text": "evidence",
+        "coordinates": {
+            "start_line": 1,
+            "start_character": 0,
+            "end_line": 1,
+            "end_character": 8,
+        },
+        "rank": 1,
+        "ranker": "lexical:bm25",
+    }
+    with pytest.raises(ValidationError):
+        ContentPassage(**valid, score=float("nan"))
+    with pytest.raises(ValidationError, match="unique_ref_count"):
+        ContentPassageReport(
+            query="q",
+            input_count=1,
+            unique_ref_count=2,
+        )
 
 
 class ExtractionTransport:
