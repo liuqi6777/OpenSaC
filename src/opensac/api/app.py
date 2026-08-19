@@ -294,7 +294,7 @@ class ApplicationRuntime:
             "sandbox_image": self.settings.sandbox_image,
             "sandbox_image_digest": self.settings.sandbox_image_digest,
             "sandbox_contract": SANDBOX_CONTRACT,
-            "capability_contract": 5,
+            "capability_contract": 6,
             "capability_limits": {
                 "search": {
                     "max_queries_per_request": self.settings.search_max_queries_per_request,
@@ -1108,7 +1108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not runtime.settings.model_name:
             capabilities = [method for method in capabilities if not method.startswith("llm.")]
         features = [
-            "capability_contract_v5",
+            "capability_contract_v6",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",

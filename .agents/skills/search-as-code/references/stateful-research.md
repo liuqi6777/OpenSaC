@@ -66,7 +66,7 @@ if manifest_path not in artifacts:
 queries = ['"exact phrase" entity', "entity alternate wording", "rare clue organization"]
 batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
 fusion = sdk.search.fuse_rrf(batches, k=60)
-rank_now = {candidate.ref: candidate.fused_rank for candidate in fusion.candidates}
+rank_now = {candidate.ref: candidate.fused_rank for candidate in fusion}
 new_rows = [
     {
         "ref": candidate.ref,
@@ -76,7 +76,7 @@ new_rows = [
         "snippet": candidate.snippet[:400],
         "score": candidate.fused_score,
     }
-    for candidate in fusion.candidates
+    for candidate in fusion
 ]
 sdk.state.merge_jsonl(pool_path, new_rows)
 pool = [dict(row) for row in sdk.state.read_jsonl(pool_path)]
@@ -148,7 +148,7 @@ if refs:
                 "requirement": requirement,
                 "ref": passage.ref,
                 "text": passage.text,
-                "locator": passage.locator.model_dump(mode="json"),
+                "locator": dict(passage.locator),
             }
             sdk.state.write_json(evidence_path, evidence)
             break

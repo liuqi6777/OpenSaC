@@ -4,7 +4,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Self
 
-from opensac_sdk._surface import BROKER_METHODS
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -35,10 +34,21 @@ class ResourceBudget(BaseModel):
     max_workspace_bytes: int | None = Field(default=None, ge=0)
 
 
-# The version-matched SDK owns the broker method names because it is the caller
-# that must expose every capability. The broker asserts its handler table
-# against this tuple on every dispatch path.
-CAPABILITY_METHODS: tuple[str, ...] = BROKER_METHODS
+# This is the host side of the JSON capability contract. Repository contract
+# tests keep it aligned with the version-matched sandbox SDK surface.
+CAPABILITY_METHODS: tuple[str, ...] = (
+    "search.query",
+    "search.query_many",
+    "content.get_many",
+    "content.passages",
+    "content.read",
+    "content.grep_report",
+    "citations.resolve",
+    "session.usage",
+    "llm.complete",
+    "llm.complete_many",
+    "llm.extract_many",
+)
 
 # method -> the params key holding its batch. Used to bound fan-out when
 # batching is disabled, so the ablation lands on "may I fan out in one call"

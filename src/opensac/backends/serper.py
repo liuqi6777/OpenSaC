@@ -5,8 +5,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchHit
 
+from opensac._contracts import ContentSnippet, RetrievalMetadata, SearchHit
 from opensac.provider import ProviderRequestError, invalid_provider_response
 
 

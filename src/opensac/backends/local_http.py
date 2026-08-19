@@ -6,14 +6,14 @@ from typing import Any
 from urllib.parse import urljoin
 
 import httpx
-from opensac_sdk.models import (
+
+from opensac._contracts import (
     CapabilityFailure,
     ContentSnippet,
     RetrievalMetadata,
     SearchBatch,
     SearchHit,
 )
-
 from opensac.provider import ProviderRequestError, invalid_provider_response
 
 # Full documents in the local corpus carry a YAML frontmatter header ahead of

@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from .models import RpcError, RpcRequest, RpcResponse
+from ._record import wrap
 
 
 class BrokerError(RuntimeError):
@@ -51,9 +51,8 @@ class UnixSocketTransport:
 
     def call(self, method: str, params: dict[str, Any]) -> Any:
         client = self._http()
-        request = RpcRequest(method=method, params=params)
         try:
-            response = client.post("/v1/call", json=request.model_dump())
+            response = client.post("/v1/call", json={"method": method, "params": params})
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise BrokerError(
@@ -62,24 +61,37 @@ class UnixSocketTransport:
                 retryable=True,
             ) from exc
 
-        payload = RpcResponse.model_validate(response.json())
-        if not payload.ok:
-            error = payload.error
-            if isinstance(error, RpcError):
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise BrokerError(
+                "Broker returned invalid JSON",
+                code="broker_protocol_error",
+                retryable=False,
+            ) from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
+            raise BrokerError(
+                "Broker returned an invalid response envelope",
+                code="broker_protocol_error",
+                retryable=False,
+            )
+        if not payload["ok"]:
+            error = payload.get("error")
+            if isinstance(error, dict):
                 raise BrokerError(
-                    error.message,
-                    code=error.code,
-                    retryable=error.retryable,
-                    attempts=error.attempts,
-                    provider_status=error.provider_status,
-                    retry_after_seconds=error.retry_after_seconds,
+                    str(error.get("message") or "Broker call failed"),
+                    code=str(error.get("code") or "broker_call_failed"),
+                    retryable=bool(error.get("retryable", False)),
+                    attempts=error.get("attempts"),
+                    provider_status=error.get("provider_status"),
+                    retry_after_seconds=error.get("retry_after_seconds"),
                 )
             raise BrokerError(
-                error or "Broker call failed",
+                str(error or "Broker call failed"),
                 code="broker_call_failed",
                 retryable=False,
             )
-        return payload.result
+        return wrap(payload.get("result"))
 
     def _http(self) -> httpx.Client:
         """Return one thread-safe connection pool for this program process."""

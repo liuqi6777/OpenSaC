@@ -1,7 +1,8 @@
 # OpenSAC SDK contract
 
 Use this reference when exact signatures, fields, limits, or failure semantics matter.
-Import the runtime entrypoints from `opensac_sdk` and semantic models from `opensac_sdk.types`.
+Import only `BrokerError` and `sdk` from `opensac_sdk`. Structured results are ordinary JSON
+records: both `row.ref` and `row["ref"]` read the same field, and `dict(row)` serializes it.
 
 ## Contents
 
@@ -17,13 +18,13 @@ Import the runtime entrypoints from `opensac_sdk` and semantic models from `open
 Search:
 
 ```python
-sdk.search(query, limit=10, offset=0, domains=None) -> list[SearchHit]
+sdk.search(query, limit=10, offset=0, domains=None) -> list[record]
 sdk.search.many(
     queries, limit_per_query=10, offset=0, concurrency=5, domains=None
-) -> list[SearchBatch]
+) -> list[record]
 sdk.search.fuse_rrf(
     batches, weights=None, k=60, limit=None
-) -> FusionResult
+) -> list[record]
 ```
 
 `fuse_rrf` is deterministic local Python and makes no RPC.
@@ -33,13 +34,13 @@ Content core:
 ```python
 sdk.content.passages(
     query, refs, limit=20, max_per_ref=3
-) -> ContentPassageReport
+) -> record
 sdk.content.grep_report(
     refs, pattern, context=0, max_matches_per_ref=20
-) -> ContentGrepReport
+) -> record
 sdk.content.read(
     refs, offset=1, limit=200, max_chars=100_000
-) -> list[ContentSnippet]
+) -> list[record]
 ```
 
 Session, state, and output:
@@ -67,7 +68,7 @@ sdk.llm.extract_many(
     concurrency=4,
     max_tokens=None,
     repair_attempts=0,
-) -> list[ExtractionResult]
+) -> list[record]
 ```
 
 The `extract_many` schema must be a JSON-serializable object whose root type is `object`.
@@ -76,46 +77,41 @@ error; keep a deterministic fallback.
 
 ## Exact result fields
 
-- `SearchHit`: `ref`, `backend`, `title`, `url`, `docid`, `domain`, `date`, `snippet`, `score`,
+- Search hit: `ref`, `backend`, `title`, `url`, `docid`, `domain`, `date`, `snippet`, `score`,
   `rank`, `retrieval`, `metadata`.
-- `SearchBatch`: `query`, `hits`, `failure`, `request`.
-- `SearchCandidate`: `ref`, `backend`, `title`, `url`, `docid`, `domain`, `date`, `snippet`,
-  `score`, `rank`, `retrieval`, `metadata`, `sources`, `fused_score`, `fused_rank`.
-- `ContentSnippet`: `ref`, `text`, `url`, `title`, `date`, `locator`, `locator_error`, `failure`,
+- Search batch: `query`, `hits`, `failure`.
+- Fused candidate: the search-hit fields plus `sources`, `fused_score`, and `fused_rank`.
+- Content row: `ref`, `text`, `url`, `title`, `date`, `locator`, `locator_error`, `failure`,
   `metadata`.
-- `ContentMatch`: `ref`, `docid`, `url`, `title`, `line`, `text`, `before`, `after`, `locator`,
-  `locator_error`, `input_index`.
-- `ContentFailure`: `input_index`, `ref`, `failure`.
-- `PassageCoordinates`: `start_line`, `start_character`, `end_line`, `end_character`. Lines are
-  1-indexed; characters are 0-indexed and the end position is exclusive.
-- `ContentPassage`: `ref`, `title`, `url`, `date`, `text`, `coordinates`, `rank`, `score`, `ranker`,
-  `locator`, `locator_error`. Rank is global and 1-indexed; scores compare only within one report.
-- `ContentPassageReport`: `query`, `passages`, `failures`, `input_count`, `unique_ref_count`.
-- `ContentGrepReport`: `matches`, `failures`, `input_count`.
-- `CapabilityFailure`: `code`, `message`, `retryable`, `attempts`, `provider_status`,
-  `retry_after_seconds`.
-- `ExtractionResult`: `index`, `data`, `error`, `attempts`.
-- `ExtractionError`: `code`, `message`, `retryable`.
-- `EvidenceLocator`: `id`, `ref`, `kind`.
-- `EvidenceLocatorError`: `code`, `message`, `retryable`.
+- Grep report: `matches`, `failures`, `input_count`. A match includes `ref`, `docid`, `url`,
+  `title`, `line`, `text`, `before`, `after`, `locator`, `locator_error`, and `input_index`.
+- Passage report: `query`, `passages`, `failures`, `input_count`, `unique_ref_count`. A passage
+  includes `ref`, source metadata, exact `text`, `coordinates`, `rank`, `score`, `ranker`,
+  `locator`, and `locator_error`.
+- Coordinates: `start_line`, `start_character`, `end_line`, `end_character`. Lines are 1-indexed;
+  characters are 0-indexed and the end position is exclusive.
+- Failure: `code`, `message`, `retryable`, `attempts`, `provider_status`,
+  `retry_after_seconds`. Content failures also carry `input_index` and `ref`.
+- Extraction row: `index`, `data`, `error`, `attempts`; an error has `code`, `message`, and
+  `retryable`.
+- Evidence locator: `id`, `ref`, `kind`.
 
-SDK models support attribute and read-only mapping access. Rows returned by `read_json` and
-`read_jsonl` support both `row.ref` and `row["ref"]`. Join capability results by `ref`.
+There is no public SDK model hierarchy or `types` module. Join capability results by `ref`.
 
 ## Failure and alignment semantics
 
 - Catch `BrokerError` for a capability-wide or infrastructure failure. Inspect `code`,
   `retryable`, and `attempts`; attempts may be absent for a transport failure.
-- Inspect `SearchBatch.failure` for per-query failure. A failed batch has no hits.
-- Inspect `ContentSnippet.failure` for per-ref failure. `read` returns one row per input ref in the
+- Inspect `batch.failure` for per-query failure. A failed batch has no hits.
+- Inspect `row.failure` for per-ref failure. `read` returns one row per input ref in the
   same order.
 - `content.passages` exactly deduplicates refs in first-seen order, ranks successful documents
-  together, and reports failed fetches in `ContentPassageReport.failures`. Empty refs and zero
+  together, and reports failed fetches in `report.failures`. Empty refs and zero
   passages are successful reports.
-- Use `grep_report` when coverage matters. Its `failures` contain `ContentFailure` rows aligned by
+- Use `grep_report` when coverage matters. Its `failures` are aligned by
   `input_index`; plain `grep` omits partial failures.
 - Treat empty search hits and zero grep matches as success, not failure.
-- Inspect `ExtractionResult.data` or `.error`; exactly one is present. The result list aligns with
+- Inspect each extraction row's `.data` or `.error`; exactly one is present. The result list aligns with
   the input items.
 - Let host policy own retries, rate limits, deduplication, and in-flight coalescing. A returned
   failure is final for that call.
@@ -152,7 +148,7 @@ SDK models support attribute and read-only mapping access. Rows returned by `rea
   than one research task while reusing the same session.
 - Use `merge_jsonl` for upserts, then `write_jsonl` when pruning a pool to a fixed bound.
 - Persist a constraint fingerprint with each evidence row and attempted refs per constraint.
-- Serialize locators with `locator.model_dump(mode="json")`. They remain valid only in the live
+- Serialize locators with `dict(locator)`. They remain valid only in the live
   session that issued them.
 - `sdk.session.usage()` returns `exec_calls`, `search_calls`, `content_fetches`, `llm_calls`,
   `pipeline_model_tokens`, `documents_seen`, `budget_remaining`, and `terminal_reason`.

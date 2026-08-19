@@ -6,7 +6,7 @@ from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass, replace
 
-from opensac_sdk.models import PassageCoordinates, SearchHit
+from opensac._contracts import PassageCoordinates, SearchHit
 
 _TERM_PATTERN = re.compile(
     r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3400-\u9fff]|[^\W\d_]+",

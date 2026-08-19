@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
+from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
 
 
 class SearchBackend(Protocol):

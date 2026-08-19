@@ -482,7 +482,6 @@ dependencies = [
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "openai" },
-    { name = "opensac-sdk" },
     { name = "pydantic-settings" },
     { name = "typer" },
     { name = "uvicorn" },
@@ -502,7 +501,6 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.25" },
     { name = "mcp", specifier = ">=1.27,<2" },
     { name = "openai", specifier = ">=1.99" },
-    { name = "opensac-sdk", editable = "packages/opensac-sdk" },
     { name = "pydantic-settings", specifier = ">=2.10" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.1" },
@@ -517,14 +515,10 @@ name = "opensac-sdk"
 source = { editable = "packages/opensac-sdk" }
 dependencies = [
     { name = "httpx" },
-    { name = "pydantic" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.28" },
-    { name = "pydantic", specifier = ">=2.11" },
-]
+requires-dist = [{ name = "httpx", specifier = ">=0.28" }]
 
 [[package]]
 name = "packaging"

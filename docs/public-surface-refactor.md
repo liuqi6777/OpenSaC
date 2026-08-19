@@ -37,7 +37,7 @@ broker 管理边界，但 SDK facade 和公共类型持续累积。
 1. 模型默认只学习完成常规 Search-as-Code 工作流所需的 core surface。
 2. 每个保留的 SDK 操作明确归类为 `core`、`helper`、`advanced` 或 `internal`。
 3. `opensac_sdk` 顶层只保留 `sdk`、`BrokerError` 和版本信息。
-4. 结果保持 typed，但 supporting model 不再全部出现在顶层 namespace。
+4. 结果保持明确的 JSON shape，但 SDK 不再暴露 Pydantic 模型层。
 5. SDK、broker、Skill、README 和 MCP schema 由 contract test 检查，避免手工漂移。
 6. 0.6 直接删除已有 canonical 替代的旧接口，不在运行时保留兼容 wrapper。
 7. 每个阶段形成可独立审查、可独立回滚的小 PR。
@@ -46,7 +46,7 @@ broker 管理边界，但 SDK facade 和公共类型持续累积。
 
 - 不重写 broker dispatch、provider runtime、sandbox 或 evidence registry。
 - 不把全部操作合并成一个高层 `research()` 黑盒。
-- 不删除为 batch alignment、failure recovery 或 provenance 服务的类型。
+- 不删除 batch alignment、failure recovery 或 provenance 语义；它们由 record 字段表达。
 - 不在本重构中更换搜索、抓取、passage ranker 或 pipeline model provider。
 - 不同时改变资源预算和 trace 计量语义。
 
@@ -62,7 +62,7 @@ broker 管理边界，但 SDK facade 和公共类型持续累积。
 | 单一权威表示 | 一个概念只保留一个字段、错误表示和序列化路径 |
 | 单向委托 | singular/batch 与 sync/async facade 必须委托同一实现，不能复制业务逻辑 |
 | 不做推测性抽象 | 只有出现两个独立实现、明确替换点或真实测试痛点时才增加 Protocol、基类或 registry |
-| 边界稳定、内部可变 | 稳定 Pydantic/HTTP/SDK contract；内部使用小函数和值对象，不把实现类升级成公共类型 |
+| 边界稳定、内部可变 | 宿主用 Pydantic 校验，SDK 消费稳定 JSON contract；实现类不进入公共接口 |
 | breaking change 完整 | 不保留 deprecated wrapper；通过版本与 contract bump 明确拒绝旧调用 |
 | 删除完整 | 删除接口时同步删除 handler、wrapper、类型、测试 fixture 和文档，不留下无调用代码 |
 | 局部可推理 | 一个模块只承担一组共同变化的职责；跨域依赖通过显式参数，不读取隐式全局状态 |
@@ -128,11 +128,15 @@ from opensac_sdk import BrokerError, sdk
 __all__ = ["BrokerError", "sdk", "__version__"]
 ```
 
-需要显式类型注解的宿主或高级程序从 `opensac_sdk.types` 导入语义模型。transport 和 wire 类型不进入
-`types`。`OpenSACClient` 从 `opensac_sdk.client` 导入，不再由包顶层重导出。
+SDK 不提供公共模型模块。结构化结果是普通 JSON record，同时支持 `row.ref` 与 `row["ref"]` 读取，
+`dict(row)` 可直接序列化。`OpenSACClient` 从 `opensac_sdk.client` 导入，不由包顶层重导出。
 
-`opensac_sdk.types` 只负责组织稳定类型路径，不要求合并现有 Pydantic 模型。不能为了减少类型数量构造
-包含大量 optional 字段的通用 `Result`，否则会丢失当前的校验和可恢复失败语义。
+所有 resource 实现集中在单一私有 `_resources.py` 中。`search`、`content` 等是 `sdk` 对象上的运行时
+namespace，不再各占一个可导入模块；新增 capability 优先向现有 resource 增加原子方法，不能顺手新增文件、
+公开类或兼容转发层。
+
+这不是把所有结果合并成包含大量 optional 字段的通用 `Result`。search batch、passage report、grep report
+和 extraction row 仍保留各自明确的字段与失败语义，只是不再为每个嵌套 shape 创建一个公共 Python 类。
 
 ### 4.2 操作分层
 
@@ -175,19 +179,23 @@ output.submit
 `state` 在单次程序不需要跨 execution 时不进入首屏；多轮任务再加载 state reference。advanced 方法只在
 按需 reference 中出现。
 
-## 5. 类型与失败语义
+## 5. Record 与失败语义
 
-### 5.1 类型路径
+### 5.1 JSON contract
 
-实施时新增 `packages/opensac-sdk/src/opensac_sdk/types.py`，只重导出语义结果类型。以下内容继续留在
-`models.py`，但不属于公共类型入口：
+宿主与 sandbox SDK 的实际边界是 Unix socket 上的 JSON，而不是共享 Python 对象。最终依赖方向为：
 
-- `RpcRequest`、`RpcResponse`、`RpcError`；
-- `SubmittedOutput`；
-- 仅用于 transport 或反序列化的 supporting type。
+```text
+opensac       -> host-internal Pydantic contracts
+opensac_sdk   -> one internal JSON Record wrapper
+```
 
-具体结果对象仍可包含嵌套的 supporting model。用户不需要为了读取字段而导入这些类型；需要静态注解时再从
-`opensac_sdk.types` 显式导入。
+两者没有运行时包依赖。宿主负责 provider、broker 和 RPC response 的校验；SDK 只递归包装 JSON object，
+提供一致的 attribute/mapping 读取。版本、sandbox contract、capability contract 和 repository contract tests
+防止字段与方法漂移。
+
+不新增 `opensac-protocol` 包。它会为当前只有两个消费者的 JSON 边界增加第三个发布单元、版本和容器安装
+步骤；也不复制一套 SDK schema，因为 SDK 不需要再次验证版本匹配宿主已经生成并校验过的 payload。
 
 ### 5.2 失败规则
 
@@ -200,7 +208,7 @@ output.submit
 5. locator 缺失不能被自动降级成正文 citation。
 
 不引入统一 `Result[T]` envelope。现有 search、content、extraction 的成功数据和恢复信息不同，强行统一会把
-明确的类型变成大量 optional 字段。
+明确的 record shape 变成大量 optional 字段。
 
 ## 6. MCP 暴露面
 
@@ -333,14 +341,17 @@ public_name, tier, transport_method, model_core
 - core Skill 中出现的方法必须存在且 tier 为 core/helper；
 - manifest 不允许声明 SDK 中不存在的方法。
 
-### PR 2：顶层导出与类型路径
+### PR 2：顶层导出与 Record 边界
 
 修改：
 
 - 更新 `packages/opensac-sdk/src/opensac_sdk/__init__.py`；
-- 新增 `packages/opensac-sdk/src/opensac_sdk/types.py`；
+- 新增单一内部 `_record.py`，删除公共 `models.py`/`types.py`；
+- 将全部 resource 实现集中到单一私有 `_resources.py`，删除按 namespace 拆分的模块；
+- 将宿主使用的 Pydantic contract 移入 `src/opensac/_contracts.py`；
+- 删除 `opensac` 对 `opensac-sdk` 的运行时依赖；
 - 更新 examples、Skill、SDK tests 和 Docker contract tests；
-- sandbox contract 递增一次；本 PR 不改变 wire method，因此不提升 capability contract。
+- sandbox contract 递增一次；删除 search batch 的 `request` 回显字段后，capability contract 提升到 6。
 
 迁移：
 
@@ -349,7 +360,10 @@ public_name, tier, transport_method, model_core
 from opensac_sdk import SearchHit
 
 # 0.6
-from opensac_sdk.types import SearchHit
+# 不导入结果类型；直接消费 sdk.search(...) 返回的 record
+from opensac_sdk import sdk
+
+hits = sdk.search("query")
 ```
 
 SDK 与 sandbox 镜像版本匹配，因此 0.6 采用明确 breaking migration，不在顶层长期保留隐式兼容别名。
@@ -358,7 +372,7 @@ SDK 与 sandbox 镜像版本匹配，因此 0.6 采用明确 breaking migration�
 
 修改：
 
-- 更新 `content.py` docstring 与 API reference；
+- 更新 `_resources.py` 中的 content resource 与 API reference；
 - canonical examples 全部迁移到 `passages`、`read`、`grep_report`；
 - 删除 `snippets`、`grep` SDK 方法及 broker handler；
 - 删除只服务旧接口的 passage selector、测试和 fixture；
@@ -436,7 +450,7 @@ failures = report.failures
 
 - bundled SDK 顶层导入路径变化；
 - 删除或重命名 sandbox 可调用方法，包括不经过 RPC 的 helper；
-- SDK 类型、参数或结果字段发生不兼容变化。
+- SDK record shape、参数或结果字段发生不兼容变化。
 
 以下变更同时要求 capability contract bump：
 
@@ -515,7 +529,7 @@ uv run pytest tests/test_sandbox_docker_e2e.py
 - PR 1—4 主要改变声明、导出和默认文档，可逐 PR revert。
 - PR 6 按 capability family 独立迁移，可逐模块 revert，不使用跨全仓库的一次性重写。
 - Content 删除可通过完整 revert 对应提交回滚，不在新代码上临时叠加 wrapper。
-- 类型路径迁移若需回滚，同样 revert 顶层导出提交，不增加双路径重导出。
+- Record 边界若需回滚，revert 对应提交，不增加双路径重导出或兼容模型。
 - MCP binding 删除可整提交回滚；不以进程共享 session 恢复 Claude Code MCP。
 - Host client 分层不改变 HTTP route，调用者可回退到上一版 client。
 

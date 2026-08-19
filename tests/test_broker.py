@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 from opensac_sdk._surface import BROKER_METHODS
-from opensac_sdk.models import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
 
+from opensac._contracts import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
 from opensac.broker.service import (
     BrokerService,

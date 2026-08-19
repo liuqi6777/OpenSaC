@@ -5,8 +5,8 @@ import json
 
 import httpx
 import pytest
-from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
 
+from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
 from opensac.backends.local_http import LocalSearchBackend
 from opensac.backends.serper import SerperBackend
 from opensac.broker.service import (

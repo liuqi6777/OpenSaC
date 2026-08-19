@@ -1,15 +1,15 @@
 # OpenSAC advanced operations
 
-Read this reference only when the core workflow cannot express the task. Runtime entrypoints live
-in `opensac_sdk`; semantic models live in `opensac_sdk.types`.
+Read this reference only when the core workflow cannot express the task. Import `sdk` from
+`opensac_sdk`; structured results are ordinary JSON records.
 
 ## Whole-document content
 
 Use a whole-document fetch only when deliberate local processing needs the complete normalized
-text. It returns one `ContentSnippet` per input ref, with a typed `failure` on unreadable rows:
+text. It returns one record per input ref, with a `failure` record on unreadable rows:
 
 ```python
-sdk.content.get_many(refs) -> list[ContentSnippet]
+sdk.content.get_many(refs) -> list[record]
 ```
 
 ## Citation resolution

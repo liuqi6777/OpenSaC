@@ -35,10 +35,10 @@ If unavailable or reporting `context_*` or `configuration_error`, stop and repor
   Inspect each returned passage before using its locator. Use `grep_report` and `read` for exact
   strings and deliberate context expansion.
 - Read the passage used for every material claim. Cite only a non-empty passage that returned a
-  locator, and preserve `locator.model_dump(mode="json")` losslessly.
+  locator, and preserve `dict(locator)` losslessly.
 - Treat a locator as proof that a passage is bound to a retrieved document, not as proof that its
   source is credible or its claim is true. Prefer primary sources and corroborate disputed claims.
-- Inspect typed item failures and `BrokerError`. Empty hits and zero matches are successful
+- Inspect item failure records and `BrokerError`. Empty hits and zero matches are successful
   results. After a final failure, change the query, source, or candidate instead of repeating it.
 - Keep stdout compact. Stdout, stderr, and submitted output share one observation budget.
 

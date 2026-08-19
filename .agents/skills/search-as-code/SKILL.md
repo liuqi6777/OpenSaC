@@ -25,10 +25,10 @@ from opensac_sdk import BrokerError, sdk
   Inspect each returned passage before using its locator. Use `grep_report` and `read` for exact
   strings and deliberate context expansion.
 - Read the passage used for each material claim. Cite only a non-empty passage that returned a
-  locator, and preserve `locator.model_dump(mode="json")` losslessly.
+  locator, and preserve `dict(locator)` losslessly.
 - Treat a locator as proof that a passage is bound to a retrieved document, not as proof that the
   source is credible or the claim is true. Prefer primary sources and corroborate disputed claims.
-- Inspect typed item failures and `BrokerError`. Empty hits and zero matches are successful
+- Inspect item failure records and `BrokerError`. Empty hits and zero matches are successful
   results. After a final failure, change the query, source, or candidate instead of repeating it.
 - Keep stdout small. Stdout, stderr, and submitted output share one observation budget, and noisy
   progress can hide the final submitted result.

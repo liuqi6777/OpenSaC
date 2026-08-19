@@ -38,7 +38,7 @@ abstraction. It is not a reconstruction of Perplexity's internal search engine.
 
 - **Programmable retrieval** — generated Python can batch, filter, join, rank, and select evidence
   with ordinary control flow.
-- **A compact typed SDK** — `opensac_sdk` exposes search, content, state, optional structured LLM,
+- **A compact record SDK** — `opensac_sdk` exposes search, content, state, optional structured LLM,
   usage, and citation primitives.
 - **Hardened execution** — sandbox programs have no network, provider credentials, Docker socket,
   or unrestricted host filesystem access.
@@ -46,7 +46,7 @@ abstraction. It is not a reconstruction of Perplexity's internal search engine.
   printed or submitted data returns to the control model.
 - **Traceable evidence** — opaque references and broker-issued passage locators connect candidates
   to final citations.
-- **Research instrumentation** — budgets, typed partial failures, traces, phase timings, idempotent
+- **Research instrumentation** — budgets, structured partial failures, traces, phase timings, idempotent
   execution, and worker lifecycle controls support reproducible rollouts.
 
 ## Architecture
@@ -179,7 +179,7 @@ program = """
 from opensac_sdk import sdk
 
 hits = sdk.search("Who introduced the ReAct prompting method?", limit=5)
-sdk.output.submit({"hits": [hit.model_dump() for hit in hits]})
+sdk.output.submit({"hits": [dict(hit) for hit in hits]})
 """
 
 with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
@@ -213,7 +213,7 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.session` | `usage` | Inspect strategy counts and remaining budgets |
 | `sdk.output` | `submit` | Return structured output and resolve trusted citations |
 
-Batch operations preserve input alignment and expose typed per-item failures. Empty search results
+Batch operations preserve input alignment and expose structured per-item failures. Empty search results
 are successful results. Passage citations must use locators returned by content operations. Core
 signatures and intentional advanced operations are split across the Search-as-Code Skill
 references.

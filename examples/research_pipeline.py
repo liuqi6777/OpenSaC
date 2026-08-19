@@ -12,7 +12,7 @@ official_domains = {"postgresql.org", "github.com", "elastic.co", "milvus.io"}
 
 unique = {
     candidate.ref: candidate
-    for candidate in fusion.candidates
+    for candidate in fusion
     if candidate.domain in official_domains
 }
 
@@ -25,12 +25,12 @@ report = sdk.content.passages(
 
 sdk.state.write_jsonl(
     "evidence.jsonl",
-    [item.model_dump(mode="json") for item in report.passages],
+    [dict(item) for item in report.passages],
 )
 sdk.output.submit(
     {
-        "evidence": [item.model_dump(mode="json") for item in report.passages],
-        "fetch_failures": [item.model_dump(mode="json") for item in report.failures],
+        "evidence": [dict(item) for item in report.passages],
+        "fetch_failures": [dict(item) for item in report.failures],
     },
     citations=[
         {"ref": item.ref, "locator": item.locator}

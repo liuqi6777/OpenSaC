@@ -16,14 +16,14 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from jsonschema import Draft202012Validator
 from openai import AsyncOpenAI
-from opensac_sdk.models import (
+
+from opensac._contracts import (
     ContentPassage,
     ContentPassageReport,
     ContentSnippet,
     SearchBatch,
     SearchHit,
 )
-
 from opensac.backends.base import BatchSearchBackend, ClosableSearchBackend, SearchBackend
 from opensac.broker.passages import (
     PassageCandidate,
@@ -1510,10 +1510,9 @@ class BrokerService:
                     batch = SearchBatch(
                         query=query,
                         failure=self._provider_failure(exc),
-                        request=request,
                     )
                 else:
-                    batch = SearchBatch(query=query, hits=hits, request=request)
+                    batch = SearchBatch(query=query, hits=hits)
                 return {key: batch}
 
             self._start_flight_group(state, group, execute)
@@ -1645,7 +1644,6 @@ class BrokerService:
                         "retryable": False,
                         "attempts": 0,
                     },
-                    request=request,
                 )
                 continue
             if len(query) > self.max_search_query_chars:
@@ -1660,7 +1658,6 @@ class BrokerService:
                         "retryable": False,
                         "attempts": 0,
                     },
-                    request=request,
                 )
                 continue
             fingerprint = self._fingerprint(
@@ -1737,12 +1734,10 @@ class BrokerService:
                         return SearchBatch(
                             query=queries[index],
                             failure=self._provider_failure(exc),
-                            request=request,
                         )
                     return SearchBatch(
                         query=queries[index],
                         hits=hits,
-                        request=request,
                     )
 
             returned = await asyncio.gather(*(one(index) for index in leaders))
@@ -1875,13 +1870,11 @@ class BrokerService:
                         row = SearchBatch(
                             query=queries[index],
                             failure=self._provider_failure(exc),
-                            request=request,
                         )
                     else:
                         row = SearchBatch(
                             query=queries[index],
                             hits=hits,
-                            request=request,
                         )
                 return {key: row}
 
@@ -1957,7 +1950,6 @@ class BrokerService:
                 index: SearchBatch(
                     query=queries[index],
                     failure=failure,
-                    request=request,
                 )
                 for index in leaders
             }
@@ -1984,7 +1976,6 @@ class BrokerService:
                 query=queries[index],
                 hits=list(batch.hits) if failure is None else [],
                 failure=failure,
-                request=request,
             )
         if any(row.failure is not None for row in rows.values()):
             for record in reversed(_EVENT_PROVIDER_ATTEMPTS.get() or []):

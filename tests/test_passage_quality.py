@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from opensac_sdk.models import ContentSnippet, SearchHit
-
+from opensac._contracts import ContentSnippet, SearchHit
 from opensac.broker.service import BrokerService
 from opensac.models import ResourceBudget, Session
 

@@ -9,27 +9,21 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from opensac_sdk import BrokerError
+from opensac_sdk._record import Record, record
+from opensac_sdk._resources import SearchResource, StateResource
 from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
-from opensac_sdk.models import (
+
+from opensac._contracts import (
     CapabilityFailure,
     ContentFailure,
     ContentGrepReport,
     ContentMatch,
-    ContentPassage,
-    ContentPassageReport,
     ContentSnippet,
     EvidenceLocator,
-    EvidenceLocatorError,
-    ExtractionError,
-    ExtractionResult,
-    PassageCoordinates,
+    OperationError,
     SearchBatch,
-    SearchCandidate,
     SearchHit,
 )
-from opensac_sdk.search import SearchResource
-from opensac_sdk.state import StateResource
-
 from opensac.sandbox.validator import validate_code
 
 ROOT = Path(__file__).parents[1]
@@ -86,10 +80,10 @@ class FakeSearch:
         self.hits_per_query = hits_per_query
         self.turn = 1
 
-    def many(self, queries: list[str], **_kwargs: object) -> list[SearchBatch]:
+    def many(self, queries: list[str], **_kwargs: object) -> list[Record]:
         prefix = f"turn_{self.turn}_" if self.vary_by_turn else ""
         if self.hits_per_query == 2:
-            return [
+            batches = [
                 SearchBatch(
                     query=query,
                     hits=[
@@ -117,8 +111,9 @@ class FakeSearch:
                 )
                 for index, query in enumerate(queries)
             ]
+            return [record(batch.model_dump(mode="json")) for batch in batches]
 
-        return [
+        batches = [
             SearchBatch(
                 query=query,
                 hits=[
@@ -137,8 +132,9 @@ class FakeSearch:
             )
             for query_index, query in enumerate(queries)
         ]
+        return [record(batch.model_dump(mode="json")) for batch in batches]
 
-    def fuse_rrf(self, batches: list[SearchBatch], **kwargs: object):
+    def fuse_rrf(self, batches: list[Record], **kwargs: object):
         return self._resource.fuse_rrf(batches, **kwargs)
 
 
@@ -229,7 +225,7 @@ class FakeContent:
                     ref=ref,
                     title=ref,
                     text=text,
-                    locator_error=EvidenceLocatorError(
+                    locator_error=OperationError(
                         code="evidence_capacity_exhausted",
                         message="evidence registry is full",
                         retryable=False,
@@ -311,16 +307,6 @@ def _run_pattern(
     return sdk, content, output, printed.getvalue()
 
 
-def _documented_fields(contract: str, model_name: str) -> set[str]:
-    match = re.search(
-        rf"^- `{re.escape(model_name)}`: (.*?)(?=\n- `|\n\n)",
-        contract,
-        flags=re.MULTILINE | re.DOTALL,
-    )
-    assert match is not None
-    return set(re.findall(r"`([a-z_]+)`", match.group(1)))
-
-
 def test_skill_is_small_and_routes_detailed_contracts() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
 
@@ -361,29 +347,14 @@ def test_skill_has_codex_catalog_metadata() -> None:
     assert "$search-as-code" in metadata
 
 
-def test_documented_model_fields_match_the_sdk() -> None:
+def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
     contract = CONTRACT_PATH.read_text(encoding="utf-8")
-    models = {
-        "SearchHit": SearchHit,
-        "SearchBatch": SearchBatch,
-        "SearchCandidate": SearchCandidate,
-        "ContentSnippet": ContentSnippet,
-        "ContentMatch": ContentMatch,
-        "ContentFailure": ContentFailure,
-        "PassageCoordinates": PassageCoordinates,
-        "ContentPassage": ContentPassage,
-        "ContentPassageReport": ContentPassageReport,
-        "ContentGrepReport": ContentGrepReport,
-        "CapabilityFailure": CapabilityFailure,
-        "ExtractionResult": ExtractionResult,
-        "ExtractionError": ExtractionError,
-        "EvidenceLocator": EvidenceLocator,
-        "EvidenceLocatorError": EvidenceLocatorError,
-    }
 
-    for name, model in models.items():
-        assert _documented_fields(contract, name) == set(model.model_fields)
-    assert "GrepFailure" not in contract
+    assert "opensac_sdk.types" not in contract
+    assert "There is no public SDK model hierarchy" in contract
+    assert 'both `row.ref` and `row["ref"]`' in contract
+    assert "Fused candidate" in contract
+    assert "Passage report" in contract
     assert "structured interface to the session workspace" in contract
     assert "Execution observations show artifact paths, not their contents" in contract
     assert "not a separate database" in contract
@@ -448,7 +419,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert len(explore.splitlines()) <= 45
     assert "sdk.search.many(" in explore
     assert "sdk.search.fuse_rrf(" in explore
-    assert ".candidates[:8]" in explore
+    assert "fuse_rrf(batches, k=60)[:8]" in explore
     assert "NEXT:" in explore
     assert "sdk.content.grep_report(" not in explore
     assert "sdk.output.submit(" not in explore
@@ -462,7 +433,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert len(verify.splitlines()) <= 75
     assert "sdk.search.many(" not in verify
     assert "NEXT:" in verify
-    assert "passage.locator.model_dump" in verify
+    assert "dict(passage.locator)" in verify
     assert verify.index("sdk.content.grep_report(") < verify.index("sdk.content.read(")
     assert verify.index("sdk.content.read(") < verify.index("sdk.output.submit(")
     assert verify.count("sdk.output.submit(") == 1

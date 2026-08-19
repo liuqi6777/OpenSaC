@@ -35,7 +35,7 @@ report = sdk.content.passages(
 
 sdk.state.write_jsonl(
     "evidence.jsonl",
-    [item.model_dump(mode="json") for item in report.passages],
+    [dict(item) for item in report.passages],
 )
 sdk.output.submit(
     {
@@ -43,7 +43,7 @@ sdk.output.submit(
             {"docid": hit.docid, "score": hit.score, "snippet": hit.snippet[:200]} for hit in ranked
         ],
         "evidence_chars": sum(len(item.text) for item in report.passages),
-        "fetch_failures": [item.model_dump(mode="json") for item in report.failures],
+        "fetch_failures": [dict(item) for item in report.failures],
     },
     citations=[
         {"ref": item.ref, "locator": item.locator}
