@@ -243,7 +243,7 @@ MCP 协议只暴露一个操作 `sac_run(code)`。对话绑定、session 创建�
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-uv sync --locked --extra dev
+uv sync --locked --all-packages --extra dev
 uv run ruff check .
 uv run pytest
 ```

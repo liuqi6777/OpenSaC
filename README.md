@@ -261,7 +261,7 @@ or digest rather than `latest`.
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-uv sync --locked --extra dev
+uv sync --locked --all-packages --extra dev
 uv run ruff check .
 uv run pytest
 ```

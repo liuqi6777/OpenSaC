@@ -35,7 +35,7 @@ CI also runs this check on every pull request.
 
    ```bash
    uv lock
-   uv sync --locked --extra dev
+   uv sync --locked --all-packages --extra dev
    uv run ruff check .
    uv run pytest
    OPENSAC_DOCKER_E2E=1 uv run pytest tests/test_sandbox_docker_e2e.py

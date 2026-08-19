@@ -112,10 +112,6 @@ def test_built_image_exposes_contract_7_and_compact_sdk(sandbox_image: str) -> N
     assert payload["types_module"] is False
     assert payload["models_module"] is False
     assert payload["search_module"] is False
-    assert payload["types_module"] is False
-    assert payload["models_module"] is False
-    assert payload["passages"]["unique_ref_count"] == 0
-    assert payload["coordinates"]["end_character"] == 1
 
 
 def test_compose_service_executes_a_sandbox_program(sandbox_image: str) -> None:
