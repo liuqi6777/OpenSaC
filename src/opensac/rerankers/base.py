@@ -1,3 +1,5 @@
+"""Provider boundary for optional semantic passage rerankers."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

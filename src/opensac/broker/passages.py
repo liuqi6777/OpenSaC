@@ -1,3 +1,5 @@
+"""Broker-owned passage segmentation, lexical scoring, and deterministic selection."""
+
 from __future__ import annotations
 
 import math
