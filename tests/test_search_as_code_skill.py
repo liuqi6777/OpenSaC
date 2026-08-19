@@ -14,11 +14,14 @@ from opensac_sdk.models import (
     ContentFailure,
     ContentGrepReport,
     ContentMatch,
+    ContentPassage,
+    ContentPassageReport,
     ContentSnippet,
     EvidenceLocator,
     EvidenceLocatorError,
     ExtractionError,
     ExtractionResult,
+    PassageCoordinates,
     SearchBatch,
     SearchCandidate,
     SearchHit,
@@ -50,6 +53,10 @@ def _explore_pattern() -> str:
 
 def _verify_pattern() -> str:
     return _code_block(PATTERNS_PATH, "## Verify selected refs and submit")
+
+
+def _rank_pattern() -> str:
+    return _code_block(PATTERNS_PATH, "## Rank passages across fused candidates")
 
 
 def _stateful_pattern() -> str:
@@ -337,6 +344,7 @@ def test_skill_is_small_and_routes_detailed_contracts() -> None:
     assert "Observations show artifact paths, not their contents" in skill
     assert "Before ending with `NEXT:`" in skill
     assert "no `sdk.workspace` API" in skill
+    assert "search.fuse_rrf` -> `content.passages" in skill
     assert "fact checking" in skill.split("---", 2)[1]
     assert "session_id" not in skill
     assert "SAC_MCP_" not in skill
@@ -359,6 +367,9 @@ def test_documented_model_fields_match_the_sdk() -> None:
         "ContentSnippet": ContentSnippet,
         "ContentMatch": ContentMatch,
         "ContentFailure": ContentFailure,
+        "PassageCoordinates": PassageCoordinates,
+        "ContentPassage": ContentPassage,
+        "ContentPassageReport": ContentPassageReport,
         "ContentGrepReport": ContentGrepReport,
         "CapabilityFailure": CapabilityFailure,
         "ExtractionResult": ExtractionResult,
@@ -378,6 +389,7 @@ def test_documented_model_fields_match_the_sdk() -> None:
 
 def test_patterns_compile_and_pass_sandbox_validation() -> None:
     explore = _explore_pattern()
+    rank = _rank_pattern()
     verify = _verify_pattern()
     stateful = _stateful_pattern()
     stateful_stages = _python_blocks(STATEFUL_PATH)
@@ -386,6 +398,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
 
     for name, program in (
         ("explore", explore),
+        ("rank", rank),
         ("verify", verify),
         ("stateful-fixture", stateful),
         ("workspace-probe", workspace_probe),
@@ -402,6 +415,12 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "NEXT:" in explore
     assert "sdk.content.grep_report(" not in explore
     assert "sdk.output.submit(" not in explore
+
+    assert "sdk.search.many(" in rank
+    assert "sdk.search.fuse_rrf(" in rank
+    assert "sdk.content.passages(" in rank
+    assert "sdk.output.submit(" not in rank
+    assert "NEXT:" in rank
 
     assert len(verify.splitlines()) <= 75
     assert "sdk.search.many(" not in verify

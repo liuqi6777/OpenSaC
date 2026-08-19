@@ -8,16 +8,25 @@ import math
 import re
 import time
 import uuid
+from bisect import bisect_right
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from jsonschema import Draft202012Validator
 from openai import AsyncOpenAI
-from opensac_sdk.models import ContentSnippet, SearchBatch, SearchHit
+from opensac_sdk.models import (
+    ContentPassage,
+    ContentPassageReport,
+    ContentSnippet,
+    PassageCoordinates,
+    SearchBatch,
+    SearchHit,
+)
 
 from opensac.backends.base import BatchSearchBackend, ClosableSearchBackend, SearchBackend
 from opensac.broker.policy import CapabilityPolicy, MechanismDisabled
@@ -31,6 +40,7 @@ from opensac.models import (
     HitRecord,
     Mechanisms,
     ModelAttemptRecord,
+    PassageTraceRecord,
     ProviderAttemptRecord,
     Session,
 )
@@ -41,6 +51,7 @@ from opensac.provider import (
     ProviderRuntime,
     ProviderWait,
 )
+from opensac.rerankers import ClosablePassageReranker, PassageReranker
 
 
 @dataclass
@@ -78,6 +89,9 @@ _EVENT_MODEL_ATTEMPTS: ContextVar[list[ModelAttemptRecord] | None] = ContextVar(
 )
 _EVENT_EVIDENCE: ContextVar[list[EvidenceTraceRecord] | None] = ContextVar(
     "opensac_event_evidence", default=None
+)
+_EVENT_PASSAGES: ContextVar[list[PassageTraceRecord] | None] = ContextVar(
+    "opensac_event_passages", default=None
 )
 _EVENT_PROVIDER_ATTEMPTS: ContextVar[list[ProviderAttemptRecord] | None] = ContextVar(
     "opensac_event_provider_attempts", default=None
@@ -227,6 +241,20 @@ class EvidenceRecord:
     passage_fingerprint: str
 
 
+@dataclass(frozen=True)
+class _PassageCandidate:
+    hit: SearchHit
+    input_index: int
+    title: str
+    url: str | None
+    date: str | None
+    text: str
+    start: int
+    end: int
+    coordinates: PassageCoordinates
+    lexical_score: float = 0.0
+
+
 @dataclass
 class _FlightGroup:
     """Transport work shared by one or more active provider request keys."""
@@ -374,6 +402,10 @@ class BrokerService:
         *,
         model_client: AsyncOpenAI | None = None,
         extraction_model: str = "",
+        passage_reranker: PassageReranker | None = None,
+        passage_chunk_chars: int = 2_000,
+        passage_chunk_overlap_chars: int = 200,
+        passage_prefilter_limit: int = 100,
         max_concurrency: int = 12,
         max_context_payload_bytes: int = 200_000,
         session_content_cache_bytes: int = 32_000_000,
@@ -400,6 +432,7 @@ class BrokerService:
         self.backends = backends
         self.model_client = model_client
         self.extraction_model = extraction_model
+        self.passage_reranker = passage_reranker
         self.sessions: dict[str, BrokerSession] = {}
         self.execution_tasks: dict[tuple[str, str], set[asyncio.Task[Any]]] = {}
         self.capacity_gate = CapacityGate(max_concurrency)
@@ -416,6 +449,21 @@ class BrokerService:
         self.max_search_queries_per_request = int(max_search_queries_per_request)
         self.max_search_query_chars = int(max_search_query_chars)
         self.max_search_top_k = int(max_search_top_k)
+        passage_limits = {
+            "passage_chunk_chars": passage_chunk_chars,
+            "passage_prefilter_limit": passage_prefilter_limit,
+        }
+        for name, value in passage_limits.items():
+            if int(value) < 1:
+                raise ValueError(f"{name} must be at least 1")
+            setattr(self, name, int(value))
+        if self.passage_prefilter_limit > 100:
+            raise ValueError("passage_prefilter_limit cannot exceed 100")
+        if int(passage_chunk_overlap_chars) < 0:
+            raise ValueError("passage_chunk_overlap_chars cannot be negative")
+        if int(passage_chunk_overlap_chars) >= int(passage_chunk_chars):
+            raise ValueError("passage_chunk_overlap_chars must be smaller than chunk size")
+        self.passage_chunk_overlap_chars = int(passage_chunk_overlap_chars)
         extraction_limits = {
             "max_extract_items": max_extract_items,
             "max_extract_instruction_bytes": max_extract_instruction_bytes,
@@ -444,6 +492,7 @@ class BrokerService:
                 "web.search": ProviderPolicy(concurrency=max_concurrency),
                 "local.document": ProviderPolicy(concurrency=6),
                 "web.scrape": ProviderPolicy(concurrency=6),
+                "web.rerank": ProviderPolicy(concurrency=2),
             }
         )
         self.backend_revision = backend_revision
@@ -472,6 +521,9 @@ class BrokerService:
             seen.add(id(backend))
             closable.append(backend)
         await asyncio.gather(*(backend.aclose() for backend in closable))
+        reranker = self.passage_reranker
+        if isinstance(reranker, ClosablePassageReranker):
+            await reranker.aclose()
 
     def register_session(self, session: Session, *, token: str | None = None) -> BrokerSession:
         state = BrokerSession(
@@ -600,6 +652,7 @@ class BrokerService:
             "search.query_many": self._search_query_many,
             "content.get_many": self._content_get_many,
             "content.snippets": self._content_snippets,
+            "content.passages": self._content_passages,
             "content.read": self._content_read,
             "content.grep": self._content_grep,
             "content.grep_report": self._content_grep_report,
@@ -624,6 +677,7 @@ class BrokerService:
         hits_context = _EVENT_HITS.set([])
         attempts_context = _EVENT_MODEL_ATTEMPTS.set([])
         evidence_context = _EVENT_EVIDENCE.set([])
+        passages_context = _EVENT_PASSAGES.set([])
         provider_trace = _ProviderTraceBuffer()
         provider_attempts_context = _EVENT_PROVIDER_ATTEMPTS.set(
             provider_trace.records
@@ -655,6 +709,7 @@ class BrokerService:
                 model_tokens=_EVENT_MODEL_TOKENS.get(),
                 model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
                 evidence_records=list(_EVENT_EVIDENCE.get() or []),
+                passage_records=list(_EVENT_PASSAGES.get() or []),
                 provider_attempts=list(_EVENT_PROVIDER_ATTEMPTS.get() or []),
                 deduplicated_requests=list(_EVENT_DEDUPLICATED.get() or []),
                 coalesced_requests=list(_EVENT_COALESCED.get() or []),
@@ -680,6 +735,7 @@ class BrokerService:
                 model_tokens=_EVENT_MODEL_TOKENS.get(),
                 model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
                 evidence_records=list(_EVENT_EVIDENCE.get() or []),
+                passage_records=list(_EVENT_PASSAGES.get() or []),
                 provider_attempts=list(_EVENT_PROVIDER_ATTEMPTS.get() or []),
                 deduplicated_requests=list(_EVENT_DEDUPLICATED.get() or []),
                 coalesced_requests=list(_EVENT_COALESCED.get() or []),
@@ -707,6 +763,7 @@ class BrokerService:
                 model_tokens=_EVENT_MODEL_TOKENS.get(),
                 model_attempts=list(_EVENT_MODEL_ATTEMPTS.get() or []),
                 evidence_records=list(_EVENT_EVIDENCE.get() or []),
+                passage_records=list(_EVENT_PASSAGES.get() or []),
                 provider_attempts=list(_EVENT_PROVIDER_ATTEMPTS.get() or []),
                 deduplicated_requests=list(_EVENT_DEDUPLICATED.get() or []),
                 coalesced_requests=list(_EVENT_COALESCED.get() or []),
@@ -725,6 +782,7 @@ class BrokerService:
             _EVENT_HITS.reset(hits_context)
             _EVENT_MODEL_ATTEMPTS.reset(attempts_context)
             _EVENT_EVIDENCE.reset(evidence_context)
+            _EVENT_PASSAGES.reset(passages_context)
             _EVENT_PROVIDER_ATTEMPTS.reset(provider_attempts_context)
             _EVENT_PROVIDER_TRACE.reset(provider_trace_context)
             _EVENT_DEDUPLICATED.reset(deduplicated_context)
@@ -1087,7 +1145,7 @@ class BrokerService:
         self,
         state: BrokerSession,
         *,
-        backend: SearchBackend,
+        backend: Any,
         operation: str,
         request_indexes: list[int],
         request_value: Any,
@@ -1168,6 +1226,9 @@ class BrokerService:
         return result
 
     def _trace_queries(self, method: str, params: dict[str, Any]) -> list[str]:
+        if method == "content.passages":
+            query = str(params.get("query", ""))
+            return [query[: self.max_search_query_chars]] if query else []
         if not method.startswith("search."):
             return []
         if method.endswith("_many"):
@@ -1188,7 +1249,8 @@ class BrokerService:
         if method == "citations.resolve" and "requests" in params:
             return len(params.get("requests", []))
         if method.startswith("content.") or method == "citations.resolve":
-            return len(params.get("refs", []))
+            refs = params.get("refs", [])
+            return 1 if isinstance(refs, str) else len(refs) if isinstance(refs, list) else 0
         if method in {"llm.complete_many", "llm.extract_many"}:
             key = "prompts" if method == "llm.complete_many" else "items"
             return len(params.get(key, []))
@@ -1202,6 +1264,8 @@ class BrokerService:
             return len(result)
         if method == "content.grep_report" and isinstance(result, dict):
             return len(result.get("matches", []))
+        if method == "content.passages" and isinstance(result, dict):
+            return len(result.get("passages", []))
         return 1 if result is not None else 0
 
     # A failed event without its message is a category, not a diagnosis. The
@@ -2336,6 +2400,386 @@ class BrokerService:
         # Positional alignment is part of the batch contract. A page which lost
         # its passage to the total budget remains as an explicit empty row.
         return rows
+
+    _PASSAGE_TERM_PATTERN = re.compile(
+        r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3400-\u9fff]|[^\W\d_]+",
+        flags=re.UNICODE,
+    )
+
+    @staticmethod
+    def _normalize_document_text(text: str) -> str:
+        """Normalize newline spellings without changing visible coordinates."""
+
+        return (text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+    @classmethod
+    def _passage_terms(cls, text: str) -> list[str]:
+        return [match.group(0).lower() for match in cls._PASSAGE_TERM_PATTERN.finditer(text)]
+
+    @staticmethod
+    def _passage_coordinates(
+        line_starts: list[int],
+        start: int,
+        end: int,
+    ) -> PassageCoordinates:
+        start_index = max(0, bisect_right(line_starts, start) - 1)
+        end_index = max(0, bisect_right(line_starts, end - 1) - 1)
+        return PassageCoordinates(
+            start_line=start_index + 1,
+            start_character=start - line_starts[start_index],
+            end_line=end_index + 1,
+            end_character=end - line_starts[end_index],
+        )
+
+    @classmethod
+    def _segment_passages(
+        cls,
+        text: str,
+        *,
+        chunk_chars: int,
+        overlap_chars: int,
+    ) -> list[tuple[str, int, int, PassageCoordinates]]:
+        """Return deterministic windows, preferring paragraph then line boundaries."""
+
+        if not text or not text.strip():
+            return []
+        line_starts = [0, *(index + 1 for index, char in enumerate(text) if char == "\n")]
+        windows: list[tuple[str, int, int, PassageCoordinates]] = []
+        cursor = 0
+        length = len(text)
+        while cursor < length:
+            while cursor < length and text[cursor].isspace():
+                cursor += 1
+            if cursor >= length:
+                break
+            hard_end = min(length, cursor + chunk_chars)
+            end = hard_end
+            if hard_end < length:
+                boundary_floor = cursor + max(1, chunk_chars // 2)
+                paragraph = text.rfind("\n\n", boundary_floor, hard_end + 1)
+                line = text.rfind("\n", boundary_floor, hard_end + 1)
+                if paragraph >= boundary_floor:
+                    end = paragraph
+                elif line >= boundary_floor:
+                    end = line
+            while end > cursor and text[end - 1].isspace():
+                end -= 1
+            if end <= cursor:
+                end = hard_end
+            passage = text[cursor:end]
+            if passage:
+                coordinates = cls._passage_coordinates(line_starts, cursor, end)
+                windows.append((passage, cursor, end, coordinates))
+            if hard_end >= length:
+                break
+            next_cursor = max(cursor + 1, end - overlap_chars)
+            cursor = next_cursor
+        return windows
+
+    @classmethod
+    def _score_passage_candidates(
+        cls,
+        query: str,
+        candidates: list[_PassageCandidate],
+    ) -> list[_PassageCandidate]:
+        """Apply request-local BM25; scores are comparable only within this call."""
+
+        if not candidates:
+            return []
+        query_terms = list(dict.fromkeys(cls._passage_terms(query)))
+        tokenized = [cls._passage_terms(candidate.text) for candidate in candidates]
+        if not query_terms:
+            return candidates
+        document_frequency: Counter[str] = Counter()
+        for terms in tokenized:
+            document_frequency.update(set(terms))
+        document_count = len(candidates)
+        average_length = sum(len(terms) for terms in tokenized) / max(document_count, 1)
+        k1 = 1.5
+        b = 0.75
+        scored: list[_PassageCandidate] = []
+        for candidate, terms in zip(candidates, tokenized, strict=True):
+            counts = Counter(terms)
+            document_length = len(terms)
+            score = 0.0
+            for term in query_terms:
+                frequency = counts.get(term, 0)
+                if not frequency:
+                    continue
+                frequency_in_documents = document_frequency[term]
+                inverse_document_frequency = math.log(
+                    1.0
+                    + (document_count - frequency_in_documents + 0.5)
+                    / (frequency_in_documents + 0.5)
+                )
+                denominator = frequency + k1 * (
+                    1.0 - b + b * document_length / max(average_length, 1.0)
+                )
+                score += inverse_document_frequency * frequency * (k1 + 1.0) / denominator
+            scored.append(replace(candidate, lexical_score=score))
+        return scored
+
+    async def _rerank_passages(
+        self,
+        state: BrokerSession,
+        query: str,
+        candidates: list[_PassageCandidate],
+    ) -> tuple[str, list[tuple[_PassageCandidate, float]]]:
+        reranker = self.passage_reranker
+        if reranker is None:
+            return "lexical:bm25", [
+                (candidate, candidate.lexical_score) for candidate in candidates
+            ]
+        if not candidates:
+            return reranker.name, []
+
+        async def request() -> Any:
+            return await reranker.rerank(query, [candidate.text for candidate in candidates])
+
+        results = await self._run_provider(
+            state,
+            backend=reranker,
+            operation="web.rerank",
+            request_indexes=list(range(len(candidates))),
+            request_value={
+                "ranker": reranker.name,
+                "query": query,
+                "passages": [
+                    hashlib.sha256(candidate.text.encode("utf-8")).hexdigest()
+                    for candidate in candidates
+                ],
+            },
+            request=request,
+            preflight=reranker.preflight,
+        )
+        scores: dict[int, float] = {}
+        for result in results:
+            index = getattr(result, "index", None)
+            score = getattr(result, "score", None)
+            if (
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or index < 0
+                or index >= len(candidates)
+                or index in scores
+                or isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not math.isfinite(float(score))
+            ):
+                raise ValueError("passage reranker returned invalid indexed scores")
+            scores[index] = float(score)
+        if set(scores) != set(range(len(candidates))):
+            raise ValueError("passage reranker returned an incomplete score set")
+        return reranker.name, [
+            (candidate, scores[index]) for index, candidate in enumerate(candidates)
+        ]
+
+    async def _content_passages(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        raw_query = params.get("query", "")
+        if not isinstance(raw_query, str):
+            raise ValueError("query must be a string")
+        query = raw_query.strip()
+        if not query:
+            raise ValueError("query must not be empty")
+        if len(query) > self.max_search_query_chars:
+            raise ValueError(
+                f"query has {len(query)} characters, exceeding the broker maximum "
+                f"of {self.max_search_query_chars}"
+            )
+        raw_limit = params.get("limit", 20)
+        raw_max_per_ref = params.get("max_per_ref", 3)
+        if (
+            isinstance(raw_limit, bool)
+            or not isinstance(raw_limit, int)
+            or isinstance(raw_max_per_ref, bool)
+            or not isinstance(raw_max_per_ref, int)
+        ):
+            raise ValueError("limit and max_per_ref must be integers")
+        limit = raw_limit
+        max_per_ref = raw_max_per_ref
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if not 1 <= max_per_ref <= 10:
+            raise ValueError("max_per_ref must be between 1 and 10")
+
+        raw_refs = params.get("refs", [])
+        input_count = (
+            1
+            if isinstance(raw_refs, str)
+            else len(raw_refs)
+            if isinstance(raw_refs, list)
+            else 0
+        )
+        hits = self._resolve_content_refs(state, raw_refs)
+        unique: list[tuple[int, SearchHit]] = []
+        leader_by_ref: dict[str, int] = {}
+        for input_index, hit in enumerate(hits):
+            leader_index = leader_by_ref.get(hit.ref)
+            if leader_index is None:
+                leader_by_ref[hit.ref] = input_index
+                unique.append((input_index, hit))
+                continue
+            fingerprint = self._fingerprint({"ref": hit.ref})
+            self._record_deduplicated_request(
+                request_index=input_index,
+                leader_index=leader_index,
+                request_fingerprint=fingerprint,
+            )
+        duplicate_count = len(hits) - len(unique)
+        if duplicate_count:
+            state.policy.record_deduplicated(duplicate_count)
+        if not unique:
+            return ContentPassageReport(
+                query=query,
+                input_count=input_count,
+                unique_ref_count=0,
+            ).model_dump(mode="json")
+
+        rows = await self._fetch_content(
+            state,
+            [hit for _, hit in unique],
+            query=None,
+        )
+        failures: list[dict[str, Any]] = []
+        candidates: list[_PassageCandidate] = []
+        normalized_documents: dict[str, str] = {}
+        for (input_index, hit), row in zip(unique, rows, strict=True):
+            failure = row.get("failure")
+            if failure is not None:
+                failures.append(
+                    {
+                        "input_index": input_index,
+                        "ref": hit.ref,
+                        "failure": failure,
+                    }
+                )
+                continue
+            document_text = self._normalize_document_text(str(row.get("text") or ""))
+            normalized_documents[hit.ref] = document_text
+            for text, start, end, coordinates in self._segment_passages(
+                document_text,
+                chunk_chars=self.passage_chunk_chars,
+                overlap_chars=self.passage_chunk_overlap_chars,
+            ):
+                candidates.append(
+                    _PassageCandidate(
+                        hit=hit,
+                        input_index=input_index,
+                        title=str(row.get("title") or hit.title or ""),
+                        url=row.get("url") or hit.url,
+                        date=row.get("date") or hit.date,
+                        text=text,
+                        start=start,
+                        end=end,
+                        coordinates=coordinates,
+                    )
+                )
+
+        scored = self._score_passage_candidates(query, candidates)
+        retained: list[_PassageCandidate] = []
+        for _ref, rows_for_ref in self._group_passages_by_ref(scored).items():
+            retained.extend(
+                sorted(
+                    rows_for_ref,
+                    key=lambda candidate: (
+                        -candidate.lexical_score,
+                        candidate.start,
+                        candidate.end,
+                    ),
+                )[: max(8, max_per_ref)]
+            )
+        retained.sort(
+            key=lambda candidate: (
+                -candidate.lexical_score,
+                candidate.input_index,
+                candidate.start,
+                candidate.end,
+            )
+        )
+        retained = retained[: self.passage_prefilter_limit]
+        ranker_name, reranked = await self._rerank_passages(state, query, retained)
+        reranked.sort(
+            key=lambda item: (
+                -item[1],
+                item[0].input_index,
+                item[0].start,
+                item[0].end,
+            )
+        )
+
+        selected: list[tuple[_PassageCandidate, float]] = []
+        per_ref: Counter[str] = Counter()
+        for candidate, score in reranked:
+            if per_ref[candidate.hit.ref] >= max_per_ref:
+                continue
+            per_ref[candidate.hit.ref] += 1
+            selected.append((candidate, score))
+            if len(selected) >= limit:
+                break
+
+        passages: list[dict[str, Any]] = []
+        traced = _EVENT_PASSAGES.get()
+        for rank, (candidate, score) in enumerate(selected, start=1):
+            coordinates = candidate.coordinates.model_dump(mode="json")
+            locator, locator_error = self._register_evidence(
+                state,
+                ref=candidate.hit.ref,
+                text=candidate.text,
+                document_text=normalized_documents[candidate.hit.ref],
+                coordinates={
+                    "type": "line_characters",
+                    "basis": "normalized_text",
+                    **coordinates,
+                },
+            )
+            row = ContentPassage(
+                ref=candidate.hit.ref,
+                title=candidate.title,
+                url=candidate.url,
+                date=candidate.date,
+                text=candidate.text,
+                coordinates=candidate.coordinates,
+                rank=rank,
+                score=score,
+                ranker=ranker_name,
+                locator=locator,
+                locator_error=locator_error,
+            ).model_dump(mode="json")
+            passages.append(row)
+            if traced is not None:
+                traced.append(
+                    PassageTraceRecord(
+                        identity=self._identity(candidate.hit),
+                        ref=candidate.hit.ref,
+                        ranker=ranker_name,
+                        rank=rank,
+                        score=score,
+                        coordinates=coordinates,
+                        passage_fingerprint=hashlib.sha256(
+                            candidate.text.encode("utf-8")
+                        ).hexdigest(),
+                    )
+                )
+        return ContentPassageReport(
+            query=query,
+            passages=passages,
+            failures=failures,
+            input_count=input_count,
+            unique_ref_count=len(unique),
+        ).model_dump(mode="json")
+
+    @staticmethod
+    def _group_passages_by_ref(
+        candidates: list[_PassageCandidate],
+    ) -> dict[str, list[_PassageCandidate]]:
+        grouped: dict[str, list[_PassageCandidate]] = {}
+        for candidate in candidates:
+            grouped.setdefault(candidate.hit.ref, []).append(candidate)
+        return grouped
 
     # Documents in a research corpus are mostly longer than any budget that can
     # be handed to a control model -- median ~9k characters, p90 ~62k -- so

@@ -1,0 +1,23 @@
+{
+  "cases": [
+    {
+      "id": "goalwidget-singapore-revenue",
+      "query": "GoalWidget Singapore revenue",
+      "gold_span": "The audited filing states that GoalWidget reported Singapore revenue of 42 million dollars in 2024.",
+      "sections": [
+        {
+          "text": "GoalWidget Singapore revenue",
+          "repeat": 1
+        },
+        {
+          "text": "Background material discusses regional logistics, office leases, product colors, conference schedules, and other unrelated operational details. ",
+          "repeat": 22
+        },
+        {
+          "text": "The audited filing states that GoalWidget reported Singapore revenue of 42 million dollars in 2024.",
+          "repeat": 1
+        }
+      ]
+    }
+  ]
+}

@@ -17,14 +17,14 @@ OpenSAC 提供执行运行时，而不负责控制循环。智能体集成应只
 
 ## 前置条件
 
-按照主 README 的 [Docker 快速开始](../README.zh-CN.md#使用-docker-快速开始)启动公开的 `v0.4.0`
+按照主 README 的 [Docker 快速开始](../README.zh-CN.md#使用-docker-快速开始)启动公开的 `v0.5.0`
 服务镜像，服务本身不需要源码检出。项目不发布 PyPI 包，因此使用 CLI 或 MCP 适配器的宿主机需要检出
 相同的发布版本，以安装适配命令和 skill：
 
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-git checkout v0.4.0
+git checkout v0.5.0
 uv tool install --editable /absolute/path/to/OpenSaC
 
 export SAC_API_BASE=http://127.0.0.1:8000

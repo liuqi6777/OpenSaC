@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from .models import ContentGrepReport, ContentMatch, ContentSnippet
+from .models import ContentGrepReport, ContentMatch, ContentPassageReport, ContentSnippet
 from .transport import UnixSocketTransport
 
 
 class ContentResource:
-    """Four ways to read a document, from whole-page to a named line window.
+    """Five ways to read documents, from global passage rank to a line window.
 
-    `get_many` and `snippets` both hand back a passage somebody else chose --
-    the whole page, or the window a broker-side scorer liked best. `grep` and
-    `read` are the pair that lets the program choose: locate a line, then read
-    around it. Line numbers are 1-indexed and shared between the two, so a
-    `ContentMatch.line` is a `read(offset=...)` with no arithmetic.
+    `passages` globally ranks windows across a ref set. `get_many` and `snippets`
+    return a whole page or one legacy page-local window. `grep` and `read` are
+    the pair for exact strings and surrounding context. Line numbers are
+    1-indexed and shared by passages, grep, and read.
 
     A document retrieved once is cached for the rest of the session, so reading
     the same pool repeatedly is cheap after the first pass. `get_many`,
@@ -113,3 +112,28 @@ class ContentResource:
             },
         )
         return [ContentSnippet.model_validate(item) for item in result]
+
+    def passages(
+        self,
+        query: str,
+        refs: list[str],
+        *,
+        limit: int = 20,
+        max_per_ref: int = 3,
+    ) -> ContentPassageReport:
+        """Globally rank citeable passages across an authorized document set.
+
+        Scores are comparable only within one report. The deployment chooses
+        the ranker; generated programs choose only the evidence query, input
+        refs, result depth, and per-document diversity cap.
+        """
+        result = self._transport.call(
+            "content.passages",
+            {
+                "query": query,
+                "refs": refs,
+                "limit": limit,
+                "max_per_ref": max_per_ref,
+            },
+        )
+        return ContentPassageReport.model_validate(result)

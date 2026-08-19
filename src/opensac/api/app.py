@@ -48,6 +48,7 @@ from opensac.models import (
     utc_now,
 )
 from opensac.provider import ProviderPolicy, ProviderRuntime
+from opensac.rerankers import JinaPassageReranker
 from opensac.sandbox import (
     SANDBOX_CONTRACT,
     DockerSandbox,
@@ -115,11 +116,14 @@ class ApplicationRuntime:
             api_key=settings.model_api_key or "not-configured",
             base_url=settings.model_base_url,
         )
-        self.provider_operations = (
+        provider_operations = list(
             ("local.search", "local.document")
             if settings.search_backend == "local"
             else ("web.search", "web.scrape")
         )
+        if settings.passage_ranker == "jina":
+            provider_operations.append("web.rerank")
+        self.provider_operations = tuple(provider_operations)
         provider_policies = {
             operation: ProviderPolicy(
                 retry_profile=settings.provider_retry_profile,
@@ -135,6 +139,8 @@ class ApplicationRuntime:
                     (
                         settings.max_concurrency
                         if operation.endswith(".search")
+                        else 2
+                        if operation == "web.rerank"
                         else settings.backend_fetch_concurrency
                     ),
                 ),
@@ -159,10 +165,20 @@ class ApplicationRuntime:
                 timeout=settings.provider_attempt_timeout_seconds,
                 fetch_concurrency=settings.backend_fetch_concurrency,
             )
+        passage_reranker = (
+            JinaPassageReranker(
+                api_key=settings.jina_api_key,
+                model=settings.passage_reranker_model,
+                timeout=settings.provider_attempt_timeout_seconds,
+            )
+            if settings.passage_ranker == "jina"
+            else None
+        )
         self.broker = BrokerService(
             {settings.search_backend: search_backend},
             model_client=self.model_client if settings.model_name else None,
             extraction_model=settings.model_name,
+            passage_reranker=passage_reranker,
             max_concurrency=settings.max_concurrency,
             max_context_payload_bytes=settings.max_context_payload_bytes,
             session_content_cache_bytes=settings.session_content_cache_bytes,
@@ -302,7 +318,7 @@ class ApplicationRuntime:
             "sandbox_image": self.settings.sandbox_image,
             "sandbox_image_digest": self.settings.sandbox_image_digest,
             "sandbox_contract": SANDBOX_CONTRACT,
-            "capability_contract": 3,
+            "capability_contract": 4,
             "capability_limits": {
                 "search": {
                     "max_queries_per_request": self.settings.search_max_queries_per_request,
@@ -327,6 +343,13 @@ class ApplicationRuntime:
                 },
                 "content": {
                     "max_refs_per_request": self.settings.content_max_refs_per_request,
+                    "passage_limit": 100,
+                    "passage_max_per_ref": 10,
+                    "passage_chunk_chars": self.broker.passage_chunk_chars,
+                    "passage_chunk_overlap_chars": (
+                        self.broker.passage_chunk_overlap_chars
+                    ),
+                    "passage_prefilter_limit": self.broker.passage_prefilter_limit,
                 },
                 "inflight": {
                     "enabled": self.settings.provider_inflight_coalescing,
@@ -346,6 +369,7 @@ class ApplicationRuntime:
             "backend_revision": self.settings.backend_revision,
             "backend_metadata_hash": self.settings.backend_metadata_hash,
             "search_backend": self.settings.search_backend,
+            "passage_ranker": self.settings.passage_ranker,
             "local_search_base_url": self.settings.local_search_base_url,
         }
 
@@ -1122,7 +1146,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not runtime.settings.model_name:
             capabilities = [method for method in capabilities if not method.startswith("llm.")]
         features = [
-            "capability_contract_v3",
+            "capability_contract_v4",
+            "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
             "content_grep_report_v1",

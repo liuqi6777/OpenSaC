@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     local_search_base_url: str = "http://127.0.0.1:8081"
     serper_api_key: str = ""
     jina_api_key: str = ""
+    passage_ranker: Literal["lexical", "jina"] = "lexical"
+    passage_reranker_model: str = ""
     # Admission limits are enforced by the broker before query fan-out. Keep
     # the defaults wide enough for research pipelines while bounding one
     # malformed/generated call independently of rollout-level usage metrics.
@@ -94,9 +96,10 @@ class Settings(BaseSettings):
     provider_max_backoff_seconds: float = Field(default=4.0, ge=0.0)
     provider_max_total_backoff_seconds: float = Field(default=15.0, ge=0.0)
     provider_max_retry_after_seconds: float = Field(default=15.0, ge=0.0)
-    # JSON dictionaries keyed by local.search/local.document/web.search/web.scrape.
+    # JSON dictionaries keyed by local.search/local.document/web.search/web.scrape/web.rerank.
     # Empty RPS/burst maps disable request-rate limiting. Concurrency falls back
-    # to max_concurrency for search and backend_fetch_concurrency for documents.
+    # to max_concurrency for search, two for reranking, and
+    # backend_fetch_concurrency for documents.
     provider_operation_concurrency: dict[str, int] = Field(default_factory=dict)
     provider_operation_requests_per_second: dict[str, float] = Field(default_factory=dict)
     provider_operation_burst: dict[str, int] = Field(default_factory=dict)
@@ -114,6 +117,7 @@ class Settings(BaseSettings):
             "local.document",
             "web.search",
             "web.scrape",
+            "web.rerank",
         }
         mappings = {
             "provider_operation_concurrency": self.provider_operation_concurrency,

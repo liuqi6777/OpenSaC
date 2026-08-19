@@ -43,7 +43,7 @@ def sandbox_image() -> str:
         )
 
 
-def test_built_image_exposes_contract_5_and_local_rrf(sandbox_image: str) -> None:
+def test_built_image_exposes_contract_6_and_passage_models(sandbox_image: str) -> None:
     image = sandbox_image
     inspected = subprocess.run(
         [
@@ -58,7 +58,7 @@ def test_built_image_exposes_contract_5_and_local_rrf(sandbox_image: str) -> Non
         capture_output=True,
         text=True,
     )
-    assert inspected.stdout.strip() == "5"
+    assert inspected.stdout.strip() == "6"
 
     inspected_version = subprocess.run(
         [
@@ -78,7 +78,8 @@ def test_built_image_exposes_contract_5_and_local_rrf(sandbox_image: str) -> Non
     script = (
         "import json; "
         "from opensac_sdk import CapabilityFailure, ContentFailure, "
-        "ContentGrepReport, SearchBatch, SearchHit, __version__; "
+        "ContentGrepReport, ContentPassageReport, PassageCoordinates, "
+        "SearchBatch, SearchHit, __version__; "
         "from opensac_sdk.search import SearchResource; "
         "hit = SearchHit(ref='ref_a', backend='local', rank=1); "
         "result = SearchResource(None).fuse_rrf([SearchBatch(query='q', hits=[hit])]); "
@@ -86,9 +87,15 @@ def test_built_image_exposes_contract_5_and_local_rrf(sandbox_image: str) -> Non
         "retryable=False, attempts=1, provider_status=404); "
         "report = ContentGrepReport(matches=[], failures=[ContentFailure("
         "input_index=0, ref='ref_a', failure=failure)], input_count=1); "
+        "passages = ContentPassageReport(query='q', input_count=0, "
+        "unique_ref_count=0); "
+        "coordinates = PassageCoordinates(start_line=1, start_character=0, "
+        "end_line=1, end_character=1); "
         "print(json.dumps({'version': __version__, "
         "'fusion': result.model_dump(mode='json'), "
-        "'report': report.model_dump(mode='json')}, sort_keys=True))"
+        "'report': report.model_dump(mode='json'), "
+        "'passages': passages.model_dump(mode='json'), "
+        "'coordinates': coordinates.model_dump(mode='json')}, sort_keys=True))"
     )
     executed = subprocess.run(
         [
@@ -111,6 +118,8 @@ def test_built_image_exposes_contract_5_and_local_rrf(sandbox_image: str) -> Non
     assert payload["fusion"]["candidates"][0]["ref"] == "ref_a"
     assert payload["fusion"]["candidates"][0]["fused_rank"] == 1
     assert payload["report"]["failures"][0]["failure"]["provider_status"] == 404
+    assert payload["passages"]["unique_ref_count"] == 0
+    assert payload["coordinates"]["end_character"] == 1
 
 
 def test_compose_service_executes_a_sandbox_program(sandbox_image: str) -> None:

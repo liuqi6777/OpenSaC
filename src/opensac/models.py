@@ -52,6 +52,7 @@ CAPABILITY_METHODS: tuple[str, ...] = (
     "search.query_many",
     "content.get_many",
     "content.snippets",
+    "content.passages",
     "content.read",
     "content.grep",
     "content.grep_report",
@@ -342,6 +343,18 @@ class EvidenceTraceRecord(BaseModel):
     error_code: str | None = None
 
 
+class PassageTraceRecord(BaseModel):
+    """Ranked-passage metadata without retrieved document text."""
+
+    identity: str
+    ref: str
+    ranker: str
+    rank: int = Field(ge=1)
+    score: float
+    coordinates: dict[str, Any] = Field(default_factory=dict)
+    passage_fingerprint: str
+
+
 class ProviderAttemptRecord(BaseModel):
     """One real provider transport attempt without request or response bodies."""
 
@@ -390,6 +403,7 @@ class CapabilityEvent(BaseModel):
     model_tokens: int = 0
     model_attempts: list[ModelAttemptRecord] = Field(default_factory=list)
     evidence_records: list[EvidenceTraceRecord] = Field(default_factory=list)
+    passage_records: list[PassageTraceRecord] = Field(default_factory=list)
     provider_attempts: list[ProviderAttemptRecord] = Field(default_factory=list)
     deduplicated_requests: list[DeduplicatedRequestRecord] = Field(default_factory=list)
     coalesced_requests: list[CoalescedRequestRecord] = Field(default_factory=list)

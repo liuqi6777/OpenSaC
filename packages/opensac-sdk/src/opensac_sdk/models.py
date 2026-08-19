@@ -205,6 +205,65 @@ class ContentFailure(SubscriptableModel):
     failure: CapabilityFailure
 
 
+class PassageCoordinates(SubscriptableModel):
+    """Exact half-open coordinates of a passage in normalized document text.
+
+    Lines are 1-indexed. Character offsets are 0-indexed within their
+    respective lines, and ``end_character`` is exclusive.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_line: int = Field(ge=1)
+    start_character: int = Field(ge=0)
+    end_line: int = Field(ge=1)
+    end_character: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        start = (self.start_line, self.start_character)
+        end = (self.end_line, self.end_character)
+        if end <= start:
+            raise ValueError("passage coordinates must describe a non-empty range")
+        return self
+
+
+class ContentPassage(SubscriptableModel):
+    """One globally ranked passage selected from a caller-authorized ref set."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str = Field(min_length=1)
+    title: str = ""
+    url: str | None = None
+    date: str | None = None
+    text: str = Field(min_length=1)
+    coordinates: PassageCoordinates
+    rank: int = Field(ge=1)
+    score: float = Field(allow_inf_nan=False)
+    ranker: str = Field(min_length=1)
+    locator: EvidenceLocator | None = None
+    locator_error: EvidenceLocatorError | None = None
+
+
+class ContentPassageReport(SubscriptableModel):
+    """Ranked passages plus typed fetch failures for the requested ref set."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1)
+    passages: list[ContentPassage] = Field(default_factory=list)
+    failures: list[ContentFailure] = Field(default_factory=list)
+    input_count: int = Field(ge=0)
+    unique_ref_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_counts(self) -> Self:
+        if self.unique_ref_count > self.input_count:
+            raise ValueError("unique_ref_count cannot exceed input_count")
+        return self
+
+
 class ContentGrepReport(SubscriptableModel):
     """Matches plus refs that grep could not inspect."""
 

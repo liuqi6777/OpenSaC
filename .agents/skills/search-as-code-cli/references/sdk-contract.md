@@ -34,6 +34,9 @@ sdk.content.get_many(refs) -> list[ContentSnippet]
 sdk.content.snippets(
     query, refs, max_tokens=4000, max_tokens_per_page=1000
 ) -> list[ContentSnippet]
+sdk.content.passages(
+    query, refs, limit=20, max_per_ref=3
+) -> ContentPassageReport
 sdk.content.grep(
     refs, pattern, context=0, max_matches_per_ref=20
 ) -> list[ContentMatch]
@@ -97,6 +100,11 @@ error; keep a deterministic fallback.
 - `ContentMatch`: `ref`, `docid`, `url`, `title`, `line`, `text`, `before`, `after`, `locator`,
   `locator_error`, `input_index`.
 - `ContentFailure`: `input_index`, `ref`, `failure`.
+- `PassageCoordinates`: `start_line`, `start_character`, `end_line`, `end_character`. Lines are
+  1-indexed; characters are 0-indexed and the end position is exclusive.
+- `ContentPassage`: `ref`, `title`, `url`, `date`, `text`, `coordinates`, `rank`, `score`, `ranker`,
+  `locator`, `locator_error`. Rank is global and 1-indexed; scores compare only within one report.
+- `ContentPassageReport`: `query`, `passages`, `failures`, `input_count`, `unique_ref_count`.
 - `ContentGrepReport`: `matches`, `failures`, `input_count`.
 - `CapabilityFailure`: `code`, `message`, `retryable`, `attempts`, `provider_status`,
   `retry_after_seconds`.
@@ -115,6 +123,9 @@ SDK models support attribute and read-only mapping access. Rows returned by `rea
 - Inspect `SearchBatch.failure` for per-query failure. A failed batch has no hits.
 - Inspect `ContentSnippet.failure` for per-ref failure. `get_many`, `snippets`, and `read` return
   one row per input ref in the same order.
+- `content.passages` exactly deduplicates refs in first-seen order, ranks successful documents
+  together, and reports failed fetches in `ContentPassageReport.failures`. Empty refs and zero
+  passages are successful reports.
 - Use `grep_report` when coverage matters. Its `failures` contain `ContentFailure` rows aligned by
   `input_index`; plain `grep` omits partial failures.
 - Treat empty search hits and zero grep matches as success, not failure.
@@ -131,6 +142,8 @@ SDK models support attribute and read-only mapping access. Rows returned by `rea
   the current session returned its ref, docid, or URL.
 - Deployment limits are configurable. Defaults admit at most 64 queries in one search batch and
   256 refs in one content request. Use smaller batches instead of depending on the maxima.
+- `content.passages` requires a non-empty query, accepts `limit=1..100` and
+  `max_per_ref=1..10`, and applies the per-ref cap after global ranking.
 - `grep` and `grep_report` fetch documents before matching them. Session caching can avoid another
   backend fetch, but every requested ref still counts as a content fetch for strategy budgets.
 - `grep` match lines and `read` offsets are 1-indexed. `read.metadata` reports `start_line`,

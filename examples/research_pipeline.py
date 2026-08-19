@@ -16,18 +16,25 @@ unique = {
     if candidate.domain in official_domains
 }
 
-snippets = sdk.content.snippets(
+report = sdk.content.passages(
     "vector index types, filtering, consistency and limitations",
     list(unique),
-    max_tokens_per_page=800,
+    limit=20,
+    max_per_ref=3,
 )
 
-sdk.state.write_jsonl("evidence.jsonl", [item.model_dump() for item in snippets])
+sdk.state.write_jsonl(
+    "evidence.jsonl",
+    [item.model_dump(mode="json") for item in report.passages],
+)
 sdk.output.submit(
-    {"evidence": [item.model_dump() for item in snippets]},
+    {
+        "evidence": [item.model_dump(mode="json") for item in report.passages],
+        "fetch_failures": [item.model_dump(mode="json") for item in report.failures],
+    },
     citations=[
         {"ref": item.ref, "locator": item.locator}
-        for item in snippets
+        for item in report.passages
         if item.locator is not None
     ],
 )

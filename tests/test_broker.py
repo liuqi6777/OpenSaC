@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from opensac.models import (
     Session,
 )
 from opensac.provider import ProviderRequestError
+from opensac.rerankers import JinaPassageReranker, PassageRerankResult
 
 
 class FakeBackend:
@@ -73,6 +75,62 @@ class BrokenBackend:
 
     async def content(self, hits, *, query=None):
         raise RuntimeError("backend exploded")
+
+
+class PassageCorpusBackend:
+    """Frozen in-memory web pages with observable per-document fetches."""
+
+    name = "web"
+    supports_domains = True
+    max_depth = 100
+
+    def __init__(self, documents: list[str], *, fail: set[int] | None = None) -> None:
+        self.documents = documents
+        self.fail = fail or set()
+        self.fetched: list[int] = []
+
+    async def search(self, query, *, limit, offset=0, domains=None):
+        del query, domains
+        return [
+            SearchHit(
+                ref="",
+                backend="web",
+                title=f"Frozen page {index}",
+                url=f"https://example.test/{index}",
+                date=f"202{index}",
+                snippet="frozen",
+                rank=index + 1,
+            )
+            for index in range(offset, min(offset + limit, len(self.documents)))
+        ]
+
+    async def content(self, hits, *, query=None):
+        del query
+        rows = []
+        for hit in hits:
+            index = int(str(hit.url).rsplit("/", 1)[-1])
+            self.fetched.append(index)
+            if index in self.fail:
+                rows.append(
+                    ContentSnippet(
+                        ref=hit.ref,
+                        text="",
+                        title=hit.title,
+                        url=hit.url,
+                        metadata={"fetch_error": "secret upstream response"},
+                    )
+                )
+            else:
+                rows.append(
+                    ContentSnippet(
+                        ref=hit.ref,
+                        text=self.documents[index],
+                        title=hit.title,
+                        url=hit.url,
+                        date=hit.date,
+                    )
+                )
+        return rows
 
 
 def make_session(*, backends=None, mechanisms=None, budget=None):
@@ -603,6 +661,389 @@ def test_query_aware_passage_matches_shared_golden_fixture() -> None:
     )
     assert text == fixture["expected_text"]
     assert metadata["passage_index"] == fixture["expected_passage_index"]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"query": "", "refs": []},
+        {"query": None, "refs": []},
+        {"query": "q", "refs": [], "limit": 0},
+        {"query": "q", "refs": [], "limit": "invalid"},
+        {"query": "q", "refs": [], "limit": True},
+        {"query": "q", "refs": [], "limit": 101},
+        {"query": "q", "refs": [], "max_per_ref": 0},
+        {"query": "q", "refs": [], "max_per_ref": None},
+        {"query": "q", "refs": [], "max_per_ref": 11},
+    ],
+)
+async def test_passages_reject_invalid_public_parameters(params) -> None:
+    service = BrokerService({"web": PassageCorpusBackend([])})
+    service.register_session(make_session())
+
+    with pytest.raises(ValueError):
+        await service.call("token", "content.passages", params)
+
+
+async def test_passages_empty_refs_and_exact_duplicates_are_successful() -> None:
+    backend = PassageCorpusBackend(["alpha evidence", "beta evidence"])
+    service = BrokerService({"web": backend})
+    state = service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "seed", "limit": 2})
+
+    empty = await service.call(
+        "token",
+        "content.passages",
+        {"query": "evidence", "refs": []},
+    )
+    report = await service.call(
+        "token",
+        "content.passages",
+        {
+            "query": "evidence",
+            "refs": [hits[0]["ref"], hits[0]["ref"], hits[1]["ref"]],
+            "limit": 2,
+            "max_per_ref": 1,
+        },
+    )
+
+    assert empty == {
+        "query": "evidence",
+        "passages": [],
+        "failures": [],
+        "input_count": 0,
+        "unique_ref_count": 0,
+    }
+    assert report["input_count"] == 3
+    assert report["unique_ref_count"] == 2
+    assert [row["ref"] for row in report["passages"]] == [
+        hits[0]["ref"],
+        hits[1]["ref"],
+    ]
+    assert backend.fetched == [0, 1]
+    assert state.policy.usage.content_fetches == 2
+    assert state.policy.usage.intra_call_deduplicated_items == 1
+
+
+async def test_passages_apply_ref_limit_before_deduplication() -> None:
+    backend = PassageCorpusBackend(["alpha"])
+    service = BrokerService({"web": backend}, max_content_refs_per_request=2)
+    service.register_session(make_session())
+    ref = (await service.call("token", "search.query", {"query": "seed"}))[0]["ref"]
+
+    with pytest.raises(ValueError, match="maximum of 2"):
+        await service.call(
+            "token",
+            "content.passages",
+            {"query": "alpha", "refs": [ref, ref, ref]},
+        )
+
+
+def test_passage_chunking_is_stable_exact_and_handles_long_single_lines() -> None:
+    text = "heading\n\n" + "a" * 4_500 + " needle"
+
+    first = BrokerService._segment_passages(
+        text,
+        chunk_chars=2_000,
+        overlap_chars=200,
+    )
+    second = BrokerService._segment_passages(
+        text,
+        chunk_chars=2_000,
+        overlap_chars=200,
+    )
+
+    assert first == second
+    assert len(first) == 3
+    for passage, start, end, coordinates in first:
+        assert passage == text[start:end]
+        assert 0 < len(passage) <= 2_000
+        assert coordinates.start_line >= 1
+        assert coordinates.end_line >= coordinates.start_line
+    assert first[-1][0].endswith("needle")
+    assert first[-1][3].end_line == 3
+    assert first[-1][3].end_character == len(text) - len("heading\n\n")
+
+    indented = BrokerService._segment_passages(
+        "\n  alpha\nbeta",
+        chunk_chars=2_000,
+        overlap_chars=200,
+    )[0]
+    assert indented[3].model_dump() == {
+        "start_line": 2,
+        "start_character": 2,
+        "end_line": 3,
+        "end_character": 4,
+    }
+
+    aligned = BrokerService._segment_passages(
+        "a" * 1_100 + "\n\n" + "b" * 1_000,
+        chunk_chars=2_000,
+        overlap_chars=200,
+    )
+    assert aligned[0][2] == 1_100
+
+
+async def test_passages_bm25_supports_english_and_chinese_queries() -> None:
+    backend = PassageCorpusBackend(
+        [
+            "The audited report states that Singapore revenue reached 42 million dollars.",
+            "公司公告显示，新加坡营收达到四千二百万美元。",
+        ]
+    )
+    service = BrokerService({"web": backend})
+    service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "seed", "limit": 2})
+    refs = [hit["ref"] for hit in hits]
+
+    english = await service.call(
+        "token",
+        "content.passages",
+        {"query": "Singapore revenue", "refs": refs, "limit": 1},
+        execution_id="passages-lexical",
+    )
+    chinese = await service.call(
+        "token",
+        "content.passages",
+        {"query": "新加坡 营收", "refs": refs, "limit": 1},
+    )
+
+    assert english["passages"][0]["ref"] == refs[0]
+    assert chinese["passages"][0]["ref"] == refs[1]
+    assert english["passages"][0]["ranker"] == "lexical:bm25"
+    assert chinese["passages"][0]["score"] > 0
+    trace = service.take_trace("token", "passages-lexical")[0]
+    assert not any(
+        attempt.operation == "web.rerank" for attempt in trace.provider_attempts
+    )
+
+
+async def test_passages_stably_break_ties_and_apply_max_per_ref_after_ranking() -> None:
+    backend = PassageCorpusBackend(["a" * 180, "b" * 180])
+    service = BrokerService(
+        {"web": backend},
+        passage_chunk_chars=50,
+        passage_chunk_overlap_chars=10,
+    )
+    service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "seed", "limit": 2})
+    refs = [hit["ref"] for hit in hits]
+
+    first = await service.call(
+        "token",
+        "content.passages",
+        {"query": "unmatched", "refs": refs, "limit": 4, "max_per_ref": 2},
+    )
+    second = await service.call(
+        "token",
+        "content.passages",
+        {"query": "unmatched", "refs": refs, "limit": 4, "max_per_ref": 2},
+    )
+
+    assert first["passages"] == second["passages"]
+    assert [row["ref"] for row in first["passages"]] == [refs[0], refs[0], refs[1], refs[1]]
+    assert [row["rank"] for row in first["passages"]] == [1, 2, 3, 4]
+    assert [row["coordinates"]["start_character"] for row in first["passages"][:2]] == [
+        0,
+        40,
+    ]
+
+
+async def test_passages_keep_partial_fetch_failures_and_issue_resolvable_locators() -> None:
+    backend = PassageCorpusBackend(
+        ["alpha answer", "unavailable", "alpha corroboration"],
+        fail={1},
+    )
+    service = BrokerService({"web": backend})
+    service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "seed", "limit": 3})
+    refs = [hit["ref"] for hit in hits]
+
+    report = await service.call(
+        "token",
+        "content.passages",
+        {"query": "alpha", "refs": refs, "limit": 2, "max_per_ref": 1},
+        execution_id="passages-partial",
+    )
+
+    assert report["failures"][0]["input_index"] == 1
+    assert report["failures"][0]["ref"] == refs[1]
+    assert report["failures"][0]["failure"]["code"] == "provider_rejected"
+    assert [row["ref"] for row in report["passages"]] == [refs[0], refs[2]]
+    assert all(row["locator"] is not None for row in report["passages"])
+    resolved = await service.call(
+        "token",
+        "citations.resolve",
+        {
+            "requests": [
+                {
+                    "ref": report["passages"][0]["ref"],
+                    "locator": report["passages"][0]["locator"],
+                }
+            ]
+        },
+    )
+    assert resolved[0]["evidence"] == report["passages"][0]["text"]
+    trace = service.take_trace("token", "passages-partial")[0]
+    assert trace.result_count == 2
+    assert len(trace.passage_records) == 2
+    assert "alpha answer" not in trace.model_dump_json()
+    assert trace.passage_records[0].coordinates == report["passages"][0]["coordinates"]
+
+
+async def test_passages_only_register_final_rows_and_report_capacity_exhaustion() -> None:
+    backend = PassageCorpusBackend(["alpha " * 100, "alpha " * 100])
+    service = BrokerService(
+        {"web": backend},
+        passage_chunk_chars=80,
+        passage_chunk_overlap_chars=10,
+        max_evidence_records=1,
+    )
+    state = service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "seed", "limit": 2})
+
+    report = await service.call(
+        "token",
+        "content.passages",
+        {
+            "query": "alpha",
+            "refs": [hit["ref"] for hit in hits],
+            "limit": 2,
+            "max_per_ref": 1,
+        },
+    )
+
+    assert len(state.evidence) == 1
+    assert report["passages"][0]["locator"] is not None
+    assert report["passages"][1].get("locator") is None
+    assert report["passages"][1]["locator_error"]["code"] == (
+        "evidence_capacity_exhausted"
+    )
+
+
+async def test_passage_reranker_maps_scores_by_index_even_when_results_are_unordered() -> None:
+    class UnorderedReranker:
+        name = "test:unordered"
+        provider_identity = "test:unordered"
+
+        def preflight(self) -> None:
+            return None
+
+        async def rerank(self, query, documents):
+            del query
+            return [
+                PassageRerankResult(index=1, score=9.0),
+                PassageRerankResult(index=0, score=1.0),
+            ][: len(documents)]
+
+    backend = PassageCorpusBackend(["alpha first", "alpha second"])
+    service = BrokerService({"web": backend}, passage_reranker=UnorderedReranker())
+    service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "seed", "limit": 2})
+
+    report = await service.call(
+        "token",
+        "content.passages",
+        {
+            "query": "alpha",
+            "refs": [hit["ref"] for hit in hits],
+            "limit": 2,
+            "max_per_ref": 1,
+        },
+        execution_id="passages-rerank",
+    )
+
+    assert [row["ref"] for row in report["passages"]] == [hits[1]["ref"], hits[0]["ref"]]
+    assert [row["score"] for row in report["passages"]] == [9.0, 1.0]
+    trace = service.take_trace("token", "passages-rerank")[0]
+    rerank_attempts = [
+        attempt for attempt in trace.provider_attempts if attempt.operation == "web.rerank"
+    ]
+    assert rerank_attempts[0].request_indexes == [0, 1]
+
+
+async def test_passage_prefilter_keeps_eight_per_ref_then_caps_globally_at_100() -> None:
+    class CapturingReranker:
+        name = "test:capture"
+        provider_identity = "test:capture"
+
+        def __init__(self) -> None:
+            self.documents: list[str] = []
+
+        def preflight(self) -> None:
+            return None
+
+        async def rerank(self, query, documents):
+            del query
+            self.documents = list(documents)
+            return [
+                PassageRerankResult(index=index, score=0.0)
+                for index in range(len(documents))
+            ]
+
+    reranker = CapturingReranker()
+    backend = PassageCorpusBackend([chr(97 + index) * 200 for index in range(13)])
+    service = BrokerService(
+        {"web": backend},
+        passage_reranker=reranker,
+        passage_chunk_chars=20,
+        passage_chunk_overlap_chars=0,
+    )
+    service.register_session(make_session())
+    hits = await service.call("token", "search.query", {"query": "seed", "limit": 13})
+
+    await service.call(
+        "token",
+        "content.passages",
+        {
+            "query": "unmatched",
+            "refs": [hit["ref"] for hit in hits],
+            "limit": 1,
+            "max_per_ref": 3,
+        },
+    )
+
+    counts = Counter(document[0] for document in reranker.documents)
+    assert len(reranker.documents) == 100
+    assert [counts[chr(97 + index)] for index in range(13)] == [*([8] * 12), 4]
+
+
+async def test_jina_mode_has_no_silent_lexical_fallback_but_empty_pages_succeed() -> None:
+    empty = BrokerService(
+        {"web": PassageCorpusBackend([""])},
+        passage_reranker=JinaPassageReranker(),
+    )
+    empty.register_session(make_session())
+    empty_ref = (await empty.call("token", "search.query", {"query": "seed"}))[0]["ref"]
+    report = await empty.call(
+        "token",
+        "content.passages",
+        {"query": "answer", "refs": [empty_ref]},
+    )
+    assert report["passages"] == []
+
+    configured = BrokerService(
+        {"web": PassageCorpusBackend(["lexically matching answer"])},
+        passage_reranker=JinaPassageReranker(),
+    )
+    state = configured.register_session(make_session())
+    ref = (await configured.call("token", "search.query", {"query": "seed"}))[0]["ref"]
+    with pytest.raises(ProviderRequestError) as raised:
+        await configured.call(
+            "token",
+            "content.passages",
+            {"query": "answer", "refs": [ref]},
+            execution_id="passages-missing-jina",
+        )
+
+    assert raised.value.code == "provider_not_configured"
+    assert raised.value.attempts == 0
+    assert state.evidence == {}
+    trace = configured.take_trace("token", "passages-missing-jina")[0]
+    assert trace.status == "error"
+    assert not any(
+        attempt.operation == "web.rerank" for attempt in trace.provider_attempts
+    )
 
 
 async def test_llm_complete_many_preserves_prompt_order() -> None:

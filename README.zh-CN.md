@@ -25,11 +25,11 @@ OpenSAC 实现了公开的
 抽象，但并不试图复刻 Perplexity 的内部搜索引擎。
 
 > [!IMPORTANT]
-> OpenSAC 是一项持续推进中的工作（当前版本 `0.4.0`）。我们正在积极开发系统并评测其效果，项目将
+> OpenSAC 是一项持续推进中的工作（当前版本 `0.5.0`）。我们正在积极开发系统并评测其效果，项目将
 > 持续更新；API、部署契约和研究材料也可能继续演进。
 
 > [!NOTE]
-> **发布状态：**[`v0.4.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.4.0) 已发布，
+> **发布状态：**[`v0.5.0`](https://github.com/liuqi6777/OpenSaC/releases/tag/v0.5.0) 已发布，
 > GHCR 上的服务镜像与沙箱镜像均可公开拉取且版本一致。
 
 ## 为什么使用 OpenSAC
@@ -72,7 +72,7 @@ OpenSAC 有意不负责 agent loop。外部控制平面选择模型、生成程�
 
 ## 快速开始
 
-公开的 `v0.4.0` 镜像包含 OpenSAC API/broker 和隔离执行沙箱。
+公开的 `v0.5.0` 镜像包含 OpenSAC API/broker 和隔离执行沙箱。
 
 环境要求：Docker Engine 或 Docker Desktop、兼容 POSIX 的 shell，以及 Serper + Jina 凭证。
 
@@ -116,7 +116,7 @@ docker run --detach \
   --env OPENSAC_SEARCH_BACKEND=web \
   --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
   --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
-  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.4.0 \
+  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.5.0 \
   --publish 127.0.0.1:8000:8000 \
   --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
   --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
@@ -124,7 +124,7 @@ docker run --detach \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:0.4.0
+  ghcr.io/liuqi6777/opensac:0.5.0
 ```
 
 等待几秒后，无需在宿主机安装客户端即可检查服务：
@@ -193,14 +193,14 @@ PY
 | 命名空间 | 主要操作 | 作用 |
 | --- | --- | --- |
 | `sdk.search` | `search`、`many`、`fuse_rrf` | 检索并融合候选，同时保留 provenance |
-| `sdk.content` | `get_many`、`snippets`、`grep`、`read` | 获取、定位和检查证据 |
+| `sdk.content` | `passages`、`get_many`、`snippets`、`grep`、`read` | 排序、定位和检查证据 |
 | `sdk.llm` | `map`、`map_many`、`extract`、`extract_many` | 可选的 broker 模型调用与 schema 校验抽取 |
 | `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
 | `sdk.session` | `usage` | 查看策略统计与剩余预算 |
 | `sdk.output` | `submit` | 返回结构化输出并解析可信引用 |
 
 批量操作保持输入对齐，并暴露类型化的逐项失败。空搜索结果属于成功结果。段落引用必须使用正文操作返回的
-locator。当前公共契约与迁移说明见 [OpenSAC 0.4](docs/opensac-0.4.md)。
+locator。当前公共契约与迁移说明见 [OpenSAC 0.5](docs/opensac-0.5.md)。
 
 ### 智能体集成
 
@@ -218,17 +218,17 @@ OpenSAC 支持三种驱动方式：
 
 | 方式 | 状态 | 适用场景 |
 | --- | --- | --- |
-| Docker CLI | `v0.4.0` 已可用 | 无本地配置文件的最快启动方式 |
-| Docker Compose | `v0.4.0` 已可用 | 声明式、可复现部署 |
+| Docker CLI | `v0.5.0` 已可用 | 无本地配置文件的最快启动方式 |
+| Docker Compose | `v0.5.0` 已可用 | 声明式、可复现部署 |
 | Git 源码 | 可用 | 开发、实验和尚未发布的改动 |
 
 <details>
 <summary><strong>发布镜像与版本策略</strong></summary>
 
-`v0.4.0` 已发布适用于 Linux `amd64` 和 `arm64` 的多架构镜像：
+`v0.5.0` 已发布适用于 Linux `amd64` 和 `arm64` 的多架构镜像：
 
-- API/broker 镜像 `ghcr.io/liuqi6777/opensac:0.4.0`；
-- 强化执行镜像 `ghcr.io/liuqi6777/opensac-sandbox:0.4.0`。
+- API/broker 镜像 `ghcr.io/liuqi6777/opensac:0.5.0`；
+- 强化执行镜像 `ghcr.io/liuqi6777/opensac-sandbox:0.5.0`。
 
 标签触发的工作流还会更新 `latest`，GitHub 也会为发布版本生成常规源码归档。
 
@@ -259,7 +259,7 @@ uv run pytest
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |
 | 配置可选的本地检索器 | [本地稠密检索](docs/local-search.md) |
-| 迁移到当前能力契约 | [OpenSAC 0.4](docs/opensac-0.4.md) |
+| 迁移到当前能力契约 | [OpenSAC 0.5](docs/opensac-0.5.md) |
 | 运行 rollout worker | [RL environment workers](docs/rl-environment-workers.md) |
 | 发布正式版本 | [版本发布流程](docs/releasing.zh-CN.md) |
 

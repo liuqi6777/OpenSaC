@@ -33,6 +33,8 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         backend_metadata_hash="sha256:index-manifest",
         extract_max_items=12,
         citation_max_evidence_chars=4096,
+        search_backend="local",
+        model_name="",
     )
     with TestClient(create_app(settings)) as client:
         unauthorized = client.post("/v1/sessions", json={})
@@ -50,7 +52,8 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v3",
+            "capability_contract_v4",
+            "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
             "content_grep_report_v1",
@@ -71,13 +74,17 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
-        assert payload["environment"]["sandbox_contract"] == 5
-        assert payload["environment"]["capability_contract"] == 3
+        assert payload["environment"]["sandbox_contract"] == 6
+        assert payload["environment"]["capability_contract"] == 4
         capability_limits = payload["environment"]["capability_limits"]
         assert capability_limits["extract_many"]["max_items"] == 12
         assert capability_limits["evidence"]["max_chars"] == 4096
         assert capability_limits["evidence"]["max_records"] == 4096
         assert capability_limits["content"]["max_refs_per_request"] == 256
+        assert capability_limits["content"]["passage_limit"] == 100
+        assert capability_limits["content"]["passage_max_per_ref"] == 10
+        assert capability_limits["content"]["passage_chunk_chars"] == 2_000
+        assert payload["environment"]["passage_ranker"] == "lexical"
         assert payload["environment"]["provider_policies"]["local.search"][
             "retry_profile"
         ] == "none"
@@ -106,6 +113,7 @@ def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
         provider_operation_concurrency={"local.search": 3},
         provider_operation_requests_per_second={"local.search": 2.5},
         provider_operation_burst={"local.search": 2},
+        search_backend="local",
     )
 
     with TestClient(create_app(settings)) as client:
@@ -133,8 +141,40 @@ def test_provider_policy_config_rejects_unknown_operations_and_orphan_bursts() -
 
 def test_settings_load_jina_api_key_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("OPENSAC_JINA_API_KEY", "jina-secret")
+    monkeypatch.setenv("OPENSAC_PASSAGE_RANKER", "jina")
+    monkeypatch.setenv("OPENSAC_PASSAGE_RERANKER_MODEL", "jina-reranker-v3")
 
-    assert Settings(_env_file=None).jina_api_key == "jina-secret"
+    settings = Settings(_env_file=None)
+
+    assert settings.jina_api_key == "jina-secret"
+    assert settings.passage_ranker == "jina"
+    assert settings.passage_reranker_model == "jina-reranker-v3"
+
+
+def test_jina_passage_ranker_is_opt_in_and_uses_provider_policy(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        broker_socket=tmp_path / "broker.sock",
+        search_backend="web",
+        passage_ranker="jina",
+        jina_api_key="jina-secret",
+        passage_reranker_model="jina-reranker-v3",
+        provider_operation_concurrency={"web.rerank": 1},
+        provider_operation_requests_per_second={"web.rerank": 2.0},
+        provider_operation_burst={"web.rerank": 1},
+    )
+
+    with TestClient(create_app(settings)) as client:
+        payload = client.post("/v1/sessions", json={}).json()
+        reranker = client.app.state.runtime.broker.passage_reranker
+
+        assert reranker is not None
+        assert reranker.name == "jina:jina-reranker-v3"
+        policy = payload["environment"]["provider_policies"]["web.rerank"]
+        assert policy["concurrency"] == 1
+        assert policy["requests_per_second"] == 2.0
+        assert policy["burst"] == 1
+        assert payload["environment"]["passage_ranker"] == "jina"
 
 
 def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
@@ -143,7 +183,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.4.0"
+    assert schema["info"]["version"] == "0.5.0"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
