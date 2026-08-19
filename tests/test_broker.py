@@ -9,13 +9,12 @@ import pytest
 from opensac_sdk._surface import BROKER_METHODS
 
 from opensac._contracts import ContentSnippet, RetrievalMetadata, SearchBatch, SearchHit
+from opensac.broker.call_context import trace_error_message
+from opensac.broker.documents import canonical_url
+from opensac.broker.llm import ExtractionInfrastructureError
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
-from opensac.broker.service import (
-    BrokerService,
-    CapabilityProviderError,
-    ExtractionInfrastructureError,
-    InflightCapacityError,
-)
+from opensac.broker.provider_execution import CapabilityProviderError, InflightCapacityError
+from opensac.broker.service import BrokerService
 from opensac.models import (
     CAPABILITY_METHODS,
     Mechanisms,
@@ -1878,7 +1877,7 @@ async def test_a_program_can_read_what_it_has_spent() -> None:
 
 
 def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:
-    canonical = BrokerService._canonical_url
+    canonical = canonical_url
     assert canonical("HTTPS://Example.COM/a?utm_source=x&id=7#frag") == (
         "https://example.com/a?id=7"
     )
@@ -2007,13 +2006,12 @@ def test_a_trace_error_message_is_bounded_but_never_empty() -> None:
     addresses and queries verbatim -- and `None` rather than `""` for a bare
     raise, because an empty string reads as "the message was dropped".
     """
-    bound = BrokerService._ERROR_MESSAGE_CHARS
-    long = BrokerService._trace_error_message(RuntimeError("x" * (bound + 100)))
+    long = trace_error_message(RuntimeError("x" * 500))
 
     assert long is not None
     assert long.startswith("x" * 32) and long.endswith("... [truncated]")
-    assert len(long) < bound + 100
-    assert BrokerService._trace_error_message(ValueError()) is None
+    assert len(long) < 500
+    assert trace_error_message(ValueError()) is None
 
 
 async def test_batching_disabled_forces_one_item_per_call() -> None:
@@ -2614,7 +2612,7 @@ async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> No
     leader = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
     await backend.fetch_started.wait()
 
-    original_admit = service._admit_flights
+    original_admit = service.providers.admit_flights
     follower_at_admission = asyncio.Event()
     resume_follower = asyncio.Event()
 
@@ -2623,7 +2621,7 @@ async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> No
         await resume_follower.wait()
         return await original_admit(state_arg, requests, group_new=group_new)
 
-    service._admit_flights = gated_admit
+    service.providers.admit_flights = gated_admit
     follower = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
     await follower_at_admission.wait()
 

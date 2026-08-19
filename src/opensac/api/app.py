@@ -41,7 +41,7 @@ from opensac.api.errors import (
 from opensac.backends import LocalSearchBackend, SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_path
 from opensac.broker.policy import BudgetExceeded
-from opensac.broker.service import BrokerSession
+from opensac.broker.session import BrokerSession
 from opensac.config import Settings
 from opensac.metrics import CapacityGate
 from opensac.models import (

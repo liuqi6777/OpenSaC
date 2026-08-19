@@ -9,11 +9,10 @@ import pytest
 from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
 from opensac.backends.local_http import LocalSearchBackend
 from opensac.backends.serper import SerperBackend
-from opensac.broker.service import (
-    BrokerService,
-    CapabilityProviderError,
-    EvidenceRecord,
-)
+from opensac.broker.documents import document_identity
+from opensac.broker.provider_execution import CapabilityProviderError, ProviderExecutor
+from opensac.broker.service import BrokerService
+from opensac.broker.session import EvidenceRecord
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
 
@@ -138,7 +137,7 @@ async def test_broker_runs_bundled_content_preflight_before_transport() -> None:
     )
     state.remember(
         hit,
-        identity=service._identity(hit),
+        identity=document_identity(hit),
         candidate_source="1",
     )
 
@@ -251,7 +250,7 @@ def test_provider_fingerprint_normalizes_model_mapping_order() -> None:
         metadata={"beta": 2, "alpha": 1},
     )
 
-    assert BrokerService._fingerprint(first) == BrokerService._fingerprint(second)
+    assert ProviderExecutor.fingerprint(first) == ProviderExecutor.fingerprint(second)
 
 
 async def test_local_query_many_deduplicates_before_one_transport_microbatch() -> None:
@@ -587,7 +586,7 @@ async def test_evidence_capacity_uses_utf8_bytes_and_keeps_old_locators() -> Non
 def test_evidence_locator_collision_never_overwrites_the_existing_binding() -> None:
     service = BrokerService({"local": LocalBackend()})
     state = service.register_session(make_session())
-    locator, error = service._register_evidence(
+    locator, error = service.content._register_evidence(
         state,
         identity="local:docid:1",
         text="original",
@@ -606,7 +605,7 @@ def test_evidence_locator_collision_never_overwrites_the_existing_binding() -> N
     state.evidence[locator] = conflicting
 
     with pytest.raises(RuntimeError, match="collision"):
-        service._register_evidence(
+        service.content._register_evidence(
             state,
             identity="local:docid:1",
             text="original",
