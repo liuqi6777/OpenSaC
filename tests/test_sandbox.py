@@ -65,7 +65,9 @@ def test_validator_allows_reporting_an_exception_type() -> None:
         "    hits = sdk.search('query')\n"
         "except Exception as exc:\n"
         "    print(f'{type(exc).__name__}: {exc}')\n"
+        "    print(sdk.__doc__)\n"
         "    print(sdk.search.__doc__)\n"
+        "    print(sdk.search.many.__doc__)\n"
     )
 
 
