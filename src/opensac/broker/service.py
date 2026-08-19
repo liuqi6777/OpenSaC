@@ -13,7 +13,6 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
@@ -651,10 +650,8 @@ class BrokerService:
             "search.query": self._search_query,
             "search.query_many": self._search_query_many,
             "content.get_many": self._content_get_many,
-            "content.snippets": self._content_snippets,
             "content.passages": self._content_passages,
             "content.read": self._content_read,
-            "content.grep": self._content_grep,
             "content.grep_report": self._content_grep_report,
             "citations.resolve": self._resolve_citations,
             "session.usage": self._session_usage,
@@ -2356,51 +2353,6 @@ class BrokerService:
         hits = self._resolve_content_refs(state, params.get("refs", []))
         return await self._fetch_content(state, hits, query=None)
 
-    async def _content_snippets(
-        self,
-        state: BrokerSession,
-        params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        hits = self._resolve_content_refs(state, params.get("refs", []))
-        query = str(params.get("query", ""))
-        rows = await self._fetch_content(state, hits, query=query)
-        per_page_chars = max(int(params.get("max_tokens_per_page", 1000)), 1) * 4
-        total_chars = max(int(params.get("max_tokens", 4000)), 1) * 4
-        used = 0
-        for row in rows:
-            document_text = row["text"]
-            text, metadata = self._select_passage(document_text, query, per_page_chars)
-            row["metadata"] = {**row.get("metadata", {}), **metadata}
-            remaining = max(total_chars - used, 0)
-            if len(text) > remaining:
-                text = text[:remaining]
-                row["metadata"]["truncated_by_total_budget"] = True
-                if not text:
-                    row["metadata"]["omitted_by_total_budget"] = True
-            start = int(row["metadata"].get("passage_start", 0))
-            row["metadata"]["passage_end"] = start + len(text)
-            row["text"] = text
-            used += len(text)
-            locator, locator_error = self._register_evidence(
-                state,
-                ref=str(row.get("ref") or ""),
-                text=text,
-                document_text=self._normalize_text(document_text),
-                coordinates={
-                    "type": "characters",
-                    "basis": "normalized_text",
-                    "start": start,
-                    "end": start + len(text),
-                },
-            )
-            if locator is not None:
-                row["locator"] = locator
-            if locator_error is not None:
-                row["locator_error"] = locator_error
-        # Positional alignment is part of the batch contract. A page which lost
-        # its passage to the total budget remains as an explicit empty row.
-        return rows
-
     _PASSAGE_TERM_PATTERN = re.compile(
         r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3400-\u9fff]|[^\W\d_]+",
         flags=re.UNICODE,
@@ -2894,35 +2846,11 @@ class BrokerService:
         except re.error:
             return re.compile(re.escape(pattern), flags=re.IGNORECASE)
 
-    async def _content_grep(
-        self,
-        state: BrokerSession,
-        params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        matches, _ = await self._content_grep_rows(state, params, report=False)
-        return matches
-
     async def _content_grep_report(
         self,
         state: BrokerSession,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        matches, failures = await self._content_grep_rows(state, params, report=True)
-        raw_refs = params.get("refs", [])
-        input_count = 1 if isinstance(raw_refs, str) else len(raw_refs)
-        return {
-            "matches": matches,
-            "failures": failures,
-            "input_count": input_count,
-        }
-
-    async def _content_grep_rows(
-        self,
-        state: BrokerSession,
-        params: dict[str, Any],
-        *,
-        report: bool,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         pattern = str(params.get("pattern", ""))
         if not pattern:
             raise ValueError("pattern must not be empty")
@@ -2931,7 +2859,7 @@ class BrokerService:
             state,
             hits,
             query=None,
-            raise_on_all_failures=not report,
+            raise_on_all_failures=False,
         )
         regex = self._compile_pattern(pattern)
         context = min(max(int(params.get("context", 0)), 0), 20)
@@ -2979,9 +2907,8 @@ class BrokerService:
                     "text": line,
                     "before": before,
                     "after": after,
+                    "input_index": input_index,
                 }
-                if report:
-                    match["input_index"] = input_index
                 evidence = "\n".join([*before, line, *after])
                 locator, locator_error = self._register_evidence(
                     state,
@@ -3000,88 +2927,11 @@ class BrokerService:
                 if locator_error is not None:
                     match["locator_error"] = locator_error
                 matches.append(match)
-        return matches, failures
-
-    @staticmethod
-    def _normalize_text(text: str) -> str:
-        normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-        return re.sub(r"\n{3,}", "\n\n", normalized).strip()
-
-    @staticmethod
-    def _word_tokens(text: str) -> list[str]:
-        return re.findall(r"\w+", (text or "").lower())
-
-    @classmethod
-    def _score_passage(cls, passage: str, query: str) -> float:
-        normalized_passage = passage.strip()
-        normalized_query = query.strip()
-        if not normalized_passage or not normalized_query:
-            return 0.0
-        query_tokens = set(cls._word_tokens(normalized_query))
-        passage_tokens = set(cls._word_tokens(normalized_passage))
-        overlap_recall = (
-            sum(1 for token in query_tokens if token in passage_tokens)
-            / max(1, len(query_tokens))
-        )
-        char_similarity = SequenceMatcher(
-            None,
-            normalized_query.lower(),
-            normalized_passage.lower(),
-        ).ratio()
-        return overlap_recall * 0.85 + char_similarity * 0.15
-
-    @classmethod
-    def _select_passage(
-        cls,
-        text: str,
-        query: str,
-        max_chars: int,
-    ) -> tuple[str, dict[str, Any]]:
-        normalized = cls._normalize_text(text)
-        if not normalized:
-            return "", {"passage_score": 0.0}
-        paragraphs = [
-            part.strip() for part in re.split(r"\n\s*\n+", normalized) if part.strip()
-        ]
-        if not paragraphs or not query.strip():
-            return normalized[:max_chars], {
-                "passage_index": 0,
-                "passage_score": 0.0,
-                "passage_start": 0,
-                "passage_end": min(len(normalized), max_chars),
-            }
-
-        positions: list[tuple[int, int]] = []
-        scores: list[float] = []
-        start = 0
-        for paragraph in paragraphs:
-            positions.append((start, start + len(paragraph)))
-            scores.append(cls._score_passage(paragraph, query))
-            start += len(paragraph) + 2
-        best_index = max(range(len(paragraphs)), key=scores.__getitem__)
-        best_start, best_end = positions[best_index]
-        remaining = max(0, max_chars - len(paragraphs[best_index]))
-        window_start = max(0, best_start - remaining // 2)
-        window_end = best_end + remaining // 2
-        selected_indexes = [
-            index
-            for index, (paragraph_start, paragraph_end) in enumerate(positions)
-            if index == best_index
-            or (paragraph_start >= window_start and paragraph_end <= window_end)
-        ]
-        snippet = cls._normalize_text(
-            "\n\n".join(paragraphs[index] for index in selected_indexes)
-        )[:max_chars]
-        selected_start = positions[selected_indexes[0]][0]
-        selected_end = min(
-            positions[selected_indexes[-1]][1],
-            selected_start + len(snippet),
-        )
-        return snippet, {
-            "passage_index": best_index,
-            "passage_score": scores[best_index],
-            "passage_start": selected_start,
-            "passage_end": selected_end,
+        raw_refs = params.get("refs", [])
+        return {
+            "matches": matches,
+            "failures": failures,
+            "input_count": 1 if isinstance(raw_refs, str) else len(raw_refs),
         }
 
     async def _fetch_content(

@@ -214,10 +214,9 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.output` | `submit` | Return structured output and resolve trusted citations |
 
 Batch operations preserve input alignment and expose typed per-item failures. Empty search results
-are successful results. Passage citations must use locators returned by content operations. The
-table highlights preferred and intentional advanced operations; the exact contract, including
-compatibility methods, is in the Search-as-Code Skill SDK reference. Migration notes are in
-[OpenSAC 0.5](docs/opensac-0.5.md).
+are successful results. Passage citations must use locators returned by content operations. Core
+signatures and intentional advanced operations are split across the Search-as-Code Skill
+references.
 
 ### Agent integrations
 

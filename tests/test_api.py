@@ -52,7 +52,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v4",
+            "capability_contract_v5",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
@@ -75,7 +75,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
         assert payload["environment"]["sandbox_contract"] == 7
-        assert payload["environment"]["capability_contract"] == 4
+        assert payload["environment"]["capability_contract"] == 5
         capability_limits = payload["environment"]["capability_limits"]
         assert capability_limits["extract_many"]["max_items"] == 12
         assert capability_limits["evidence"]["max_chars"] == 4096

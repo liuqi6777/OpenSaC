@@ -12,7 +12,7 @@ Import the runtime entrypoints from `opensac_sdk` and semantic models from `open
 - [Workspace state, output, and lifecycle](#workspace-state-output-and-lifecycle)
 - [Sandbox constraints](#sandbox-constraints)
 
-## Capabilities
+## Core and helper capabilities
 
 Search:
 
@@ -42,23 +42,9 @@ sdk.content.read(
 ) -> list[ContentSnippet]
 ```
 
-Advanced and legacy compatibility:
+Session, state, and output:
 
 ```python
-sdk.content.get_many(refs) -> list[ContentSnippet]  # advanced whole-document fetch
-sdk.content.snippets(  # legacy; use passages
-    query, refs, max_tokens=4000, max_tokens_per_page=1000
-) -> list[ContentSnippet]
-sdk.content.grep(  # legacy; use grep_report
-    refs, pattern, context=0, max_matches_per_ref=20
-) -> list[ContentMatch]
-```
-
-Citations, session, state, and output:
-
-```python
-sdk.citations.resolve(refs) -> list[dict]
-sdk.citations.resolve_requests(requests) -> list[dict]
 sdk.session.usage() -> dict
 sdk.state.write_json(path, value)
 sdk.state.write_jsonl(path, rows)
@@ -71,15 +57,9 @@ sdk.state.list(prefix="") -> list[str]
 sdk.output.submit(output, citations=[{"ref": ref, "locator": locator}])
 ```
 
-Pipeline-model calls are optional deployment capabilities:
+Structured extraction is an optional deployment capability:
 
 ```python
-sdk.llm.complete(
-    prompt, system=None, temperature=0.2, max_tokens=None
-) -> str
-sdk.llm.complete_many(
-    prompts, system=None, temperature=0.2, max_tokens=None, concurrency=4
-) -> list[str]
 sdk.llm.extract_many(
     items,
     instruction=...,
@@ -127,8 +107,8 @@ SDK models support attribute and read-only mapping access. Rows returned by `rea
 - Catch `BrokerError` for a capability-wide or infrastructure failure. Inspect `code`,
   `retryable`, and `attempts`; attempts may be absent for a transport failure.
 - Inspect `SearchBatch.failure` for per-query failure. A failed batch has no hits.
-- Inspect `ContentSnippet.failure` for per-ref failure. `get_many`, legacy `snippets`, and `read` return
-  one row per input ref in the same order.
+- Inspect `ContentSnippet.failure` for per-ref failure. `read` returns one row per input ref in the
+  same order.
 - `content.passages` exactly deduplicates refs in first-seen order, ranks successful documents
   together, and reports failed fetches in `ContentPassageReport.failures`. Empty refs and zero
   passages are successful reports.
@@ -150,8 +130,8 @@ SDK models support attribute and read-only mapping access. Rows returned by `rea
   256 refs in one content request. Use smaller batches instead of depending on the maxima.
 - `content.passages` requires a non-empty query, accepts `limit=1..100` and
   `max_per_ref=1..10`, and applies the per-ref cap after global ranking.
-- `grep_report` and legacy `grep` fetch documents before matching them. Session caching can avoid another
-  backend fetch, but every requested ref still counts as a content fetch for strategy budgets.
+- `grep_report` fetches documents before matching them. Session caching can avoid another backend
+  fetch, but every requested ref still counts as a content fetch for strategy budgets.
 - `grep` match lines and `read` offsets are 1-indexed. `read.metadata` reports `start_line`,
   `end_line`, `total_lines`, and `next_offset`.
 - A non-empty passage no longer than the configured evidence limit, 16,000 characters by default,

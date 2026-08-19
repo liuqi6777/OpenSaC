@@ -201,8 +201,7 @@ PY
 | `sdk.output` | `submit` | 返回结构化输出并解析可信引用 |
 
 批量操作保持输入对齐，并暴露类型化的逐项失败。空搜索结果属于成功结果。段落引用必须使用正文操作返回的
-locator。表格突出推荐接口和有意保留的高级接口；包含兼容方法的精确契约见 Search-as-Code Skill SDK reference，
-迁移说明见 [OpenSAC 0.5](docs/opensac-0.5.md)。
+locator。精确 core 签名与有意保留的 advanced 操作分别位于 Search-as-Code Skill references。
 
 ### 智能体集成
 

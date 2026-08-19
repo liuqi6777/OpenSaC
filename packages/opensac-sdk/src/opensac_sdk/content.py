@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import ContentGrepReport, ContentMatch, ContentPassageReport, ContentSnippet
+from .models import ContentGrepReport, ContentPassageReport, ContentSnippet
 from .transport import UnixSocketTransport
 
 
@@ -12,9 +12,7 @@ class ContentResource:
     strings without hiding fetch failures, and `read` expands a line window.
     Line numbers are 1-indexed and shared by all three operations.
 
-    `get_many` is an advanced whole-document operation. `snippets` and `grep`
-    remain available for 0.5 compatibility, but new code should use `passages`
-    and `grep_report` respectively.
+    `get_many` is an advanced whole-document operation.
 
     Documents are cached for the session after their first retrieval.
     """
@@ -50,30 +48,6 @@ class ContentResource:
         )
         return [ContentSnippet.model_validate(item) for item in result]
 
-    def grep(
-        self,
-        refs: list[str],
-        pattern: str,
-        *,
-        context: int = 0,
-        max_matches_per_ref: int = 20,
-    ) -> list[ContentMatch]:
-        """Legacy match-only view; prefer `grep_report` for typed fetch failures.
-
-        Case-insensitive; a pattern that is not valid regex is searched
-        literally rather than raising.
-        """
-        result = self._transport.call(
-            "content.grep",
-            {
-                "refs": refs,
-                "pattern": pattern,
-                "context": context,
-                "max_matches_per_ref": max_matches_per_ref,
-            },
-        )
-        return [ContentMatch.model_validate(item) for item in result]
-
     def grep_report(
         self,
         refs: list[str],
@@ -93,26 +67,6 @@ class ContentResource:
             },
         )
         return ContentGrepReport.model_validate(result)
-
-    def snippets(
-        self,
-        query: str,
-        refs: list[str],
-        *,
-        max_tokens: int = 4000,
-        max_tokens_per_page: int = 1000,
-    ) -> list[ContentSnippet]:
-        """Legacy page-local windows; prefer globally ranked `passages`."""
-        result = self._transport.call(
-            "content.snippets",
-            {
-                "query": query,
-                "refs": refs,
-                "max_tokens": max_tokens,
-                "max_tokens_per_page": max_tokens_per_page,
-            },
-        )
-        return [ContentSnippet.model_validate(item) for item in result]
 
     def passages(
         self,

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import Counter
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -152,10 +151,10 @@ async def test_broker_scopes_references_and_fetches_content() -> None:
     assert hits[0]["ref"].startswith("ref_")
     content = await service.call(
         "token",
-        "content.snippets",
-        {"refs": [hits[0]["ref"]], "query": "fact"},
+        "content.read",
+        {"refs": [hits[0]["ref"]]},
     )
-    assert content[0]["text"] == "content:fact"
+    assert content[0]["text"] == "content:None"
     citations = await service.call("token", "citations.resolve", {"refs": [hits[0]["ref"]]})
     assert citations[0]["url"] == "https://example.com/1"
 
@@ -619,49 +618,6 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
     assert trace[1].status == "error"
     assert trace[1].error_type == "ValueError"
     assert "missing" not in str(trace[0].model_dump())
-
-
-async def test_query_aware_snippets_select_the_relevant_paragraph() -> None:
-    class PassageBackend(FakeBackend):
-        async def content(self, hits, *, query=None):
-            del query
-            text = (
-                "An unrelated introduction about cooking and weather.\n\n"
-                "Vector databases use HNSW indexes for approximate nearest-neighbor search.\n\n"
-                "An unrelated conclusion about travel."
-            )
-            return [ContentSnippet(ref=hit.ref, text=text) for hit in hits]
-
-    service = BrokerService({"web": PassageBackend("web")})
-    state = service.register_session(make_session())
-    hits = await service.call("token", "search.query", {"query": "seed"})
-    snippets = await service.call(
-        "token",
-        "content.snippets",
-        {
-            "query": "HNSW nearest neighbor",
-            "refs": [hits[0]["ref"]],
-            "max_tokens_per_page": 12,
-        },
-    )
-    assert "HNSW indexes" in snippets[0]["text"]
-    assert "cooking" not in snippets[0]["text"]
-    assert snippets[0]["metadata"]["passage_index"] == 1
-    assert snippets[0]["metadata"]["passage_score"] > 0
-    assert state.policy.usage.content_fetches == 1
-
-
-def test_query_aware_passage_matches_shared_golden_fixture() -> None:
-    fixture = json.loads(
-        (Path(__file__).parent / "data" / "query_aware_passage.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    text, metadata = BrokerService._select_passage(
-        fixture["text"], fixture["goal"], fixture["max_chars"]
-    )
-    assert text == fixture["expected_text"]
-    assert metadata["passage_index"] == fixture["expected_passage_index"]
 
 
 @pytest.mark.parametrize(
@@ -1570,7 +1526,7 @@ async def test_offset_reaches_ranks_a_bare_limit_cannot() -> None:
     assert deep[0]["docid"] in state.by_docid
 
 
-async def test_grep_line_numbers_are_read_offsets() -> None:
+async def test_grep_report_line_numbers_are_read_offsets() -> None:
     """The two halves compose without character arithmetic.
 
     This is the same contract the function-calling profiles keep, and matching
@@ -1596,9 +1552,12 @@ async def test_grep_line_numbers_are_read_offsets() -> None:
     hits = await service.call("token", "search.query", {"query": "q"})
     ref = hits[0]["ref"]
 
-    matches = await service.call(
-        "token", "content.grep", {"refs": [ref], "pattern": r"target \w+", "context": 1}
+    report = await service.call(
+        "token",
+        "content.grep_report",
+        {"refs": [ref], "pattern": r"target \w+", "context": 1},
     )
+    matches = report["matches"]
     assert len(matches) == 1
     assert matches[0]["line"] == 25
     assert matches[0]["before"] == ["line 24"]
@@ -1641,7 +1600,7 @@ async def test_read_reports_where_to_continue_and_where_to_stop() -> None:
     assert tail[0]["metadata"]["next_offset"] is None
 
 
-async def test_grep_falls_back_to_a_literal_search_for_a_bad_pattern() -> None:
+async def test_grep_report_falls_back_to_a_literal_search_for_a_bad_pattern() -> None:
     """A program that meant `C++ (lang)` should get matches, not a traceback."""
 
     class Doc:
@@ -1659,7 +1618,10 @@ async def test_grep_falls_back_to_a_literal_search_for_a_bad_pattern() -> None:
     service.register_session(make_session(backends=["local"]))
     ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
 
-    matches = await service.call("token", "content.grep", {"refs": [ref], "pattern": "C++ ("})
+    report = await service.call(
+        "token", "content.grep_report", {"refs": [ref], "pattern": "C++ ("}
+    )
+    matches = report["matches"]
     assert [match["line"] for match in matches] == [1]
 
 
@@ -1769,37 +1731,6 @@ async def test_selected_passage_locator_resolves_exact_evidence_and_rejects_tamp
         )
 
 
-async def test_snippets_keep_one_row_per_ref_and_update_truncated_coordinates() -> None:
-    class EvidenceBackend(FakeBackend):
-        async def content(self, hits, *, query=None):
-            return [
-                ContentSnippet(ref=hit.ref, text=f"document-{hit.rank}") for hit in hits
-            ]
-
-    service = BrokerService({"web": EvidenceBackend("web", depth=2)})
-    service.register_session(make_session())
-    hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
-
-    rows = await service.call(
-        "token",
-        "content.snippets",
-        {
-            "refs": [hit["ref"] for hit in hits],
-            "query": "",
-            "max_tokens_per_page": 20,
-            "max_tokens": 1,
-        },
-    )
-
-    assert [row["ref"] for row in rows] == [hit["ref"] for hit in hits]
-    assert rows[0]["text"] == "docu"
-    assert rows[0]["metadata"]["passage_end"] == 4
-    assert rows[0]["locator"]["ref"] == hits[0]["ref"]
-    assert rows[1]["text"] == ""
-    assert rows[1]["metadata"]["omitted_by_total_budget"] is True
-    assert rows[1].get("locator") is None
-
-
 async def test_read_uses_character_locator_when_one_line_is_truncated() -> None:
     class LongLineBackend(FakeBackend):
         async def content(self, hits, *, query=None):
@@ -1835,7 +1766,7 @@ async def test_read_uses_character_locator_when_one_line_is_truncated() -> None:
     assert resolved[0]["evidence"] == "x" * 10
 
 
-async def test_grep_locator_cites_the_returned_context_and_honours_size_limit() -> None:
+async def test_grep_report_locator_cites_context_and_honours_size_limit() -> None:
     class EvidenceBackend(FakeBackend):
         async def content(self, hits, *, query=None):
             return [ContentSnippet(ref=hit.ref, text="before\ntarget\nafter") for hit in hits]
@@ -1843,11 +1774,12 @@ async def test_grep_locator_cites_the_returned_context_and_honours_size_limit() 
     service = BrokerService({"web": EvidenceBackend("web")}, max_evidence_chars=19)
     service.register_session(make_session())
     ref = (await service.call("token", "search.query", {"query": "q"}))[0]["ref"]
-    matches = await service.call(
+    report = await service.call(
         "token",
-        "content.grep",
+        "content.grep_report",
         {"refs": [ref], "pattern": "target", "context": 1},
     )
+    matches = report["matches"]
     resolved = await service.call(
         "token",
         "citations.resolve",
@@ -1860,9 +1792,10 @@ async def test_grep_locator_cites_the_returned_context_and_honours_size_limit() 
     small_ref = (
         await too_small.call("token", "search.query", {"query": "q"})
     )[0]["ref"]
-    small_matches = await too_small.call(
-        "token", "content.grep", {"refs": [small_ref], "pattern": "target"}
+    small_report = await too_small.call(
+        "token", "content.grep_report", {"refs": [small_ref], "pattern": "target"}
     )
+    small_matches = small_report["matches"]
     assert small_matches[0].get("locator") is None
 
 
@@ -1909,7 +1842,7 @@ class CountingBackend:
 
 
 async def test_a_document_is_retrieved_once_per_session() -> None:
-    """grep and read are meant to be used repeatedly over one pool.
+    """grep_report and read are meant to be used repeatedly over one pool.
 
     Without a cache the recommended survey/locate/verify shape refetches every
     candidate once per stage. Against a local index that is merely wasteful;
@@ -1922,7 +1855,7 @@ async def test_a_document_is_retrieved_once_per_session() -> None:
     refs = [hit["ref"] for hit in hits]
 
     await service.call("token", "content.get_many", {"refs": refs})
-    await service.call("token", "content.grep", {"refs": refs, "pattern": "body"})
+    await service.call("token", "content.grep_report", {"refs": refs, "pattern": "body"})
     await service.call("token", "content.read", {"refs": refs})
 
     assert backend.fetched == ["1", "2", "3"]
@@ -1930,26 +1863,6 @@ async def test_a_document_is_retrieved_once_per_session() -> None:
     # follows the bill, and a cache is exactly what makes them diverge.
     assert state.policy.usage.content_fetches == 9
     assert state.policy.usage.content_backend_fetches == 3
-
-
-async def test_a_selected_passage_never_overwrites_the_cached_document() -> None:
-    """`content.snippets` rewrites the rows it is handed.
-
-    If those rows were the cached objects, one call to `snippets` would replace
-    the stored document with the passage it chose, and every later `read` of
-    that document would silently be a read of that passage instead.
-    """
-    backend = CountingBackend()
-    service = BrokerService({"local": backend})
-    service.register_session(make_session(backends=["local"]))
-    ref = (await service.call("token", "search.query", {"query": "q", "limit": 1}))[0]["ref"]
-
-    await service.call(
-        "token", "content.snippets", {"refs": [ref], "query": "body", "max_tokens_per_page": 1}
-    )
-    rows = await service.call("token", "content.get_many", {"refs": [ref]})
-
-    assert rows[0]["text"] == "body of 1"
 
 
 async def test_every_requested_document_comes_back_in_order() -> None:
@@ -1985,7 +1898,10 @@ async def test_all_permanent_document_failures_remain_typed_aligned_rows() -> No
     hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
 
     rows = await service.call(
-        "token", "content.get_many", {"refs": [hit["ref"] for hit in hits]}
+        "token",
+        "content.get_many",
+        {"refs": [hit["ref"] for hit in hits]},
+        execution_id="sanitized-content",
     )
 
     assert [row["failure"]["code"] for row in rows] == [
@@ -1997,19 +1913,7 @@ async def test_all_permanent_document_failures_remain_typed_aligned_rows() -> No
         "Provider rejected one document.",
         "Provider rejected one document.",
     ]
-    with pytest.raises(CapabilityProviderError) as promoted:
-        await service.call(
-            "token",
-            "content.grep",
-            {
-                "refs": [hit["ref"] for hit in hits],
-                "pattern": "anything",
-            },
-            execution_id="sanitized-content-error",
-        )
-    assert str(promoted.value) == "Provider rejected one document."
-    event = service.take_trace("token", "sanitized-content-error")[0]
-    assert event.error == "Provider rejected one document."
+    event = service.take_trace("token", "sanitized-content")[0]
     assert "HTTPError" not in event.model_dump_json()
 
 
@@ -2180,7 +2084,7 @@ async def test_a_failed_event_records_why_and_not_only_the_type() -> None:
     with pytest.raises(ValueError):
         await service.call(
             "token",
-            "content.grep",
+            "content.grep_report",
             {"refs": ["1"], "pattern": ""},
             execution_id="exec-pattern",
         )
@@ -2306,11 +2210,16 @@ async def test_capability_methods_stay_in_step_with_the_handler_table() -> None:
     service.register_session(make_session())
     with pytest.raises(ValueError, match="Unsupported capability"):
         await service.call("token", "search.nope", {})
+    for removed in ("content.snippets", "content.grep"):
+        with pytest.raises(ValueError, match="Unsupported capability"):
+            await service.call("token", removed, {})
 
 
 def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
     assert CAPABILITY_METHODS == BROKER_METHODS
     assert Mechanisms().capabilities() == list(CAPABILITY_METHODS)
+    assert "content.snippets" not in CAPABILITY_METHODS
+    assert "content.grep" not in CAPABILITY_METHODS
     without_llm = Mechanisms(llm_subroutine=False).capabilities()
     assert not any(method.startswith("llm.") for method in without_llm)
     assert "search.query_many" in without_llm

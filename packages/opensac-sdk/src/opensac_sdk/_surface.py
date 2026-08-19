@@ -8,7 +8,6 @@ class SurfaceTier(StrEnum):
     CORE = "core"
     HELPER = "helper"
     ADVANCED = "advanced"
-    LEGACY = "legacy"
     INTERNAL = "internal"
 
 
@@ -19,7 +18,6 @@ class OperationSpec:
     tier: SurfaceTier
     transport_method: str | None = None
     model_core: bool = False
-    replacement: str | None = None
 
     @property
     def public_name(self) -> str:
@@ -35,26 +33,12 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
     OperationSpec("content", "get_many", SurfaceTier.ADVANCED, "content.get_many"),
     OperationSpec(
         "content",
-        "snippets",
-        SurfaceTier.LEGACY,
-        "content.snippets",
-        replacement="sdk.content.passages",
-    ),
-    OperationSpec(
-        "content",
         "passages",
         SurfaceTier.CORE,
         "content.passages",
         model_core=True,
     ),
     OperationSpec("content", "read", SurfaceTier.CORE, "content.read", model_core=True),
-    OperationSpec(
-        "content",
-        "grep",
-        SurfaceTier.LEGACY,
-        "content.grep",
-        replacement="sdk.content.grep_report",
-    ),
     OperationSpec(
         "content",
         "grep_report",

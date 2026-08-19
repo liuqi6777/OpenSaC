@@ -9,7 +9,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from opensac_sdk import BrokerError
-from opensac_sdk._surface import MODEL_CORE_METHODS
+from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 from opensac_sdk.models import (
     CapabilityFailure,
     ContentFailure,
@@ -36,6 +36,7 @@ ROOT = Path(__file__).parents[1]
 SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
+ADVANCED_PATH = SKILL_DIR / "references" / "advanced.md"
 PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
 RECIPES_PATH = SKILL_DIR / "references" / "python-recipes.md"
 STATEFUL_PATH = SKILL_DIR / "references" / "stateful-research.md"
@@ -333,6 +334,7 @@ def test_skill_is_small_and_routes_detailed_contracts() -> None:
     assert "same program blindly" in skill
     assert "OpenSAC locator" in skill
     assert "references/sdk-contract.md" in skill
+    assert "references/advanced.md" in skill
     assert "references/patterns.md" in skill
     assert "references/python-recipes.md" in skill
     assert "references/stateful-research.md" in skill
@@ -388,11 +390,38 @@ def test_documented_model_fields_match_the_sdk() -> None:
     assert "`sdk.workspace` resource" in contract
 
 
-def test_model_core_surface_is_present_in_the_exact_contract() -> None:
+def test_surface_tiers_route_exact_signatures_to_the_right_reference() -> None:
     contract = CONTRACT_PATH.read_text(encoding="utf-8")
+    advanced = ADVANCED_PATH.read_text(encoding="utf-8")
 
-    for public_name in MODEL_CORE_METHODS:
-        assert f"{public_name}(" in contract
+    for operation in SDK_SURFACE:
+        signature = f"{operation.public_name}("
+        if operation.tier is SurfaceTier.INTERNAL:
+            assert signature not in contract
+            assert signature not in advanced
+        elif operation.tier is SurfaceTier.ADVANCED:
+            assert signature not in contract
+            assert signature in advanced
+        else:
+            assert signature in contract
+
+
+def test_core_patterns_only_call_core_or_helper_operations() -> None:
+    calls = {
+        f"sdk.{resource}.{method}" if method else f"sdk.{resource}"
+        for resource, method in re.findall(
+            r"sdk\.([a-z_]+)(?:\.([a-z_]+))?\(",
+            PATTERNS_PATH.read_text(encoding="utf-8"),
+        )
+    }
+    allowed = {
+        operation.public_name
+        for operation in SDK_SURFACE
+        if operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER}
+    }
+
+    assert calls
+    assert calls <= allowed
 
 
 def test_patterns_compile_and_pass_sandbox_validation() -> None:

@@ -1,6 +1,6 @@
 # OpenSAC 公共接口收敛实现设计
 
-- 状态：Draft
+- 状态：实施中
 - 目标版本：OpenSAC 0.6
 - 范围：MCP、sandbox SDK、Python host client 与对应契约测试
 
@@ -17,7 +17,7 @@ broker 管理边界，但 SDK facade 和公共类型持续累积。
 | --- | ---: | --- |
 | MCP discovery | 2 个工具 | `bind_context` 标记为内部，但仍可被客户端发现 |
 | Broker capability | 13 个 RPC method | 数量可控，但只有方法名 manifest，没有参数级防漂移 |
-| Sandbox SDK | 7 个 namespace、约 24 个操作 | core、helper、advanced、legacy 没有分层 |
+| Sandbox SDK | 7 个 namespace、约 24 个操作 | core、helper、advanced 与旧接口没有分层 |
 | SDK 顶层导出 | 26 个符号，其中 22 个模型类型 | 实现类型被提升为默认公共入口 |
 | Host client | 同步/异步各 8 个方法 | 普通执行、session 生命周期和 admin 操作混在一个类中 |
 
@@ -28,18 +28,18 @@ broker 管理边界，但 SDK facade 和公共类型持续累积。
 - typed result/failure 对 batch 对齐和恢复策略是必要的；
 - provider、trace、预算、worker 和 sandbox 的内部复杂度不应为了缩短公共 API 而删除。
 
-本重构解决的是公共契约缺少层级、兼容接口没有退场机制和文档无法机械同步的问题，不以减少内部类或文件数量为目标。
+本重构解决的是公共契约缺少层级、旧接口持续占用实现面和文档无法机械同步的问题。
 
 ## 2. 目标与非目标
 
 ### 2.1 目标
 
 1. 模型默认只学习完成常规 Search-as-Code 工作流所需的 core surface。
-2. 每个 SDK 操作明确归类为 `core`、`helper`、`advanced`、`legacy` 或 `internal`。
+2. 每个保留的 SDK 操作明确归类为 `core`、`helper`、`advanced` 或 `internal`。
 3. `opensac_sdk` 顶层只保留 `sdk`、`BrokerError` 和版本信息。
 4. 结果保持 typed，但 supporting model 不再全部出现在顶层 namespace。
 5. SDK、broker、Skill、README 和 MCP schema 由 contract test 检查，避免手工漂移。
-6. legacy 删除必须经过迁移、静态使用扫描和 paired evaluation。
+6. 0.6 直接删除已有 canonical 替代的旧接口，不在运行时保留兼容 wrapper。
 7. 每个阶段形成可独立审查、可独立回滚的小 PR。
 
 ### 2.2 非目标
@@ -59,11 +59,11 @@ broker 管理边界，但 SDK facade 和公共类型持续累积。
 | 规则 | 工程约束 |
 | --- | --- |
 | 组合优先 | 新需求先用现有原语和普通 Python 组合；新增方法必须说明现有组合为什么不足 |
-| 单一权威表示 | 一个概念只保留一个字段、错误表示和序列化路径；兼容转换只存在于边界 |
-| 单向委托 | singular/batch、sync/async、legacy/core wrapper 必须委托同一实现，不能复制业务逻辑 |
+| 单一权威表示 | 一个概念只保留一个字段、错误表示和序列化路径 |
+| 单向委托 | singular/batch 与 sync/async facade 必须委托同一实现，不能复制业务逻辑 |
 | 不做推测性抽象 | 只有出现两个独立实现、明确替换点或真实测试痛点时才增加 Protocol、基类或 registry |
 | 边界稳定、内部可变 | 稳定 Pydantic/HTTP/SDK contract；内部使用小函数和值对象，不把实现类升级成公共类型 |
-| 兼容有期限 | legacy 必须记录 replacement、移除 gate 和目标版本；不得永久保留双路径 |
+| breaking change 完整 | 不保留 deprecated wrapper；通过版本与 contract bump 明确拒绝旧调用 |
 | 删除完整 | 删除接口时同步删除 handler、wrapper、类型、测试 fixture 和文档，不留下无调用代码 |
 | 局部可推理 | 一个模块只承担一组共同变化的职责；跨域依赖通过显式参数，不读取隐式全局状态 |
 
@@ -94,7 +94,6 @@ broker 管理边界，但 SDK facade 和公共类型持续累积。
 | `core` | 常规研究程序完成任务所需的最小接口 | 是 | 同一 major contract 内稳定 |
 | `helper` | 无额外权限的本地确定性组合或状态辅助 | 按 workflow 渐进披露 | 语义稳定，但不属于 broker primitive |
 | `advanced` | 特殊任务或调试需要的 escape hatch | 否 | 有文档和测试；变更需 migration note |
-| `legacy` | 已有更安全或更统一替代的兼容接口 | 否 | 只在声明的迁移窗口保留 |
 | `internal` | transport、RPC、resource construction 和 host 控制面 | 否 | 无公共兼容承诺 |
 
 Tier 描述的是暴露策略，不等于代码目录。`helper` 可以继续作为 `sdk.search` 或 `sdk.state` 的方法，
@@ -106,7 +105,7 @@ Tier 描述的是暴露策略，不等于代码目录。`helper` 可以继续作
 
 ```text
 MODEL_CORE_METHODS     模型默认学习的方法
-SDK_PUBLIC_OPERATIONS  core + helper + advanced + 尚未删除的 legacy
+SDK_PUBLIC_OPERATIONS  core + helper + advanced
 CAPABILITY_METHODS     需要 broker 权限、预算和 trace 的 RPC 方法
 ```
 
@@ -146,8 +145,6 @@ __all__ = ["BrokerError", "sdk", "__version__"]
 | `content` | `read` | core | 保留；精确上下文扩展 |
 | `content` | `grep_report` | core | 保留；零匹配与抓取失败可区分 |
 | `content` | `get_many` | advanced | 保留；整页读取 escape hatch |
-| `content` | `snippets` | legacy | 不再出现在新示例；由 `passages` 替代 |
-| `content` | `grep` | legacy | 由 `grep_report(...).matches` 替代 |
 | `citations` | `resolve` | advanced | 保留；triage 和调试使用 |
 | `citations` | `resolve_requests` | advanced | 评估与 `resolve` 合并，0.6 不直接删除 |
 | `session` | `usage` | core | 保留；程序据此改变继续或停止策略 |
@@ -160,8 +157,8 @@ __all__ = ["BrokerError", "sdk", "__version__"]
 | `state` | `exists`、`list` | helper | 保留；恢复与 namespace 发现 |
 | `output` | `submit` | core | 保留；唯一正式结果与 citation 提交入口 |
 
-0.6 的首要目标是改变默认暴露和稳定性承诺，不是一次删除所有 legacy。删除 `snippets`、`grep` 或
-`resolve_requests` 必须单独进入后续 release gate。
+0.6 删除 `snippets` 与 `grep`；它们不再出现在 SDK surface、broker capability、Skill 或测试 fixture 中。
+`resolve_requests` 仍有独立输入语义，因此作为 advanced operation 保留。
 
 ### 4.3 Core profile
 
@@ -175,8 +172,8 @@ session.usage
 output.submit
 ```
 
-`state` 在单次程序不需要跨 execution 时不进入首屏；多轮任务再加载 state reference。advanced 和 legacy
-方法只出现在精确 SDK reference 与 migration guide 中。
+`state` 在单次程序不需要跨 execution 时不进入首屏；多轮任务再加载 state reference。advanced 方法只在
+按需 reference 中出现。
 
 ## 5. 类型与失败语义
 
@@ -200,8 +197,7 @@ output.submit
 2. batch 中单项失败返回 typed item failure，并保持输入对齐。
 3. 空 search hits、零 grep matches 和零 passages 是成功结果。
 4. core content 方法不得隐藏 partial fetch failure。
-5. `grep` 之所以进入 legacy，正是因为它无法同时表达“没有匹配”和“输入 ref 抓取失败”。
-6. locator 缺失不能被自动降级成正文 citation。
+5. locator 缺失不能被自动降级成正文 citation。
 
 不引入统一 `Result[T]` envelope。现有 search、content、extraction 的成功数据和恢复信息不同，强行统一会把
 明确的类型变成大量 optional 字段。
@@ -333,7 +329,7 @@ OpenSAC 只保留已经存在真实变化轴的扩展点：search backend、pass
 `_surface.py` 是内部声明，不进入 `__all__`。每条记录至少包含：
 
 ```text
-public_name, tier, transport_method, model_core, replacement
+public_name, tier, transport_method, model_core
 ```
 
 验收：
@@ -341,7 +337,7 @@ public_name, tier, transport_method, model_core, replacement
 - 每个 resource 公共方法恰好对应一条 surface record；
 - 每个 broker handler 恰好对应一个 `CAPABILITY_METHODS` 条目；
 - core Skill 中出现的方法必须存在且 tier 为 core/helper；
-- legacy 方法必须有 replacement 或明确的保留理由。
+- manifest 不允许声明 SDK 中不存在的方法。
 
 ### PR 2：顶层导出与类型路径
 
@@ -364,14 +360,15 @@ from opensac_sdk.types import SearchHit
 
 SDK 与 sandbox 镜像版本匹配，因此 0.6 采用明确 breaking migration，不在顶层长期保留隐式兼容别名。
 
-### PR 3：Content 分层
+### PR 3：Content 收敛
 
 修改：
 
 - 更新 `content.py` docstring 与 API reference；
 - canonical examples 全部迁移到 `passages`、`read`、`grep_report`；
-- 为 legacy 方法增加测试，固定其替代关系；
-- 不在本 PR 删除 broker handler。
+- 删除 `snippets`、`grep` SDK 方法及 broker handler；
+- 删除只服务旧接口的 passage selector、测试和 fixture；
+- capability contract 从 4 提升到 5。
 
 迁移：
 
@@ -385,15 +382,14 @@ matches = report.matches
 failures = report.failures
 ```
 
-`snippets` 的替代不是机械的一对一调用。迁移程序必须选择全局 `passages`，并显式决定候选 ref、limit 和
-`max_per_ref`。
+`snippets` 不提供兼容 shim。调用者必须选择全局 `passages` 的候选 ref、limit 和 `max_per_ref`。
 
 ### PR 4：Skill 渐进披露
 
 修改：
 
 - 缩短 `.agents/skills/search-as-code/SKILL.md` 的方法枚举；
-- 将 exact signature、advanced、legacy 和 migration 分开；
+- 将 core/helper exact signature 与 advanced reference 分开；
 - 同步 CLI Skill reference；
 - contract test 执行 core pattern，而不只搜索方法名。
 
@@ -437,14 +433,12 @@ failures = report.failures
 - 更新 `tests/test_client.py`、API 文档和 examples；
 - 保持 HTTP route 不变。
 
-### PR 8：0.6 发布与 Legacy 观察
+### PR 8：0.6 发布
 
-0.6 发布新的顶层导入路径、surface tier 和 canonical Skill，但继续携带 legacy handler。发布前完成仓库与历史
-rollout 的使用扫描；发布后保留一个明确的观察窗口。只有通过第 11 节 gate 的方法才进入 0.7 删除候选。
+0.6 发布新的顶层导入路径、收敛后的 surface 与 canonical Skill。release note 必须明确列出删除的
+`content.snippets`、`content.grep` 与顶层类型导入，不用模糊的“API cleanup”概括 breaking change。
 
-后续删除时，每个删除项独立列在 release note，不允许用“API cleanup”概括多个行为变化。
-
-## 10. 兼容与版本策略
+## 10. Breaking change 与版本策略
 
 以下变更要求 sandbox contract bump：
 
@@ -487,15 +481,15 @@ uv run pytest
 uv run pytest tests/test_sandbox_docker_e2e.py
 ```
 
-### 11.2 使用扫描
+### 11.2 删除扫描
 
-删除 legacy 前，扫描以下范围：
+删除旧接口时扫描以下范围：
 
 - `examples/`、`tests/data/`、`.agents/skills/`、`docs/`；
 - 已保存的 rollout program archive；
 - 项目内已知 external harness 和发布示例。
 
-至少报告每个候选删除方法的程序调用次数和任务覆盖数。没有数据不等于没有调用。
+仓库内调用必须清零；已知 external harness 通过 0.6 release note 获知 breaking change，不在运行时增加兼容层。
 
 ### 11.3 Paired evaluation
 
@@ -515,7 +509,7 @@ uv run pytest tests/test_sandbox_docker_e2e.py
 
 每个实施 PR 在功能测试之外回答：
 
-- 是否减少了公共符号、重复实现、跨模块私有调用或兼容分支？
+- 是否减少了公共符号、重复实现、跨模块私有调用或历史分支？
 - 新增的 class/Protocol/registry 是否已有两个真实消费者或独立实现？
 - 修改一个 capability 是否只需要进入一个领域模块？
 - 删除路径是否同时删除了代码、类型、测试和文档？
@@ -528,8 +522,8 @@ uv run pytest tests/test_sandbox_docker_e2e.py
 
 - PR 1—4 主要改变声明、导出和默认文档，可逐 PR revert。
 - PR 6 按 capability family 独立迁移，可逐模块 revert，不使用跨全仓库的一次性重写。
-- Broker handler 在 legacy 观察期继续存在，因此 Skill 回滚不需要数据迁移。
-- 类型路径迁移若发现外部依赖，可临时在顶层增加带明确删除版本的兼容重导出；不得恢复无期限承诺。
+- Content 删除可通过完整 revert 对应提交回滚，不在新代码上临时叠加 wrapper。
+- 类型路径迁移若需回滚，同样 revert 顶层导出提交，不增加双路径重导出。
 - MCP binding 迁移必须保留旧配置的 fail-closed 行为，不能在失败时创建进程共享 session。
 - Host client 分层不改变 HTTP route，调用者可回退到上一版 client。
 
@@ -538,16 +532,16 @@ uv run pytest tests/test_sandbox_docker_e2e.py
 本重构仅在以下条件全部满足时完成：
 
 1. `opensac_sdk.__all__` 只包含 `BrokerError`、`sdk` 和 `__version__`。
-2. 每个 SDK operation 有唯一 tier，core/legacy 集合有 contract test。
+2. 每个 SDK operation 有唯一 tier，core/helper/advanced 集合有 contract test。
 3. README、Skill 与 SDK 不再出现不存在的方法名。
 4. 常规 research workflow 不需要从包顶层导入结果模型。
 5. core content workflow 不隐藏 partial fetch failure。
 6. broker capability、SDK helper 和 host control operation 在文档中明确区分。
 7. MCP 对 `bind_context` 的实际 discovery 状态被准确描述；未解决外部宿主阻塞时不得声称只有一个协议工具。
-8. 任何 legacy 删除都通过使用扫描、Docker E2E 和 paired evaluation；0.6 未通过 gate 的接口继续保留。
+8. 已删除方法在 SDK、broker、Skill、examples、测试和非历史文档中的引用清零。
 9. host admin 操作不再与常规执行方法共用同一个默认 facade。
 10. migration note 提供所有 breaking import 和方法替代示例。
 11. `BrokerService` 和 `api/app.py` 只保留装配与生命周期职责，领域逻辑可以独立测试。
-12. sync/async、singular/batch 和 legacy/core 之间不存在复制的业务实现。
+12. sync/async 与 singular/batch 之间不存在复制的业务实现。
 13. 新扩展通过既有 Protocol 或窄装配点完成，不需要在核心流程增加 provider-specific 分支。
 14. 所有删除路径均移除对应 dead code、重复类型、fixture 和文档。

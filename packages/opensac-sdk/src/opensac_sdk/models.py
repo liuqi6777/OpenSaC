@@ -193,8 +193,7 @@ class ContentMatch(SubscriptableModel):
     after: list[str] = Field(default_factory=list)
     locator: EvidenceLocator | None = None
     locator_error: EvidenceLocatorError | None = None
-    # Populated by grep_report so duplicate input refs remain distinguishable;
-    # legacy grep leaves it absent.
+    # Populated by grep_report so duplicate input refs remain distinguishable.
     input_index: int | None = Field(default=None, ge=0)
 
 

@@ -75,14 +75,12 @@ def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
     assert declared == implemented
 
 
-def test_surface_manifest_keeps_core_small_and_legacy_actionable() -> None:
+def test_surface_manifest_keeps_model_core_small() -> None:
     model_core = [operation for operation in SDK_SURFACE if operation.model_core]
     assert len(model_core) <= 12
     assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
-
-    legacy = [operation for operation in SDK_SURFACE if operation.tier is SurfaceTier.LEGACY]
-    assert legacy
-    assert all(operation.replacement for operation in legacy)
+    assert not hasattr(ContentResource, "snippets")
+    assert not hasattr(ContentResource, "grep")
 
 
 class FakeTransport:

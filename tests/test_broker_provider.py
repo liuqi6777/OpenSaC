@@ -461,13 +461,6 @@ async def test_content_dedupes_refs_and_grep_report_keeps_failure_indexes() -> N
     )
     assert only_failure["matches"] == []
     assert only_failure["failures"][0]["failure"]["code"] == "provider_not_found"
-    with pytest.raises(CapabilityProviderError) as legacy:
-        await service.call(
-            "token",
-            "content.grep",
-            {"refs": [refs[1]], "pattern": "target"},
-        )
-    assert legacy.value.code == "provider_not_found"
 
 
 async def test_systemic_content_failure_is_promoted_and_never_cached() -> None:
