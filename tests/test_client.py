@@ -13,8 +13,6 @@ class ClientServer:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content) if request.content else None
         self.requests.append((request.method, request.url.path, payload))
-        if request.url.path == "/healthz":
-            return httpx.Response(200, json={"status": "ok"})
         if request.method == "POST" and request.url.path == "/v1/sessions":
             return httpx.Response(
                 200,
@@ -31,8 +29,6 @@ class ClientServer:
             )
         if request.method == "POST" and request.url.path.endswith("/abort"):
             return httpx.Response(200, json={"status": "aborted"})
-        if request.method == "POST" and request.url.path == "/v1/admin/drain":
-            return httpx.Response(200, json={"status": "draining"})
         if request.method == "DELETE":
             return httpx.Response(200)
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
@@ -56,13 +52,12 @@ def test_sync_client_negotiates_idempotency_and_preserves_explicit_options() -> 
         }
         assert not hasattr(client, "create_run")
         assert not hasattr(client, "create_and_wait")
-        assert client.health() == {"status": "ok"}
+        assert not hasattr(client, "health")
+        assert not hasattr(client, "drain_worker")
         client.exec_code("sess-new", "pass\n", exec_id="logical-1")
         assert server.requests[-1][2]["exec_id"] == "logical-1"
         assert client.heartbeat_session("sess-new")["id"] == "sess-new"
         assert client.abort_session("sess-new") == {"status": "aborted"}
-        assert client.drain_worker() == {"status": "draining"}
-
         with pytest.raises(RuntimeError, match="does not advertise idempotent_exec"):
             client.exec_code("sess-old", "pass\n", exec_id="unsafe-retry")
     finally:

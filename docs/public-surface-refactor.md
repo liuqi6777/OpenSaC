@@ -238,13 +238,13 @@ OpenSAC
   heartbeat_session
   abort_session
 
-OpenSACAdmin
-  health
-  drain_worker
+Admin REST control plane
+  GET /healthz
+  POST /v1/admin/drain
 ```
 
-同步和异步 client 必须共享请求构造、feature negotiation 和错误映射逻辑。实现可以继续提供两个 facade，
-但不再维护两份独立 payload 规则。
+同步和异步 client 必须共享请求构造、feature negotiation 和错误映射逻辑。管理操作保持显式 REST 控制面，
+不再为两个低频 endpoint 维护额外同步/异步 facade。
 
 本阶段不要求把所有 `dict[str, Any]` 立即改成 Pydantic 返回值。先确定稳定的 host contract，再决定是否只为
 `PublicSession` 和 `ExecResult` 提供两个根 DTO；不得把 `src/opensac/models.py` 的内部持久化类型全部导出。
@@ -420,10 +420,10 @@ failures = report.failures
 
 修改：
 
-- 新增或拆分 admin client；
+- 从默认 client 删除 admin 方法，管理端直接使用 REST 控制面；
 - 抽取同步/异步共享的 payload 和 feature 规则；
 - 更新 `tests/test_client.py`、API 文档和 examples；
-- 保持 HTTP route 不变。
+- 保持 HTTP route 不变，不在默认 client 上保留 admin 转发别名。
 
 ### PR 8：0.6 发布
 

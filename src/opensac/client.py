@@ -5,6 +5,23 @@ from typing import Any
 import httpx
 
 
+def _session_payload(
+    *,
+    mechanisms: dict[str, Any] | None,
+    request_id: str | None,
+    lease_seconds: float | None,
+    budget: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"mechanisms": mechanisms or {}}
+    if budget is not None:
+        payload["budget"] = budget
+    if request_id is not None:
+        payload["request_id"] = request_id
+    if lease_seconds is not None:
+        payload["lease_seconds"] = lease_seconds
+    return payload
+
+
 class OpenSAC:
     def __init__(
         self,
@@ -25,15 +42,12 @@ class OpenSAC:
         lease_seconds: float | None = None,
         budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "mechanisms": mechanisms or {},
-        }
-        if budget is not None:
-            payload["budget"] = budget
-        if request_id is not None:
-            payload["request_id"] = request_id
-        if lease_seconds is not None:
-            payload["lease_seconds"] = lease_seconds
+        payload = _session_payload(
+            mechanisms=mechanisms,
+            request_id=request_id,
+            lease_seconds=lease_seconds,
+            budget=budget,
+        )
         response = self._client.post(
             "/v1/sessions",
             json=payload,
@@ -42,11 +56,6 @@ class OpenSAC:
         session = response.json()
         self._remember_features(session)
         return session
-
-    def health(self) -> dict[str, Any]:
-        response = self._client.get("/healthz")
-        response.raise_for_status()
-        return response.json()
 
     def _remember_features(self, session: dict[str, Any]) -> frozenset[str]:
         features = frozenset(str(item) for item in session.get("features", []))
@@ -98,11 +107,6 @@ class OpenSAC:
         self._session_features.pop(session_id, None)
         return response.json()
 
-    def drain_worker(self) -> dict[str, Any]:
-        response = self._client.post("/v1/admin/drain")
-        response.raise_for_status()
-        return response.json()
-
     def close(self) -> None:
         self._client.close()
 
@@ -133,15 +137,12 @@ class AsyncOpenSAC:
         lease_seconds: float | None = None,
         budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "mechanisms": mechanisms or {},
-        }
-        if budget is not None:
-            payload["budget"] = budget
-        if request_id is not None:
-            payload["request_id"] = request_id
-        if lease_seconds is not None:
-            payload["lease_seconds"] = lease_seconds
+        payload = _session_payload(
+            mechanisms=mechanisms,
+            request_id=request_id,
+            lease_seconds=lease_seconds,
+            budget=budget,
+        )
         response = await self._client.post(
             "/v1/sessions",
             json=payload,
@@ -150,11 +151,6 @@ class AsyncOpenSAC:
         session = response.json()
         self._remember_features(session)
         return session
-
-    async def health(self) -> dict[str, Any]:
-        response = await self._client.get("/healthz")
-        response.raise_for_status()
-        return response.json()
 
     def _remember_features(self, session: dict[str, Any]) -> frozenset[str]:
         features = frozenset(str(item) for item in session.get("features", []))
@@ -185,9 +181,7 @@ class AsyncOpenSAC:
                     "The server does not advertise idempotent_exec; refusing exec_id"
                 )
             payload["exec_id"] = exec_id
-        response = await self._client.post(
-            f"/v1/sessions/{session_id}/exec", json=payload
-        )
+        response = await self._client.post(f"/v1/sessions/{session_id}/exec", json=payload)
         response.raise_for_status()
         return response.json()
 
@@ -206,11 +200,6 @@ class AsyncOpenSAC:
         response = await self._client.post(f"/v1/sessions/{session_id}/abort")
         response.raise_for_status()
         self._session_features.pop(session_id, None)
-        return response.json()
-
-    async def drain_worker(self) -> dict[str, Any]:
-        response = await self._client.post("/v1/admin/drain")
-        response.raise_for_status()
         return response.json()
 
     async def close(self) -> None:
