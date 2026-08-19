@@ -4,6 +4,8 @@ import json
 from unittest.mock import patch
 
 import httpx
+import opensac_sdk
+import opensac_sdk.types as sdk_types
 import pytest
 from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 from opensac_sdk.citations import CitationsResource
@@ -43,6 +45,15 @@ RESOURCE_TYPES = {
     "session": SessionResource,
     "state": StateResource,
 }
+
+
+def test_package_root_exposes_only_runtime_entrypoints() -> None:
+    assert opensac_sdk.__all__ == ["BrokerError", "sdk", "__version__"]
+    assert not hasattr(opensac_sdk, "SearchHit")
+    assert not hasattr(opensac_sdk, "OpenSACClient")
+    assert not hasattr(opensac_sdk, "LazyOpenSACClient")
+    assert "SearchHit" in sdk_types.__all__
+    assert "RpcError" not in sdk_types.__all__
 
 
 def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:

@@ -17,7 +17,7 @@ _OUTPUT_LIMIT_MARKER = (
     b"\nOpenSAC terminated the sandbox process after stdout/stderr reached "
     b"the output limit.\n"
 )
-SANDBOX_CONTRACT = 6
+SANDBOX_CONTRACT = 7
 SANDBOX_CONTRACT_LABEL = "org.opensac.sandbox.contract"
 
 

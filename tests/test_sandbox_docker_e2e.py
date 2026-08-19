@@ -43,7 +43,7 @@ def sandbox_image() -> str:
         )
 
 
-def test_built_image_exposes_contract_6_and_passage_models(sandbox_image: str) -> None:
+def test_built_image_exposes_contract_7_and_public_types(sandbox_image: str) -> None:
     image = sandbox_image
     inspected = subprocess.run(
         [
@@ -58,7 +58,7 @@ def test_built_image_exposes_contract_6_and_passage_models(sandbox_image: str) -
         capture_output=True,
         text=True,
     )
-    assert inspected.stdout.strip() == "6"
+    assert inspected.stdout.strip() == "7"
 
     inspected_version = subprocess.run(
         [
@@ -77,9 +77,9 @@ def test_built_image_exposes_contract_6_and_passage_models(sandbox_image: str) -
 
     script = (
         "import json; "
-        "from opensac_sdk import CapabilityFailure, ContentFailure, "
-        "ContentGrepReport, ContentPassageReport, PassageCoordinates, "
-        "SearchBatch, SearchHit, __version__; "
+        "from opensac_sdk import __version__; "
+        "from opensac_sdk.types import CapabilityFailure, ContentFailure, "
+        "ContentGrepReport, ContentPassageReport, PassageCoordinates, SearchBatch, SearchHit; "
         "from opensac_sdk.search import SearchResource; "
         "hit = SearchHit(ref='ref_a', backend='local', rank=1); "
         "result = SearchResource(None).fuse_rrf([SearchBatch(query='q', hits=[hit])]); "
