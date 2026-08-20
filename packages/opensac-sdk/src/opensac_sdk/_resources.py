@@ -7,6 +7,7 @@ import tempfile
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from ._record import Record, record, wrap
 from .transport import UnixSocketTransport
@@ -96,25 +97,38 @@ class SearchResource:
         weights: list[float] | None = None,
         k: int = 60,
         limit: int | None = None,
+        exclude_domains: list[str] | None = None,
+        domain_weights: dict[str, float] | None = None,
+        max_per_domain: int | None = None,
     ) -> list[Record]:
-        """Fuse successful search batches locally with reciprocal-rank fusion.
+        """Fuse successful search batches locally with domain-aware RRF.
 
         This deterministic helper makes no broker call. Failed batches are skipped
         and remain available to the caller through their original ``failure``
         fields. ``weights`` must align one-to-one with ``batches``; ``k`` controls
-        rank smoothing and ``limit`` truncates the fused list.
+        rank smoothing and ``limit`` truncates the fused list. Domain policies match
+        an exact hostname or any of its subdomains. ``exclude_domains`` removes
+        candidates, ``domain_weights`` multiplies their RRF scores, and
+        ``max_per_domain`` caps candidates sharing one exact hostname before the
+        final limit is applied. Sources that are not web URLs are unaffected.
 
         Returns:
-            Search-hit records extended with ``provenance``, ``fused_score``, and
-            1-based ``fused_rank``. Document sources and metadata are preserved.
+            Search-hit records extended with ``provenance``, ``raw_fused_score``,
+            ``domain_weight``, ``fused_score``, and 1-based ``fused_rank``. Document
+            sources and metadata are preserved.
 
         Raises:
-            ValueError: Weights, ranks, ``k``, or ``limit`` are invalid.
+            ValueError: Weights, domains, ranks, ``k``, or limits are invalid.
         """
         parsed_batches = [record(batch) for batch in batches]
         normalized_weights = self._validate_fusion_options(
             len(parsed_batches), weights=weights, k=k, limit=limit
         )
+        normalized_exclusions = self._normalize_domain_list(
+            exclude_domains, option="exclude_domains"
+        )
+        normalized_domain_weights = self._normalize_domain_weights(domain_weights)
+        self._validate_max_per_domain(max_per_domain)
         candidates: dict[str, dict[str, Any]] = {}
 
         for batch_index, (batch, weight) in enumerate(
@@ -153,6 +167,7 @@ class SearchResource:
                         "earliest_batch": batch_index,
                         "provenance": [provenance],
                         "fused_score": weight / (k + hit.rank),
+                        "domain": self._source_domain(hit.source),
                     }
                     continue
 
@@ -164,8 +179,20 @@ class SearchResource:
                     candidate["hit"] = hit
                     candidate["representative_key"] = representative_key
 
+        eligible: list[tuple[str, dict[str, Any]]] = []
+        for source, candidate in candidates.items():
+            domain = candidate["domain"]
+            if domain is not None and self._domain_matches_any(domain, normalized_exclusions):
+                continue
+            raw_fused_score = candidate["fused_score"]
+            domain_weight = self._domain_weight(domain, normalized_domain_weights)
+            candidate["raw_fused_score"] = raw_fused_score
+            candidate["domain_weight"] = domain_weight
+            candidate["fused_score"] = raw_fused_score * domain_weight
+            eligible.append((source, candidate))
+
         ordered = sorted(
-            candidates.items(),
+            eligible,
             key=lambda item: (
                 -item[1]["fused_score"],
                 item[1]["best_rank"],
@@ -173,18 +200,32 @@ class SearchResource:
                 item[0],
             ),
         )
+        selected: list[tuple[str, dict[str, Any]]] = []
+        domain_counts: dict[str, int] = {}
+        for item in ordered:
+            if limit is not None and len(selected) >= limit:
+                break
+            domain = item[1]["domain"]
+            if domain is not None and max_per_domain is not None:
+                if domain_counts.get(domain, 0) >= max_per_domain:
+                    continue
+                domain_counts[domain] = domain_counts.get(domain, 0) + 1
+            selected.append(item)
+
         fused = [
             record(
                 {
                     **candidate["hit"],
                     "provenance": candidate["provenance"],
+                    "raw_fused_score": candidate["raw_fused_score"],
+                    "domain_weight": candidate["domain_weight"],
                     "fused_score": candidate["fused_score"],
                     "fused_rank": fused_rank,
                 }
             )
-            for fused_rank, (_, candidate) in enumerate(ordered, start=1)
+            for fused_rank, (_, candidate) in enumerate(selected, start=1)
         ]
-        return fused if limit is None else fused[:limit]
+        return fused
 
     @staticmethod
     def _validate_fusion_options(
@@ -220,6 +261,108 @@ class SearchResource:
         if normalized and not any(weight > 0 for weight in normalized):
             raise ValueError("at least one weight must be greater than zero")
         return normalized
+
+    @classmethod
+    def _normalize_domain_list(
+        cls,
+        domains: list[str] | None,
+        *,
+        option: str,
+    ) -> frozenset[str]:
+        if domains is None:
+            return frozenset()
+        if not isinstance(domains, list):
+            raise ValueError(f"{option} must be a list of domain names or None")
+        return frozenset(cls._normalize_policy_domain(domain, option=option) for domain in domains)
+
+    @classmethod
+    def _normalize_domain_weights(
+        cls,
+        domain_weights: dict[str, float] | None,
+    ) -> dict[str, float]:
+        if domain_weights is None:
+            return {}
+        if not isinstance(domain_weights, dict):
+            raise ValueError("domain_weights must be a mapping of domains to weights or None")
+        normalized: dict[str, float] = {}
+        for domain, weight in domain_weights.items():
+            normalized_domain = cls._normalize_policy_domain(domain, option="domain_weights")
+            if normalized_domain in normalized:
+                raise ValueError("domain_weights contains duplicate normalized domains")
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+                raise ValueError("domain_weights must contain only positive finite numbers")
+            normalized_weight = float(weight)
+            if not math.isfinite(normalized_weight) or normalized_weight <= 0:
+                raise ValueError("domain_weights must contain only positive finite numbers")
+            normalized[normalized_domain] = normalized_weight
+        return normalized
+
+    @staticmethod
+    def _normalize_policy_domain(domain: Any, *, option: str) -> str:
+        if not isinstance(domain, str):
+            raise ValueError(f"{option} must contain only domain names")
+        value = domain.strip().rstrip(".").lower()
+        if not value or any(character in value for character in "/:@?#"):
+            raise ValueError(f"{option} must contain only domain names")
+        try:
+            value = value.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError(f"{option} contains an invalid domain name") from exc
+        labels = value.split(".")
+        if len(value) > 253 or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not all(character.isalnum() or character == "-" for character in label)
+            for label in labels
+        ):
+            raise ValueError(f"{option} contains an invalid domain name")
+        return value
+
+    @staticmethod
+    def _source_domain(source: Any) -> str | None:
+        if not isinstance(source, str):
+            return None
+        try:
+            parts = urlsplit(source)
+            hostname = parts.hostname
+        except ValueError:
+            return None
+        if parts.scheme.lower() not in {"http", "https"} or not hostname:
+            return None
+        try:
+            return hostname.rstrip(".").encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return hostname.rstrip(".").lower()
+
+    @staticmethod
+    def _domain_matches(domain: str, policy_domain: str) -> bool:
+        return domain == policy_domain or domain.endswith(f".{policy_domain}")
+
+    @classmethod
+    def _domain_matches_any(cls, domain: str, policy_domains: frozenset[str]) -> bool:
+        return any(cls._domain_matches(domain, policy_domain) for policy_domain in policy_domains)
+
+    @classmethod
+    def _domain_weight(cls, domain: str | None, weights: dict[str, float]) -> float:
+        if domain is None:
+            return 1.0
+        matches = [
+            (len(policy_domain), weight)
+            for policy_domain, weight in weights.items()
+            if cls._domain_matches(domain, policy_domain)
+        ]
+        return max(matches, default=(0, 1.0))[1]
+
+    @staticmethod
+    def _validate_max_per_domain(max_per_domain: int | None) -> None:
+        if max_per_domain is not None and (
+            isinstance(max_per_domain, bool)
+            or not isinstance(max_per_domain, int)
+            or max_per_domain < 1
+        ):
+            raise ValueError("max_per_domain must be a positive integer or None")
 
 
 class ContentResource:

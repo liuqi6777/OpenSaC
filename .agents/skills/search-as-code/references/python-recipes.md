@@ -43,8 +43,14 @@ means “broaden the heuristic” or “the hard constraint is unsupported.”
 ```python
 from opensac_sdk import sdk
 
-batches = sdk.search.many(queries, limit_per_query=10, concurrency=4)
-candidates = sdk.search.fuse_rrf(batches, k=60)
+batches = sdk.search.many(queries, limit_per_query=12, concurrency=4)
+candidates = sdk.search.fuse_rrf(
+    batches,
+    k=60,
+    exclude_domains=["example.social"],
+    domain_weights={"example.gov": 1.5, "example.edu": 1.25},
+    max_per_domain=3,
+)
 wanted_years = {str(year) for year in range(2019, 2024)}
 preferred_domains = {"example.gov", "example.edu"}
 

@@ -24,11 +24,18 @@ sdk.search.many(
     queries, limit_per_query=10, offset=0, concurrency=5, domains=None
 ) -> list[record]
 sdk.search.fuse_rrf(
-    batches, weights=None, k=60, limit=None
+    batches,
+    weights=None,
+    k=60,
+    limit=None,
+    exclude_domains=None,
+    domain_weights=None,
+    max_per_domain=None,
 ) -> list[record]
 ```
 
-`fuse_rrf` is deterministic local Python and makes no RPC.
+`fuse_rrf` is deterministic local Python and makes no RPC. Domain exclusions, weights, and the
+per-host cap are applied before `limit`; over-fetch each query when a policy may remove candidates.
 
 Content core:
 
@@ -81,7 +88,8 @@ error; keep a deterministic fallback.
 - Search hit: `source`, `backend`, `title`, `domain`, `date`, `snippet`, `score`,
   `rank`, `retrieval`, `metadata`.
 - Search batch: `query`, `hits`, `failure`.
-- Fused candidate: the search-hit fields plus `provenance`, `fused_score`, and `fused_rank`.
+- Fused candidate: the search-hit fields plus `provenance`, `raw_fused_score`, `domain_weight`,
+  `fused_score`, and `fused_rank`.
 - Content row: `source`, `text`, `title`, `date`, `failure`, `metadata`.
 - Grep report: `matches`, `failures`, `input_count`. A match includes `source`, `title`, `line`,
   `text`, `before`, `after`, and `input_index`.
