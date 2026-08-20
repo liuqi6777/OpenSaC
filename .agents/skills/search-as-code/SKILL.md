@@ -1,6 +1,6 @@
 ---
 name: search-as-code
-description: Compose evidence-grounded OpenSAC research programs through the sac_run MCP tool. Use for programmable multi-query search, document inspection, fact checking, structured extraction, workspace-backed research state, or passage-grounded citations when sac_run is available.
+description: Compose evidence-grounded OpenSAC research programs through the sac_run MCP tool. Use for programmable multi-query search, document inspection, fact checking, structured extraction, workspace-backed research state, or URL-cited results when sac_run is available.
 ---
 
 # Search as Code
@@ -17,17 +17,14 @@ from opensac_sdk import BrokerError, sdk
 
 ## Keep the evidence boundary intact
 
-- Search sources are canonical URLs or local IDs. Reuse them unchanged; authorization
-  still requires the current session's search. Locator strings are opaque.
+- Sources are URL or local-ID strings. Web content accepts bounded public HTTP(S) URLs directly;
+  local IDs still require search admission. Pass strings, never result records, to content.
 - Use search snippets to triage sources, not to support claims about document content. Search
   metadata is sufficient only when the requested result is a discovery list.
-- Prefer `search.many` -> `search.fuse_rrf` -> `content.passages` for semantic evidence discovery.
-  Inspect each returned passage before using its locator. Use `grep_report` and `read` for exact
-  strings and deliberate context expansion.
-- Read the passage used for each material claim. Cite only a non-empty passage that returned a
-  locator, and preserve that string unchanged.
-- Treat a locator as proof that a passage is bound to a retrieved document, not as proof that the
-  source is credible or the claim is true. Prefer primary sources and corroborate disputed claims.
+- Prefer `search.many` -> `search.fuse_rrf` -> `content.passages` for semantic discovery. Inspect
+  returned text; use `grep_report` and `read` for exact strings and deliberate context expansion.
+- Read the text used for each material claim. Output citations are optional, unverified URL/source
+  labels; prefer primary sources and corroborate disputed claims.
 - Inspect item failure records and `BrokerError`. Empty hits and zero matches are successful
   results. After a final failure, change the query, source, or candidate instead of repeating it.
 - Keep stdout small. Stdout, stderr, and submitted output share one observation budget, and noisy
@@ -36,7 +33,7 @@ from opensac_sdk import BrokerError, sdk
 ## End stages deliberately
 
 - **Review needed:** print bounded results and end with `NEXT:`, naming the model decision and
-  likely next operation.
+  likely next operation. Include bounded URL/domain/title candidates so the next call can reuse URLs.
 - **Research complete:** call `sdk.output.submit(...)` once with compact evidence and citations;
   do not print them first. After `submitted output` appears, stop calling `sac_run` and answer.
 
@@ -51,7 +48,7 @@ search can fuse/filter, while known sources and patterns can grep/read in one pr
 
 Frame constraints and source policy first. Use 2-4 queries for a known entity and 6-12 only for
 ambiguous discovery. Fuse a bounded shortlist, rank passages across its sources, inspect the original
-passage text, and submit only after every material claim has a locator. Use bounded grep/read calls
+passage text, and submit only after every material claim is supported by inspected text. Use bounded grep/read calls
 when verification depends on an exact spelling or more surrounding lines.
 
 ## Orchestrate with Python
@@ -72,14 +69,14 @@ attempted `(constraint, source)` pairs. Before ending with `NEXT:`, persist ever
 confirm the expected artifact paths appear in the observation. Submit from the evidence ledger
 only after coverage is complete. Python variables do not survive a call.
 
-Stored sources and locators remain usable only while the same broker session is live. If `sac_run`
-returns `state_lost`, the submitted program was not replayed; treat the workspace and source
-generation as gone, start clean, and do not resubmit the same program blindly.
+Public web URLs remain reusable across calls and sessions; local IDs remain session-bound. If
+`sac_run` returns `state_lost`, the submitted program was not replayed; rebuild workspace state and
+local-source admission, then resume only missing work.
 
 Adapter failures and tool timeouts occur outside the sandbox, so their execution outcome may be
 unknown. Do not replay the same program blindly. Inspect the task namespace and usage in one small
 recovery stage, then resume only missing work. If inspection repeatedly fails, report OpenSAC as
-unavailable; never invent an OpenSAC locator.
+unavailable.
 
 ## Load details only when needed
 

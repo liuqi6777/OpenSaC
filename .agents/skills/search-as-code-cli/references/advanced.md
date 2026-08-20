@@ -12,15 +12,6 @@ text. It returns one record per input source, with a `failure` record on unreada
 sdk.content.get_many(sources) -> list[record]
 ```
 
-## Citation resolution
-
-`sdk.output.submit` normally resolves final citations. Use these lower-level operations only when
-a host integration explicitly needs resolved citation rows:
-
-```python
-sdk.citations.resolve([{"source": source}, {"locator": locator}]) -> list[record]
-```
-
 ## Free-form pipeline model
 
 These calls are optional deployment capabilities. Prefer deterministic Python or the structured

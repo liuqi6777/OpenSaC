@@ -9,7 +9,6 @@ from opensac.models import (
     CapabilityEvent,
     CoalescedRequestRecord,
     DeduplicatedRequestRecord,
-    EvidenceTraceRecord,
     HitRecord,
     ModelAttemptRecord,
     PassageTraceRecord,
@@ -42,7 +41,6 @@ class CallContext:
     model_tokens: int = 0
     hits: list[HitRecord] = field(default_factory=list)
     model_attempts: list[ModelAttemptRecord] = field(default_factory=list)
-    evidence_records: list[EvidenceTraceRecord] = field(default_factory=list)
     passage_records: list[PassageTraceRecord] = field(default_factory=list)
     provider_trace: ProviderTraceBuffer = field(default_factory=ProviderTraceBuffer)
     deduplicated_requests: list[DeduplicatedRequestRecord] = field(default_factory=list)

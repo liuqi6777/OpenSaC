@@ -75,17 +75,4 @@ async def test_frozen_gold_passages_are_retrieved_and_resolvable() -> None:
         )
 
         assert any(case["gold_span"] in row["text"] for row in report["passages"])
-        citations = [
-            {"locator": row["locator"]}
-            for row in report["passages"]
-            if row.get("locator") is not None
-        ]
-        resolved = await service.call(
-            "token",
-            "citations.resolve",
-            {"citations": citations},
-        )
-        assert all(
-            item["evidence"] == row["text"]
-            for item, row in zip(resolved, report["passages"], strict=True)
-        )
+        assert all("locator" not in row for row in report["passages"])

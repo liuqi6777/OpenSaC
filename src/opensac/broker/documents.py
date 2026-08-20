@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
+from copy import deepcopy
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 from opensac._contracts import SearchHit
 from opensac.broker.call_context import current_call
@@ -33,13 +35,42 @@ def canonical_url(url: str) -> str:
     """Conservatively fold URL spellings that identify the same page."""
 
     parts = urlsplit(url.strip())
-    query = sorted(
-        (key, value)
-        for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key.lower() not in _TRACKING_PARAMS
-    )
-    encoded = "&".join(f"{key}={value}" for key, value in query)
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, encoded, ""))
+    query_parts = []
+    for item in parts.query.split("&") if parts.query else []:
+        raw_key = item.partition("=")[0]
+        if unquote_plus(raw_key).lower() not in _TRACKING_PARAMS:
+            query_parts.append(item)
+    query = "&".join(sorted(query_parts))
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, query, ""))
+
+
+def public_web_url(value: Any) -> str:
+    """Validate and normalize a bounded public HTTP(S) document address."""
+
+    source = normalize_source(value)
+    if any(ord(character) < 32 for character in source):
+        raise ValueError("URL contains control characters")
+    parts = urlsplit(source)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise ValueError("source is not an absolute HTTP or HTTPS URL")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("URL userinfo is not allowed")
+    try:
+        hostname = parts.hostname or ""
+        _ = parts.port
+    except ValueError as exc:
+        raise ValueError("URL port is invalid") from exc
+    lowered = hostname.rstrip(".").lower()
+    if not lowered or lowered == "localhost" or lowered.endswith((".localhost", ".local")):
+        raise ValueError("URL host is not public")
+    try:
+        address = ipaddress.ip_address(lowered)
+    except ValueError:
+        pass
+    else:
+        if not address.is_global:
+            raise ValueError("URL IP address is not public")
+    return source
 
 
 def source_for(hit: SearchHit) -> str:
@@ -74,7 +105,11 @@ def document_identity(hit: SearchHit) -> str:
 
 
 def normalize_source(value: Any) -> str:
-    source = str(value).strip()
+    if not isinstance(value, str):
+        raise ValueError("source must be a string")
+    source = value.strip()
+    if not source:
+        raise ValueError("source must not be empty")
     if len(source) > _MAX_SOURCE_CHARS:
         raise ValueError(f"source must be at most {_MAX_SOURCE_CHARS} characters")
     parts = urlsplit(source)
@@ -86,20 +121,30 @@ def normalize_source(value: Any) -> str:
 def resolve_sources(state: BrokerSession, sources: list[str]) -> list[SearchHit]:
     """Resolve only sources admitted by search in this live session."""
 
-    resolved = [
-        (source, state.documents_by_source.get(normalize_source(source))) for source in sources
-    ]
-    missing = [source for source, hit in resolved if hit is None]
+    resolved = [(source, state.document_for_alias(normalize_source(source))) for source in sources]
+    missing = [source for source, record in resolved if record is None]
     if missing:
         rendered = ", ".join(str(source)[:_MAX_ERROR_SOURCE_CHARS] for source in missing[:3])
         raise ValueError(
             f"Unknown sources: {rendered}. Pass a source that search returned in this session."
         )
-    hits = [hit for _, hit in resolved if hit is not None]
+    hits: list[SearchHit] = []
+    for requested_source, record in resolved:
+        if record is None:
+            continue
+        hit = deepcopy(record.hit)
+        hit.source = requested_source.strip()
+        hits.append(hit)
     context = current_call()
     if context is not None:
         context.hits.extend(
-            HitRecord(identity=document_identity(hit), rank=hit.rank, score=hit.score)
-            for hit in hits
+            HitRecord(
+                identity=document_identity(hit),
+                rank=hit.rank,
+                score=hit.score,
+                admission=record.admission,
+            )
+            for hit, (_requested_source, record) in zip(hits, resolved, strict=True)
+            if record is not None
         )
     return hits

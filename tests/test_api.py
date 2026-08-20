@@ -32,7 +32,6 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         api_key="public-secret",
         backend_metadata_hash="sha256:index-manifest",
         extract_max_items=12,
-        citation_max_evidence_chars=4096,
         search_backend="local",
         model_name="",
     )
@@ -52,12 +51,13 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v7",
+            "capability_contract_v8",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
             "content_grep_report_v1",
-            "bounded_evidence_registry_v1",
+            "direct_web_content_v1",
+            "lightweight_url_citations_v1",
             "intra_call_dedupe_v1",
             "execution_cancellation_v1",
             "idempotent_exec",
@@ -74,13 +74,12 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
-        assert payload["environment"]["sandbox_contract"] == 8
-        assert payload["environment"]["capability_contract"] == 7
+        assert payload["environment"]["sandbox_contract"] == 9
+        assert payload["environment"]["capability_contract"] == 8
         capability_limits = payload["environment"]["capability_limits"]
         assert capability_limits["extract_many"]["max_items"] == 12
-        assert capability_limits["evidence"]["max_chars"] == 4096
-        assert capability_limits["evidence"]["max_records"] == 4096
         assert capability_limits["content"]["max_sources_per_request"] == 256
+        assert capability_limits["content"]["url_admission"] == "searched_or_public_web"
         assert capability_limits["content"]["passage_limit"] == 100
         assert capability_limits["content"]["passage_max_per_source"] == 10
         assert capability_limits["content"]["passage_chunk_chars"] == 2_000
@@ -111,6 +110,8 @@ def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
         provider_operation_concurrency={"local.search": 3},
         provider_operation_requests_per_second={"local.search": 2.5},
         provider_operation_burst={"local.search": 2},
+        provider_operation_attempt_timeout_seconds={"local.search": 7.0},
+        provider_operation_logical_deadline_seconds={"local.search": 11.0},
         search_backend="local",
     )
 
@@ -128,6 +129,8 @@ def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
     assert local_policy["concurrency"] == 3
     assert local_policy["requests_per_second"] == 2.5
     assert local_policy["burst"] == 2
+    assert local_policy["attempt_timeout_seconds"] == 7.0
+    assert local_policy["logical_deadline_seconds"] == 11.0
 
 
 def test_provider_policy_config_rejects_unknown_operations_and_orphan_bursts() -> None:
@@ -135,6 +138,8 @@ def test_provider_policy_config_rejects_unknown_operations_and_orphan_bursts() -
         Settings(provider_operation_concurrency={"other.search": 1})
     with pytest.raises(ValueError, match="requires requests_per_second"):
         Settings(provider_operation_burst={"local.search": 1})
+    with pytest.raises(ValueError, match="values must be positive"):
+        Settings(provider_operation_attempt_timeout_seconds={"local.search": 0})
 
 
 def test_settings_load_jina_api_key_from_environment(monkeypatch) -> None:
@@ -181,7 +186,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.6.2"
+    assert schema["info"]["version"] == "0.6.3"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
@@ -324,7 +329,7 @@ class RecordingSandbox:
             stderr="",
             duration_seconds=1.5,
             output={"records": 3},
-            citations=[{"source": "doc_1", "url": "https://example.com"}],
+            citations=["https://example.com"],
         )
 
 
@@ -453,7 +458,7 @@ def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None
         assert payload["succeeded"] is True
         assert payload["stdout"] == "ran\n"
         assert payload["output"] == {"records": 3}
-        assert payload["citations"][0]["source"] == "doc_1"
+        assert payload["citations"] == ["https://example.com"]
         assert payload["artifacts"] == ["evidence.jsonl"]
         assert payload["trace"] == []
         assert set(payload["timings"]) >= {

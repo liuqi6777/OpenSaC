@@ -23,7 +23,7 @@ contents; every later program must explicitly load the files it needs.
 | --- | --- | --- |
 | `manifest.json` | Task, stable requirements, source policy | Write once per namespace |
 | `pool.jsonl` | Bounded candidate metadata and sources | Merge, rerank, then prune |
-| `evidence.json` | Verified passages and locators | Keep matching fingerprints |
+| `evidence.json` | Verified passages and source URLs | Keep matching fingerprints |
 | `attempts.json` | Sources tried for each matching rule | Save before capability calls |
 
 For every stage:
@@ -32,7 +32,7 @@ For every stage:
 - Start with `sdk.state.list(f"{root}/")`, then read the artifacts the stage needs.
 - Save progress before printing `NEXT:` or exiting. Python variables do not survive calls.
 - Keep pools bounded and skip attempted `(constraint, source)` pairs.
-- Treat stored sources and locators as valid only in the same live broker session.
+- Public web URLs remain reusable across sessions; re-search local IDs after session loss.
 - Use bounded `print` output for progress; use `sdk.output.submit` for the final result.
 
 ## 1. Search or extend the candidate pool
@@ -137,17 +137,12 @@ if sources:
         passage = sdk.content.read(
             [match.source], offset=max(match.line - 10, 1), limit=40, max_chars=16_000
         )[0]
-        if (
-            passage.failure is None
-            and passage.locator is not None
-            and re.search(pattern, passage.text, re.IGNORECASE)
-        ):
+        if passage.failure is None and re.search(pattern, passage.text, re.IGNORECASE):
             evidence[name] = {
                 "fingerprint": fingerprint,
                 "requirement": requirement,
                 "source": passage.source,
                 "text": passage.text,
-                "locator": passage.locator,
             }
             sdk.state.write_json(evidence_path, evidence)
             break
@@ -212,9 +207,6 @@ else:
                 for name in required
             ],
         },
-        citations=[
-            {"locator": evidence[name]["locator"]}
-            for name in required
-        ],
+        citations=list(dict.fromkeys(evidence[name]["source"] for name in required)),
     )
 ```

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -43,7 +43,6 @@ CAPABILITY_METHODS: tuple[str, ...] = (
     "content.passages",
     "content.read",
     "content.grep_report",
-    "citations.resolve",
     "session.usage",
     "llm.complete",
     "llm.complete_many",
@@ -190,6 +189,10 @@ class RunUsage(BaseModel):
     # only the first would hide the saving; only the second would make a program
     # look like it stopped reading.
     content_backend_fetches: int = 0
+    # Public web URLs admitted without a prior search. Attempts count admission
+    # decisions; successes count documents fetched and registered for reuse.
+    direct_url_attempts: int = 0
+    direct_url_successes: int = 0
     # Real transport attempts, distinct from the logical operations above. A
     # local search_many HTTP request counts once even when it carries many
     # queries; retries add attempts without adding logical calls.
@@ -201,11 +204,6 @@ class RunUsage(BaseModel):
     provider_queue_seconds: float = 0.0
     provider_rate_limit_wait_seconds: float = 0.0
     provider_backoff_seconds: float = 0.0
-    # Trusted passage state held by the broker for this session. These are
-    # measurements, not agent-spend budgets, so they intentionally have no
-    # ResourceBudget counterpart.
-    evidence_records: int = 0
-    evidence_passage_bytes: int = 0
     llm_calls: int = 0
     sandbox_seconds: float = 0.0
     workspace_bytes: int = 0
@@ -274,7 +272,7 @@ class HitRecord(BaseModel):
     "did the agent ever surface the gold document" is the first question anyone
     asks of a failed run.
 
-    Recorded on ``content.*`` and ``citations.resolve`` as well as on searches,
+    Recorded on ``content.*`` as well as on searches,
     because surfacing and opening are different events with different remedies:
     a gold document that never appeared is a query-formulation failure, and one
     that appeared and was never opened is a reading failure, and a trace with
@@ -295,11 +293,14 @@ class HitRecord(BaseModel):
     rank: int
     score: float | None = None
     # Populated for search fan-out so one trace can reconstruct which query
-    # surfaced a candidate. Content and citation events have no query index.
+    # surfaced a candidate. Content events have no query index.
     query_index: int | None = None
     # Effective backend behaviour, not a caller-requested mode. Kept flat in
     # the trace so older analysis does not need the SDK model to read it.
     retrieval_mode: str | None = None
+    # How this document entered the session registry. Rejected inputs have no
+    # admission because they were never registered.
+    admission: Literal["search", "direct_url"] | None = None
 
 
 class ModelAttemptRecord(BaseModel):
@@ -310,19 +311,6 @@ class ModelAttemptRecord(BaseModel):
     status: str
     duration_seconds: float
     model_tokens: int = 0
-    error_code: str | None = None
-
-
-class EvidenceTraceRecord(BaseModel):
-    """Evidence lifecycle metadata suitable for persistent research traces."""
-
-    locator_id: str | None = None
-    identity: str | None = None
-    action: str
-    status: str
-    coordinates: dict[str, Any] = Field(default_factory=dict)
-    document_fingerprint: str | None = None
-    passage_fingerprint: str | None = None
     error_code: str | None = None
 
 
@@ -384,7 +372,6 @@ class CapabilityEvent(BaseModel):
     hits: list[HitRecord] = Field(default_factory=list)
     model_tokens: int = 0
     model_attempts: list[ModelAttemptRecord] = Field(default_factory=list)
-    evidence_records: list[EvidenceTraceRecord] = Field(default_factory=list)
     passage_records: list[PassageTraceRecord] = Field(default_factory=list)
     provider_attempts: list[ProviderAttemptRecord] = Field(default_factory=list)
     deduplicated_requests: list[DeduplicatedRequestRecord] = Field(default_factory=list)
@@ -431,7 +418,7 @@ class ExecResult(BaseModel):
     output_limit_exceeded: bool = False
     succeeded: bool
     output: Any = None
-    citations: list[dict[str, Any]] = Field(default_factory=list)
+    citations: list[str] = Field(default_factory=list)
     # Set when the program never ran: rejected by the code validator, or the
     # sandbox container failed to start. Distinct from stderr, which carries
     # failures of a program that did run, because only the latter is something

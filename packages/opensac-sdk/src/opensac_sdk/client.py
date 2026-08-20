@@ -3,7 +3,6 @@ from __future__ import annotations
 import threading
 
 from ._resources import (
-    CitationsResource,
     ContentResource,
     LLMResource,
     OutputResource,
@@ -26,7 +25,6 @@ class OpenSACClient:
         self._transport = transport
         self.search = SearchResource(transport)
         self.content = ContentResource(transport)
-        self.citations = CitationsResource(transport)
         self.session = SessionResource(transport)
         self.llm = LLMResource(transport)
         self.state = state
@@ -38,7 +36,7 @@ class OpenSACClient:
         return cls(
             transport,
             StateResource.from_environment(),
-            OutputResource.from_environment(transport),
+            OutputResource.from_environment(),
         )
 
     def close(self) -> None:
@@ -54,8 +52,8 @@ class OpenSACClient:
 class LazyOpenSACClient:
     """OpenSAC sandbox entry point, available as ``opensac_sdk.sdk``.
 
-    Namespaces are ``search``, ``content``, ``citations``, ``session``, ``llm``,
-    ``state``, and ``output``. Read one namespace or method ``.__doc__`` when exact
+    Namespaces are ``search``, ``content``, ``session``, ``llm``, ``state``, and
+    ``output``. Read one namespace or method ``.__doc__`` when exact
     runtime behavior is needed; doing so does not call the broker.
     """
 

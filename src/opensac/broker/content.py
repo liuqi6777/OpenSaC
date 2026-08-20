@@ -3,16 +3,21 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
-import json
 import math
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from opensac._contracts import ContentPassage, ContentPassageReport, ContentSnippet, SearchHit
+from opensac.backends.document import document_fetch_candidates
 from opensac.backends.rerank.base import PassageReranker
 from opensac.backends.search.base import SearchBackend
 from opensac.broker.call_context import current_call
-from opensac.broker.documents import document_identity, resolve_sources
+from opensac.broker.documents import (
+    document_identity,
+    normalize_source,
+    public_web_url,
+)
 from opensac.broker.passages import (
     PassageCandidate,
     normalize_document_text,
@@ -22,8 +27,8 @@ from opensac.broker.passages import (
     select_passage_candidates,
 )
 from opensac.broker.provider_execution import CapabilityProviderError, ProviderExecutor
-from opensac.broker.session import BrokerSession, EvidenceRecord, FlightGroup
-from opensac.models import EvidenceTraceRecord, PassageTraceRecord, ProviderAttemptRecord
+from opensac.broker.session import BrokerSession, FlightGroup
+from opensac.models import HitRecord, PassageTraceRecord, ProviderAttemptRecord
 from opensac.provider import ProviderRequestError
 
 
@@ -33,7 +38,7 @@ def _provider_attempts() -> list[ProviderAttemptRecord]:
 
 
 class ContentCapabilities:
-    """Fetch admitted documents and derive bounded, citable evidence."""
+    """Fetch admitted documents and derive bounded passages."""
 
     def __init__(
         self,
@@ -45,11 +50,10 @@ class ContentCapabilities:
         passage_chunk_overlap_chars: int,
         passage_prefilter_limit: int,
         max_query_chars: int,
-        max_evidence_chars: int,
-        max_evidence_records: int,
-        max_evidence_passage_bytes: int,
         max_sources_per_request: int,
         session_content_cache_bytes: int,
+        content_url_admission: str,
+        content_batch_deadline_seconds: float,
         backend_revision: str,
     ) -> None:
         self.backends = backends
@@ -59,11 +63,14 @@ class ContentCapabilities:
         self.passage_chunk_overlap_chars = passage_chunk_overlap_chars
         self.passage_prefilter_limit = passage_prefilter_limit
         self.max_search_query_chars = max_query_chars
-        self.max_evidence_chars = max_evidence_chars
-        self.max_evidence_records = max_evidence_records
-        self.max_evidence_passage_bytes = max_evidence_passage_bytes
         self.max_content_sources_per_request = max_sources_per_request
         self.session_content_cache_bytes = session_content_cache_bytes
+        if content_url_admission not in {"searched_only", "searched_or_public_web"}:
+            raise ValueError("content_url_admission is invalid")
+        self.content_url_admission = content_url_admission
+        if float(content_batch_deadline_seconds) <= 0:
+            raise ValueError("content_batch_deadline_seconds must be positive")
+        self.content_batch_deadline_seconds = float(content_batch_deadline_seconds)
         self.backend_revision = backend_revision
         self.inflight_coalescing = providers.inflight_coalescing
 
@@ -79,7 +86,114 @@ class ContentCapabilities:
                 f"content request contains {len(normalized)} sources, exceeding the "
                 f"broker maximum of {self.max_content_sources_per_request}"
             )
-        return resolve_sources(state, normalized)
+        hits: list[SearchHit] = []
+        backend_names = sorted(state.policy.allowed_backends & set(self.backends))
+        if len(backend_names) != 1:
+            raise RuntimeError("A session must have exactly one configured search backend")
+        backend_name = backend_names[0]
+        for input_index, raw_source in enumerate(normalized):
+            if not isinstance(raw_source, str):
+                raise ValueError(f"content source at input index {input_index} must be a string")
+            try:
+                source = normalize_source(raw_source)
+            except ValueError as exc:
+                raise ValueError(
+                    f"content source at input index {input_index} is invalid: {exc}"
+                ) from exc
+            record = state.document_for_alias(source)
+            if record is not None:
+                hit = record.hit.model_copy(deep=True)
+                hit.source = raw_source.strip()
+                hits.append(hit)
+                continue
+
+            try:
+                web_source = public_web_url(source)
+            except ValueError as exc:
+                hits.append(
+                    SearchHit(
+                        source=source,
+                        backend=backend_name,
+                        url=(
+                            source
+                            if backend_name == "web"
+                            and urlsplit(source).scheme.lower() in {"http", "https"}
+                            and bool(urlsplit(source).netloc)
+                            else None
+                        ),
+                        docid=(
+                            source
+                            if backend_name == "local"
+                            or urlsplit(source).scheme.lower() not in {"http", "https"}
+                            or not urlsplit(source).netloc
+                            else None
+                        ),
+                        rank=0,
+                        metadata={
+                            "_opensac_admission_failure": {
+                                "code": "unknown_source",
+                                "message": str(exc),
+                                "retryable": False,
+                                "attempts": 0,
+                            }
+                        },
+                    )
+                )
+                continue
+
+            if backend_name != "web" or self.content_url_admission == "searched_only":
+                hits.append(
+                    SearchHit(
+                        source=source,
+                        backend=backend_name,
+                        url=web_source,
+                        rank=0,
+                        metadata={
+                            "_opensac_admission_failure": {
+                                "code": "url_not_admitted",
+                                "message": (
+                                    "This deployment only reads web URLs admitted by search."
+                                ),
+                                "retryable": False,
+                                "attempts": 0,
+                            }
+                        },
+                    )
+                )
+                continue
+
+            hits.append(
+                SearchHit(
+                    source=raw_source.strip(),
+                    backend="web",
+                    url=web_source,
+                    domain=urlsplit(web_source).hostname,
+                    rank=0,
+                    metadata={"_opensac_direct_url": True},
+                )
+            )
+            state.policy.record_direct_url_attempt()
+
+        context = current_call()
+        if context is not None:
+            for hit in hits:
+                registered = state.document_for_alias(normalize_source(hit.source))
+                admission = (
+                    "direct_url"
+                    if hit.metadata.get("_opensac_direct_url")
+                    else registered.admission
+                    if registered is not None
+                    else None
+                )
+                context.hits.append(
+                    HitRecord(
+                        identity=document_identity(hit),
+                        rank=hit.rank,
+                        score=hit.score,
+                        admission=admission,
+                    )
+                )
+        return hits
 
     @staticmethod
     def _content_sources_argument(
@@ -95,204 +209,6 @@ class ContentCapabilities:
         if "sources" not in params:
             raise ValueError("content requests must provide sources")
         return params["sources"]
-
-    async def resolve_citations(
-        self,
-        state: BrokerSession,
-        params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        legacy = [key for key in ("refs", "requests") if key in params]
-        if legacy:
-            raise ValueError(
-                f"Unsupported legacy citation parameter(s): {', '.join(sorted(legacy))}"
-            )
-        if "citations" not in params:
-            raise ValueError("citation requests must provide citations")
-        requests = params["citations"]
-        if not isinstance(requests, list):
-            raise ValueError("citations must be a list")
-        resolved: list[dict[str, Any]] = []
-        for request in requests:
-            if not isinstance(request, dict):
-                raise ValueError("Each citation request must be an object")
-            if set(request) == {"source"}:
-                source = request["source"]
-                if not isinstance(source, str) or not source:
-                    raise ValueError("Citation source must be a non-empty string")
-                hit = resolve_sources(state, [source])[0]
-                resolved.append(self._citation_wire(hit, hit.snippet, "search_preview"))
-                continue
-            if set(request) != {"locator"}:
-                raise ValueError("Citation requests contain exactly source or locator")
-            locator = request["locator"]
-            record = self._verify_evidence_locator(state, locator)
-            source = state.source_by_identity.get(record.identity)
-            hit = state.documents_by_source.get(source or "")
-            if hit is None:
-                raise RuntimeError("Evidence locator lost its admitted document")
-            citation = self._citation_wire(hit, record.text, record.kind)
-            citation["locator"] = locator
-            resolved.append(citation)
-        return resolved
-
-    @staticmethod
-    def _citation_wire(
-        hit: SearchHit,
-        evidence: str,
-        evidence_kind: str,
-    ) -> dict[str, Any]:
-        return {
-            "source": hit.source,
-            "title": hit.title,
-            "url": hit.url,
-            "docid": hit.docid,
-            "evidence": evidence,
-            "evidence_kind": evidence_kind,
-            "backend": hit.backend,
-        }
-
-    def _verify_evidence_locator(
-        self,
-        state: BrokerSession,
-        locator: Any,
-    ) -> EvidenceRecord:
-        registered: EvidenceRecord | None = None
-
-        def reject(message: str, code: str) -> None:
-            self._record_evidence_trace(
-                locator_id=locator if isinstance(locator, str) else None,
-                action="validate",
-                status="error",
-                record=registered,
-                error_code=code,
-            )
-            raise ValueError(message)
-
-        if not isinstance(locator, str) or not locator or len(locator) > 128:
-            reject("Evidence locator must be a non-empty bounded string", "invalid_locator")
-        registered = state.evidence.get(locator)
-        if registered is None:
-            reject("Unknown evidence locator", "unknown_locator")
-        assert registered is not None
-        self._record_evidence_trace(
-            locator_id=locator,
-            action="validate",
-            status="ok",
-            record=registered,
-        )
-        return registered
-
-    @staticmethod
-    def _record_evidence_trace(
-        *,
-        locator_id: str | None,
-        action: str,
-        status: str,
-        record: EvidenceRecord | None,
-        error_code: str | None = None,
-    ) -> None:
-        context = current_call()
-        if context is None:
-            return
-        context.evidence_records.append(
-            EvidenceTraceRecord(
-                locator_id=locator_id[:128] if locator_id else None,
-                identity=record.identity if record else None,
-                action=action,
-                status=status,
-                coordinates=dict(record.coordinates) if record else {},
-                document_fingerprint=record.document_fingerprint if record else None,
-                passage_fingerprint=record.passage_fingerprint if record else None,
-                error_code=error_code,
-            )
-        )
-
-    def _register_evidence(
-        self,
-        state: BrokerSession,
-        *,
-        identity: str,
-        text: str,
-        document_text: str,
-        coordinates: dict[str, Any],
-    ) -> tuple[str | None, dict[str, Any] | None]:
-        if not text or len(text) > self.max_evidence_chars:
-            return None, None
-        document_fingerprint = hashlib.sha256(document_text.encode("utf-8")).hexdigest()
-        passage_fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        material = json.dumps(
-            {
-                "identity": identity,
-                "kind": "selected_passage",
-                "coordinates": coordinates,
-                "document_fingerprint": document_fingerprint,
-                "passage_fingerprint": passage_fingerprint,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        locator_id = (
-            "evidence_"
-            + hashlib.sha256(f"{state.session.token}\0{material}".encode()).hexdigest()[:24]
-        )
-        record = EvidenceRecord(
-            identity=identity,
-            kind="selected_passage",
-            text=text,
-            coordinates=dict(coordinates),
-            document_fingerprint=document_fingerprint,
-            passage_fingerprint=passage_fingerprint,
-        )
-        existing = state.evidence.get(locator_id)
-        if existing is not None:
-            if existing != record:
-                self._record_evidence_trace(
-                    locator_id=locator_id,
-                    action="issue",
-                    status="error",
-                    record=existing,
-                    error_code="evidence_locator_collision",
-                )
-                raise RuntimeError("Evidence locator collision detected")
-            self._record_evidence_trace(
-                locator_id=locator_id,
-                action="issue",
-                status="ok",
-                record=existing,
-            )
-            return locator_id, None
-
-        passage_bytes = len(text.encode("utf-8"))
-        if (
-            len(state.evidence) >= self.max_evidence_records
-            or state.evidence_passage_bytes + passage_bytes > self.max_evidence_passage_bytes
-        ):
-            self._record_evidence_trace(
-                locator_id=locator_id,
-                action="issue",
-                status="error",
-                record=record,
-                error_code="evidence_capacity_exhausted",
-            )
-            return None, {
-                "code": "evidence_capacity_exhausted",
-                "message": "The session evidence registry is full.",
-                "retryable": False,
-            }
-
-        state.evidence[locator_id] = record
-        state.evidence_passage_bytes += passage_bytes
-        state.policy.set_evidence_usage(
-            records=len(state.evidence),
-            passage_bytes=state.evidence_passage_bytes,
-        )
-        self._record_evidence_trace(
-            locator_id=locator_id,
-            action="issue",
-            status="ok",
-            record=record,
-        )
-        return locator_id, None
 
     async def get_many(
         self,
@@ -433,7 +349,6 @@ class ContentCapabilities:
         )
         failures: list[dict[str, Any]] = []
         candidates: list[PassageCandidate] = []
-        normalized_documents: dict[str, str] = {}
         for (input_index, hit), row in zip(unique, rows, strict=True):
             failure = row.get("failure")
             if failure is not None:
@@ -446,7 +361,6 @@ class ContentCapabilities:
                 )
                 continue
             document_text = normalize_document_text(str(row.get("text") or ""))
-            normalized_documents[hit.source] = document_text
             for text, start, end, coordinates in segment_passages(
                 document_text,
                 chunk_chars=self.passage_chunk_chars,
@@ -483,17 +397,6 @@ class ContentCapabilities:
         traced = context.passage_records if context is not None else None
         for rank, (candidate, score) in enumerate(selected, start=1):
             coordinates = candidate.coordinates.model_dump(mode="json")
-            locator, locator_error = self._register_evidence(
-                state,
-                identity=document_identity(candidate.hit),
-                text=candidate.text,
-                document_text=normalized_documents[candidate.hit.source],
-                coordinates={
-                    "type": "line_characters",
-                    "basis": "normalized_text",
-                    **coordinates,
-                },
-            )
             row = ContentPassage(
                 source=candidate.hit.source,
                 title=candidate.title,
@@ -503,8 +406,6 @@ class ContentCapabilities:
                 rank=rank,
                 score=score,
                 ranker=ranker_name,
-                locator=locator,
-                locator_error=locator_error,
             ).model_dump(mode="json")
             passages.append(row)
             if traced is not None:
@@ -556,8 +457,7 @@ class ContentCapabilities:
         # manage -- generous enough that ordinary reading never meets it.
         max_chars = min(max(int(params.get("max_chars", 100_000)), 1), 400_000)
         windows: list[dict[str, Any]] = []
-        for hit, row in zip(hits, rows, strict=True):
-            document_text = str(row.get("text") or "")
+        for _hit, row in zip(hits, rows, strict=True):
             lines = self._document_lines(row)
             total = len(lines)
             window = lines[offset - 1 : offset - 1 + limit]
@@ -587,36 +487,10 @@ class ContentCapabilities:
             if partial_line:
                 # The public read coordinate is line-based, so a single line
                 # cannot be resumed mid-line. Report the partial window
-                # explicitly and bind its locator with character coordinates
-                # instead of claiming the prefix represents the whole line.
+                # explicitly instead of claiming the prefix represents the whole line.
                 metadata["truncated_mid_line"] = True
                 metadata["partial_line_remaining_chars"] = len(window[0]) - len(text)
             result = {**row, "text": text, "metadata": metadata}
-            coordinates = (
-                {
-                    "type": "line_characters",
-                    "line": metadata["start_line"],
-                    "start_character": 0,
-                    "end_character": len(text),
-                }
-                if partial_line
-                else {
-                    "type": "lines",
-                    "start_line": metadata["start_line"],
-                    "end_line": metadata["end_line"],
-                }
-            )
-            locator, locator_error = self._register_evidence(
-                state,
-                identity=document_identity(hit),
-                text=text,
-                document_text=document_text,
-                coordinates=coordinates,
-            )
-            if locator is not None:
-                result["locator"] = locator
-            if locator_error is not None:
-                result["locator_error"] = locator_error
             windows.append(result)
         return windows
 
@@ -659,7 +533,7 @@ class ContentCapabilities:
         max_per_source = min(max(int(params.get("max_matches_per_source", 20)), 1), 200)
         matches: list[dict[str, Any]] = []
         failures: list[dict[str, Any]] = []
-        for input_index, (hit, row) in enumerate(zip(hits, rows, strict=True)):
+        for input_index, (_hit, row) in enumerate(zip(hits, rows, strict=True)):
             failure = row.get("failure")
             if failure is None and row.get("metadata", {}).get("fetch_error"):
                 failure = {
@@ -696,23 +570,6 @@ class ContentCapabilities:
                     "after": after,
                     "input_index": input_index,
                 }
-                evidence = "\n".join([*before, line, *after])
-                locator, locator_error = self._register_evidence(
-                    state,
-                    identity=document_identity(hit),
-                    text=evidence,
-                    document_text=str(row.get("text") or ""),
-                    coordinates={
-                        "type": "lines",
-                        "start_line": index + 1 - len(before),
-                        "end_line": index + 1 + len(after),
-                        "match_line": index + 1,
-                    },
-                )
-                if locator is not None:
-                    match["locator"] = locator
-                if locator_error is not None:
-                    match["locator_error"] = locator_error
                 matches.append(match)
         return {
             "matches": matches,
@@ -788,6 +645,9 @@ class ContentCapabilities:
             operation_id: str | None = None,
             track_execution: bool = True,
         ) -> tuple[str, dict[str, Any]]:
+            admission_failure = hit.metadata.get("_opensac_admission_failure")
+            if isinstance(admission_failure, dict):
+                return key, self._content_failure_row(hit, admission_failure)
             backend = self.backends.get(hit.backend)
             if backend is None:
                 return key, self._content_failure_row(
@@ -800,77 +660,164 @@ class ContentCapabilities:
                     },
                 )
             operation = "local.document" if hit.backend == "local" else "web.scrape"
-
-            async def request() -> ContentSnippet:
-                fetch = getattr(backend, "fetch", None)
-                if not callable(fetch):
-                    raise ValueError("backend has no atomic content fetch operation")
-                result = await fetch(hit, query=query)
-                row = ContentSnippet.model_validate(result)
-                if row.source != hit.source:
-                    raise ValueError("backend changed the requested content source")
-                return row
-
             validate_fetch = getattr(backend, "preflight_fetch", None)
+            candidates = document_fetch_candidates(hit) if hit.backend == "web" else [hit]
+            total_attempts = 0
+            row: dict[str, Any] | None = None
+            fallback_codes = {
+                "provider_rejected",
+                "provider_not_found",
+                "provider_invalid_response",
+            }
+            for candidate_index, candidate in enumerate(candidates):
 
-            def preflight() -> None:
-                if callable(validate_fetch):
-                    validate_fetch(hit)
-                # This counter represents admitted unique provider leaders,
-                # not logical input rows. Keeping it in the runtime preflight
-                # means an invalid handle or missing credential is rejected
-                # before either this usage or a governor token is consumed.
-                state.policy.record_content_backend_fetches(1)
+                async def request(candidate: SearchHit = candidate) -> ContentSnippet:
+                    fetch = getattr(backend, "fetch", None)
+                    if not callable(fetch):
+                        raise ValueError("backend has no atomic content fetch operation")
+                    result = await fetch(candidate, query=query)
+                    snippet = ContentSnippet.model_validate(result)
+                    if snippet.source != hit.source:
+                        raise ValueError("backend changed the requested content source")
+                    return snippet
 
-            try:
-                snippet = await self.providers.run(
-                    state,
-                    backend=backend,
-                    operation=operation,
-                    request_indexes=[input_index],
-                    request_value={
-                        "backend": hit.backend,
-                        "revision": self.backend_revision,
-                        "identity": document_identity(hit),
-                    },
-                    request=request,
-                    preflight=preflight,
-                    operation_id=operation_id,
-                    track_execution=track_execution,
-                )
-            except ProviderRequestError as exc:
-                return key, self._content_failure_row(
-                    hit,
-                    self.providers.provider_failure(exc),
-                )
+                def preflight(candidate: SearchHit = candidate) -> None:
+                    if callable(validate_fetch):
+                        validate_fetch(candidate)
+                    # Every representation attempt is separately governed and accounted.
+                    state.policy.record_content_backend_fetches(1)
 
-            row = snippet.model_dump(mode="json", exclude={"url"})
-            metadata = dict(row.get("metadata") or {})
-            for metadata_key in ("ref", "url", "docid", "source"):
-                metadata.pop(metadata_key, None)
-            row["metadata"] = metadata
-            legacy_error = row.get("metadata", {}).get("fetch_error")
-            if row.get("failure") is None and legacy_error:
-                attempts = max(
-                    (
-                        record.attempt
-                        for record in _provider_attempts()
-                        if input_index in record.request_indexes and record.operation == operation
-                    ),
-                    default=1,
+                candidate_operation_id = (
+                    f"{operation_id}:{candidate_index}" if operation_id is not None else None
                 )
+                try:
+                    snippet = await self.providers.run(
+                        state,
+                        backend=backend,
+                        operation=operation,
+                        request_indexes=[input_index],
+                        request_value={
+                            "backend": hit.backend,
+                            "revision": self.backend_revision,
+                            "identity": document_identity(hit),
+                            "representation": candidate.metadata.get(
+                                "_opensac_representation", "original"
+                            ),
+                        },
+                        request=request,
+                        preflight=preflight,
+                        operation_id=candidate_operation_id,
+                        track_execution=track_execution,
+                    )
+                except ProviderRequestError as exc:
+                    failure = self.providers.provider_failure(exc)
+                    total_attempts += int(failure.get("attempts") or 0)
+                    has_fallback = candidate_index + 1 < len(candidates)
+                    if has_fallback and failure["code"] in fallback_codes:
+                        continue
+                    failure["attempts"] = total_attempts
+                    return key, self._content_failure_row(hit, failure)
+
+                row = snippet.model_dump(mode="json", exclude={"url"})
+                metadata = dict(row.get("metadata") or {})
+                for metadata_key in ("ref", "url", "docid", "source"):
+                    metadata.pop(metadata_key, None)
+                representation = candidate.metadata.get("_opensac_representation")
+                if representation:
+                    metadata["representation"] = representation
+                row["metadata"] = metadata
+                legacy_error = metadata.get("fetch_error")
+                if row.get("failure") is None and legacy_error:
+                    attempts = max(
+                        (
+                            record.attempt
+                            for record in _provider_attempts()
+                            if input_index in record.request_indexes
+                            and record.operation == operation
+                        ),
+                        default=1,
+                    )
+                    total_attempts = max(total_attempts, attempts)
+                    if candidate_index + 1 < len(candidates):
+                        continue
+                    return key, self._content_failure_row(
+                        hit,
+                        {
+                            "code": "provider_rejected",
+                            "message": "Provider rejected one document.",
+                            "retryable": False,
+                            "attempts": total_attempts,
+                        },
+                    )
+                break
+
+            if row is None:
                 return key, self._content_failure_row(
                     hit,
                     {
-                        "code": "provider_rejected",
-                        "message": "Provider rejected one document.",
+                        "code": "provider_invalid_response",
+                        "message": "Provider returned no document representation.",
                         "retryable": False,
-                        "attempts": attempts,
+                        "attempts": total_attempts,
                     },
                 )
             if row.get("date") is None and hit.date is not None:
                 row["date"] = hit.date
+            identity = document_identity(hit)
+            if hit.metadata.get("_opensac_direct_url"):
+                registered_hit = hit.model_copy(deep=True)
+                registered_hit.metadata.pop("_opensac_direct_url", None)
+                candidate_source = normalize_source(hit.source)
+                aliases = {candidate_source}
+                if hit.url:
+                    aliases.add(normalize_source(hit.url))
+                state.remember(
+                    registered_hit,
+                    identity=identity,
+                    candidate_source=candidate_source,
+                    admission="direct_url",
+                    aliases=aliases,
+                )
+                state.policy.record_direct_url_success()
+            state.mark_fetched(identity)
             return key, row
+
+        async def collect_bounded(
+            tasks: dict[str, asyncio.Task[tuple[str, dict[str, Any]]]],
+        ) -> dict[str, dict[str, Any]]:
+            if not tasks:
+                return {}
+            done, pending = await asyncio.wait(
+                set(tasks.values()),
+                timeout=self.content_batch_deadline_seconds,
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            results: dict[str, dict[str, Any]] = {}
+            for fingerprint, task in tasks.items():
+                if task not in done:
+                    input_index, hit = misses[fingerprint]
+                    operation = "local.document" if hit.backend == "local" else "web.scrape"
+                    attempts = sum(
+                        1
+                        for record in _provider_attempts()
+                        if input_index in record.request_indexes and record.operation == operation
+                    )
+                    results[fingerprint] = self._content_failure_row(
+                        hit,
+                        {
+                            "code": "content_deadline_exceeded",
+                            "message": "The content batch deadline was exceeded.",
+                            "retryable": True,
+                            "attempts": attempts,
+                        },
+                    )
+                    continue
+                returned_key, row = task.result()
+                results[returned_key] = row
+            return results
 
         if self.inflight_coalescing and misses:
             flight_key_for_fingerprint = {
@@ -947,21 +894,28 @@ class ContentCapabilities:
 
                 self.providers.start_flight_group(state, group, execute_content)
 
-            returned_rows = await asyncio.gather(
-                *(
-                    self.providers.await_flight(
-                        state,
-                        admission.waiters[flight_key_for_fingerprint[fingerprint]],
-                    )
-                    for fingerprint in misses
+            async def await_content_flight(
+                fingerprint: str,
+            ) -> tuple[str, dict[str, Any]]:
+                row = await self.providers.await_flight(
+                    state,
+                    admission.waiters[flight_key_for_fingerprint[fingerprint]],
                 )
+                return fingerprint, row
+
+            fetched = await collect_bounded(
+                {
+                    fingerprint: asyncio.create_task(await_content_flight(fingerprint))
+                    for fingerprint in misses
+                }
             )
-            fetched = dict(zip(misses, returned_rows, strict=True))
         else:
-            returned = await asyncio.gather(
-                *(fetch_one(key, input_index, hit) for key, (input_index, hit) in misses.items())
+            fetched = await collect_bounded(
+                {
+                    key: asyncio.create_task(fetch_one(key, input_index, hit))
+                    for key, (input_index, hit) in misses.items()
+                }
             )
-            fetched = dict(returned)
         for fingerprint, row in fetched.items():
             _input_index, hit = misses[fingerprint]
             state.cache_content(
@@ -984,6 +938,7 @@ class ContentCapabilities:
                     },
                 )
             row = copy.deepcopy(stored)
+            row["source"] = hit.source
             if row.get("date") is None and hit.date is not None:
                 row["date"] = hit.date
             rows.append(row)

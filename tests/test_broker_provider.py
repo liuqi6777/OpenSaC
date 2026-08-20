@@ -12,7 +12,6 @@ from opensac.backends.search.serper import SerperBackend
 from opensac.broker.documents import document_identity
 from opensac.broker.provider_execution import CapabilityProviderError, ProviderExecutor
 from opensac.broker.service import BrokerService
-from opensac.broker.session import EvidenceRecord
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
 
@@ -500,6 +499,8 @@ async def test_systemic_content_failure_is_promoted_and_never_cached() -> None:
     [
         ("provider_http_error", 1),
         ("provider_not_configured", 0),
+        ("provider_timeout", 1),
+        ("provider_invalid_response", 1),
     ],
 )
 async def test_permanent_content_failures_remain_aligned_rows(
@@ -533,115 +534,88 @@ async def test_permanent_content_failures_remain_aligned_rows(
     assert partial[1]["failure"]["code"] == code
 
 
-async def test_evidence_capacity_uses_utf8_bytes_and_keeps_old_locators() -> None:
-    backend = LocalBackend(documents={"1": "é", "2": "a"})
+async def test_content_batch_deadline_returns_an_aligned_timeout_row() -> None:
+    class HangingBackend(LocalBackend):
+        async def fetch(self, hit, *, query=None):
+            self.fetches.append(str(hit.docid))
+            await asyncio.Event().wait()
+
+    backend = HangingBackend(documents={"1": "one"})
     service = BrokerService(
         {"local": backend},
-        max_evidence_records=1,
-        max_evidence_passage_bytes=2,
+        content_batch_deadline_seconds=0.01,
     )
-    state = service.register_session(make_session())
-    hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
+    service.register_session(make_session())
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    first = await service.call(
-        "token",
-        "content.read",
-        {"sources": [hits[0]["source"]], "limit": 1},
-    )
-    duplicate = await service.call(
-        "token",
-        "content.read",
-        {"sources": [hits[0]["source"]], "limit": 1},
-    )
-    exhausted = await service.call(
-        "token",
-        "content.read",
-        {"sources": [hits[1]["source"]], "limit": 1},
-    )
+    rows = await service.call("token", "content.get_many", {"sources": [source]})
 
-    assert first[0]["locator"] == duplicate[0]["locator"]
-    assert exhausted[0]["text"] == "a"
-    assert exhausted[0].get("locator") is None
-    assert exhausted[0]["locator_error"] == {
-        "code": "evidence_capacity_exhausted",
-        "message": "The session evidence registry is full.",
-        "retryable": False,
+    assert rows[0]["failure"] == {
+        "code": "content_deadline_exceeded",
+        "message": "The content batch deadline was exceeded.",
+        "retryable": True,
+        "attempts": 1,
+        "provider_status": None,
+        "retry_after_seconds": None,
     }
-    assert state.policy.usage.evidence_records == 1
-    assert state.policy.usage.evidence_passage_bytes == 2
-    selected = await service.call(
+    assert backend.fetches == ["1"]
+
+
+async def test_internet_archive_text_fallback_is_separately_accounted() -> None:
+    class ArchiveBackend:
+        name = "web"
+        provider_identity = "archive-test"
+        supports_domains = True
+        max_depth = 10
+
+        def __init__(self) -> None:
+            self.fetches: list[str] = []
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            del query, limit, offset, domains
+            return [
+                SearchHit(
+                    backend="web",
+                    url="https://archive.org/details/example_book",
+                    rank=1,
+                )
+            ]
+
+        async def fetch(self, hit, *, query=None):
+            del query
+            url = str(hit.url)
+            self.fetches.append(url)
+            if url.endswith("/details/example_book"):
+                raise ProviderRequestError(
+                    "provider_rejected",
+                    "Provider rejected the request.",
+                    retryable=False,
+                    provider_status=422,
+                )
+            return ContentSnippet(source=hit.source, text="archive text", url=hit.url)
+
+    backend = ArchiveBackend()
+    service = BrokerService({"web": backend})
+    state = service.register_session(make_session(backend="web"))
+    source = (await service.call("token", "search.query", {"query": "book"}))[0]["source"]
+
+    rows = await service.call(
         "token",
-        "citations.resolve",
-        {"citations": [{"locator": first[0]["locator"]}]},
+        "content.get_many",
+        {"sources": [source]},
+        execution_id="archive-fallback",
     )
-    assert selected[0]["evidence"] == "é"
-    with pytest.raises(ValueError, match="bounded string"):
-        await service.call(
-            "token",
-            "citations.resolve",
-            {"citations": [{"locator": None}]},
-        )
 
-
-def test_evidence_locator_collision_never_overwrites_the_existing_binding() -> None:
-    service = BrokerService({"local": LocalBackend()})
-    state = service.register_session(make_session())
-    locator, error = service.content._register_evidence(
-        state,
-        identity="local:docid:1",
-        text="original",
-        document_text="document",
-        coordinates={"type": "lines", "start_line": 1, "end_line": 1},
-    )
-    assert locator is not None and error is None
-    conflicting = EvidenceRecord(
-        identity="local:docid:1",
-        kind="selected_passage",
-        text="conflicting",
-        coordinates={"type": "lines", "start_line": 9, "end_line": 9},
-        document_fingerprint="d" * 64,
-        passage_fingerprint="p" * 64,
-    )
-    state.evidence[locator] = conflicting
-
-    with pytest.raises(RuntimeError, match="collision"):
-        service.content._register_evidence(
-            state,
-            identity="local:docid:1",
-            text="original",
-            document_text="document",
-            coordinates={"type": "lines", "start_line": 1, "end_line": 1},
-        )
-
-    assert state.evidence[locator] is conflicting
-
-
-async def test_evidence_capacity_admission_is_atomic_across_concurrent_reads() -> None:
-    backend = LocalBackend(documents={"1": "one", "2": "two"})
-    service = BrokerService(
-        {"local": backend},
-        max_evidence_records=1,
-        max_evidence_passage_bytes=100,
-    )
-    state = service.register_session(make_session())
-    hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
-
-    returned = await asyncio.gather(
-        *(
-            service.call(
-                "token",
-                "content.read",
-                {"sources": [hit["source"]], "limit": 1},
-            )
-            for hit in hits
-        )
-    )
-    rows = [batch[0] for batch in returned]
-
-    assert sum(row.get("locator") is not None for row in rows) == 1
-    assert sum(row.get("locator_error") is not None for row in rows) == 1
-    assert len(state.evidence) == state.policy.usage.evidence_records == 1
-    assert state.evidence_passage_bytes <= 100
+    assert rows[0]["text"] == "archive text"
+    assert rows[0]["source"] == source
+    assert rows[0]["metadata"]["representation"] == "internet_archive_djvu_text"
+    assert backend.fetches == [
+        "https://archive.org/details/example_book",
+        "https://archive.org/download/example_book/example_book_djvu.txt",
+    ]
+    assert state.policy.usage.content_backend_fetches == 2
+    trace = service.take_trace("token", "archive-fallback")[0]
+    assert len(trace.provider_attempts) == 2
 
 
 async def test_content_source_limit_rejects_before_usage_or_provider_side_effect() -> None:

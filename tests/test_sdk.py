@@ -10,7 +10,6 @@ import opensac_sdk
 import pytest
 from opensac_sdk._record import Record, record, wrap
 from opensac_sdk._resources import (
-    CitationsResource,
     ContentResource,
     LLMResource,
     OutputResource,
@@ -22,7 +21,6 @@ from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 from opensac_sdk.transport import BrokerError, UnixSocketTransport
 
 RESOURCE_TYPES = {
-    "citations": CitationsResource,
     "content": ContentResource,
     "llm": LLMResource,
     "output": OutputResource,
@@ -129,10 +127,6 @@ class FakeTransport:
 
     def call(self, method, params):
         self.calls.append((method, params))
-        if method == "citations.resolve":
-            requested = params["citations"]
-            source = requested[0].get("source", "https://example.com")
-            return wrap([{"source": source, "url": "https://example.com"}])
         return wrap(
             [
                 {
@@ -475,7 +469,6 @@ def test_content_passages_returns_nested_records() -> None:
                             "rank": 1,
                             "score": 3.5,
                             "ranker": "lexical:bm25",
-                            "locator": "evidence_1",
                         }
                     ],
                     "failures": [],
@@ -495,7 +488,7 @@ def test_content_passages_returns_nested_records() -> None:
     assert isinstance(report, Record)
     assert isinstance(report.passages[0], Record)
     assert isinstance(report.passages[0].coordinates, Record)
-    assert report.passages[0].locator is not None
+    assert "locator" not in report.passages[0]
     assert report.input_count == 2
     assert report.unique_source_count == 1
     assert transport.calls == [
@@ -509,6 +502,18 @@ def test_content_passages_returns_nested_records() -> None:
             },
         )
     ]
+
+
+def test_content_rejects_record_inputs_before_transport() -> None:
+    transport = FakeTransport()
+    content = ContentResource(transport)
+
+    with pytest.raises(ValueError, match="input index 0 must be a string"):
+        content.get_many([record({"source": "https://example.com"})])
+    with pytest.raises(ValueError, match="input index 0 must not be empty"):
+        content.read(["  "])
+
+    assert transport.calls == []
 
 
 class ExtractionTransport:
@@ -693,63 +698,50 @@ def test_state_can_be_asked_what_is_there(tmp_path) -> None:
 
 def test_output_submission(tmp_path) -> None:
     path = tmp_path / "output.json"
-    transport = FakeTransport()
-    OutputResource(str(path), transport).submit({"answer": 42}, citations=[{"source": "source_1"}])
+    OutputResource(str(path)).submit(
+        {"answer": 42},
+        citations=["https://example.com/source"],
+    )
     payload = json.loads(path.read_text())
     assert payload["output"] == {"answer": 42}
-    assert payload["citations"][0]["url"] == "https://example.com"
-    assert transport.calls == [("citations.resolve", {"citations": [{"source": "source_1"}]})]
+    assert payload["citations"] == ["https://example.com/source"]
 
 
-def test_output_forwards_an_evidence_locator(tmp_path) -> None:
+def test_output_citations_do_not_call_the_broker(tmp_path) -> None:
     path = tmp_path / "output.json"
     transport = FakeTransport()
-
-    OutputResource(str(path), transport).submit(
-        {"answer": 42},
-        citations=[{"locator": "ev_1"}],
-    )
-
-    assert transport.calls == [
-        (
-            "citations.resolve",
-            {"citations": [{"locator": "ev_1"}]},
-        )
-    ]
-
-
-def test_output_rejects_ambiguous_citations_and_accepts_source_only(tmp_path) -> None:
-    transport = FakeTransport()
-    output = OutputResource(str(tmp_path / "output.json"), transport)
-
-    with pytest.raises(ValueError, match="exactly one"):
-        output.submit({}, citations=[{"source": "source_1", "locator": None}])
-    with pytest.raises(ValueError, match="at most 128"):
-        output.submit({}, citations=[{"locator": {"id": "ev_1"}}])
-
+    OutputResource(str(path)).submit({"answer": 42}, citations=["source_1"])
+    assert json.loads(path.read_text())["citations"] == ["source_1"]
     assert transport.calls == []
-    output.submit({}, citations=[{"source": "source_1"}])
-    assert transport.calls == [("citations.resolve", {"citations": [{"source": "source_1"}]})]
 
 
-def test_citations_resource_has_one_request_shape() -> None:
-    transport = FakeTransport()
-    result = CitationsResource(transport).resolve([{"source": "source_1"}, {"locator": "ev_1"}])
+def test_output_accepts_only_bounded_source_strings(tmp_path) -> None:
+    output = OutputResource(str(tmp_path / "output.json"))
 
-    assert result[0].source == "source_1"
-    assert transport.calls == [
-        (
-            "citations.resolve",
-            {"citations": [{"source": "source_1"}, {"locator": "ev_1"}]},
-        )
-    ]
+    with pytest.raises(ValueError, match="input index 0 must be a string"):
+        output.submit({}, citations=[{"source": "source_1"}])
+    with pytest.raises(ValueError, match="must not be empty"):
+        output.submit({}, citations=["  "])
+    with pytest.raises(ValueError, match="at most 4096"):
+        output.submit({}, citations=["x" * 4097])
+    with pytest.raises(ValueError, match="at most 256"):
+        output.submit({}, citations=["source"] * 257)
+
+    output.submit({}, citations=["source_1"])
+    assert json.loads((tmp_path / "output.json").read_text())["citations"] == ["source_1"]
 
 
-def test_output_rejects_unscoped_citation(tmp_path) -> None:
-    with pytest.raises(ValueError, match="exactly one"):
-        OutputResource(str(tmp_path / "output.json"), FakeTransport()).submit(
-            {}, citations=[{"url": "https://invented.example"}]
-        )
+def test_output_submission_replaces_the_artifact_atomically(tmp_path) -> None:
+    path = tmp_path / "output.json"
+    path.write_text('{"previous": true}', encoding="utf-8")
+    circular: list[object] = []
+    circular.append(circular)
+
+    with pytest.raises(ValueError, match="Circular reference"):
+        OutputResource(str(path)).submit(circular, citations=["https://example.com/source"])
+
+    assert path.read_text(encoding="utf-8") == '{"previous": true}'
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_a_result_answers_to_either_spelling_of_a_field_read() -> None:

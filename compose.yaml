@@ -2,7 +2,7 @@ name: opensac
 
 services:
   opensac:
-    image: ${OPENSAC_SERVICE_IMAGE:-ghcr.io/liuqi6777/opensac:0.6.2}
+    image: ${OPENSAC_SERVICE_IMAGE:-ghcr.io/liuqi6777/opensac:0.6.3}
     init: true
     user: "${OPENSAC_UID:-10001}:${OPENSAC_GID:-10001}"
     group_add:
@@ -16,7 +16,7 @@ services:
       OPENSAC_API_PORT: "8000"
       OPENSAC_BROKER_SOCKET: ${OPENSAC_CONTAINER_DATA_DIR:?Set an absolute OPENSAC_CONTAINER_DATA_DIR}/broker.sock
       OPENSAC_DATA_DIR: ${OPENSAC_CONTAINER_DATA_DIR}
-      OPENSAC_SANDBOX_IMAGE: ${OPENSAC_SANDBOX_IMAGE:-ghcr.io/liuqi6777/opensac-sandbox:0.6.2}
+      OPENSAC_SANDBOX_IMAGE: ${OPENSAC_SANDBOX_IMAGE:-ghcr.io/liuqi6777/opensac-sandbox:0.6.3}
       OPENSAC_SEARCH_BACKEND: ${OPENSAC_CONTAINER_SEARCH_BACKEND:-web}
     ports:
       - "${OPENSAC_BIND_ADDRESS:-127.0.0.1}:${OPENSAC_PORT:-8000}:8000"

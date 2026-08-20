@@ -105,8 +105,12 @@ class ApplicationRuntime:
             operation: ProviderPolicy(
                 retry_profile=settings.provider_retry_profile,
                 max_attempts=settings.provider_max_attempts,
-                attempt_timeout_seconds=settings.provider_attempt_timeout_seconds,
-                logical_deadline_seconds=settings.provider_logical_deadline_seconds,
+                attempt_timeout_seconds=settings.provider_operation_attempt_timeout_seconds.get(
+                    operation, settings.provider_attempt_timeout_seconds
+                ),
+                logical_deadline_seconds=settings.provider_operation_logical_deadline_seconds.get(
+                    operation, settings.provider_logical_deadline_seconds
+                ),
                 base_backoff_seconds=settings.provider_base_backoff_seconds,
                 max_backoff_seconds=settings.provider_max_backoff_seconds,
                 max_total_backoff_seconds=settings.provider_max_total_backoff_seconds,
@@ -132,21 +136,27 @@ class ApplicationRuntime:
         if settings.search_backend == "local":
             search_backend = LocalSearchBackend(
                 settings.local_search_base_url,
-                timeout=settings.provider_attempt_timeout_seconds,
+                timeout=max(
+                    provider_policies["local.search"].attempt_timeout_seconds,
+                    provider_policies["local.document"].attempt_timeout_seconds,
+                ),
                 fetch_concurrency=settings.backend_fetch_concurrency,
             )
         else:
             search_backend = SerperBackend(
                 settings.serper_api_key,
                 jina_api_key=settings.jina_api_key,
-                timeout=settings.provider_attempt_timeout_seconds,
+                timeout=max(
+                    provider_policies["web.search"].attempt_timeout_seconds,
+                    provider_policies["web.scrape"].attempt_timeout_seconds,
+                ),
                 fetch_concurrency=settings.backend_fetch_concurrency,
             )
         passage_reranker = (
             JinaPassageReranker(
                 api_key=settings.jina_api_key,
                 model=settings.passage_reranker_model,
-                timeout=settings.provider_attempt_timeout_seconds,
+                timeout=provider_policies["web.rerank"].attempt_timeout_seconds,
             )
             if settings.passage_ranker == "jina"
             else None
@@ -169,10 +179,9 @@ class ApplicationRuntime:
             max_extract_total_item_bytes=settings.extract_max_total_item_bytes,
             max_extract_schema_depth=settings.extract_max_schema_depth,
             max_extract_repair_attempts=settings.extract_max_repair_attempts,
-            max_evidence_chars=settings.citation_max_evidence_chars,
-            max_evidence_records=settings.citation_max_evidence_records,
-            max_evidence_passage_bytes=settings.citation_max_evidence_passage_bytes,
             max_content_sources_per_request=settings.content_max_sources_per_request,
+            content_url_admission=settings.content_url_admission,
+            content_batch_deadline_seconds=settings.content_batch_deadline_seconds,
             inflight_coalescing=settings.provider_inflight_coalescing,
             max_inflight_keys=settings.provider_max_inflight_keys,
             max_waiters_per_flight=settings.provider_max_waiters_per_key,
@@ -295,7 +304,7 @@ class ApplicationRuntime:
             "sandbox_image": self.settings.sandbox_image,
             "sandbox_image_digest": self.settings.sandbox_image_digest,
             "sandbox_contract": SANDBOX_CONTRACT,
-            "capability_contract": 7,
+            "capability_contract": 8,
             "capability_limits": {
                 "search": {
                     "max_queries_per_request": self.settings.search_max_queries_per_request,
@@ -311,15 +320,10 @@ class ApplicationRuntime:
                     "max_schema_depth": self.settings.extract_max_schema_depth,
                     "max_repair_attempts": self.settings.extract_max_repair_attempts,
                 },
-                "evidence": {
-                    "max_chars": self.settings.citation_max_evidence_chars,
-                    "max_records": self.settings.citation_max_evidence_records,
-                    "max_total_passage_bytes": (
-                        self.settings.citation_max_evidence_passage_bytes
-                    ),
-                },
                 "content": {
                     "max_sources_per_request": self.settings.content_max_sources_per_request,
+                    "url_admission": self.settings.content_url_admission,
+                    "batch_deadline_seconds": self.settings.content_batch_deadline_seconds,
                     "passage_limit": 100,
                     "passage_max_per_source": 10,
                     "passage_chunk_chars": self.broker.passage_chunk_chars,
@@ -1109,12 +1113,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not runtime.settings.model_name:
             capabilities = [method for method in capabilities if not method.startswith("llm.")]
         features = [
-            "capability_contract_v7",
+            "capability_contract_v8",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
             "content_grep_report_v1",
-            "bounded_evidence_registry_v1",
+            "direct_web_content_v1",
+            "lightweight_url_citations_v1",
             "intra_call_dedupe_v1",
             "execution_cancellation_v1",
             "idempotent_exec",

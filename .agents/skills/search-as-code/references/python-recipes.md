@@ -78,8 +78,8 @@ independent sources corroborate a claim.
 ## Validate structured extraction
 
 `extract_many` is a semantic map over aligned inputs. It cannot call search or content tools, and
-it must never create sources or locators. Ask it for semantic fields and a quote; let Python validate
-the quote and retain the locator from the original passage. This example handles one requested
+it must never create sources. Ask it for semantic fields and a quote; let Python validate the quote
+against the original passage. This example handles one requested
 relation; for several constraints, add a constraint key and require set coverage before submit.
 
 ```python
@@ -88,7 +88,7 @@ from opensac_sdk import BrokerError, sdk
 usable = [
     passage
     for passage in passages
-    if passage.failure is None and passage.text.strip() and passage.locator is not None
+    if passage.failure is None and passage.text.strip()
 ][:12]
 items = [{"source": passage.source, "text": passage.text} for passage in usable]
 schema = {
@@ -137,7 +137,6 @@ if extraction_error is None:
                     "source": passage.source,
                     "text": passage.text,
                     "quote": quote,
-                    "locator": passage.locator,
                 }
             )
         elif data.get("next_action") == "search_more":
@@ -170,7 +169,7 @@ if accepted:
                 for row in accepted
             ]
         },
-        citations=[{"locator": row["locator"]} for row in accepted],
+        citations=list(dict.fromkeys(row["source"] for row in accepted)),
     )
 elif followup_queries:
     try:

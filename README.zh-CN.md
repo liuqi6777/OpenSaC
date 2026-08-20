@@ -35,10 +35,10 @@ OpenSAC 实现了公开的
 ## 为什么使用 OpenSAC
 
 - **可编程检索**：生成的 Python 可以用普通控制流完成批量查询、过滤、关联、排序和证据选择。
-- **紧凑的 record SDK**：`opensac_sdk` 提供搜索、正文、状态、可选结构化 LLM、用量和引用原语。
+- **紧凑的 record SDK**：`opensac_sdk` 提供搜索、正文、状态、可选结构化 LLM、用量和输出原语。
 - **强化隔离执行**：沙箱程序无法访问网络、服务商密钥、Docker socket 或不受限的宿主机文件系统。
 - **上下文解耦**：大规模中间结果保留在工作空间中，只有程序明确打印或提交的数据返回控制模型。
-- **可追踪证据**：会话级不透明引用与 broker 签发的段落 locator 将候选结果连接到最终引用。
+- **可读来源**：Web 文档始终使用有语义的 URL；可选输出引用只是轻量、未经验证的来源标注。
 - **研究级观测**：预算、结构化局部失败、trace、阶段耗时、幂等执行和 worker 生命周期支持可复现 rollout。
 
 ## 架构
@@ -65,7 +65,7 @@ OpenSAC 用于研究一个核心问题：
 > 工具调用，能否提升质量、上下文效率，或改善延迟—成本权衡？
 
 OpenSAC 有意不负责 agent loop。外部控制平面选择模型、生成程序、管理 rollout 并评测答案。每个 rollout
-应复用同一个 OpenSAC session，使工作空间文件和不透明引用可以跨轮次使用。后端选择、密钥、重试、
+应复用同一个 OpenSAC session，使工作空间文件和本地文档 ID 可以跨轮次使用。后端选择、密钥、重试、
 限流和资源约束全部保留在服务端。
 
 </details>
@@ -179,7 +179,7 @@ with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
 PY
 ```
 
-包含多查询融合、正文过滤、JSONL 持久化状态和段落引用的完整示例见
+包含多查询融合、正文过滤、JSONL 持久化状态和来源 URL 引用的完整示例见
 [examples/research_pipeline.py](examples/research_pipeline.py)。
 
 </details>
@@ -195,14 +195,14 @@ PY
 | `sdk.search` | `search`、`many`、`fuse_rrf` | 检索并融合候选，同时保留 provenance |
 | `sdk.content` | `passages`、`read`、`grep_report` | 排序、定位和检查证据，不隐藏部分抓取失败 |
 | `sdk.llm` | `extract_many`、`complete`、`complete_many` | 可选的 broker 模型调用与 schema 校验抽取 |
-| `sdk.citations` | `resolve` | 高级检查 source 或 locator 引用 |
 | `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
 | `sdk.session` | `usage` | 查看策略统计与剩余预算 |
-| `sdk.output` | `submit` | 返回结构化输出并解析可信引用 |
+| `sdk.output` | `submit` | 返回结构化输出和可选 URL/source 标注 |
 
 批量操作保持输入对齐，并暴露结构化的逐项失败。每条搜索结果只有一个 `source`：规范化后的网页 URL 或
-本地文档 ID。空搜索结果属于成功结果。段落引用必须使用正文操作返回的 locator。精确 core 签名与有意
-保留的 advanced 操作分别位于 Search-as-Code Skill references。
+本地文档 ID。Content 只接收 URL/本地 ID 字符串；Web 部署可直接读取受限的公开 HTTP(S) URL，本地
+ID 仍需搜索准入。Output citations 是可选来源字符串，不代表证据验证。精确 core 签名与 advanced
+操作分别位于 Search-as-Code Skill references。
 
 ### 智能体集成
 
@@ -258,6 +258,7 @@ uv run pytest
 
 | 目标 | 文档 |
 | --- | --- |
+| 升级到 v0.6.3 | [v0.6.3 版本说明](docs/opensac-0.6.3.md) |
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |
 | 配置可选的本地检索器 | [本地稠密检索](docs/local-search.md) |

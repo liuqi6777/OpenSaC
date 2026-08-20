@@ -48,7 +48,7 @@ Core SDK surface:
 - Use `sdk.llm.extract_many(...)` only for bounded semantic mapping.
 - Persist optional research state with `sdk.state`—there is no `sdk.workspace` API. Inspect
   recovery usage with `sdk.session.usage()`.
-- Finish with `sdk.output.submit(output, citations=[{"locator": locator}])`.
+- Finish with `sdk.output.submit(output, citations=[source_url])`.
 
 ## Work in deliberate stages
 
@@ -78,7 +78,7 @@ For a one-claim task with known inputs, keep mechanical verification together:
 ```python
 import re
 
-sources = ["copy-source-exactly"]
+sources = ["selected-source-url"]
 pattern = r"target phrase"
 report = sdk.content.grep_report(sources, pattern, context=2)
 passage = None
@@ -86,11 +86,7 @@ for match in report.matches[:4]:
     item = sdk.content.read(
         [match.source], offset=max(match.line - 8, 1), limit=30, max_chars=12_000
     )[0]
-    if (
-        item.failure is None
-        and item.locator is not None
-        and re.search(pattern, item.text, re.IGNORECASE)
-    ):
+    if item.failure is None and re.search(pattern, item.text, re.IGNORECASE):
         passage = item
         break
 
@@ -99,23 +95,24 @@ if passage is None:
 else:
     sdk.output.submit(
         {"evidence": [{"source": passage.source, "text": passage.text}]},
-        citations=[{"locator": passage.locator}],
+        citations=[passage.source],
     )
 ```
 
 Use bounded comprehensions, `filter`, dicts, sets, `sorted`, `any`, and `all` to generate queries,
 join by source, rank candidates, and measure coverage. Prefer `re`, dates, strings, and arithmetic
-to an extraction call. `extract_many` cannot call tools or create trusted sources or locators:
+to an extraction call. `extract_many` cannot call tools, create trusted sources, or certify
+citation labels:
 validate its quoted evidence, clean and cap proposed follow-up inputs, then make bounded SDK calls.
 
 ## Keep the evidence boundary intact
 
-- Search sources are canonical URLs or local IDs; reuse them unchanged. Locator strings are opaque.
+- Pass URL/local-ID strings, never result records, to content. Public web URLs can be read directly
+  and reused across runs; local IDs remain search-admitted only.
 - Search metadata and snippets are for triage, or for a requested discovery list; they do not
   support claims about document content.
-- For every material document-content claim, read a non-empty passage and preserve its returned
-  locator losslessly. A locator binds the passage to a retrieved document; it does not establish
-  source credibility or truth. Prefer primary sources and corroborate disputed claims.
+- For every material document-content claim, inspect non-empty text. Output citations are optional,
+  unverified URL/source labels; prefer primary sources and corroborate disputed claims.
 - Inspect `BrokerError` and typed item failures. Empty hits or zero matches are successful results,
   not failures.
 
@@ -141,10 +138,10 @@ each stage, list and load the needed manifest, pool, evidence, and attempts befo
 persist progress before `NEXT:` and submit only from a complete evidence ledger. Observations show
 workspace paths, not file contents, and Python variables do not survive calls.
 
-Sources, locators, and workspace artifacts remain valid only in this live session. On explicit
-`state_lost`, start clean. If a timeout or adapter failure has an unknown execution outcome, do not
-replay blindly: inspect the namespace and usage once, then resume only missing work. After a final
-capability failure, change the query, source, or candidate instead of repeating it.
+Public web URLs remain reusable across sessions; local IDs and workspace artifacts are session
+state. On explicit `state_lost`, rebuild missing state. If a timeout or adapter failure has an
+unknown execution outcome, do not replay blindly: inspect the namespace and usage once, then resume
+only missing work. After a final capability failure, change the query, source, or candidate.
 
 Return the final answer directly as your entire response, without wrapper tags or a preamble.
 """

@@ -195,13 +195,7 @@ for name, spec in constraints.items():
             if passage.failure is not None:
                 print(f"read failed: {name} code={passage.failure.code}")
                 continue
-            if (
-                not passage.text.strip()
-                or passage.locator is None
-                or not compiled.search(passage.text)
-            ):
-                if passage.locator_error is not None:
-                    print(f"locator unavailable: {name} code={passage.locator_error.code}")
+            if not passage.text.strip() or not compiled.search(passage.text):
                 continue
 
             evidence[name] = {
@@ -209,7 +203,6 @@ for name, spec in constraints.items():
                 "requirement": spec["requirement"],
                 "source": passage.source,
                 "text": passage.text,
-                "locator": passage.locator,
             }
             print(f"{name}: verified")
             break
@@ -245,5 +238,5 @@ if evidence and not missing:
                 for name, row in evidence.items()
             ],
         },
-        citations=[{"locator": row["locator"]} for row in evidence.values()],
+        citations=list(dict.fromkeys(row["source"] for row in evidence.values())),
     )
