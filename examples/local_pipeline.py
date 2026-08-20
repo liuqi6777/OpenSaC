@@ -45,5 +45,5 @@ sdk.output.submit(
         "evidence_chars": sum(len(item.text) for item in report.passages),
         "fetch_failures": [dict(item) for item in report.failures],
     },
-    citations=[{"locator": item.locator} for item in report.passages if item.locator is not None],
+    citations=list(dict.fromkeys(item.source for item in report.passages)),
 )

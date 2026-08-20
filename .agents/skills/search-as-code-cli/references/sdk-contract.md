@@ -9,7 +9,7 @@ records: both `row.source` and `row["source"]` read the same field, and `dict(ro
 - [Capabilities](#capabilities)
 - [Exact result fields](#exact-result-fields)
 - [Failure and alignment semantics](#failure-and-alignment-semantics)
-- [Retrieval and evidence limits](#retrieval-and-evidence-limits)
+- [Retrieval and content limits](#retrieval-and-content-limits)
 - [Workspace state, output, and lifecycle](#workspace-state-output-and-lifecycle)
 - [Runtime documentation](#runtime-documentation)
 - [Sandbox constraints](#sandbox-constraints)
@@ -56,7 +56,7 @@ sdk.state.read_json(path)
 sdk.state.read_jsonl(path)
 sdk.state.exists(path) -> bool
 sdk.state.list(prefix="") -> list[str]
-sdk.output.submit(output, citations=[{"locator": locator}])
+sdk.output.submit(output, citations=[source_url])
 ```
 
 Structured extraction is an optional deployment capability:
@@ -82,20 +82,17 @@ error; keep a deterministic fallback.
   `rank`, `retrieval`, `metadata`.
 - Search batch: `query`, `hits`, `failure`.
 - Fused candidate: the search-hit fields plus `provenance`, `fused_score`, and `fused_rank`.
-- Content row: `source`, `text`, `title`, `date`, `locator`, `locator_error`, `failure`,
-  `metadata`.
+- Content row: `source`, `text`, `title`, `date`, `failure`, `metadata`.
 - Grep report: `matches`, `failures`, `input_count`. A match includes `source`, `title`, `line`,
-  `text`, `before`, `after`, `locator`, `locator_error`, and `input_index`.
+  `text`, `before`, `after`, and `input_index`.
 - Passage report: `query`, `passages`, `failures`, `input_count`, `unique_source_count`. A passage
-  includes `source`, source metadata, exact `text`, `coordinates`, `rank`, `score`, `ranker`,
-  `locator`, and `locator_error`.
+  includes `source`, source metadata, exact `text`, `coordinates`, `rank`, `score`, and `ranker`.
 - Coordinates: `start_line`, `start_character`, `end_line`, `end_character`. Lines are 1-indexed;
   characters are 0-indexed and the end position is exclusive.
 - Failure: `code`, `message`, `retryable`, `attempts`, `provider_status`,
   `retry_after_seconds`. Content failures also carry `input_index` and `source`.
 - Extraction row: `index`, `data`, `error`, `attempts`; an error has `code`, `message`, and
   `retryable`.
-- Evidence locator: an opaque string.
 
 There is no public SDK model hierarchy or `types` module. Join capability results by `source`.
 
@@ -117,12 +114,12 @@ There is no public SDK model hierarchy or `types` module. Join capability result
 - Let host policy own retries, rate limits, deduplication, and in-flight coalescing. A returned
   failure is final for that call.
 
-## Retrieval and evidence limits
+## Retrieval and content limits
 
 - A session reaches one configured search backend. `domains` works only when that backend supports
   domain filtering.
-- Search `offset` is depth into the full ranking. A document is readable only after a search in
-  the current session returned its source.
+- Search `offset` is depth into the full ranking. Local document IDs are readable only after search
+  returned them; web deployments also accept bounded public HTTP(S) URLs directly.
 - Deployment limits are configurable. Defaults admit at most 64 queries in one search batch and
   256 sources in one content request. Use smaller batches instead of depending on the maxima.
 - `content.passages` requires a non-empty query, accepts `limit=1..100` and
@@ -131,11 +128,9 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   fetch, but every requested source still counts as a content fetch for strategy budgets.
 - `grep` match lines and `read` offsets are 1-indexed. `read.metadata` reports `start_line`,
   `end_line`, `total_lines`, and `next_offset`.
-- A non-empty passage no longer than the configured evidence limit, 16,000 characters by default,
-  receives a locator unless the evidence registry is full. In that case `locator` is `None` and
-  `locator_error.code == "evidence_capacity_exhausted"`.
-- Never cite a missing locator. Explicit `locator: None` is invalid. A source-only citation resolves
-  search-preview evidence and must not support a document-content claim.
+- Content accepts only URL/local-ID strings, not search-hit or content-result records.
+- `citations` is an optional list of at most 256 non-empty source strings. It is written locally,
+  does not call the broker, and is not evidence validation.
 
 ## Workspace state, output, and lifecycle
 
@@ -149,13 +144,12 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   than one research task while reusing the same session.
 - Use `merge_jsonl` for upserts, then `write_jsonl` when pruning a pool to a fixed bound.
 - Persist a constraint fingerprint with each evidence row and attempted sources per constraint.
-- Preserve locator strings unchanged. They remain valid only in the live session that issued them.
 - `sdk.session.usage()` returns `exec_calls`, `search_calls`, `content_fetches`, `llm_calls`,
   `pipeline_model_tokens`, `documents_seen`, `budget_remaining`, and `terminal_reason`.
 - Only stdout, stderr, and `sdk.output.submit` return to the control model. They share roughly
   32,000 visible characters, with stdout considered first; reserve space for submitted output.
 - On `state_lost`, the failed program was not replayed and the next call starts a clean session.
-  Discard every workspace path, source, and locator from the lost session.
+  Rebuild workspace state and local-ID admission; public web URLs remain reusable.
 - Adapter observations such as `[sac_run] OpenSAC request failed` and tool-level timeouts occur
   outside the program and are not `BrokerError`. The model-visible adapter surface does not accept
   an execution ID, so a failed observation can have an unknown execution outcome. Inspect

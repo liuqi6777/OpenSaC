@@ -143,6 +143,12 @@ class CapabilityPolicy:
 
         self.usage.content_backend_fetches += max(amount, 0)
 
+    def record_direct_url_attempt(self) -> None:
+        self.usage.direct_url_attempts += 1
+
+    def record_direct_url_success(self) -> None:
+        self.usage.direct_url_successes += 1
+
     async def record_pipeline_model_tokens(self, amount: int) -> None:
         async with self._lock:
             self.usage.pipeline_model_tokens += amount
@@ -191,10 +197,6 @@ class CapabilityPolicy:
 
     def record_coalesced(self, amount: int) -> None:
         self.usage.provider_coalesced_requests += max(amount, 0)
-
-    def set_evidence_usage(self, *, records: int, passage_bytes: int) -> None:
-        self.usage.evidence_records = max(records, 0)
-        self.usage.evidence_passage_bytes = max(passage_bytes, 0)
 
     async def record_sandbox_seconds(self, amount: float) -> None:
         async with self._lock:

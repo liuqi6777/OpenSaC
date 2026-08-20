@@ -39,13 +39,13 @@ abstraction. It is not a reconstruction of Perplexity's internal search engine.
 - **Programmable retrieval** — generated Python can batch, filter, join, rank, and select evidence
   with ordinary control flow.
 - **A compact record SDK** — `opensac_sdk` exposes search, content, state, optional structured LLM,
-  usage, and citation primitives.
+  usage, and output primitives.
 - **Hardened execution** — sandbox programs have no network, provider credentials, Docker socket,
   or unrestricted host filesystem access.
 - **Context decoupling** — large intermediate results remain in the workspace; only explicitly
   printed or submitted data returns to the control model.
-- **Traceable evidence** — opaque references and broker-issued passage locators connect candidates
-  to final citations.
+- **Readable sources** — web documents use semantic URLs end to end; optional output citations are
+  lightweight, unverified source labels.
 - **Research instrumentation** — budgets, structured partial failures, traces, phase timings, idempotent
   execution, and worker lifecycle controls support reproducible rollouts.
 
@@ -75,7 +75,7 @@ OpenSAC supports controlled research on a central question:
 
 OpenSAC deliberately does not own the agent loop. The external control plane selects the model,
 generates programs, manages rollouts, and evaluates answers. One rollout should reuse one OpenSAC
-session so workspace files and opaque references remain valid across turns. Backend choice,
+session so workspace files and local document IDs remain valid across turns. Backend choice,
 credentials, retries, rate limits, and resource enforcement stay on the service side.
 
 </details>
@@ -192,7 +192,7 @@ with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
 PY
 ```
 
-For multi-query fusion, document filtering, persistent JSONL state, and passage citations, see
+For multi-query fusion, document filtering, persistent JSONL state, and source URL citations, see
 [examples/research_pipeline.py](examples/research_pipeline.py).
 
 </details>
@@ -208,16 +208,16 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
 | `sdk.content` | `passages`, `read`, `grep_report` | Rank, locate, and inspect evidence without hiding partial failures |
 | `sdk.llm` | `extract_many`, `complete`, `complete_many` | Optional brokered model calls and schema-checked extraction |
-| `sdk.citations` | `resolve` | Advanced inspection of source or locator citations |
 | `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
 | `sdk.session` | `usage` | Inspect strategy counts and remaining budgets |
-| `sdk.output` | `submit` | Return structured output and resolve trusted citations |
+| `sdk.output` | `submit` | Return structured output with optional URL/source labels |
 
 Batch operations preserve input alignment and expose structured per-item failures. Each search hit has
 one `source`: a canonical web URL or local document ID. Empty search results are successful results.
-Passage citations must use locators returned by content operations. Core
-signatures and intentional advanced operations are split across the Search-as-Code Skill
-references.
+Content accepts URL/local-ID strings rather than result records. Web deployments can fetch bounded
+public HTTP(S) URLs directly; local IDs remain search-admitted. Output citations are optional
+source strings and are not evidence validation. Core signatures and intentional advanced operations
+are split across the Search-as-Code Skill references.
 
 ### Agent integrations
 
@@ -276,6 +276,7 @@ layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
 
 | Goal | Document |
 | --- | --- |
+| Upgrade to v0.6.3 | [v0.6.3 release notes](docs/opensac-0.6.3.md) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Connect Codex, Claude Code, CLI, or a custom agent | [Agent integrations](docs/agent-integrations.md) |
 | Configure the optional local retriever | [Local dense search](docs/local-search.md) |

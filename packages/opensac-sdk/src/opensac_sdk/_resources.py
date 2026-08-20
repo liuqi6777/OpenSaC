@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +20,8 @@ class SearchResource:
     results or a document ID for local results. An empty list is a successful
     no-match result.
 
-    Search is the only way documents enter the current session's authorized
-    evidence set. Pass returned ``source`` values unchanged to ``sdk.content``
-    and citation operations.
+    Pass returned ``source`` values to ``sdk.content``. Web deployments may also
+    accept bounded public HTTP(S) URLs directly, according to host policy.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
@@ -222,7 +223,7 @@ class SearchResource:
 
 
 class ContentResource:
-    """Locate and read evidence from documents authorized by search.
+    """Locate and read text from URL or local-document source strings.
 
     Prefer ``passages`` for semantic discovery, ``grep_report`` for exact text,
     and ``read`` for deliberate line-window expansion. Content operations report
@@ -231,6 +232,24 @@ class ContentResource:
 
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
+
+    @staticmethod
+    def _sources(sources: list[str]) -> list[str]:
+        if not isinstance(sources, list):
+            raise ValueError("sources must be a list of source strings")
+        validated: list[str] = []
+        for input_index, source in enumerate(sources):
+            if not isinstance(source, str):
+                raise ValueError(f"source at input index {input_index} must be a string")
+            source = source.strip()
+            if not source:
+                raise ValueError(f"source at input index {input_index} must not be empty")
+            if len(source) > 4096:
+                raise ValueError(
+                    f"source at input index {input_index} must be at most 4096 characters"
+                )
+            validated.append(source)
+        return validated
 
     def get_many(self, sources: list[str]) -> list[Record]:
         """Fetch complete normalized documents for advanced local processing.
@@ -243,7 +262,7 @@ class ContentResource:
         Raises:
             BrokerError: The whole request failed or every failure was systemic.
         """
-        return self._transport.call("content.get_many", {"sources": sources})
+        return self._transport.call("content.get_many", {"sources": self._sources(sources)})
 
     def read(
         self,
@@ -268,7 +287,12 @@ class ContentResource:
         """
         return self._transport.call(
             "content.read",
-            {"sources": sources, "offset": offset, "limit": limit, "max_chars": max_chars},
+            {
+                "sources": self._sources(sources),
+                "offset": offset,
+                "limit": limit,
+                "max_chars": max_chars,
+            },
         )
 
     def grep_report(
@@ -288,8 +312,8 @@ class ContentResource:
 
         Returns:
             A report with ``matches``, ``failures``, and ``input_count``. Each match
-            includes source metadata, ``line``, ``text``, context, ``input_index``,
-            and either ``locator`` or ``locator_error``. Zero matches is success.
+            includes source metadata, ``line``, ``text``, context, and
+            ``input_index``. Zero matches is success.
 
         Raises:
             BrokerError: The report could not be produced.
@@ -297,7 +321,7 @@ class ContentResource:
         return self._transport.call(
             "content.grep_report",
             {
-                "sources": sources,
+                "sources": self._sources(sources),
                 "pattern": pattern,
                 "context": context,
                 "max_matches_per_source": max_matches_per_source,
@@ -312,7 +336,7 @@ class ContentResource:
         limit: int = 20,
         max_per_source: int = 3,
     ) -> Record:
-        """Rank citeable passages across a caller-supplied set of sources.
+        """Rank passages across a caller-supplied set of sources.
 
         The broker deduplicates sources in first-seen order, ranks successful documents
         together, then applies ``max_per_source``. ``limit`` bounds the whole report.
@@ -321,8 +345,7 @@ class ContentResource:
         Returns:
             A report with ``query``, ``passages``, ``failures``, ``input_count``, and
             ``unique_source_count``. Each passage includes exact ``text``, coordinates,
-            ranker metadata, and either ``locator`` or ``locator_error``. Never cite
-            a passage whose locator is missing.
+            and ranker metadata.
 
         Raises:
             BrokerError: The report could not be produced.
@@ -331,38 +354,11 @@ class ContentResource:
             "content.passages",
             {
                 "query": query,
-                "sources": sources,
+                "sources": self._sources(sources),
                 "limit": limit,
                 "max_per_source": max_per_source,
             },
         )
-
-
-class CitationsResource:
-    """Resolve document sources and passage locators into trusted citation metadata.
-
-    These are advanced inspection operations. Final research results normally pass
-    source or locator citations directly to ``sdk.output.submit`` for resolution.
-    """
-
-    def __init__(self, transport: UnixSocketTransport) -> None:
-        self._transport = transport
-
-    def resolve(self, citations: list[dict[str, Any]]) -> list[Record]:
-        """Resolve source or locator citations in input order.
-
-        Every item must contain exactly one field: ``{"source": source}`` resolves
-        search-preview evidence, while ``{"locator": locator}`` resolves exact
-        evidence returned by a content operation.
-
-        Returns:
-            Trusted citation records containing the source, URL or document ID,
-            backend, evidence, and evidence kind.
-
-        Raises:
-            BrokerError: A source or locator is unknown, stale, or invalid.
-        """
-        return self._transport.call("citations.resolve", {"citations": citations})
 
 
 class LLMResource:
@@ -514,8 +510,8 @@ class StateResource:
     """Persist JSON and JSONL artifacts across executions in one live session.
 
     Paths are workspace-relative and cannot escape the session workspace. State is
-    program memory, not a database; sources and locators become invalid if the host
-    reports ``state_lost``.
+    program memory, not a database; local document sources become invalid if the
+    host reports ``state_lost``. Public web URLs remain meaningful across sessions.
     """
 
     def __init__(self, workspace: str) -> None:
@@ -662,66 +658,63 @@ class StateResource:
 
 
 class OutputResource:
-    """Submit the final structured result and broker-resolved citations."""
+    """Submit the final structured result and optional source strings."""
 
-    def __init__(self, output_path: str, transport: UnixSocketTransport | None = None) -> None:
+    def __init__(self, output_path: str) -> None:
         self._output_path = Path(output_path)
-        self._transport = transport
 
     def submit(
         self,
         output: Any,
         *,
-        citations: list[dict[str, Any]] | None = None,
+        citations: list[str] | None = None,
     ) -> None:
-        """Write the final output artifact and resolve its citations.
+        """Write the final output artifact with optional URL/source labels.
 
-        Call this once when research is complete. Every citation must contain
-        exactly one field: ``{"source": source}`` for search-preview evidence or
-        ``{"locator": locator}`` for exact evidence returned by content operations.
+        Citations are unverified source declarations. They are not resolved by the
+        broker and do not claim that OpenSAC validated a source against the answer.
 
         Raises:
-            ValueError: A citation is malformed.
-            BrokerError: Citation resolution fails.
-            RuntimeError: Citations were requested without a broker transport.
+            ValueError: Citations are malformed or exceed the local bound.
         """
-        requested = [self._citation(item) for item in citations or []]
-        if requested:
-            if self._transport is None:
-                raise RuntimeError("Citation resolution requires a broker transport")
-            resolved = self._transport.call("citations.resolve", {"citations": requested})
-        else:
-            resolved = []
-        self._output_path.write_text(
-            json.dumps(
-                {"output": output, "citations": resolved},
-                ensure_ascii=True,
-                indent=2,
-                default=str,
-            ),
-            encoding="utf-8",
+        if citations is not None and not isinstance(citations, list):
+            raise ValueError("citations must be a list of source strings")
+        if citations is not None and len(citations) > 256:
+            raise ValueError("citations must contain at most 256 source strings")
+        sources = [self._citation(item, index) for index, item in enumerate(citations or [])]
+        encoded = json.dumps(
+            {"output": output, "citations": sources},
+            ensure_ascii=True,
+            indent=2,
+            default=str,
         )
+        self._output_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            dir=self._output_path.parent,
+            prefix=f".{self._output_path.name}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(encoded)
+            os.replace(temporary, self._output_path)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary)
 
     @staticmethod
-    def _citation(item: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(item, dict):
-            raise ValueError("Every citation must be an object")
-        fields = set(item)
-        if fields == {"source"}:
-            source = item["source"]
-            if not isinstance(source, str) or not source or len(source) > 4096:
-                raise ValueError("source must be a non-empty string of at most 4096 characters")
-        elif fields == {"locator"}:
-            locator = item["locator"]
-            if not isinstance(locator, str) or not locator or len(locator) > 128:
-                raise ValueError("locator must be a non-empty string of at most 128 characters")
-        else:
-            raise ValueError("Every citation must contain exactly one of source or locator")
-        return dict(item)
+    def _citation(item: Any, input_index: int) -> str:
+        if not isinstance(item, str):
+            raise ValueError(f"citation at input index {input_index} must be a string")
+        source = item.strip()
+        if not source:
+            raise ValueError(f"citation at input index {input_index} must not be empty")
+        if len(source) > 4096:
+            raise ValueError(
+                f"citation at input index {input_index} must be at most 4096 characters"
+            )
+        return source
 
     @classmethod
-    def from_environment(cls, transport: UnixSocketTransport | None = None) -> OutputResource:
-        return cls(
-            os.environ.get("OPENSAC_OUTPUT_PATH", "/workspace/.opensac-output.json"),
-            transport,
-        )
+    def from_environment(cls) -> OutputResource:
+        return cls(os.environ.get("OPENSAC_OUTPUT_PATH", "/workspace/.opensac-output.json"))

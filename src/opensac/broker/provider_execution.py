@@ -490,11 +490,9 @@ class ProviderExecutor:
         """
 
         return str(failure.get("code") or "") in {
-            "provider_timeout",
             "provider_rate_limited",
             "provider_unavailable",
             "provider_auth_failed",
-            "provider_invalid_response",
         }
 
     async def run(

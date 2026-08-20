@@ -111,7 +111,7 @@ def render_observation(
 
     citations = payload.get("citations") or []
     if citations:
-        sections.append(f"resolved citations: {len(citations)}")
+        sections.append(f"source citations: {len(citations)}")
     artifacts = sorted(str(item) for item in (payload.get("artifacts") or []))
     sections.append(
         "workspace: empty"

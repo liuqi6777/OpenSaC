@@ -19,7 +19,6 @@ from opensac._contracts import (
     ContentGrepReport,
     ContentMatch,
     ContentSnippet,
-    OperationError,
     SearchBatch,
     SearchHit,
 )
@@ -145,7 +144,6 @@ class FakeContent:
         same_source: bool = False,
         year_from_turn: int = 1,
         partial_failure: bool = False,
-        locator_exhausted: bool = False,
         no_matches: bool = False,
         grep_error: bool = False,
     ) -> None:
@@ -153,7 +151,6 @@ class FakeContent:
         self.same_source = same_source
         self.year_from_turn = year_from_turn
         self.partial_failure = partial_failure
-        self.locator_exhausted = locator_exhausted
         self.no_matches = no_matches
         self.grep_error = grep_error
         self.turn = 1
@@ -188,7 +185,6 @@ class FakeContent:
                     title=source,
                     line=line,
                     text="1998" if is_year else "target phrase",
-                    locator=f"grep-{source}-{line}",
                 )
             ]
         failures = (
@@ -218,34 +214,20 @@ class FakeContent:
         self.read_sources.append(source)
         offset = int(kwargs["offset"])
         text = f"{'1998' if offset > 50 else 'target phrase'} evidence for {source}"
-        if self.locator_exhausted:
-            return [
-                ContentSnippet(
-                    source=source,
-                    title=source,
-                    text=text,
-                    locator_error=OperationError(
-                        code="evidence_capacity_exhausted",
-                        message="evidence registry is full",
-                        retryable=False,
-                    ),
-                )
-            ]
         return [
             ContentSnippet(
                 source=source,
                 title=source,
                 text=text,
-                locator=f"read-{source}-{offset}",
             )
         ]
 
 
 class FakeOutput:
     def __init__(self) -> None:
-        self.submissions: list[tuple[object, list[dict[str, object]]]] = []
+        self.submissions: list[tuple[object, list[str]]] = []
 
-    def submit(self, output: object, *, citations: list[dict[str, object]]) -> None:
+    def submit(self, output: object, *, citations: list[str]) -> None:
         self.submissions.append((output, citations))
 
 
@@ -258,7 +240,6 @@ def _run_pattern(
     year_from_turn: int = 1,
     turns: int = 1,
     partial_failure: bool = False,
-    locator_exhausted: bool = False,
     no_matches: bool = False,
     grep_error: bool = False,
     vary_search_by_turn: bool = False,
@@ -273,7 +254,6 @@ def _run_pattern(
         same_source=same_source,
         year_from_turn=year_from_turn,
         partial_failure=partial_failure,
-        locator_exhausted=locator_exhausted,
         no_matches=no_matches,
         grep_error=grep_error,
     )
@@ -315,7 +295,7 @@ def test_skill_is_small_and_routes_detailed_contracts() -> None:
     assert "submitted program was not replayed" in skill
     assert "execution outcome may be" in skill
     assert "same program blindly" in skill
-    assert "OpenSAC locator" in skill
+    assert "Public web URLs" in skill
     assert "references/sdk-contract.md" in skill
     assert "references/advanced.md" in skill
     assert "references/patterns.md" in skill
@@ -340,7 +320,7 @@ def test_skill_has_codex_catalog_metadata() -> None:
     metadata = (SKILL_DIR / "agents" / "openai.yaml").read_text(encoding="utf-8")
 
     assert 'display_name: "Search as Code"' in metadata
-    assert 'short_description: "Research with OpenSAC MCP and trusted citations"' in metadata
+    assert 'short_description: "Research with OpenSAC MCP and source URLs"' in metadata
     assert "$search-as-code" in metadata
 
 
@@ -430,7 +410,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert len(verify.splitlines()) <= 75
     assert "sdk.search.many(" not in verify
     assert "NEXT:" in verify
-    assert '"locator": passage.locator' in verify
+    assert '"source": passage.source' in verify
     assert verify.index("sdk.content.grep_report(") < verify.index("sdk.content.read(")
     assert verify.index("sdk.content.read(") < verify.index("sdk.output.submit(")
     assert verify.count("sdk.output.submit(") == 1
@@ -571,7 +551,8 @@ def test_verify_pattern_submits_instead_of_printing_final_evidence(tmp_path: Pat
     assert len(output.submissions) == 1
     submitted, citations = output.submissions[0]
     assert {row["constraint"] for row in submitted["evidence"]} == {"phrase", "year"}
-    assert all(citation["locator"].startswith("read-") for citation in citations)
+    assert citations
+    assert all(isinstance(citation, str) for citation in citations)
 
 
 def test_verify_pattern_ends_in_next_when_model_judgment_is_needed(tmp_path: Path) -> None:
@@ -610,8 +591,7 @@ def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -
     assert set(evidence) == {"phrase", "year"}
     assert len(output.submissions) == 1
     _, citations = output.submissions[0]
-    assert all(set(citation) == {"locator"} for citation in citations)
-    assert all(citation["locator"].startswith("read-") for citation in citations)
+    assert citations == list(dict.fromkeys(row.source for row in evidence.values()))
 
 
 def test_pattern_pool_score_is_idempotent_across_replayed_stages(tmp_path: Path) -> None:
@@ -645,12 +625,12 @@ def test_pattern_verifies_far_apart_constraints_in_the_same_document(tmp_path: P
     evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
     assert {row.source for row in evidence.values()} == {"doc_consensus"}
     assert all(
-        set(row) == {"fingerprint", "requirement", "source", "text", "locator"}
+        set(row) == {"fingerprint", "requirement", "source", "text"}
         for row in evidence.values()
     )
     assert len(output.submissions) == 1
     _, citations = output.submissions[0]
-    assert len({citation["locator"] for citation in citations}) == 2
+    assert citations == ["doc_consensus"]
 
 
 def test_pattern_unions_new_evidence_across_turns(tmp_path: Path) -> None:
@@ -677,15 +657,6 @@ def test_pattern_reports_partial_fetch_failure_and_keeps_matches(tmp_path: Path)
 
     assert "code=provider_timeout" in printed
     assert len(output.submissions) == 1
-
-
-def test_pattern_never_cites_locator_capacity_exhausted_text(tmp_path: Path) -> None:
-    sdk, _, output, printed = _run_pattern(tmp_path, locator_exhausted=True)
-
-    assert "code=evidence_capacity_exhausted" in printed
-    assert "unsupported: ['phrase', 'year']" in printed
-    assert not output.submissions
-    assert not any(path.endswith("/evidence.json") for path in sdk.state.list())
 
 
 def test_pattern_bounds_pool_and_content_batches(tmp_path: Path) -> None:

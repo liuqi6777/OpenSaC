@@ -61,7 +61,7 @@ else:
 ## Rank passages across fused candidates
 
 This is the default semantic evidence funnel. Passage text is exact document text, but the score
-only orders this one report; inspect the text and source before trusting or citing it.
+only orders this one report; inspect the text and source before trusting it.
 
 ```python
 from opensac_sdk import BrokerError, sdk
@@ -87,16 +87,15 @@ except BrokerError as error:
 else:
     for item in report.passages:
         excerpt = " ".join(item.text.split())[:700]
-        locator = item.locator
         print(
             f"PASSAGE rank={item.rank} source={item.source!r} title={item.title!r} "
             f"coordinates={dict(item.coordinates)!r} "
-            f"locator={locator!r} text={excerpt!r}"
+            f"text={excerpt!r}"
         )
     failures = [item.failure.code for item in report.failures]
     print(
         "NEXT: inspect source quality and passage entailment; use grep/read for exact "
-        f"checks or context, then submit verified locators; failures={failures[:4]}"
+        f"checks or context, then submit source URLs; failures={failures[:4]}"
     )
 ```
 
@@ -111,7 +110,7 @@ import re
 
 from opensac_sdk import BrokerError, sdk
 
-sources = ["copy-source-1-exactly", "copy-source-2-exactly"]
+sources = ["selected-source-url-1", "selected-source-url-2"]
 checks = {
     "phrase": r"(target phrase|other spelling)",
     "year": r"\b(1998|1999)\b",
@@ -141,7 +140,7 @@ for name, pattern in checks.items():
         except BrokerError as error:
             problems.append(f"{name}:read:{error.code}")
             continue
-        if passage.failure is not None or not passage.text.strip() or passage.locator is None:
+        if passage.failure is not None or not passage.text.strip():
             problems.append(f"{name}:unreadable")
             continue
         if re.search(pattern, passage.text, re.IGNORECASE) is None:
@@ -149,7 +148,6 @@ for name, pattern in checks.items():
         evidence[name] = {
             "source": passage.source,
             "text": passage.text,
-            "locator": passage.locator,
         }
         break
 
@@ -167,7 +165,7 @@ else:
                 for name, row in evidence.items()
             ]
         },
-        citations=[{"locator": row["locator"]} for row in evidence.values()],
+        citations=list(dict.fromkeys(row["source"] for row in evidence.values())),
     )
 ```
 

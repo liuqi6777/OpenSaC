@@ -150,6 +150,7 @@ class SearchCapabilities:
                         score=hit.score,
                         query_index=query_index,
                         retrieval_mode=self._effective_retrieval_mode(hit),
+                        admission="search",
                     )
                 )
         return [self._search_hit_wire(hit) for hit in hits]

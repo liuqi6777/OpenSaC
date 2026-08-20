@@ -88,17 +88,13 @@ class ContentSnippet(BaseModel):
     # `url` but no `date` reads like an oversight, and a program written on
     # that assumption dies on `AttributeError` rather than missing a filter.
     date: str | None = None
-    locator: str | None = None
-    locator_error: OperationError | None = None
     failure: CapabilityFailure | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_failure(self) -> Self:
-        if self.failure is not None and (
-            self.text or self.locator is not None or self.locator_error is not None
-        ):
-            raise ValueError("a failed content row must have empty text and no locator state")
+        if self.failure is not None and self.text:
+            raise ValueError("a failed content row must have empty text")
         return self
 
 
@@ -121,8 +117,6 @@ class ContentMatch(BaseModel):
     # so a program can tell which side of the match a line came from.
     before: list[str] = Field(default_factory=list)
     after: list[str] = Field(default_factory=list)
-    locator: str | None = None
-    locator_error: OperationError | None = None
     # Populated by grep_report so duplicate input sources remain distinguishable.
     input_index: int | None = Field(default=None, ge=0)
 
@@ -171,8 +165,6 @@ class ContentPassage(BaseModel):
     rank: int = Field(ge=1)
     score: float = Field(allow_inf_nan=False)
     ranker: str = Field(min_length=1)
-    locator: str | None = Field(default=None, min_length=1, max_length=128)
-    locator_error: OperationError | None = None
 
 
 class ContentPassageReport(BaseModel):

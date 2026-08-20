@@ -50,10 +50,9 @@ class BrokerService:
         max_extract_total_item_bytes: int = 2_097_152,
         max_extract_schema_depth: int = 8,
         max_extract_repair_attempts: int = 1,
-        max_evidence_chars: int = 16_000,
-        max_evidence_records: int = 4_096,
-        max_evidence_passage_bytes: int = 33_554_432,
         max_content_sources_per_request: int = 256,
+        content_url_admission: str = "searched_or_public_web",
+        content_batch_deadline_seconds: float = 60.0,
         inflight_coalescing: bool = False,
         max_inflight_keys: int = 256,
         max_waiters_per_flight: int = 64,
@@ -100,9 +99,6 @@ class BrokerService:
                 "max_extract_item_bytes": max_extract_item_bytes,
                 "max_extract_total_item_bytes": max_extract_total_item_bytes,
                 "max_extract_schema_depth": max_extract_schema_depth,
-                "max_evidence_chars": max_evidence_chars,
-                "max_evidence_records": max_evidence_records,
-                "max_evidence_passage_bytes": max_evidence_passage_bytes,
                 "max_content_sources_per_request": max_content_sources_per_request,
                 "max_inflight_keys": max_inflight_keys,
                 "max_waiters_per_flight": max_waiters_per_flight,
@@ -143,11 +139,10 @@ class BrokerService:
             passage_chunk_overlap_chars=self.passage_chunk_overlap_chars,
             passage_prefilter_limit=self.passage_prefilter_limit,
             max_query_chars=self.max_search_query_chars,
-            max_evidence_chars=component_limits["max_evidence_chars"],
-            max_evidence_records=component_limits["max_evidence_records"],
-            max_evidence_passage_bytes=component_limits["max_evidence_passage_bytes"],
             max_sources_per_request=component_limits["max_content_sources_per_request"],
             session_content_cache_bytes=int(session_content_cache_bytes),
+            content_url_admission=content_url_admission,
+            content_batch_deadline_seconds=content_batch_deadline_seconds,
             backend_revision=backend_revision,
         )
         self.llm = LLMCapabilities(
@@ -169,7 +164,6 @@ class BrokerService:
             "content.passages": self.content.passages,
             "content.read": self.content.read,
             "content.grep_report": self.content.grep_report,
-            "citations.resolve": self.content.resolve_citations,
             "session.usage": self._session_usage,
             "llm.complete": self.llm.complete,
             "llm.complete_many": self.llm.complete_many,
@@ -356,7 +350,6 @@ class BrokerService:
             hits=list(context.hits),
             model_tokens=context.model_tokens,
             model_attempts=list(context.model_attempts),
-            evidence_records=list(context.evidence_records),
             passage_records=list(context.passage_records),
             provider_attempts=list(context.provider_attempts),
             deduplicated_requests=list(context.deduplicated_requests),
@@ -415,9 +408,6 @@ class BrokerService:
     def _trace_input_count(method: str, params: dict[str, Any]) -> int:
         if method.startswith("search."):
             return len(params.get("queries", [])) if method.endswith("_many") else 1
-        if method == "citations.resolve":
-            citations = params.get("citations", [])
-            return len(citations) if isinstance(citations, list) else 0
         if method.startswith("content."):
             sources = params.get("sources", [])
             return (
@@ -451,9 +441,11 @@ class BrokerService:
             "exec_calls": usage.exec_calls,
             "search_calls": usage.search_calls,
             "content_fetches": usage.content_fetches,
+            "direct_url_attempts": usage.direct_url_attempts,
+            "direct_url_successes": usage.direct_url_successes,
             "llm_calls": usage.llm_calls,
             "pipeline_model_tokens": usage.pipeline_model_tokens,
-            "documents_seen": len(state.source_by_identity),
+            "documents_seen": len(state.documents_by_id),
             "budget_remaining": state.policy.remaining(),
             "terminal_reason": state.policy.terminal_reason,
         }

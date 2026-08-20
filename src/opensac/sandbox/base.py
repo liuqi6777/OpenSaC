@@ -36,7 +36,7 @@ class SandboxResult:
     stderr: str
     duration_seconds: float
     output: Any = None
-    citations: list[dict[str, Any]] = field(default_factory=list)
+    citations: list[str] = field(default_factory=list)
     timed_out: bool = False
     # Host-observed phase timings. Optional so alternate sandbox
     # implementations keep their existing contract.

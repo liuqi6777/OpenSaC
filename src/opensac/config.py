@@ -64,12 +64,14 @@ class Settings(BaseSettings):
     extract_max_total_item_bytes: int = Field(default=2_097_152, ge=1)
     extract_max_schema_depth: int = Field(default=8, ge=1)
     extract_max_repair_attempts: int = Field(default=1, ge=0, le=1)
-    # Evidence locators are only minted for passages small enough to be
-    # returned and validated as one citation payload.
-    citation_max_evidence_chars: int = Field(default=16_000, ge=1)
-    citation_max_evidence_records: int = Field(default=4_096, ge=1)
-    citation_max_evidence_passage_bytes: int = Field(default=33_554_432, ge=1)
     content_max_sources_per_request: int = Field(default=256, ge=1)
+    # Web deployments accept bounded public HTTP(S) URLs directly so a URL
+    # selected from an earlier agent execution remains usable. Local docids
+    # always remain search-admitted only.
+    content_url_admission: Literal["searched_only", "searched_or_public_web"] = (
+        "searched_or_public_web"
+    )
+    content_batch_deadline_seconds: float = Field(default=60.0, gt=0.0)
     # Concurrent document fetches inside one `content.*` call. The broker's own
     # semaphore admits a whole call as one unit, so without this a program
     # asking for fifty pages opens fifty simultaneous requests to the provider,
@@ -103,6 +105,8 @@ class Settings(BaseSettings):
     provider_operation_concurrency: dict[str, int] = Field(default_factory=dict)
     provider_operation_requests_per_second: dict[str, float] = Field(default_factory=dict)
     provider_operation_burst: dict[str, int] = Field(default_factory=dict)
+    provider_operation_attempt_timeout_seconds: dict[str, float] = Field(default_factory=dict)
+    provider_operation_logical_deadline_seconds: dict[str, float] = Field(default_factory=dict)
 
     # 0.3.1 in-flight sharing. Disabled by default so upgrading cannot alter a
     # frozen baseline's latency or failure timing.
@@ -125,11 +129,19 @@ class Settings(BaseSettings):
                 self.provider_operation_requests_per_second
             ),
             "provider_operation_burst": self.provider_operation_burst,
+            "provider_operation_attempt_timeout_seconds": (
+                self.provider_operation_attempt_timeout_seconds
+            ),
+            "provider_operation_logical_deadline_seconds": (
+                self.provider_operation_logical_deadline_seconds
+            ),
         }
         for name, values in mappings.items():
             unknown = set(values) - allowed
             if unknown:
                 raise ValueError(f"{name} has unknown operations: {sorted(unknown)}")
+            if name.endswith("_seconds") and any(float(value) <= 0 for value in values.values()):
+                raise ValueError(f"{name} values must be positive")
         missing_rates = set(self.provider_operation_burst) - set(
             self.provider_operation_requests_per_second
         )
