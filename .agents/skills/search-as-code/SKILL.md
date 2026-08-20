@@ -23,6 +23,7 @@ from opensac_sdk import BrokerError, sdk
   metadata is sufficient only when the requested result is a discovery list.
 - Prefer `search.many` -> `search.fuse_rrf` -> `content.passages` for semantic discovery. Inspect
   returned text; use `grep_report` and `read` for exact strings and deliberate context expansion.
+- Apply task-specific domain policy in `fuse_rrf` before its final limit.
 - Read the text used for each material claim. Output citations are optional, unverified URL/source
   labels; prefer primary sources and corroborate disputed claims.
 - Inspect item failure records and `BrokerError`. Empty hits and zero matches are successful

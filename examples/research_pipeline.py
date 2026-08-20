@@ -6,9 +6,15 @@ queries = [
     "Milvus vector search official documentation",
 ]
 
-batches = sdk.search.many(queries, limit_per_query=8, concurrency=3)
-fusion = sdk.search.fuse_rrf(batches, k=60, limit=24)
 official_domains = {"postgresql.org", "github.com", "elastic.co", "milvus.io"}
+batches = sdk.search.many(queries, limit_per_query=10, concurrency=3)
+fusion = sdk.search.fuse_rrf(
+    batches,
+    k=60,
+    limit=24,
+    domain_weights={domain: 1.5 for domain in official_domains},
+    max_per_domain=6,
+)
 
 unique = {
     candidate.source: candidate for candidate in fusion if candidate.domain in official_domains

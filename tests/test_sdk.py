@@ -311,6 +311,8 @@ def test_search_rrf_fuses_sources_locally_and_preserves_provenance() -> None:
     candidate_a = result[1]
     assert isinstance(candidate_a, Record)
     assert candidate_a.rank == 1
+    assert candidate_a.raw_fused_score == candidate_a.fused_score
+    assert candidate_a.domain_weight == 1.0
     assert len(candidate_a.provenance) == 2
     assert dict(candidate_a.provenance[0]) == {
         "batch_index": 0,
@@ -334,6 +336,12 @@ def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
 
     empty = search.fuse_rrf([])
     assert empty == []
+
+    zero_limit = search.fuse_rrf(
+        [record({"query": "one", "hits": [_hit("a", 1)], "failure": None})],
+        limit=0,
+    )
+    assert zero_limit == []
 
 
 @pytest.mark.parametrize(
@@ -361,6 +369,103 @@ def test_search_rrf_refuses_non_positive_source_rank() -> None:
         SearchResource(FakeTransport()).fuse_rrf(
             [record({"query": "bad", "hits": [_hit("a", 0)], "failure": None})]
         )
+
+
+def test_search_rrf_applies_domain_policy_before_limit() -> None:
+    search = SearchResource(FakeTransport())
+    batches = [
+        record(
+            {
+                "query": "one",
+                "hits": [
+                    _hit("https://www.instagram.com/a", 1, backend="web"),
+                    _hit("https://noise.example/a", 2, backend="web"),
+                    _hit("https://noise.example/b", 3, backend="web"),
+                    _hit("https://useful.example/a", 4, backend="web"),
+                    _hit("local-document", 5),
+                ],
+                "failure": None,
+            }
+        )
+    ]
+
+    result = search.fuse_rrf(
+        batches,
+        exclude_domains=["Instagram.COM."],
+        domain_weights={"noise.example": 0.1},
+        max_per_domain=1,
+        limit=3,
+    )
+
+    assert [candidate.source for candidate in result] == [
+        "https://useful.example/a",
+        "local-document",
+        "https://noise.example/a",
+    ]
+    assert [candidate.fused_rank for candidate in result] == [1, 2, 3]
+    assert result[0].raw_fused_score == pytest.approx(1 / 64)
+    assert result[0].domain_weight == 1.0
+    assert result[2].fused_score == pytest.approx(result[2].raw_fused_score * 0.1)
+
+
+def test_search_rrf_uses_most_specific_domain_weight() -> None:
+    result = SearchResource(FakeTransport()).fuse_rrf(
+        [
+            record(
+                {
+                    "query": "one",
+                    "hits": [
+                        _hit("https://docs.example.com/a", 1, backend="web"),
+                        _hit("https://blog.example.com/a", 2, backend="web"),
+                    ],
+                    "failure": None,
+                }
+            )
+        ],
+        domain_weights={"example.com": 0.25, "docs.example.com": 2.0},
+    )
+
+    assert [candidate.source for candidate in result] == [
+        "https://docs.example.com/a",
+        "https://blog.example.com/a",
+    ]
+    assert [candidate.domain_weight for candidate in result] == [2.0, 0.25]
+
+
+def test_search_rrf_domain_policy_ignores_non_web_and_malformed_sources() -> None:
+    result = SearchResource(FakeTransport()).fuse_rrf(
+        [
+            record(
+                {
+                    "query": "one",
+                    "hits": [_hit("local-document", 1), _hit("https://[invalid", 2)],
+                    "failure": None,
+                }
+            )
+        ],
+        exclude_domains=["example.com"],
+        max_per_domain=1,
+    )
+
+    assert [candidate.source for candidate in result] == ["local-document", "https://[invalid"]
+    assert [candidate.domain_weight for candidate in result] == [1.0, 1.0]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"exclude_domains": "example.com"}, "exclude_domains"),
+        ({"exclude_domains": ["https://example.com"]}, "domain names"),
+        ({"domain_weights": {"example.com": 0}}, "positive finite"),
+        ({"domain_weights": {"example.com": float("inf")}}, "positive finite"),
+        ({"domain_weights": {"Example.com": 1, "example.com.": 2}}, "duplicate"),
+        ({"max_per_domain": 0}, "positive integer"),
+    ],
+)
+def test_search_rrf_rejects_invalid_domain_policy(kwargs, message) -> None:
+    batches = [record({"query": "one", "hits": [_hit("a", 1)], "failure": None})]
+    with pytest.raises(ValueError, match=message):
+        SearchResource(FakeTransport()).fuse_rrf(batches, **kwargs)
 
 
 def test_search_rrf_skips_failed_batches_without_copying_their_errors() -> None:
