@@ -13,12 +13,13 @@ from opensac.backends.document import document_fetch_candidates
 from opensac.backends.rerank.base import PassageReranker
 from opensac.backends.search.base import SearchBackend
 from opensac.broker.call_context import current_call
-from opensac.broker.documents import (
-    document_identity,
-    normalize_source,
-    public_web_url,
-)
-from opensac.broker.passages import (
+from opensac.broker.session import BrokerSession, FlightGroup
+from opensac.models import HitRecord, PassageTraceRecord, ProviderAttemptRecord
+from opensac.provider import ProviderRequestError
+
+from ..providers.execution import CapabilityProviderError, ProviderExecutor
+from .documents import document_identity, normalize_source, public_web_url
+from .passages import (
     PassageCandidate,
     normalize_document_text,
     prefilter_passage_candidates,
@@ -26,10 +27,6 @@ from opensac.broker.passages import (
     segment_passages,
     select_passage_candidates,
 )
-from opensac.broker.provider_execution import CapabilityProviderError, ProviderExecutor
-from opensac.broker.session import BrokerSession, FlightGroup
-from opensac.models import HitRecord, PassageTraceRecord, ProviderAttemptRecord
-from opensac.provider import ProviderRequestError
 
 
 def _provider_attempts() -> list[ProviderAttemptRecord]:
@@ -72,7 +69,7 @@ class ContentCapabilities:
             raise ValueError("content_batch_deadline_seconds must be positive")
         self.content_batch_deadline_seconds = float(content_batch_deadline_seconds)
         self.backend_revision = backend_revision
-        self.inflight_coalescing = providers.inflight_coalescing
+        self.inflight_coalescing = providers.flights.enabled
 
     def _resolve_content_sources(self, state: BrokerSession, sources: Any) -> list[SearchHit]:
         if isinstance(sources, str):
@@ -821,13 +818,13 @@ class ContentCapabilities:
 
         if self.inflight_coalescing and misses:
             flight_key_for_fingerprint = {
-                fingerprint: self.providers.flight_key(
+                fingerprint: self.providers.flights.key(
                     "local.document" if hit.backend == "local" else "web.scrape",
                     fingerprint,
                 )
                 for fingerprint, (_index, hit) in misses.items()
             }
-            admission = await self.providers.admit_flights(
+            admission = await self.providers.flights.admit(
                 state,
                 {
                     flight_key_for_fingerprint[fingerprint]: (
@@ -863,7 +860,7 @@ class ContentCapabilities:
                         # second provider operation.
                         return {flight_key: copy.deepcopy(cached)}
 
-                    self.providers.start_flight_group(state, group, execute_cached_content)
+                    self.providers.flights.start(state, group, execute_cached_content)
                     continue
 
                 async def execute_content(
@@ -892,12 +889,12 @@ class ContentCapabilities:
                     )
                     return {flight_key: row}
 
-                self.providers.start_flight_group(state, group, execute_content)
+                self.providers.flights.start(state, group, execute_content)
 
             async def await_content_flight(
                 fingerprint: str,
             ) -> tuple[str, dict[str, Any]]:
-                row = await self.providers.await_flight(
+                row = await self.providers.flights.wait(
                     state,
                     admission.waiters[flight_key_for_fingerprint[fingerprint]],
                 )

@@ -41,7 +41,12 @@ from opensac.api.errors import (
 from opensac.backends.rerank.jina import JinaPassageReranker
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
-from opensac.broker import BrokerRuntime, BrokerService, resolve_broker_socket_path
+from opensac.broker import (
+    BrokerRuntime,
+    BrokerService,
+    ProviderExecutionConfig,
+    resolve_broker_socket_path,
+)
 from opensac.broker.policy import BudgetExceeded
 from opensac.broker.session import BrokerSession
 from opensac.config import Settings
@@ -182,13 +187,13 @@ class ApplicationRuntime:
             max_content_sources_per_request=settings.content_max_sources_per_request,
             content_url_admission=settings.content_url_admission,
             content_batch_deadline_seconds=settings.content_batch_deadline_seconds,
-            inflight_coalescing=settings.provider_inflight_coalescing,
-            max_inflight_keys=settings.provider_max_inflight_keys,
-            max_waiters_per_flight=settings.provider_max_waiters_per_key,
-            provider_result_cache_ttl_seconds=(
-                settings.provider_result_cache_ttl_seconds
+            provider_execution_config=ProviderExecutionConfig(
+                inflight_coalescing=settings.provider_inflight_coalescing,
+                max_inflight_keys=settings.provider_max_inflight_keys,
+                max_waiters_per_flight=settings.provider_max_waiters_per_key,
+                result_cache_ttl_seconds=settings.provider_result_cache_ttl_seconds,
+                result_cache_max_bytes=settings.provider_result_cache_max_bytes,
             ),
-            provider_result_cache_max_bytes=settings.provider_result_cache_max_bytes,
             provider_runtime=provider_runtime,
             backend_revision=settings.backend_revision,
         )

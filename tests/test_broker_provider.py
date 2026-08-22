@@ -9,12 +9,13 @@ import pytest
 from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
-from opensac.broker.documents import document_identity
-from opensac.broker.provider_execution import (
+from opensac.broker.capabilities.documents import document_identity
+from opensac.broker.providers import (
     CapabilityProviderError,
+    ProviderExecutionConfig,
     ProviderExecutor,
-    ProviderResultCache,
 )
+from opensac.broker.providers.cache import ProviderResultCache
 from opensac.broker.service import BrokerService
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
@@ -737,8 +738,10 @@ async def test_web_provider_cache_reuses_search_and_scrape_across_sessions() -> 
     backend = WebCacheBackend()
     service = BrokerService(
         {"web": backend},
-        provider_result_cache_ttl_seconds=300,
-        provider_result_cache_max_bytes=1_000_000,
+        provider_execution_config=ProviderExecutionConfig(
+            result_cache_ttl_seconds=300,
+            result_cache_max_bytes=1_000_000,
+        ),
     )
     first = service.register_session(
         make_session(backend="web", session_id="first", token="first-token")
@@ -799,7 +802,7 @@ async def test_provider_cache_key_includes_backend_revision() -> None:
     service = BrokerService(
         {"web": backend},
         backend_revision="revision-a",
-        provider_result_cache_ttl_seconds=300,
+        provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
     )
     service.register_session(make_session(backend="web", session_id="a", token="a"))
     service.register_session(make_session(backend="web", session_id="b", token="b"))
@@ -818,7 +821,7 @@ async def test_provider_cache_coalesces_concurrent_cross_session_misses() -> Non
     backend.block_first = True
     service = BrokerService(
         {"web": backend},
-        provider_result_cache_ttl_seconds=300,
+        provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
     )
     first = service.register_session(make_session(backend="web", session_id="a", token="a"))
     second = service.register_session(make_session(backend="web", session_id="b", token="b"))
@@ -865,7 +868,7 @@ async def test_provider_cache_does_not_store_failures_and_recovers_from_cancella
     backend.failures_remaining = 1
     service = BrokerService(
         {"web": backend},
-        provider_result_cache_ttl_seconds=300,
+        provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
     )
     service.register_session(make_session(backend="web", session_id="a", token="a"))
     service.register_session(make_session(backend="web", session_id="b", token="b"))
@@ -883,7 +886,7 @@ async def test_provider_cache_does_not_store_failures_and_recovers_from_cancella
     cancelling_backend.block_first = True
     cancelling_service = BrokerService(
         {"web": cancelling_backend},
-        provider_result_cache_ttl_seconds=300,
+        provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
     )
     cancelling_service.register_session(
         make_session(backend="web", session_id="cancel-a", token="cancel-a")
