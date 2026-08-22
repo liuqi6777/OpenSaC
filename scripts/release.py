@@ -49,7 +49,9 @@ def validate_release(tag: str | None = None) -> ReleaseMetadata:
         REPO_ROOT / "packages/opensac-sdk/src/opensac_sdk/_version.py",
         "__version__",
     )
-    contract = _literal_assignment(REPO_ROOT / "src/opensac/sandbox/docker.py", "SANDBOX_CONTRACT")
+    contract = _literal_assignment(
+        REPO_ROOT / "src/opensac/sandbox/docker_core.py", "SANDBOX_CONTRACT"
+    )
     if not isinstance(opensac_version, str) or not isinstance(sdk_version, str):
         raise ReleaseValidationError("Package versions must be strings")
     if not isinstance(contract, int):
