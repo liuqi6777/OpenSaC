@@ -11,11 +11,11 @@ from openai import AsyncOpenAI
 from opensac.backends.rerank.base import ClosablePassageReranker, PassageReranker
 from opensac.backends.search.base import ClosableSearchBackend, SearchBackend
 from opensac.broker.call_context import CallContext, call_scope, trace_error_message
-from opensac.broker.content import ContentCapabilities
-from opensac.broker.llm import LLMCapabilities
+from opensac.broker.capabilities.content import ContentCapabilities
+from opensac.broker.capabilities.llm import LLMCapabilities
+from opensac.broker.capabilities.search import SearchCapabilities
 from opensac.broker.policy import CapabilityPolicy, MechanismDisabled
-from opensac.broker.provider_execution import ProviderExecutor
-from opensac.broker.search import SearchCapabilities
+from opensac.broker.providers import ProviderExecutionConfig, ProviderExecutor
 from opensac.broker.session import BrokerSession
 from opensac.metrics import CapacityGate
 from opensac.models import CAPABILITY_METHODS, CapabilityEvent, Session
@@ -53,9 +53,7 @@ class BrokerService:
         max_content_sources_per_request: int = 256,
         content_url_admission: str = "searched_or_public_web",
         content_batch_deadline_seconds: float = 60.0,
-        inflight_coalescing: bool = False,
-        max_inflight_keys: int = 256,
-        max_waiters_per_flight: int = 64,
+        provider_execution_config: ProviderExecutionConfig | None = None,
         provider_runtime: ProviderRuntime | None = None,
         backend_revision: str = "",
     ) -> None:
@@ -100,8 +98,6 @@ class BrokerService:
                 "max_extract_total_item_bytes": max_extract_total_item_bytes,
                 "max_extract_schema_depth": max_extract_schema_depth,
                 "max_content_sources_per_request": max_content_sources_per_request,
-                "max_inflight_keys": max_inflight_keys,
-                "max_waiters_per_flight": max_waiters_per_flight,
             }
         )
         if int(max_extract_repair_attempts) not in {0, 1}:
@@ -119,9 +115,7 @@ class BrokerService:
         self.providers = ProviderExecutor(
             self.sessions,
             self.provider_runtime,
-            inflight_coalescing=bool(inflight_coalescing),
-            max_inflight_keys=component_limits["max_inflight_keys"],
-            max_waiters_per_flight=component_limits["max_waiters_per_flight"],
+            config=provider_execution_config or ProviderExecutionConfig(),
         )
         self.search = SearchCapabilities(
             backends,
@@ -354,6 +348,8 @@ class BrokerService:
             provider_attempts=list(context.provider_attempts),
             deduplicated_requests=list(context.deduplicated_requests),
             coalesced_requests=list(context.coalesced_requests),
+            provider_cache_hits=context.provider_cache_hits,
+            provider_cache_misses=context.provider_cache_misses,
             error_type=type(exc).__name__ if exc is not None else None,
             error=error,
             result_payload=result_payload,

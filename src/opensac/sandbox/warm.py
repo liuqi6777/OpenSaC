@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import os
 import sys
 import time
@@ -14,11 +13,10 @@ from pathlib import Path
 from typing import Protocol
 
 from opensac.sandbox.base import SandboxRequest, SandboxResult
-from opensac.sandbox.docker import (
-    DockerImageContractVerifier,
-    DockerSandbox,
+from opensac.sandbox.docker_core import (
+    DockerSandboxCore,
+    ExecutionWorkspace,
     SandboxImageContractError,
-    broker_socket_mount_args,
     read_bounded_process_output,
     remove_docker_container,
 )
@@ -62,7 +60,7 @@ class _StartFailure(Exception):
         self.launch_error = launch_error
 
 
-class WarmDockerSandbox:
+class WarmDockerSandbox(DockerSandboxCore):
     """One lazily-created, resource-limited Docker container per session.
 
     A container keeps only the namespace and mounts warm.  Every ``execute``
@@ -94,18 +92,19 @@ class WarmDockerSandbox:
         idle_timeout_seconds: float = 300.0,
         max_containers: int = 0,
     ) -> None:
-        self.image = image
-        self.broker_socket = broker_socket.resolve()
-        self.docker_host_platform = docker_host_platform
-        self.timeout_seconds = timeout_seconds
-        self.memory = memory
-        self.cpus = cpus
-        self.pids_limit = pids_limit
-        self.max_output_bytes = max_output_bytes
+        super().__init__(
+            image=image,
+            broker_socket=broker_socket,
+            docker_host_platform=docker_host_platform,
+            timeout_seconds=timeout_seconds,
+            memory=memory,
+            cpus=cpus,
+            pids_limit=pids_limit,
+            max_output_bytes=max_output_bytes,
+        )
         self.startup_timeout_seconds = startup_timeout_seconds
         self.idle_timeout_seconds = idle_timeout_seconds
         self.max_containers = max(0, int(max_containers))
-        self._image_contract = DockerImageContractVerifier(image)
         self._sessions: dict[str, _WarmSession] = {}
         self._closed_session_keys: set[str] = set()
         self._registry_lock = asyncio.Lock()
@@ -116,9 +115,7 @@ class WarmDockerSandbox:
         self._capacity_waiting = 0
 
     def snapshot(self) -> dict[str, int]:
-        containers = sum(
-            state.container_id is not None for state in self._sessions.values()
-        )
+        containers = sum(state.container_id is not None for state in self._sessions.values())
         return {
             "capacity": self.max_containers,
             "active": containers,
@@ -146,53 +143,23 @@ class WarmDockerSandbox:
     ) -> list[str]:
         """Build the long-lived container command without embedding credentials."""
 
-        workspace = request.workspace.resolve()
         cid_path = cid_path or self.broker_socket.parent / "containers" / "warm-test.cid"
         session_digest = hashlib.sha256(self._session_key(request).encode()).hexdigest()[:16]
-        command = [
-            "docker",
-            "run",
-            "--detach",
-            "--rm",
-            "--init",
-            "--network",
-            "none",
-            "--read-only",
-            "--user",
-            f"{os.getuid()}:{os.getgid()}",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--pids-limit",
-            str(self.pids_limit),
-            "--memory",
-            self.memory,
-        ]
-        if self.cpus > 0:
-            command += ["--cpus", str(self.cpus)]
-        command += [
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=64m",
-            "--cidfile",
-            str(cid_path),
-            "--label",
-            "opensac.sandbox=warm",
-            "--label",
-            f"opensac.owner={self.owner_label}",
-            "--label",
-            f"opensac.session={session_digest}",
-            "--mount",
-            f"type=bind,src={workspace},dst=/workspace",
-        ]
-        command += broker_socket_mount_args(
-            self.broker_socket, platform=self.docker_host_platform
+        command = self._docker_run_command(
+            request,
+            cid_path=cid_path,
+            detach=True,
+            init=True,
+            extra_args=(
+                "--label",
+                "opensac.sandbox=warm",
+                "--label",
+                f"opensac.owner={self.owner_label}",
+                "--label",
+                f"opensac.session={session_digest}",
+            ),
         )
         command += [
-            "--env",
-            "OPENSAC_BROKER_SOCKET=/run/opensac/broker.sock",
-            "--env",
-            "OPENSAC_WORKSPACE=/workspace",
             "--workdir",
             "/workspace",
             "--entrypoint",
@@ -258,8 +225,7 @@ class WarmDockerSandbox:
             )
         except OSError as exc:
             raise RuntimeError(
-                f"Could not audit warm container {container_id}: "
-                f"{type(exc).__name__}: {exc}"
+                f"Could not audit warm container {container_id}: {type(exc).__name__}: {exc}"
             ) from exc
         stdout_bytes, stderr_bytes = await process.communicate()
         stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
@@ -308,9 +274,7 @@ class WarmDockerSandbox:
         stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
         if process.returncode != 0:
             detail = stderr or f"docker ps exited {process.returncode}"
-            raise RuntimeError(
-                f"Could not enumerate warm containers for session {key!r}: {detail}"
-            )
+            raise RuntimeError(f"Could not enumerate warm containers for session {key!r}: {detail}")
         return set(stdout_bytes.decode("utf-8", errors="replace").split())
 
     def execution_command(self, container_id: str, request: SandboxRequest) -> list[str]:
@@ -451,13 +415,12 @@ class WarmDockerSandbox:
                 first_line = (
                     stderr.strip().splitlines()[0] if stderr.strip() else "docker run failed"
                 )
-                launch_error = DockerSandbox._launch_error(process.returncode, stderr)
+                launch_error = self._launch_error(process.returncode, stderr)
                 raise _StartFailure(
                     process.returncode if process.returncode is not None else 125,
                     stdout,
                     stderr,
-                    launch_error
-                    or f"The sandbox container could not be started: {first_line}",
+                    launch_error or f"The sandbox container could not be started: {first_line}",
                 )
             state.container_id = container_id
             try:
@@ -524,9 +487,7 @@ class WarmDockerSandbox:
             return ""
         return cid_path.read_text(encoding="utf-8").strip()
 
-    async def _ensure_container(
-        self, state: _WarmSession, request: SandboxRequest
-    ) -> str:
+    async def _ensure_container(self, state: _WarmSession, request: SandboxRequest) -> str:
         if state.poisoned:
             await self._discard_container(state)
         if state.container_id:
@@ -538,13 +499,7 @@ class WarmDockerSandbox:
         validate_code(request.code)
         validation_seconds = time.monotonic() - validation_started
         setup_started = time.monotonic()
-        request.workspace.mkdir(parents=True, exist_ok=True)
-        program_path = request.workspace / request.program_filename
-        output_path = request.workspace / request.output_filename
-        ready_path = request.workspace / f"{request.output_filename}.ready"
-        program_path.write_text(request.code, encoding="utf-8")
-        output_path.unlink(missing_ok=True)
-        ready_path.unlink(missing_ok=True)
+        workspace = ExecutionWorkspace.prepare(request)
         workspace_setup_seconds = time.monotonic() - setup_started
         started = time.monotonic()
         try:
@@ -605,12 +560,7 @@ class WarmDockerSandbox:
                     captured = await read_bounded_process_output(
                         process,
                         max_output_bytes=self.max_output_bytes,
-                        timeout_seconds=min(
-                            self.timeout_seconds,
-                            request.timeout_seconds
-                            if request.timeout_seconds is not None
-                            else self.timeout_seconds,
-                        ),
+                        timeout_seconds=self._execution_timeout(request),
                     )
                 except asyncio.CancelledError:
                     await self._discard_container(state)
@@ -621,12 +571,10 @@ class WarmDockerSandbox:
                 process_duration_seconds = time.monotonic() - process_started
                 stdout = captured.stdout.decode("utf-8", errors="replace")
                 stderr = captured.stderr.decode("utf-8", errors="replace")
-                submitted = {}
-                if output_path.exists() and output_path.stat().st_size <= self.max_output_bytes:
-                    try:
-                        submitted = json.loads(output_path.read_text(encoding="utf-8"))
-                    except json.JSONDecodeError:
-                        stderr += "\nOpenSAC output was not valid JSON."
+                submitted, output_error = workspace.read_output(
+                    max_output_bytes=self.max_output_bytes
+                )
+                stderr += output_error
                 launch_error = self._execution_launch_error(process.returncode, stderr)
                 if launch_error:
                     await self._discard_container(state)
@@ -634,15 +582,13 @@ class WarmDockerSandbox:
                     try:
                         current_pids = await self._container_pids(container_id)
                         if current_pids != state.baseline_pids:
-                            raise RuntimeError(
-                                "warm container process set changed after execution"
-                            )
+                            raise RuntimeError("warm container process set changed after execution")
                     except Exception as exc:
                         await self._discard_container(state)
                         launch_error = f"The warm sandbox process audit failed: {exc}"
                 duration_seconds = time.monotonic() - started
-                process_start_seconds = DockerSandbox._startup_seconds(
-                    ready_path,
+                process_start_seconds = self._startup_seconds(
+                    workspace.ready_path,
                     wall_started=process_wall_started,
                     duration_seconds=process_duration_seconds,
                 )
@@ -666,9 +612,7 @@ class WarmDockerSandbox:
                     launch_error=launch_error,
                 )
         finally:
-            program_path.unlink(missing_ok=True)
-            output_path.unlink(missing_ok=True)
-            ready_path.unlink(missing_ok=True)
+            workspace.cleanup()
 
     @staticmethod
     def _timings(
@@ -690,13 +634,9 @@ class WarmDockerSandbox:
             "container_start_seconds": container_start_seconds,
             "process_start_seconds": process_start_seconds,
             "startup_seconds": startup_seconds,
-            "program_seconds": max(
-                process_duration_seconds - process_start_seconds, 0.0
-            ),
+            "program_seconds": max(process_duration_seconds - process_start_seconds, 0.0),
             "result_processing_seconds": max(
-                duration_seconds
-                - container_start_seconds
-                - process_duration_seconds,
+                duration_seconds - container_start_seconds - process_duration_seconds,
                 0.0,
             ),
             "sandbox_total_seconds": duration_seconds,
@@ -717,7 +657,7 @@ class WarmDockerSandbox:
 
     @staticmethod
     def _execution_launch_error(returncode: int | None, stderr: str) -> str | None:
-        launch_error = DockerSandbox._launch_error(returncode, stderr)
+        launch_error = DockerSandboxCore._launch_error(returncode, stderr)
         if launch_error:
             return launch_error
         first_line = stderr.strip().splitlines()[0] if stderr.strip() else ""
@@ -747,9 +687,7 @@ class WarmDockerSandbox:
                 state.closed.set()
                 self._capacity_changed.set()
 
-    def _start_close_locked(
-        self, key: str, state: _WarmSession
-    ) -> asyncio.Task[None]:
+    def _start_close_locked(self, key: str, state: _WarmSession) -> asyncio.Task[None]:
         state.closing = True
         state.closed = asyncio.Event()
         task = asyncio.create_task(self._finish_close(key, state))
@@ -791,9 +729,7 @@ class WarmDockerSandbox:
             *(self._untracked_session_containers(key) for key in keys)
         )
         orphan_ids = set().union(*orphan_sets)
-        await asyncio.gather(
-            *(self._remove_container(container_id) for container_id in orphan_ids)
-        )
+        await asyncio.gather(*(self._remove_container(container_id) for container_id in orphan_ids))
 
     async def reap_idle(self, max_idle_seconds: float | None = None) -> int:
         """Close currently idle session containers and return how many were claimed."""

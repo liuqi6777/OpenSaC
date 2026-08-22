@@ -12,10 +12,14 @@ from opensac._contracts import ContentSnippet, RetrievalMetadata, SearchBatch, S
 from opensac.backends.rerank.base import PassageRerankResult
 from opensac.backends.rerank.jina import JinaPassageReranker
 from opensac.broker.call_context import trace_error_message
-from opensac.broker.documents import canonical_url
-from opensac.broker.llm import ExtractionInfrastructureError
+from opensac.broker.capabilities.documents import canonical_url
+from opensac.broker.capabilities.llm import ExtractionInfrastructureError
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
-from opensac.broker.provider_execution import CapabilityProviderError, InflightCapacityError
+from opensac.broker.providers import (
+    CapabilityProviderError,
+    InflightCapacityError,
+    ProviderExecutionConfig,
+)
 from opensac.broker.service import BrokerService
 from opensac.models import (
     CAPABILITY_METHODS,
@@ -24,6 +28,8 @@ from opensac.models import (
     Session,
 )
 from opensac.provider import ProviderRequestError
+
+COALESCING = ProviderExecutionConfig(inflight_coalescing=True)
 
 
 class FakeBackend:
@@ -2185,7 +2191,7 @@ class _CoalescingContentBackend(FakeBackend):
 
 async def test_inflight_coalescing_overlapping_local_batches_and_duplicates() -> None:
     backend = _CoalescingBatchBackend()
-    service = BrokerService({"local": backend}, inflight_coalescing=True)
+    service = BrokerService({"local": backend}, provider_execution_config=COALESCING)
     state = service.register_session(make_session(backends=["local"]))
 
     first = asyncio.create_task(
@@ -2234,8 +2240,10 @@ async def test_inflight_admission_is_atomic_before_provider_side_effect() -> Non
     backend = _CoalescingBatchBackend()
     service = BrokerService(
         {"local": backend},
-        inflight_coalescing=True,
-        max_inflight_keys=1,
+        provider_execution_config=ProviderExecutionConfig(
+            inflight_coalescing=True,
+            max_inflight_keys=1,
+        ),
     )
     state = service.register_session(make_session(backends=["local"]))
     leader = asyncio.create_task(service.call("token", "search.query", {"query": "alpha"}))
@@ -2259,8 +2267,10 @@ async def test_inflight_waiter_limit_counts_unique_call_not_duplicate_rows() -> 
     backend = _CoalescingBatchBackend()
     service = BrokerService(
         {"local": backend},
-        inflight_coalescing=True,
-        max_waiters_per_flight=2,
+        provider_execution_config=ProviderExecutionConfig(
+            inflight_coalescing=True,
+            max_waiters_per_flight=2,
+        ),
     )
     state = service.register_session(make_session(backends=["local"]))
     leader = asyncio.create_task(service.call("token", "search.query", {"query": "same"}))
@@ -2287,7 +2297,7 @@ async def test_inflight_waiter_limit_counts_unique_call_not_duplicate_rows() -> 
 
 async def test_inflight_feature_disabled_keeps_independent_transports() -> None:
     backend = _CoalescingSearchBackend()
-    service = BrokerService({"web": backend}, inflight_coalescing=False)
+    service = BrokerService({"web": backend})
     state = service.register_session(make_session())
 
     calls = [
@@ -2304,7 +2314,7 @@ async def test_inflight_feature_disabled_keeps_independent_transports() -> None:
 
 async def test_cancelling_leader_detaches_without_cancelling_follower() -> None:
     backend = _CoalescingSearchBackend()
-    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    service = BrokerService({"web": backend}, provider_execution_config=COALESCING)
     state = service.register_session(make_session())
     leader = asyncio.create_task(
         service.call(
@@ -2349,7 +2359,7 @@ async def test_cancelling_leader_detaches_without_cancelling_follower() -> None:
 
 async def test_cancel_execution_drains_last_waiter_group_and_trace() -> None:
     backend = _CoalescingSearchBackend()
-    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    service = BrokerService({"web": backend}, provider_execution_config=COALESCING)
     state = service.register_session(make_session())
     call = asyncio.create_task(
         service.call(
@@ -2377,7 +2387,7 @@ async def test_cancel_execution_drains_last_waiter_group_and_trace() -> None:
 
 async def test_last_waiter_cancel_cleans_flight_during_publish_lock_race() -> None:
     backend = _CoalescingSearchBackend()
-    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    service = BrokerService({"web": backend}, provider_execution_config=COALESCING)
     state = service.register_session(make_session())
     call = asyncio.create_task(service.call("token", "search.query", {"query": "race"}))
     await backend.started.wait()
@@ -2404,7 +2414,7 @@ async def test_last_waiter_cancel_cleans_flight_during_publish_lock_race() -> No
 
 async def test_content_coalescing_counts_only_real_backend_leader_and_copies_rows() -> None:
     backend = _CoalescingContentBackend()
-    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    service = BrokerService({"web": backend}, provider_execution_config=COALESCING)
     state = service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "doc"})
     source = hits[0]["source"]
@@ -2447,7 +2457,7 @@ async def test_content_coalescing_counts_only_real_backend_leader_and_copies_row
 
 async def test_content_leader_caches_before_flight_cleanup_lock_queue() -> None:
     backend = _CoalescingContentBackend()
-    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    service = BrokerService({"web": backend}, provider_execution_config=COALESCING)
     state = service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "doc"}))[0]["source"]
     record = state.document_for_alias(source)
@@ -2481,7 +2491,7 @@ async def test_content_leader_caches_before_flight_cleanup_lock_queue() -> None:
 
 async def test_content_refreshes_stale_misses_after_usage_reservation() -> None:
     backend = _CoalescingContentBackend()
-    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    service = BrokerService({"web": backend}, provider_execution_config=COALESCING)
     state = service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "doc"}))[0]["source"]
     original_record = state.policy.record_content_fetches
@@ -2514,13 +2524,13 @@ async def test_content_refreshes_stale_misses_after_usage_reservation() -> None:
 
 async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> None:
     backend = _CoalescingContentBackend()
-    service = BrokerService({"web": backend}, inflight_coalescing=True)
+    service = BrokerService({"web": backend}, provider_execution_config=COALESCING)
     state = service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "doc"}))[0]["source"]
     leader = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
     await backend.fetch_started.wait()
 
-    original_admit = service.providers.admit_flights
+    original_admit = service.providers.flights.admit
     follower_at_admission = asyncio.Event()
     resume_follower = asyncio.Event()
 
@@ -2529,7 +2539,7 @@ async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> No
         await resume_follower.wait()
         return await original_admit(state_arg, requests, group_new=group_new)
 
-    service.providers.admit_flights = gated_admit
+    service.providers.flights.admit = gated_admit
     follower = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
     await follower_at_admission.wait()
 

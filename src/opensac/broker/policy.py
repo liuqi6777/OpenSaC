@@ -198,6 +198,10 @@ class CapabilityPolicy:
     def record_coalesced(self, amount: int) -> None:
         self.usage.provider_coalesced_requests += max(amount, 0)
 
+    def record_provider_cache(self, *, hit: bool) -> None:
+        field = "provider_cache_hits" if hit else "provider_cache_misses"
+        setattr(self.usage, field, getattr(self.usage, field) + 1)
+
     async def record_sandbox_seconds(self, amount: float) -> None:
         async with self._lock:
             self.usage.sandbox_seconds += amount

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from opensac.broker.passages import segment_passages
+from opensac.broker.capabilities.passages import segment_passages
 
 
 def test_chunking_is_stable_exact_and_handles_long_single_lines() -> None:

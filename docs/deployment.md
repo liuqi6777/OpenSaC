@@ -1,6 +1,6 @@
 # Deployment
 
-OpenSAC `v0.5.0` is publicly available as version-matched service and sandbox images on GHCR.
+OpenSAC `v0.6.3` is publicly available as version-matched service and sandbox images on GHCR.
 The Docker CLI provides a no-checkout, no-configuration-file quick start. Docker Compose remains
 available for declarative deployments. Both run the API and capability broker from the service
 image and start an isolated sandbox container for each execution. Neither builds nor runs the
@@ -64,7 +64,7 @@ docker run --detach \
   --env OPENSAC_SEARCH_BACKEND=web \
   --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
   --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
-  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.5.0 \
+  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.6.3 \
   --publish 127.0.0.1:8000:8000 \
   --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
   --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
@@ -72,7 +72,7 @@ docker run --detach \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:0.5.0
+  ghcr.io/liuqi6777/opensac:0.6.3
 ```
 
 After a few seconds, verify the service with the Python runtime already installed in the image:
@@ -100,11 +100,11 @@ source repository, build an image, or install Python packages:
 mkdir opensac-deploy
 cd opensac-deploy
 curl -fsSLo compose.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.5.0/compose.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.6.3/compose.yaml
 curl -fsSLo .env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.5.0/.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.6.3/.env.example
 curl -fsSLo compose.env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.5.0/compose.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.6.3/compose.env.example
 mkdir -p "$PWD/.opensac"
 ```
 
@@ -196,6 +196,50 @@ OPENSAC_JINA_API_KEY=replace-with-jina-key
 ```
 
 They remain in the host broker and are not passed to sandbox programs.
+
+### Eight-core Web performance profile
+
+For an eight-core Docker host with at least 8 GB assigned to Docker, start with the following
+settings. Warm mode keeps one hardened container per active session but still starts a fresh Python
+process for every execution. Eight 512 MB sandbox limits leave room for the service, Docker, and the
+128 MB provider cache.
+
+```bash
+OPENSAC_SANDBOX_MODE=warm
+OPENSAC_SANDBOX_MAX_WARM_CONTAINERS=8
+OPENSAC_SANDBOX_MAX_CONCURRENCY=8
+OPENSAC_SANDBOX_WARM_IDLE_SECONDS=300
+OPENSAC_MAX_CONCURRENCY=12
+OPENSAC_BACKEND_FETCH_CONCURRENCY=6
+OPENSAC_PROVIDER_RESULT_CACHE_TTL_SECONDS=300
+OPENSAC_PROVIDER_RESULT_CACHE_MAX_BYTES=128000000
+```
+
+The provider result cache is process-local and only stores successful `web.search` and `web.scrape`
+results. It never caches failures, reranker responses, or LLM output. Keep the TTL at zero when
+cross-session freshness must take precedence over latency and provider cost.
+
+### Benchmark before and after tuning
+
+Run the same program against each deployment with identical Docker resources and provider settings.
+The following no-op benchmark isolates API, queue, and sandbox overhead and repeats every concurrency
+level three times:
+
+```bash
+uv run python scripts/benchmark_exec.py \
+  --base-url http://127.0.0.1:8000 \
+  --concurrency 1,4,8,16 \
+  --requests 32 \
+  --repetitions 3 \
+  --warmup-per-worker 1 \
+  --code $'pass\n' \
+  --output /tmp/opensac-benchmark.json
+```
+
+Use `--code-file` with one fixed Search-as-Code program for the Web path. Compare the `aggregates`
+for client P95 and successful requests per second, and use phase timings plus `/healthz` cache/queue
+snapshots to attribute the change. Measure `0.6.3` in cold mode before enabling warm mode so the
+version upgrade and container reuse remain separately attributable.
 
 ### 3. Configure and start OpenSAC
 
@@ -294,6 +338,12 @@ sudo systemctl start opensac.service
 
 Update `OPENSAC_BUILD_COMMIT` and repeat the end-to-end check. Rollback uses the same steps with
 the previous commit.
+
+For a blue-green upgrade, start the new worker on a different port with its own data directory and
+broker socket. Send only new sessions to it, keep every existing session pinned to its original
+worker, and drain the old worker before removal. Do not place a round-robin proxy in front of
+stateful session routes. Keep the previous worker available until the no-op and fixed Web canaries
+pass; rollback then consists only of sending new sessions back to that worker.
 
 ## Troubleshooting
 

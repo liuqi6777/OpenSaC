@@ -54,6 +54,7 @@ def _health_metrics(payload: dict[str, Any]) -> dict[str, float]:
     process = payload.get("process") or {}
     sandbox = payload.get("sandbox") or {}
     broker = payload.get("broker") or {}
+    provider_cache = payload.get("provider_cache") or {}
     warm = payload.get("warm") or {}
     sessions = payload.get("sessions") or {}
     return {
@@ -63,10 +64,49 @@ def _health_metrics(payload: dict[str, Any]) -> dict[str, float]:
         "sandbox.waiting": float(sandbox.get("waiting", 0)),
         "broker.active": float(broker.get("active", 0)),
         "broker.waiting": float(broker.get("waiting", 0)),
+        "provider_cache.current_bytes": float(provider_cache.get("current_bytes", 0)),
+        "provider_cache.entries": float(provider_cache.get("entries", 0)),
+        "provider_cache.waiting": float(provider_cache.get("waiting", 0)),
+        "provider_cache.inflight": float(provider_cache.get("inflight", 0)),
         "warm.active": float(warm.get("active", warm.get("containers", 0))),
         "warm.waiting": float(warm.get("waiting", 0)),
         "sessions.active": float(sessions.get("active", 0)),
         "sessions.executing": float(sessions.get("executing", 0)),
+    }
+
+
+def _aggregate_repetitions(
+    concurrency: int,
+    runs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    latency_names = sorted({name for run in runs for name in (run.get("latency_seconds") or {})})
+    resource_names = sorted({name for run in runs for name in (run.get("resource_peaks") or {})})
+    return {
+        "requested_concurrency": concurrency,
+        "repetitions": len(runs),
+        "attempted_requests": sum(int(run.get("attempted_requests", 0)) for run in runs),
+        "request_failures": sum(int(run.get("request_failures", 0)) for run in runs),
+        "program_failures": sum(int(run.get("program_failures", 0)) for run in runs),
+        "throughput_requests_per_second": _summary(
+            [float(run.get("throughput_requests_per_second", 0.0)) for run in runs]
+        ),
+        "successful_requests_per_second": _summary(
+            [float(run.get("successful_requests_per_second", 0.0)) for run in runs]
+        ),
+        "latency_p95_seconds": {
+            name: _summary(
+                [
+                    float(run["latency_seconds"][name].get("p95", 0.0))
+                    for run in runs
+                    if name in run.get("latency_seconds", {})
+                ]
+            )
+            for name in latency_names
+        },
+        "resource_peaks": {
+            name: max(float(run.get("resource_peaks", {}).get(name, 0.0)) for run in runs)
+            for name in resource_names
+        },
     }
 
 
@@ -289,22 +329,28 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
         health_response.raise_for_status()
         health = health_response.json()
         levels = []
+        aggregates = []
         for concurrency in args.concurrency:
-            before = (await client.get("/healthz")).json()
-            level = await _run_level(
-                client,
-                concurrency=concurrency,
-                requests=args.requests,
-                warmup_per_worker=args.warmup_per_worker,
-                code=args.code,
-                include_trace=args.include_trace,
-                duration_seconds=args.duration_seconds,
-                sample_health=True,
-            )
-            after = (await client.get("/healthz")).json()
-            level["health_before"] = before
-            level["health_after"] = after
-            levels.append(level)
+            runs = []
+            for repetition in range(1, args.repetitions + 1):
+                before = (await client.get("/healthz")).json()
+                level = await _run_level(
+                    client,
+                    concurrency=concurrency,
+                    requests=args.requests,
+                    warmup_per_worker=args.warmup_per_worker,
+                    code=args.code,
+                    include_trace=args.include_trace,
+                    duration_seconds=args.duration_seconds,
+                    sample_health=True,
+                )
+                after = (await client.get("/healthz")).json()
+                level["repetition"] = repetition
+                level["health_before"] = before
+                level["health_after"] = after
+                runs.append(level)
+                levels.append(level)
+            aggregates.append(_aggregate_repetitions(concurrency, runs))
     return {
         "base_url": args.base_url,
         "backend": health.get("build", {}).get("search_backend"),
@@ -314,7 +360,9 @@ async def _main(args: argparse.Namespace) -> dict[str, Any]:
         "requests_per_level": args.requests,
         "duration_seconds_per_level": args.duration_seconds,
         "warmup_per_worker": args.warmup_per_worker,
+        "repetitions": args.repetitions,
         "levels": levels,
+        "aggregates": aggregates,
     }
 
 
@@ -331,6 +379,7 @@ def _arguments() -> argparse.Namespace:
         help="Run each concurrency level for this long; when set, --requests is ignored.",
     )
     parser.add_argument("--warmup-per-worker", type=int, default=1)
+    parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=600.0)
     parser.add_argument("--include-trace", action=argparse.BooleanOptionalAction, default=True)
     code_group = parser.add_mutually_exclusive_group()
@@ -344,6 +393,8 @@ def _arguments() -> argparse.Namespace:
         parser.error("--duration-seconds must be non-negative")
     if args.warmup_per_worker < 0:
         parser.error("--warmup-per-worker must be non-negative")
+    if args.repetitions < 1:
+        parser.error("--repetitions must be at least 1")
     if args.code_file is not None:
         args.code = args.code_file.read_text(encoding="utf-8")
     return args

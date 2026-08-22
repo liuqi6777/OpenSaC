@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import secrets
 import shutil
+import stat
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +20,12 @@ from opensac.models import (
     WorkspaceSnapshot,
     utc_now,
 )
+
+
+@dataclass(frozen=True)
+class WorkspaceInventory:
+    total_bytes: int
+    artifacts: list[str]
 
 
 class StateStore:
@@ -204,6 +212,27 @@ class StateStore:
             if path.is_file()
         )
 
+    def workspace_inventory(
+        self,
+        session: Session,
+        workspace: Path | None = None,
+    ) -> WorkspaceInventory:
+        """Collect post-execution byte usage and public artifacts in one walk."""
+
+        workspace = Path(workspace or session.workspace)
+        if not workspace.exists():
+            return WorkspaceInventory(total_bytes=0, artifacts=[])
+        total_bytes = 0
+        artifacts: list[str] = []
+        for path in workspace.rglob("*"):
+            file_stat = path.stat()
+            if not stat.S_ISREG(file_stat.st_mode):
+                continue
+            total_bytes += file_stat.st_size
+            if not path.name.startswith(".opensac-"):
+                artifacts.append(str(path.relative_to(workspace)))
+        return WorkspaceInventory(total_bytes=total_bytes, artifacts=artifacts)
+
     def execs_dir(self, session: Session) -> Path:
         return self.sessions_dir / session.id / "execs"
 
@@ -276,14 +305,7 @@ class StateStore:
         back is ordinary behaviour, and it is only the survival across calls
         that the switch removes.
         """
-        workspace = Path(workspace or session.workspace)
-        if not workspace.exists():
-            return []
-        return [
-            str(path.relative_to(workspace))
-            for path in workspace.rglob("*")
-            if path.is_file() and not path.name.startswith(".opensac-")
-        ]
+        return self.workspace_inventory(session, workspace).artifacts
 
     def snapshot_workspace(
         self,

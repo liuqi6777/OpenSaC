@@ -45,6 +45,8 @@ class CallContext:
     provider_trace: ProviderTraceBuffer = field(default_factory=ProviderTraceBuffer)
     deduplicated_requests: list[DeduplicatedRequestRecord] = field(default_factory=list)
     coalesced_requests: list[CoalescedRequestRecord] = field(default_factory=list)
+    provider_cache_hits: int = 0
+    provider_cache_misses: int = 0
 
     @property
     def provider_attempts(self) -> list[ProviderAttemptRecord]:

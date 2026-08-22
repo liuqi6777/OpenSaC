@@ -8,11 +8,12 @@ from typing import Any
 from opensac._contracts import SearchBatch, SearchHit
 from opensac.backends.search.base import BatchSearchBackend, SearchBackend
 from opensac.broker.call_context import current_call
-from opensac.broker.documents import document_identity, source_for
-from opensac.broker.provider_execution import CapabilityProviderError, ProviderExecutor
 from opensac.broker.session import BrokerSession, FlightGroup
 from opensac.models import HitRecord, ProviderAttemptRecord
 from opensac.provider import ProviderRequestError
+
+from ..providers.execution import CapabilityProviderError, ProviderExecutor
+from .documents import document_identity, source_for
 
 
 def _provider_attempts() -> list[ProviderAttemptRecord]:
@@ -39,7 +40,7 @@ class SearchCapabilities:
         self.max_search_queries_per_request = max_queries_per_request
         self.max_search_query_chars = max_query_chars
         self.max_search_top_k = max_top_k
-        self.inflight_coalescing = providers.inflight_coalescing
+        self.inflight_coalescing = providers.flights.enabled
 
     def _search_backend(self, state: BrokerSession) -> tuple[str, SearchBackend]:
         """The one backend this session searches.
@@ -254,8 +255,8 @@ class SearchCapabilities:
                 **request,
             }
         )
-        key = self.providers.flight_key(f"{backend_name}.search", fingerprint)
-        admission = await self.providers.admit_flights(
+        key = self.providers.flights.key(f"{backend_name}.search", fingerprint)
+        admission = await self.providers.flights.admit(
             state,
             {key: (fingerprint, [0])},
             group_new=False,
@@ -287,10 +288,10 @@ class SearchCapabilities:
                     batch = SearchBatch(query=query, hits=hits)
                 return {key: batch}
 
-            self.providers.start_flight_group(state, group, execute)
+            self.providers.flights.start(state, group, execute)
 
         batch = SearchBatch.model_validate(
-            await self.providers.await_flight(state, admission.waiters[key])
+            await self.providers.flights.wait(state, admission.waiters[key])
         )
         if batch.failure is not None:
             raise CapabilityProviderError.from_failure(
@@ -519,9 +520,9 @@ class SearchCapabilities:
 
         operation = f"{backend_name}.search"
         key_for_index = {
-            index: self.providers.flight_key(operation, fingerprints[index]) for index in leaders
+            index: self.providers.flights.key(operation, fingerprints[index]) for index in leaders
         }
-        admission = await self.providers.admit_flights(
+        admission = await self.providers.flights.admit(
             state,
             {key_for_index[index]: (fingerprints[index], [index]) for index in leaders},
             group_new=backend_name == "local" and isinstance(backend, BatchSearchBackend),
@@ -551,7 +552,7 @@ class SearchCapabilities:
                     )
                     return {key_for_index[index]: row for index, row in rows.items()}
 
-                self.providers.start_flight_group(state, group, execute_local)
+                self.providers.flights.start(state, group, execute_local)
                 continue
 
             if len(group_indexes) != 1:
@@ -591,11 +592,11 @@ class SearchCapabilities:
                         )
                 return {key: row}
 
-            self.providers.start_flight_group(state, group, execute_one)
+            self.providers.flights.start(state, group, execute_one)
 
         returned = await asyncio.gather(
             *(
-                self.providers.await_flight(state, admission.waiters[key_for_index[index]])
+                self.providers.flights.wait(state, admission.waiters[key_for_index[index]])
                 for index in leaders
             )
         )

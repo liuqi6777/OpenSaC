@@ -9,17 +9,27 @@ import pytest
 from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
-from opensac.broker.documents import document_identity
-from opensac.broker.provider_execution import CapabilityProviderError, ProviderExecutor
+from opensac.broker.capabilities.documents import document_identity
+from opensac.broker.providers import (
+    CapabilityProviderError,
+    ProviderExecutionConfig,
+    ProviderExecutor,
+)
+from opensac.broker.providers.cache import ProviderResultCache
 from opensac.broker.service import BrokerService
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
 
 
-def make_session(*, backend: str = "local") -> Session:
+def make_session(
+    *,
+    backend: str = "local",
+    session_id: str = "sess_provider",
+    token: str = "token",
+) -> Session:
     return Session(
-        id="sess_provider",
-        token="token",
+        id=session_id,
+        token=token,
         backends=[backend],
         workspace="/tmp/provider-session",
         mechanisms=Mechanisms(),
@@ -77,6 +87,53 @@ class LocalBackend:
             text=self.documents[docid],
             title=hit.title,
             metadata={"backend": "local", "docid": docid},
+        )
+
+
+class WebCacheBackend:
+    name = "web"
+    supports_domains = True
+    max_depth = 100
+    provider_identity = "web:cache-test"
+
+    def __init__(self) -> None:
+        self.search_calls = 0
+        self.fetch_calls = 0
+        self.failures_remaining = 0
+        self.block_first = False
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def search(self, query, *, limit, offset=0, domains=None):
+        del domains
+        self.search_calls += 1
+        if self.block_first and self.search_calls == 1:
+            self.started.set()
+            await self.release.wait()
+        if self.failures_remaining:
+            self.failures_remaining -= 1
+            raise ProviderRequestError(
+                "provider_unavailable",
+                "Provider is temporarily unavailable.",
+                retryable=True,
+            )
+        return [
+            SearchHit(
+                backend="web",
+                url=f"https://example.com/{query}",
+                title=query,
+                rank=offset + 1,
+            )
+        ][:limit]
+
+    async def fetch(self, hit, *, query=None):
+        del query
+        self.fetch_calls += 1
+        return ContentSnippet(
+            source=hit.source,
+            text=f"body for {hit.source}",
+            url=hit.url,
+            title=hit.title,
         )
 
 
@@ -648,3 +705,214 @@ async def test_content_cache_budget_counts_utf8_bytes() -> None:
     # The passage is one Unicode code point but two UTF-8 bytes, so it cannot
     # enter a one-byte cache and must be fetched again.
     assert backend.fetches == ["1", "1"]
+
+
+async def test_provider_result_cache_is_bounded_lru_ttl_and_returns_copies() -> None:
+    now = [0.0]
+    cache = ProviderResultCache(
+        ttl_seconds=1.0,
+        max_bytes=8,
+        clock=lambda: now[0],
+    )
+
+    assert await cache.put("first", {"v": 1}) is True
+    hit, first = await cache.get("first")
+    assert hit is True
+    first["v"] = 2
+    assert (await cache.get("first"))[1] == {"v": 1}
+
+    # Each compact object is seven bytes; inserting the second evicts the LRU.
+    assert await cache.put("second", {"v": 2}) is True
+    assert (await cache.get("first"))[0] is False
+    assert cache.snapshot()["evictions"] == 1
+
+    now[0] = 2.0
+    assert (await cache.get("second"))[0] is False
+    assert cache.snapshot()["evictions"] == 2
+    assert cache.key("provider-a", "web.search", "request") != cache.key(
+        "provider-b", "web.search", "request"
+    )
+
+
+async def test_web_provider_cache_reuses_search_and_scrape_across_sessions() -> None:
+    backend = WebCacheBackend()
+    service = BrokerService(
+        {"web": backend},
+        provider_execution_config=ProviderExecutionConfig(
+            result_cache_ttl_seconds=300,
+            result_cache_max_bytes=1_000_000,
+        ),
+    )
+    first = service.register_session(
+        make_session(backend="web", session_id="first", token="first-token")
+    )
+    second = service.register_session(
+        make_session(backend="web", session_id="second", token="second-token")
+    )
+    try:
+        first_source = (
+            await service.call(
+                "first-token",
+                "search.query",
+                {"query": "cached"},
+                execution_id="first-search",
+            )
+        )[0]["source"]
+        second_source = (
+            await service.call(
+                "second-token",
+                "search.query",
+                {"query": "cached"},
+                execution_id="second-search",
+            )
+        )[0]["source"]
+        await service.call(
+            "first-token",
+            "content.get_many",
+            {"sources": [first_source]},
+            execution_id="first-content",
+        )
+        rows = await service.call(
+            "second-token",
+            "content.get_many",
+            {"sources": [second_source]},
+            execution_id="second-content",
+        )
+    finally:
+        await service.aclose()
+
+    assert rows[0]["text"] == f"body for {first_source}"
+    assert backend.search_calls == 1
+    assert backend.fetch_calls == 1
+    assert first.policy.usage.search_provider_attempts == 1
+    assert first.policy.usage.content_backend_fetches == 1
+    assert second.policy.usage.search_provider_attempts == 0
+    assert second.policy.usage.content_backend_fetches == 0
+    assert second.policy.usage.provider_cache_hits == 2
+    search_trace = service.take_trace("second-token", "second-search")[0]
+    content_trace = service.take_trace("second-token", "second-content")[0]
+    assert search_trace.provider_attempts == []
+    assert content_trace.provider_attempts == []
+    assert search_trace.provider_cache_hits == 1
+    assert content_trace.provider_cache_hits == 1
+
+
+async def test_provider_cache_key_includes_backend_revision() -> None:
+    backend = WebCacheBackend()
+    service = BrokerService(
+        {"web": backend},
+        backend_revision="revision-a",
+        provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
+    )
+    service.register_session(make_session(backend="web", session_id="a", token="a"))
+    service.register_session(make_session(backend="web", session_id="b", token="b"))
+    try:
+        await service.call("a", "search.query", {"query": "revision"})
+        service.search.backend_revision = "revision-b"
+        await service.call("b", "search.query", {"query": "revision"})
+    finally:
+        await service.aclose()
+
+    assert backend.search_calls == 2
+
+
+async def test_provider_cache_coalesces_concurrent_cross_session_misses() -> None:
+    backend = WebCacheBackend()
+    backend.block_first = True
+    service = BrokerService(
+        {"web": backend},
+        provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
+    )
+    first = service.register_session(make_session(backend="web", session_id="a", token="a"))
+    second = service.register_session(make_session(backend="web", session_id="b", token="b"))
+    first_call = asyncio.create_task(
+        service.call("a", "search.query", {"query": "shared"}, execution_id="a-search")
+    )
+    await backend.started.wait()
+    second_call = asyncio.create_task(
+        service.call("b", "search.query", {"query": "shared"}, execution_id="b-search")
+    )
+    for _ in range(100):
+        if service.providers.result_cache.snapshot()["waiting"] == 1:
+            break
+        await asyncio.sleep(0)
+    backend.release.set()
+    try:
+        first_rows, second_rows = await asyncio.gather(first_call, second_call)
+    finally:
+        await service.aclose()
+
+    assert first_rows == second_rows
+    assert backend.search_calls == 1
+    assert first.policy.usage.provider_cache_misses == 1
+    assert second.policy.usage.provider_cache_misses == 1
+    attempts = sum(state.policy.usage.search_provider_attempts for state in (first, second))
+    coalesced = (
+        first.policy.usage.provider_coalesced_requests
+        + second.policy.usage.provider_coalesced_requests
+    )
+    assert attempts == 1
+    assert coalesced == 1
+    snapshot = service.providers.result_cache.snapshot()
+    assert snapshot["coalesced_waiters"] == 1
+    traces = [
+        service.take_trace("a", "a-search")[0],
+        service.take_trace("b", "b-search")[0],
+    ]
+    assert sorted(len(trace.provider_attempts) for trace in traces) == [0, 1]
+    assert sum(len(trace.coalesced_requests) for trace in traces) == 1
+
+
+async def test_provider_cache_does_not_store_failures_and_recovers_from_cancellation() -> None:
+    backend = WebCacheBackend()
+    backend.failures_remaining = 1
+    service = BrokerService(
+        {"web": backend},
+        provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
+    )
+    service.register_session(make_session(backend="web", session_id="a", token="a"))
+    service.register_session(make_session(backend="web", session_id="b", token="b"))
+    try:
+        with pytest.raises(ProviderRequestError):
+            await service.call("a", "search.query", {"query": "retry"})
+        rows = await service.call("b", "search.query", {"query": "retry"})
+    finally:
+        await service.aclose()
+
+    assert rows[0]["source"] == "https://example.com/retry"
+    assert backend.search_calls == 2
+
+    cancelling_backend = WebCacheBackend()
+    cancelling_backend.block_first = True
+    cancelling_service = BrokerService(
+        {"web": cancelling_backend},
+        provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
+    )
+    cancelling_service.register_session(
+        make_session(backend="web", session_id="cancel-a", token="cancel-a")
+    )
+    cancelling_service.register_session(
+        make_session(backend="web", session_id="cancel-b", token="cancel-b")
+    )
+    cancelled = asyncio.create_task(
+        cancelling_service.call("cancel-a", "search.query", {"query": "cancel"})
+    )
+    await cancelling_backend.started.wait()
+    follower = asyncio.create_task(
+        cancelling_service.call("cancel-b", "search.query", {"query": "cancel"})
+    )
+    for _ in range(100):
+        if cancelling_service.providers.result_cache.snapshot()["waiting"] == 1:
+            break
+        await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    cancelling_backend.release.set()
+    try:
+        recovered = await follower
+    finally:
+        await cancelling_service.aclose()
+
+    assert recovered[0]["source"] == "https://example.com/cancel"
+    assert cancelling_backend.search_calls == 2
