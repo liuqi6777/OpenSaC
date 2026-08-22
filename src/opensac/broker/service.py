@@ -56,6 +56,8 @@ class BrokerService:
         inflight_coalescing: bool = False,
         max_inflight_keys: int = 256,
         max_waiters_per_flight: int = 64,
+        provider_result_cache_ttl_seconds: float = 0.0,
+        provider_result_cache_max_bytes: int = 128_000_000,
         provider_runtime: ProviderRuntime | None = None,
         backend_revision: str = "",
     ) -> None:
@@ -122,6 +124,8 @@ class BrokerService:
             inflight_coalescing=bool(inflight_coalescing),
             max_inflight_keys=component_limits["max_inflight_keys"],
             max_waiters_per_flight=component_limits["max_waiters_per_flight"],
+            result_cache_ttl_seconds=provider_result_cache_ttl_seconds,
+            result_cache_max_bytes=provider_result_cache_max_bytes,
         )
         self.search = SearchCapabilities(
             backends,
@@ -354,6 +358,8 @@ class BrokerService:
             provider_attempts=list(context.provider_attempts),
             deduplicated_requests=list(context.deduplicated_requests),
             coalesced_requests=list(context.coalesced_requests),
+            provider_cache_hits=context.provider_cache_hits,
+            provider_cache_misses=context.provider_cache_misses,
             error_type=type(exc).__name__ if exc is not None else None,
             error=error,
             result_payload=result_payload,

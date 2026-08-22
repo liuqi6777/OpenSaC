@@ -185,6 +185,10 @@ class ApplicationRuntime:
             inflight_coalescing=settings.provider_inflight_coalescing,
             max_inflight_keys=settings.provider_max_inflight_keys,
             max_waiters_per_flight=settings.provider_max_waiters_per_key,
+            provider_result_cache_ttl_seconds=(
+                settings.provider_result_cache_ttl_seconds
+            ),
+            provider_result_cache_max_bytes=settings.provider_result_cache_max_bytes,
             provider_runtime=provider_runtime,
             backend_revision=settings.backend_revision,
         )
@@ -336,6 +340,12 @@ class ApplicationRuntime:
                     "enabled": self.settings.provider_inflight_coalescing,
                     "max_keys": self.settings.provider_max_inflight_keys,
                     "max_waiters_per_key": self.settings.provider_max_waiters_per_key,
+                },
+                "provider_result_cache": {
+                    "enabled": self.settings.provider_result_cache_ttl_seconds > 0,
+                    "ttl_seconds": self.settings.provider_result_cache_ttl_seconds,
+                    "max_bytes": self.settings.provider_result_cache_max_bytes,
+                    "operations": ["web.search", "web.scrape"],
                 },
             },
             "provider_policies": {
@@ -829,7 +839,13 @@ class ApplicationRuntime:
 
             state = self.bind_session(session)
             state.policy.require_active()
-            await state.policy.record_workspace_bytes(self.store.workspace_bytes(session))
+            workspace_precheck_started = time.monotonic()
+            existing_workspace_bytes = await asyncio.to_thread(
+                self.store.workspace_bytes,
+                session,
+            )
+            workspace_precheck_seconds = time.monotonic() - workspace_precheck_started
+            await state.policy.record_workspace_bytes(existing_workspace_bytes)
             state.policy.require_active()
             await state.policy.record_exec()
             sandbox_timeout = await state.policy.sandbox_timeout(
@@ -914,8 +930,15 @@ class ApplicationRuntime:
                         name=f"opensac-drain-{execution_id}",
                     )
                     trace = await asyncio.shield(drain_task)
-                    artifacts = self.store.artifacts(session, workspace)
-                    workspace_bytes = self.store.workspace_bytes(session, workspace)
+                    workspace_inventory_started = time.monotonic()
+                    inventory = await asyncio.to_thread(
+                        self.store.workspace_inventory,
+                        session,
+                        workspace,
+                    )
+                    workspace_inventory_seconds = time.monotonic() - workspace_inventory_started
+                    artifacts = inventory.artifacts
+                    workspace_bytes = inventory.total_bytes
             except asyncio.CancelledError:
                 if drain_task is None:
                     drain_task = asyncio.create_task(
@@ -980,8 +1003,10 @@ class ApplicationRuntime:
                 {
                     "session_queue_seconds": session_queue_seconds,
                     "prepare_seconds": prepare_seconds,
+                    "workspace_precheck_seconds": workspace_precheck_seconds,
                     "sandbox_queue_seconds": sandbox_queue_seconds,
                     "sandbox_execute_seconds": sandbox_execute_seconds,
+                    "workspace_inventory_seconds": workspace_inventory_seconds,
                     "postprocess_seconds": postprocess_seconds,
                     "server_total_seconds": time.monotonic() - server_started,
                 }
@@ -1131,6 +1156,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ]
         if runtime.settings.provider_inflight_coalescing:
             features.append("inflight_coalescing_v1")
+        if runtime.settings.provider_result_cache_ttl_seconds > 0:
+            features.append("provider_result_cache_v1")
         return PublicSession.model_validate(
             {
                 **session.model_dump(exclude={"token", "workspace"}),
@@ -1163,6 +1190,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "sandbox": runtime.sandbox_gate.snapshot(),
             "warm": warm_snapshot() if callable(warm_snapshot) else None,
             "broker": runtime.broker.capacity_gate.snapshot(),
+            "provider_cache": runtime.broker.providers.result_cache.snapshot(),
             "sessions": {
                 "capacity": settings.max_active_sessions,
                 "active": len(active_sessions),

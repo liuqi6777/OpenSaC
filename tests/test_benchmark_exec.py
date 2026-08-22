@@ -82,6 +82,7 @@ def test_health_metrics_extract_resource_peaks() -> None:
             "process": {"rss_bytes": 1000, "fd_count": 12},
             "sandbox": {"active": 3, "waiting": 4},
             "broker": {"active": 5, "waiting": 6},
+            "provider_cache": {"current_bytes": 2048, "entries": 2, "waiting": 1},
             "warm": {"active": 7, "waiting": 8},
             "sessions": {"active": 9, "executing": 10},
         }
@@ -90,5 +91,40 @@ def test_health_metrics_extract_resource_peaks() -> None:
     assert metrics["process.rss_bytes"] == 1000
     assert metrics["sandbox.waiting"] == 4
     assert metrics["broker.active"] == 5
+    assert metrics["provider_cache.current_bytes"] == 2048
+    assert metrics["provider_cache.entries"] == 2
     assert metrics["warm.waiting"] == 8
     assert metrics["sessions.executing"] == 10
+
+
+def test_aggregate_repetitions_summarizes_p95_and_throughput() -> None:
+    runs = [
+        {
+            "attempted_requests": 10,
+            "request_failures": 1,
+            "program_failures": 0,
+            "throughput_requests_per_second": 5.0,
+            "successful_requests_per_second": 4.5,
+            "latency_seconds": {"client_wall_seconds": {"p95": 0.4}},
+            "resource_peaks": {"process.rss_bytes": 100.0},
+        },
+        {
+            "attempted_requests": 12,
+            "request_failures": 0,
+            "program_failures": 1,
+            "throughput_requests_per_second": 7.0,
+            "successful_requests_per_second": 6.0,
+            "latency_seconds": {"client_wall_seconds": {"p95": 0.2}},
+            "resource_peaks": {"process.rss_bytes": 120.0},
+        },
+    ]
+
+    aggregate = benchmark_exec._aggregate_repetitions(8, runs)
+
+    assert aggregate["requested_concurrency"] == 8
+    assert aggregate["repetitions"] == 2
+    assert aggregate["attempted_requests"] == 22
+    assert aggregate["request_failures"] == 1
+    assert aggregate["throughput_requests_per_second"]["p50"] == 6.0
+    assert aggregate["latency_p95_seconds"]["client_wall_seconds"]["p50"] == pytest.approx(0.3)
+    assert aggregate["resource_peaks"]["process.rss_bytes"] == 120.0

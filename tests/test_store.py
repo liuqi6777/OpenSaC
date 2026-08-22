@@ -95,3 +95,21 @@ def test_workspace_snapshot_reports_files_the_budget_never_reached(tmp_path) -> 
 
     assert [f.path for f in snapshot.files] == ["a.jsonl"]
     assert snapshot.omitted == ["b.jsonl"]
+
+
+def test_workspace_inventory_collects_bytes_and_artifacts_in_one_walk(tmp_path) -> None:
+    store = StateStore(tmp_path)
+    session = store.create_session(SessionCreate(), backend="local")
+    workspace = tmp_path / "sessions" / session.id / "workspace"
+    nested = workspace / "nested"
+    nested.mkdir()
+    (workspace / "evidence.jsonl").write_text("é\n", encoding="utf-8")
+    (nested / "notes.txt").write_text("abc", encoding="utf-8")
+    (workspace / ".opensac-output.json").write_text("{}", encoding="utf-8")
+
+    inventory = store.workspace_inventory(session)
+
+    assert inventory.total_bytes == 3 + 3 + 2
+    assert set(inventory.artifacts) == {"evidence.jsonl", "nested/notes.txt"}
+    assert store.workspace_bytes(session) == inventory.total_bytes
+    assert store.artifacts(session) == inventory.artifacts

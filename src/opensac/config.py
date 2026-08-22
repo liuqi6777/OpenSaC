@@ -113,6 +113,11 @@ class Settings(BaseSettings):
     provider_inflight_coalescing: bool = False
     provider_max_inflight_keys: int = Field(default=256, ge=1)
     provider_max_waiters_per_key: int = Field(default=64, ge=1)
+    # Successful web search/scrape results may be shared across sessions for a
+    # short deployment-owned window. Zero keeps the cache disabled so upgrading
+    # does not change provider freshness or accounting by default.
+    provider_result_cache_ttl_seconds: float = Field(default=0.0, ge=0.0)
+    provider_result_cache_max_bytes: int = Field(default=128_000_000, ge=1)
 
     @model_validator(mode="after")
     def validate_provider_operation_maps(self) -> Settings:

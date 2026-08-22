@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -107,6 +108,8 @@ def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
         broker_socket=tmp_path / "broker.sock",
         provider_retry_profile="safe",
         provider_inflight_coalescing=True,
+        provider_result_cache_ttl_seconds=300,
+        provider_result_cache_max_bytes=2048,
         provider_operation_concurrency={"local.search": 3},
         provider_operation_requests_per_second={"local.search": 2.5},
         provider_operation_burst={"local.search": 2},
@@ -119,10 +122,17 @@ def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
         payload = client.post("/v1/sessions", json={}).json()
 
     assert "inflight_coalescing_v1" in payload["features"]
+    assert "provider_result_cache_v1" in payload["features"]
     assert payload["environment"]["capability_limits"]["inflight"] == {
         "enabled": True,
         "max_keys": 256,
         "max_waiters_per_key": 64,
+    }
+    assert payload["environment"]["capability_limits"]["provider_result_cache"] == {
+        "enabled": True,
+        "ttl_seconds": 300.0,
+        "max_bytes": 2048,
+        "operations": ["web.search", "web.scrape"],
     }
     local_policy = payload["environment"]["provider_policies"]["local.search"]
     assert local_policy["retry_profile"] == "safe"
@@ -464,8 +474,10 @@ def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None
         assert set(payload["timings"]) >= {
             "session_queue_seconds",
             "prepare_seconds",
+            "workspace_precheck_seconds",
             "sandbox_queue_seconds",
             "sandbox_execute_seconds",
+            "workspace_inventory_seconds",
             "postprocess_seconds",
             "server_total_seconds",
         }
@@ -547,12 +559,63 @@ def test_health_reports_capacity_and_warm_mode_is_selectable(
         "admitted": 0,
     }
     assert payload["broker"]["capacity"] == settings.max_concurrency
+    assert payload["provider_cache"] == {
+        "enabled": False,
+        "ttl_seconds": 0.0,
+        "capacity_bytes": 128_000_000,
+        "current_bytes": 0,
+        "entries": 0,
+        "hits": 0,
+        "misses": 0,
+        "evictions": 0,
+        "waiting": 0,
+        "coalesced_waiters": 0,
+        "inflight": 0,
+    }
     assert payload["warm"]["limit"] == 0
     assert payload["warm"]["capacity"] == 0
     assert payload["warm"]["active"] == 0
     assert payload["warm"]["waiting"] == 0
     assert payload["sessions"]["waiting"] == 0
     assert payload["state"] == "accepting"
+
+
+@pytest.mark.asyncio
+async def test_workspace_precheck_runs_off_the_event_loop(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = ApplicationRuntime(
+        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+    )
+    runtime.sandbox = RecordingSandbox()
+    session = runtime.store.create_session(SessionCreate(), backend="local")
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    original_workspace_bytes = runtime.store.workspace_bytes
+
+    def blocking_workspace_bytes(*args, **kwargs):
+        scan_started.set()
+        release_scan.wait(timeout=2)
+        return original_workspace_bytes(*args, **kwargs)
+
+    monkeypatch.setattr(runtime.store, "workspace_bytes", blocking_workspace_bytes)
+    execution = asyncio.create_task(
+        runtime.execute_code(session.id, ExecCreate(code="print('threaded scan')\n"))
+    )
+    try:
+        assert await asyncio.wait_for(asyncio.to_thread(scan_started.wait), timeout=1)
+        await asyncio.sleep(0)
+        assert execution.done() is False
+        release_scan.set()
+        result = await execution
+        assert result.timings["workspace_precheck_seconds"] > 0
+        assert result.timings["workspace_inventory_seconds"] >= 0
+    finally:
+        release_scan.set()
+        if not execution.done():
+            await asyncio.gather(execution, return_exceptions=True)
+        await runtime.stop()
 
 
 def test_exec_id_retries_return_the_persisted_result_and_conflicts_are_409(tmp_path) -> None:

@@ -201,6 +201,8 @@ class RunUsage(BaseModel):
     provider_retries: int = 0
     intra_call_deduplicated_items: int = 0
     provider_coalesced_requests: int = 0
+    provider_cache_hits: int = 0
+    provider_cache_misses: int = 0
     provider_queue_seconds: float = 0.0
     provider_rate_limit_wait_seconds: float = 0.0
     provider_backoff_seconds: float = 0.0
@@ -376,6 +378,8 @@ class CapabilityEvent(BaseModel):
     provider_attempts: list[ProviderAttemptRecord] = Field(default_factory=list)
     deduplicated_requests: list[DeduplicatedRequestRecord] = Field(default_factory=list)
     coalesced_requests: list[CoalescedRequestRecord] = Field(default_factory=list)
+    provider_cache_hits: int = 0
+    provider_cache_misses: int = 0
     error_type: str | None = None
     error: str | None = None
     # Only populated when the session disables context decoupling: the result
