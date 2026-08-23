@@ -278,7 +278,7 @@ layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
 
 | Goal | Document |
 | --- | --- |
-| Upgrade to v0.6.4 | [v0.6.4 release notes](docs/opensac-0.6.4.md) |
+| Upgrade to v0.6.5 | [v0.6.5 release notes](docs/opensac-0.6.5.md) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Connect Codex, Claude Code, CLI, or a custom agent | [Agent integrations](docs/agent-integrations.md) |
 | Configure the optional local retriever | [Local dense search](docs/local-search.md) |

@@ -55,6 +55,7 @@ from opensac.models import (
     ExecRecord,
     ExecRecordStatus,
     ExecResult,
+    ExecutionWarning,
     Mechanisms,
     ProgramRecord,
     RunUsage,
@@ -1017,6 +1018,7 @@ class ApplicationRuntime:
                 succeeded=bool(result.succeeded) if result else False,
                 output=result.output if result else None,
                 citations=result.citations if result else [],
+                warnings=self._execution_warnings(result.warnings if result else []),
                 error=rejection or (result.launch_error if result else None),
                 usage=self._session_usage(state),
                 artifacts=artifacts,
@@ -1041,6 +1043,18 @@ class ApplicationRuntime:
                     ),
                 )
             return response
+
+    @staticmethod
+    def _execution_warnings(values: Any) -> list[ExecutionWarning]:
+        if not isinstance(values, list):
+            return []
+        warnings: list[ExecutionWarning] = []
+        for value in values[:16]:
+            try:
+                warnings.append(ExecutionWarning.model_validate(value))
+            except (TypeError, ValueError):
+                continue
+        return warnings
 
     @staticmethod
     def _returned_trace(

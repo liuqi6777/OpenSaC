@@ -177,6 +177,40 @@ async def test_sac_runtime_settings_are_fixed(monkeypatch) -> None:
         await tool.aclose()
 
 
+def test_sac_observation_prioritizes_external_failure_warnings() -> None:
+    rendered = SacRunTool()._render(
+        {
+            "exit_code": 0,
+            "duration_seconds": 0.1,
+            "stdout": "successful passage",
+            "stderr": "",
+            "warnings": [
+                {
+                    "code": "external_result_failure",
+                    "method": "content.passages",
+                    "success_count": 1,
+                    "failure_count": 1,
+                    "failures": [
+                        {
+                            "source": "https://example.com/missing",
+                            "code": "provider_not_found",
+                            "message": "Document was not found.",
+                            "retryable": False,
+                        }
+                    ],
+                    "omitted_failure_count": 0,
+                }
+            ],
+            "usage": {"search_calls": 0, "content_fetches": 2},
+        }
+    )
+
+    assert rendered.index("warnings:") < rendered.index("stdout:")
+    assert "content.passages succeeded for 1 item(s); 1 failed" in rendered
+    assert "provider_not_found" in rendered
+    assert "successful passage" in rendered
+
+
 async def test_react_reuses_one_sac_session_and_closes_it() -> None:
     sessions_created = 0
     session_payloads: list[dict[str, Any]] = []

@@ -70,40 +70,6 @@ class CapabilityProviderError(RuntimeError):
             scope=failure.get("scope"),
         )
 
-    @classmethod
-    def from_failures(
-        cls,
-        failures: list[dict[str, Any]],
-        *,
-        attempts: int,
-    ) -> CapabilityProviderError:
-        """Promote a whole failed batch without overstating retryability."""
-
-        if not failures:
-            raise ValueError("at least one provider failure is required")
-        retryable = all(bool(failure.get("retryable")) for failure in failures)
-        representative = next(
-            (failure for failure in failures if not bool(failure.get("retryable"))),
-            failures[0],
-        )
-        aggregate = dict(representative)
-        aggregate["retryable"] = retryable
-        if retryable:
-            retry_after = [
-                float(value)
-                for failure in failures
-                if (value := failure.get("retry_after_seconds")) is not None
-            ]
-            if retry_after:
-                aggregate["retry_after_seconds"] = max(retry_after)
-        providers = {failure.get("provider") for failure in failures}
-        operations = {failure.get("operation") for failure in failures}
-        scopes = {failure.get("scope") for failure in failures}
-        aggregate["provider"] = providers.pop() if len(providers) == 1 else None
-        aggregate["operation"] = operations.pop() if len(operations) == 1 else None
-        aggregate["scope"] = scopes.pop() if len(scopes) == 1 else "unknown"
-        return cls.from_failure(aggregate, attempts=attempts)
-
 
 class ProviderExecutor:
     """Run, coalesce, trace, and cancel backend provider operations."""
@@ -282,36 +248,6 @@ class ProviderExecutor:
                 provider_status=contextualized.get("provider_status"),
             )
         return contextualized
-
-    @staticmethod
-    def is_systemic_search_failure(failure: dict[str, Any]) -> bool:
-        return str(failure.get("code") or "") in {
-            "provider_not_configured",
-            "provider_timeout",
-            "provider_rate_limited",
-            "provider_unavailable",
-            "provider_auth_failed",
-            "provider_http_error",
-            "provider_invalid_response",
-        }
-
-    @staticmethod
-    def is_systemic_content_failure(failure: dict[str, Any]) -> bool:
-        """Whether every document failing means the content service is down.
-
-        Permanent document and unexpected non-retryable HTTP failures remain
-        aligned rows: unlike a shared outage, they may be specific to the URL
-        or corpus entry the caller asked to fetch.
-        """
-
-        scope = failure.get("scope")
-        if scope in {"request", "resource", "unknown"}:
-            return False
-        return str(failure.get("code") or "") in {
-            "provider_rate_limited",
-            "provider_unavailable",
-            "provider_auth_failed",
-        }
 
     async def run(
         self,

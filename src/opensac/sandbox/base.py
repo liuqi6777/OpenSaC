@@ -50,6 +50,7 @@ class SandboxResult:
     # Appended to preserve the positional constructor contract for existing
     # alternate sandbox implementations.
     output_limit_exceeded: bool = False
+    warnings: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def succeeded(self) -> bool:

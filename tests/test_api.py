@@ -53,7 +53,8 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v10",
+            "capability_contract_v11",
+            "external_failure_warnings_v1",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
@@ -76,10 +77,10 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
-        assert payload["environment"]["sandbox_contract"] == 11
-        assert payload["environment"]["capability_contract"] == 10
+        assert payload["environment"]["sandbox_contract"] == 12
+        assert payload["environment"]["capability_contract"] == 11
         sdk_capabilities = payload["environment"]["sdk_capabilities"]
-        assert sdk_capabilities["contracts"] == {"sandbox": 11, "capability": 10}
+        assert sdk_capabilities["contracts"] == {"sandbox": 12, "capability": 11}
         assert sdk_capabilities["search"]["backend"] == "local"
         assert sdk_capabilities["search"]["supports_domains"] is False
         assert sdk_capabilities["llm"]["available"] is False
@@ -203,7 +204,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.6.4"
+    assert schema["info"]["version"] == "0.6.5"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
@@ -350,6 +351,35 @@ class RecordingSandbox:
         )
 
 
+class WarningSandbox(RecordingSandbox):
+    async def execute(self, request: SandboxRequest) -> SandboxResult:
+        self.requests.append(request)
+        return SandboxResult(
+            exit_code=0,
+            stdout="successful passage\n",
+            stderr="",
+            duration_seconds=0.1,
+            warnings=[
+                {
+                    "code": "external_result_failure",
+                    "method": "content.passages",
+                    "success_count": 1,
+                    "failure_count": 1,
+                    "failures": [
+                        {
+                            "source": "https://example.com/missing",
+                            "code": "provider_not_found",
+                            "message": "Document was not found.",
+                            "retryable": False,
+                        }
+                    ],
+                    "omitted_failure_count": 0,
+                },
+                {"malformed": True},
+            ],
+        )
+
+
 class TerminatedSandbox(RecordingSandbox):
     def __init__(self, *, timed_out: bool = False, output_limit_exceeded: bool = False):
         super().__init__()
@@ -491,6 +521,23 @@ def test_exec_runs_harness_authored_code_and_reports_artifacts(tmp_path) -> None
         assert sandbox.requests[0].execution_id
         # No control model was consulted: the caller supplied the program.
         assert sandbox.requests[0].code == "from opensac_sdk import sdk\n"
+
+
+def test_exec_returns_validated_external_failure_warnings(tmp_path) -> None:
+    sandbox = WarningSandbox()
+    with exec_client(tmp_path, sandbox) as client:
+        session_id = client.post("/v1/sessions", json={}).json()["id"]
+        response = client.post(
+            f"/v1/sessions/{session_id}/exec",
+            json={"code": "print('successful passage')\n"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["succeeded"] is True
+    assert len(payload["warnings"]) == 1
+    assert payload["warnings"][0]["method"] == "content.passages"
+    assert payload["warnings"][0]["failures"][0]["code"] == "provider_not_found"
 
 
 @pytest.mark.asyncio

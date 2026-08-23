@@ -19,7 +19,7 @@ endpoint exposed inside sandbox programs as `sdk.llm.*`.
 
 ## Prerequisites
 
-Start the public `v0.6.4` service image by following the main README's
+Start the public `v0.6.5` service image by following the main README's
 [Docker quick start](../README.md#quick-start-with-docker). The service itself needs no source
 checkout. PyPI publication is not planned, so a host that uses the CLI or MCP adapter should check
 out the matching release to install the adapter and skills:
@@ -27,7 +27,7 @@ out the matching release to install the adapter and skills:
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-git checkout v0.6.4
+git checkout v0.6.5
 uv tool install --editable /absolute/path/to/OpenSaC
 
 export SAC_API_BASE=http://127.0.0.1:8000
@@ -50,6 +50,10 @@ Wrap `POST /v1/sessions/{session_id}/exec`, or `OpenSAC.exec_code`, as a single 
 tool. Create one session when the rollout starts, reuse it across turns, and delete or abort it at
 the end. This preserves workspace files and session-bound local document IDs while keeping session
 IDs out of model-generated arguments. Public source URLs can be carried across sessions.
+
+Render the execution response's bounded `warnings` list before stdout. These warnings expose
+partial or complete external item failures even when generated code only prints successful values;
+they do not make an otherwise successful execution fail.
 
 The runnable [sac_agent](../sac_agent/README.md) package demonstrates a minimal OpenAI-compatible
 ReAct loop. For production harnesses, also handle leases, `worker_restarted`, `session_expired`,

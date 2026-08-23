@@ -249,18 +249,18 @@ async def test_jina_final_http_error_is_typed_and_does_not_expose_response_body(
     service.register_session(_session())
     try:
         source = (await service.call("token", "search.query", {"query": "seed"}))[0]["source"]
-        with pytest.raises(ProviderRequestError) as raised:
-            await service.call(
-                "token",
-                "content.passages",
-                {"query": "rankable", "sources": [source]},
-                execution_id="jina-final-error",
-            )
+        report = await service.call(
+            "token",
+            "content.passages",
+            {"query": "rankable", "sources": [source]},
+            execution_id="jina-final-error",
+        )
         trace = service.take_trace("token", "jina-final-error")[0]
     finally:
         await service.aclose()
 
-    assert raised.value.code == "provider_unavailable"
-    assert raised.value.attempts == 1
-    assert secret_body not in str(raised.value)
+    assert report["passages"][0]["ranker"] == "lexical:bm25"
+    assert report["warnings"][0]["code"] == "provider_unavailable"
+    assert report["warnings"][0]["attempts"] == 1
+    assert secret_body not in json.dumps(report)
     assert secret_body not in trace.model_dump_json()

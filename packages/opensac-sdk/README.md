@@ -15,7 +15,7 @@ can inspect one exact interface without calling the broker, for example:
 print(sdk.content.passages.__doc__)
 ```
 
-The v0.6.4 content surface separates one-source and batch reads:
+The v0.6.5 content surface separates one-source and batch reads:
 
 ```python
 row = sdk.content.read(source, offset=1, limit=200)

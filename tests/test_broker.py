@@ -13,13 +13,8 @@ from opensac.backends.rerank.base import PassageRerankResult
 from opensac.backends.rerank.jina import JinaPassageReranker
 from opensac.broker.call_context import trace_error_message
 from opensac.broker.capabilities.documents import canonical_url
-from opensac.broker.capabilities.llm import ExtractionInfrastructureError
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
-from opensac.broker.providers import (
-    CapabilityProviderError,
-    InflightCapacityError,
-    ProviderExecutionConfig,
-)
+from opensac.broker.providers import InflightCapacityError, ProviderExecutionConfig
 from opensac.broker.service import BrokerService
 from opensac.models import (
     CAPABILITY_METHODS,
@@ -359,13 +354,16 @@ async def test_searches_are_counted_and_never_capped() -> None:
     assert state.policy.usage.search_calls == 25
 
 
-async def test_search_many_raises_when_every_query_fails() -> None:
+async def test_search_many_returns_aligned_failures_when_every_query_fails() -> None:
     service = BrokerService({"web": BrokenBackend()})
     service.register_session(make_session())
-    with pytest.raises(CapabilityProviderError) as failed:
-        await service.call("token", "search.query_many", {"queries": ["one", "two"]})
-    assert failed.value.code == "provider_invalid_response"
-    assert failed.value.attempts == 2
+    rows = await service.call("token", "search.query_many", {"queries": ["one", "two"]})
+    assert [row["hits"] for row in rows] == [[], []]
+    assert [row["failure"]["code"] for row in rows] == [
+        "provider_invalid_response",
+        "provider_invalid_response",
+    ]
+    assert [row["failure"]["attempts"] for row in rows] == [1, 1]
 
 
 async def test_search_many_tolerates_partial_failure() -> None:
@@ -677,6 +675,7 @@ async def test_passages_empty_sources_and_exact_duplicates_are_successful() -> N
         "query": "evidence",
         "passages": [],
         "failures": [],
+        "warnings": [],
         "input_count": 0,
         "unique_source_count": 0,
     }
@@ -843,6 +842,34 @@ async def test_passage_reranker_maps_scores_by_index_even_when_results_are_unord
     assert rerank_attempts[0].request_indexes == [0, 1]
 
 
+async def test_invalid_reranker_result_falls_back_with_rerank_attempt_count() -> None:
+    class IncompleteReranker:
+        name = "test:incomplete"
+        provider_identity = "test:incomplete"
+
+        def preflight(self) -> None:
+            return None
+
+        async def rerank(self, query, documents):
+            del query, documents
+            return []
+
+    backend = PassageCorpusBackend(["alpha first"])
+    service = BrokerService({"web": backend}, passage_reranker=IncompleteReranker())
+    service.register_session(make_session())
+    source = (await service.call("token", "search.query", {"query": "seed"}))[0]["source"]
+
+    report = await service.call(
+        "token",
+        "content.passages",
+        {"query": "alpha", "sources": [source]},
+    )
+
+    assert report["passages"][0]["ranker"] == "lexical:bm25"
+    assert report["warnings"][0]["code"] == "provider_invalid_response"
+    assert report["warnings"][0]["attempts"] == 1
+
+
 async def test_passage_prefilter_keeps_eight_per_source_then_caps_globally_at_100() -> None:
     class CapturingReranker:
         name = "test:capture"
@@ -886,7 +913,7 @@ async def test_passage_prefilter_keeps_eight_per_source_then_caps_globally_at_10
     assert [counts[chr(97 + index)] for index in range(13)] == [*([8] * 12), 4]
 
 
-async def test_jina_mode_has_no_silent_lexical_fallback_but_empty_pages_succeed() -> None:
+async def test_jina_mode_falls_back_on_failure_but_empty_pages_need_no_warning() -> None:
     empty = BrokerService(
         {"web": PassageCorpusBackend([""])},
         passage_reranker=JinaPassageReranker(),
@@ -906,21 +933,21 @@ async def test_jina_mode_has_no_silent_lexical_fallback_but_empty_pages_succeed(
     )
     configured.register_session(make_session())
     source = (await configured.call("token", "search.query", {"query": "seed"}))[0]["source"]
-    with pytest.raises(ProviderRequestError) as raised:
-        await configured.call(
-            "token",
-            "content.passages",
-            {"query": "answer", "sources": [source]},
-            execution_id="passages-missing-jina",
-        )
+    fallback = await configured.call(
+        "token",
+        "content.passages",
+        {"query": "answer", "sources": [source]},
+        execution_id="passages-missing-jina",
+    )
 
-    assert raised.value.code == "provider_not_configured"
-    assert raised.value.attempts == 0
-    assert raised.value.provider == "jina_reranker"
-    assert raised.value.operation == "web.rerank"
-    assert raised.value.scope == "provider"
+    assert fallback["passages"][0]["ranker"] == "lexical:bm25"
+    assert fallback["warnings"][0]["code"] == "provider_not_configured"
+    assert fallback["warnings"][0]["attempts"] == 0
+    assert fallback["warnings"][0]["provider"] == "jina_reranker"
+    assert fallback["warnings"][0]["operation"] == "web.rerank"
+    assert fallback["warnings"][0]["scope"] == "provider"
     trace = configured.take_trace("token", "passages-missing-jina")[0]
-    assert trace.status == "error"
+    assert trace.status == "ok"
     assert not any(attempt.operation == "web.rerank" for attempt in trace.provider_attempts)
 
 
@@ -1209,26 +1236,27 @@ async def test_extract_many_keeps_partial_provider_failure_and_success_tokens() 
     assert "secret" not in event.model_dump_json()
 
 
-async def test_extract_many_raises_safe_typed_error_when_provider_fails_all_items() -> None:
+async def test_extract_many_returns_safe_failures_when_provider_fails_all_items() -> None:
     service, _ = make_scripted_llm_service(
         [RuntimeError("first secret"), RuntimeError("second secret")]
     )
-    with pytest.raises(ExtractionInfrastructureError) as raised:
-        await service.call(
-            "token",
-            "llm.extract_many",
-            {
-                "items": [1, 2],
-                "instruction": "extract",
-                "schema": {"type": "object"},
-                "concurrency": 1,
-            },
-            execution_id="exec-provider-down",
-        )
+    rows = await service.call(
+        "token",
+        "llm.extract_many",
+        {
+            "items": [1, 2],
+            "instruction": "extract",
+            "schema": {"type": "object"},
+            "concurrency": 1,
+        },
+        execution_id="exec-provider-down",
+    )
 
-    assert raised.value.code == "extraction_provider_unavailable"
-    assert raised.value.retryable is True
-    assert "secret" not in str(raised.value)
+    assert [row["data"] for row in rows] == [None, None]
+    assert [row["failure"]["code"] for row in rows] == [
+        "provider_error",
+        "provider_error",
+    ]
     event = service.take_trace("token", "exec-provider-down")[0]
     assert [attempt.error_code for attempt in event.model_attempts] == [
         "provider_error",
@@ -2215,7 +2243,7 @@ async def test_session_capabilities_reflect_backend_limits_and_mechanisms() -> N
 
     capabilities = await service.call("token", "session.capabilities", {})
 
-    assert capabilities["contracts"] == {"sandbox": 11, "capability": 10}
+    assert capabilities["contracts"] == {"sandbox": 12, "capability": 11}
     assert capabilities["search"] == {
         "backend": "local",
         "supports_domains": False,

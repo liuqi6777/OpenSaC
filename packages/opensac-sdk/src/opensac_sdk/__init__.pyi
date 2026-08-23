@@ -171,6 +171,7 @@ class _PassageReportRecord(Protocol):
     query: str
     passages: list[_PassageRecord]
     failures: list[_ContentFailureRecord]
+    warnings: list[_FailureRecord]
     input_count: int
     unique_source_count: int
 

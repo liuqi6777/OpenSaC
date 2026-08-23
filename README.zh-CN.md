@@ -258,7 +258,7 @@ uv run pytest
 
 | 目标 | 文档 |
 | --- | --- |
-| 升级到 v0.6.4 | [v0.6.4 版本说明](docs/opensac-0.6.4.md) |
+| 升级到 v0.6.5 | [v0.6.5 版本说明](docs/opensac-0.6.5.md) |
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |
 | 配置可选的本地检索器 | [本地稠密检索](docs/local-search.md) |

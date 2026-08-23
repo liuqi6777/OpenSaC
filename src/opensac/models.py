@@ -4,9 +4,9 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-CAPABILITY_CONTRACT = 10
+CAPABILITY_CONTRACT = 11
 
 
 def utc_now() -> datetime:
@@ -375,6 +375,44 @@ class CoalescedRequestRecord(BaseModel):
     request_fingerprint: str
 
 
+class FailureDiagnostic(BaseModel):
+    """One bounded provider/item failure safe for the control-model observation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_index: int | None = Field(default=None, ge=0)
+    query: str | None = Field(default=None, max_length=512)
+    source: str | None = Field(default=None, max_length=512)
+    code: str = Field(min_length=1, max_length=512)
+    message: str = Field(min_length=1, max_length=1_024)
+    retryable: bool
+    attempts: int | None = Field(default=None, ge=0)
+    provider_status: int | None = Field(default=None, ge=100, le=599)
+    retry_after_seconds: float | None = Field(default=None, ge=0.0)
+    provider: str | None = Field(default=None, max_length=512)
+    operation: str | None = Field(default=None, max_length=512)
+    scope: Literal["request", "resource", "provider", "unknown"] | None = None
+
+
+class ExecutionWarning(BaseModel):
+    """A bounded summary of external item failures from one SDK operation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Literal["external_result_failure"]
+    method: str = Field(min_length=1, max_length=128)
+    success_count: int = Field(ge=0)
+    failure_count: int = Field(ge=1)
+    failures: list[FailureDiagnostic] = Field(default_factory=list, max_length=8)
+    omitted_failure_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_counts(self) -> Self:
+        if len(self.failures) + self.omitted_failure_count != self.failure_count:
+            raise ValueError("warning failure counts must include retained and omitted failures")
+        return self
+
+
 class CapabilityEvent(BaseModel):
     sequence: int
     method: str
@@ -435,6 +473,7 @@ class ExecResult(BaseModel):
     succeeded: bool
     output: Any = None
     citations: list[str] = Field(default_factory=list)
+    warnings: list[ExecutionWarning] = Field(default_factory=list, max_length=16)
     # Set when the program never ran: rejected by the code validator, or the
     # sandbox container failed to start. Distinct from stderr, which carries
     # failures of a program that did run, because only the latter is something

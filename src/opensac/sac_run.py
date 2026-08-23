@@ -10,6 +10,7 @@ import httpx
 
 DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_OUTPUT_LIMIT = 32_000
+_WARNING_OUTPUT_LIMIT = 4_096
 _STATE_LOSS_CODES = frozenset({"session_expired", "worker_restarted"})
 
 
@@ -88,6 +89,12 @@ def render_observation(
         f"search_calls={usage.get('search_calls', 0)} "
         f"docs_fetched={usage.get('content_fetches', 0)}"
     ]
+    remaining = output_limit
+    warning_body = _render_warnings(payload.get("warnings"))
+    if warning_body and remaining > 0:
+        rendered = truncate_observation(warning_body, min(remaining, _WARNING_OUTPUT_LIMIT))
+        sections.append(f"warnings:\n{rendered}")
+        remaining -= len(rendered)
     bodies: list[tuple[str, str]] = []
     if str(payload.get("stdout") or "").strip():
         bodies.append(("stdout", str(payload["stdout"]).strip()))
@@ -101,7 +108,6 @@ def render_observation(
             )
         )
 
-    remaining = output_limit
     for label, body in bodies:
         if remaining <= 0:
             break
@@ -121,6 +127,40 @@ def render_observation(
     if len(sections) == 2 and not artifacts:
         sections.insert(1, "The program printed and submitted nothing.")
     return "\n\n".join(sections)
+
+
+def _render_warnings(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    lines: list[str] = []
+    for warning in value:
+        if not isinstance(warning, Mapping):
+            continue
+        method = str(warning.get("method") or "unknown")
+        success_count = int(warning.get("success_count") or 0)
+        failure_count = int(warning.get("failure_count") or 0)
+        lines.append(
+            f"OpenSAC external failure: {method} succeeded for "
+            f"{success_count} item(s); {failure_count} failed."
+        )
+        failures = warning.get("failures")
+        if isinstance(failures, list):
+            for failure in failures:
+                if not isinstance(failure, Mapping):
+                    continue
+                code = str(failure.get("code") or "unknown")
+                context = failure.get("source") or failure.get("query")
+                index = failure.get("input_index")
+                target = f" source={context}" if context else ""
+                if not target and index is not None:
+                    target = f" input_index={index}"
+                retryable = " retryable" if failure.get("retryable") else ""
+                message = str(failure.get("message") or "External operation failed.")
+                lines.append(f"- [{code}]{target}{retryable}: {message}")
+        omitted = int(warning.get("omitted_failure_count") or 0)
+        if omitted:
+            lines.append(f"- {omitted} more failure(s) omitted")
+    return "\n".join(lines)
 
 
 def truncate_observation(text: str, limit: int) -> str:

@@ -274,6 +274,119 @@ def test_search_many_returns_only_result_semantics() -> None:
     ]
 
 
+def test_search_many_records_all_failed_warning_without_raising(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class FailedManyTransport:
+        def call(self, method, params):
+            assert method == "search.query_many"
+            return wrap(
+                [
+                    {
+                        "query": query,
+                        "hits": [],
+                        "failure": {
+                            "code": "provider_timeout",
+                            "message": "Search provider timed out.",
+                            "retryable": True,
+                            "attempts": 3,
+                            "provider": "serper",
+                            "operation": "web.search",
+                            "scope": "provider",
+                        },
+                    }
+                    for query in params["queries"]
+                ]
+            )
+
+    search = SearchResource(FailedManyTransport())
+    batches = search.many(["one", "two"])
+    assert search.fuse_rrf(batches) == []
+
+    assert len(batches) == 2
+    assert all(batch.failure.code == "provider_timeout" for batch in batches)
+    warnings = json.loads(output_path.read_text(encoding="utf-8"))["warnings"]
+    assert len(warnings) == 1
+    warning = warnings[0]
+    assert warning["method"] == "search.many"
+    assert warning["success_count"] == 0
+    assert warning["failure_count"] == 2
+    assert [failure["query"] for failure in warning["failures"]] == ["one", "two"]
+    assert all(failure["provider"] == "serper" for failure in warning["failures"])
+
+
+def test_sdk_failure_warnings_are_strictly_bounded(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class FailedManyTransport:
+        def call(self, method, params):
+            assert method == "search.query_many"
+            return wrap(
+                [
+                    {
+                        "query": query,
+                        "hits": [],
+                        "failure": {
+                            "code": "provider_timeout",
+                            "message": "x" * 10_000,
+                            "retryable": True,
+                            "attempts": 3,
+                        },
+                    }
+                    for query in params["queries"]
+                ]
+            )
+
+    SearchResource(FailedManyTransport()).many([f"query-{index}" for index in range(64)])
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    encoded_warnings = json.dumps(
+        payload["warnings"], ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    warning = payload["warnings"][0]
+    assert len(encoded_warnings) <= 4_096
+    assert len(warning["failures"]) + warning["omitted_failure_count"] == 64
+
+
+def test_warning_budget_keeps_later_failure_summaries(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class FailedManyTransport:
+        def call(self, method, params):
+            return wrap(
+                [
+                    {
+                        "query": params["queries"][0],
+                        "hits": [],
+                        "failure": {
+                            "code": "provider_invalid_response" + "x" * 480,
+                            "message": "x" * 1_024,
+                            "retryable": False,
+                            "attempts": 1,
+                            "provider": "p" * 512,
+                            "operation": "o" * 512,
+                        },
+                    }
+                ]
+            )
+
+    search = SearchResource(FailedManyTransport())
+    for index in range(16):
+        search.many([f"query-{index}-" + "q" * 500])
+
+    warnings = json.loads(output_path.read_text(encoding="utf-8"))["warnings"]
+    encoded = json.dumps(warnings, ensure_ascii=False, separators=(",", ":")).encode()
+    assert len(warnings) == 16
+    assert len(encoded) <= 4_096
+    assert all(warning["failure_count"] == 1 for warning in warnings)
+    assert all(
+        len(warning["failures"]) + warning["omitted_failure_count"] == 1 for warning in warnings
+    )
+
+
 def _hit(source: str, rank: int, *, backend: str = "local", score: float | None = None):
     return record(
         {
@@ -486,7 +599,11 @@ def test_search_rrf_rejects_invalid_domain_policy(kwargs, message) -> None:
         SearchResource(FakeTransport()).fuse_rrf(batches, **kwargs)
 
 
-def test_search_rrf_skips_failed_batches_without_copying_their_errors() -> None:
+def test_search_rrf_skips_failed_batches_and_records_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
     failure = record(
         {
             "code": "provider_rate_limited",
@@ -503,6 +620,10 @@ def test_search_rrf_skips_failed_batches_without_copying_their_errors() -> None:
 
     assert result == []
     assert batch.failure == failure
+    warning = json.loads(output_path.read_text(encoding="utf-8"))["warnings"][0]
+    assert warning["method"] == "search.fuse_rrf"
+    assert warning["success_count"] == 0
+    assert warning["failures"][0]["query"] == "limited"
 
 
 def test_content_grep_returns_matches_and_source_aligned_status() -> None:
@@ -646,6 +767,39 @@ def test_content_read_accepts_one_source_and_returns_one_record() -> None:
     ]
 
 
+def test_content_read_returns_failed_row_and_records_warning(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class FailedReadTransport:
+        def call(self, method, params):
+            assert method == "content.read"
+            return record(
+                {
+                    "source": params["source"],
+                    "text": "",
+                    "failure": {
+                        "code": "provider_not_found",
+                        "message": "Document could not be fetched.",
+                        "retryable": False,
+                        "attempts": 1,
+                        "provider": "jina",
+                        "operation": "web.scrape",
+                        "scope": "resource",
+                    },
+                }
+            )
+
+    row = ContentResource(FailedReadTransport()).read("https://example.com/missing")
+
+    assert row.text == ""
+    assert row.failure.code == "provider_not_found"
+    warning = json.loads(output_path.read_text(encoding="utf-8"))["warnings"][0]
+    assert warning["success_count"] == 0
+    assert warning["failure_count"] == 1
+    assert warning["failures"][0]["source"] == "https://example.com/missing"
+
+
 def test_content_passages_returns_nested_records() -> None:
     class PassageTransport:
         def __init__(self) -> None:
@@ -744,13 +898,13 @@ def test_session_capabilities_is_a_broker_operation() -> None:
 
         def call(self, method, params):
             self.calls.append((method, params))
-            return record({"contracts": {"sandbox": 11, "capability": 10}})
+            return record({"contracts": {"sandbox": 12, "capability": 11}})
 
     transport = SessionTransport()
     capabilities = SessionResource(transport).capabilities()
 
-    assert capabilities.contracts.sandbox == 11
-    assert capabilities.contracts.capability == 10
+    assert capabilities.contracts.sandbox == 12
+    assert capabilities.contracts.capability == 11
     assert transport.calls == [("session.capabilities", {})]
 
 
@@ -959,6 +1113,37 @@ def test_output_submission(tmp_path) -> None:
     payload = json.loads(path.read_text())
     assert payload["output"] == {"answer": 42}
     assert payload["citations"] == ["https://example.com/source"]
+
+
+def test_output_submission_preserves_sdk_warnings(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(path))
+
+    class FailedContentTransport:
+        def call(self, method, params):
+            assert method == "content.get_many"
+            return wrap(
+                [
+                    {
+                        "source": params["sources"][0],
+                        "text": "",
+                        "failure": {
+                            "code": "provider_not_found",
+                            "message": "Document was not found.",
+                            "retryable": False,
+                            "attempts": 1,
+                        },
+                    }
+                ]
+            )
+
+    ContentResource(FailedContentTransport()).get_many(["https://example.com/missing"])
+    OutputResource(str(path)).submit({"answer": 42}, citations=["source_1"])
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["output"] == {"answer": 42}
+    assert payload["citations"] == ["source_1"]
+    assert payload["warnings"][0]["method"] == "content.get_many"
 
 
 def test_output_citations_do_not_call_the_broker(tmp_path) -> None:

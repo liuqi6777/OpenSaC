@@ -43,7 +43,9 @@ jobs:
         run: uv run pytest
 
       - name: Build distributions
-        run: uv build --all-packages --out-dir dist --clear
+        run: |
+          uv build --package opensac-sdk --out-dir dist --clear
+          uv build --package opensac --out-dir dist
 
       - name: Check distributions
         run: uvx --from twine twine check dist/*

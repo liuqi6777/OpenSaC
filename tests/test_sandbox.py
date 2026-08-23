@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 
 import pytest
@@ -19,6 +20,7 @@ from opensac.sandbox.docker import (
     broker_socket_mount_args,
     read_bounded_process_output,
 )
+from opensac.sandbox.docker_core import ExecutionWorkspace
 
 
 class _CompletedProcess:
@@ -136,7 +138,7 @@ async def test_sandbox_image_contract_is_inspected_once(
 
     async def create_process(*command: str, **_: object) -> _CompletedProcess:
         calls.append(command)
-        return _CompletedProcess(stdout=b"11\n")
+        return _CompletedProcess(stdout=b"12\n")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     verifier = DockerImageContractVerifier("opensac-test")
@@ -157,7 +159,7 @@ async def test_missing_sandbox_image_is_pulled_before_contract_check(
         [
             _CompletedProcess(returncode=1, stderr=b"No such image: published:0.6.0\n"),
             _CompletedProcess(stdout=b"pulled\n"),
-            _CompletedProcess(stdout=b"11\n"),
+            _CompletedProcess(stdout=b"12\n"),
         ]
     )
 
@@ -174,6 +176,46 @@ async def test_missing_sandbox_image_is_pulled_before_contract_check(
         ("pull", "published:0.6.0"),
         ("image", "inspect"),
     ]
+
+
+def test_execution_warnings_have_an_independent_output_budget(tmp_path) -> None:
+    workspace = ExecutionWorkspace.prepare(SandboxRequest("pass", tmp_path, "secret"))
+    submitted = {"output": {"answer": "x" * 100}, "citations": []}
+    warning = {
+        "code": "external_result_failure",
+        "method": "content.read_many",
+        "success_count": 1,
+        "failure_count": 1,
+        "failures": [{"code": "provider_timeout", "message": "timed out"}],
+        "omitted_failure_count": 0,
+    }
+    workspace.output_path.write_text(
+        json.dumps({**submitted, "warnings": [warning]}, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    value, stderr = workspace.read_output(
+        max_output_bytes=len(json.dumps(submitted, separators=(",", ":")).encode())
+    )
+
+    assert value == {**submitted, "warnings": [warning]}
+    assert stderr == ""
+
+
+def test_oversized_execution_warnings_do_not_discard_valid_output(tmp_path) -> None:
+    workspace = ExecutionWorkspace.prepare(SandboxRequest("pass", tmp_path, "secret"))
+    submitted = {"output": {"answer": 42}, "citations": []}
+    workspace.output_path.write_text(
+        json.dumps({**submitted, "warnings": ["x" * 5_000]}, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    value, stderr = workspace.read_output(
+        max_output_bytes=len(json.dumps(submitted, separators=(",", ":")).encode())
+    )
+
+    assert value == submitted
+    assert stderr == ""
 
 
 async def test_sandbox_image_pull_failure_is_reported(
@@ -213,7 +255,7 @@ async def test_cold_sandbox_rejects_stale_image_before_workspace_setup(
     result = await sandbox.execute(SandboxRequest("pass", workspace, "secret"))
 
     assert result.exit_code == 125
-    assert "has contract '2'; expected 11" in (result.launch_error or "")
+    assert "has contract '2'; expected 12" in (result.launch_error or "")
     assert not workspace.exists()
     assert len(calls) == 1
     assert calls[0][1:3] == ("image", "inspect")
