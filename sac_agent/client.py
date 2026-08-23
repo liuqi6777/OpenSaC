@@ -8,13 +8,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from openai import (
-    APIConnectionError,
-    APITimeoutError,
-    AsyncOpenAI,
-    InternalServerError,
-    RateLimitError,
-)
+from opensac import _optional
 
 _MODEL_TIMEOUT_SECONDS = 600.0
 _MODEL_MAX_RETRIES = 3
@@ -64,6 +58,15 @@ class ModelClient:
 
     def __init__(self, config: ModelConfig | None = None) -> None:
         self.config = config or ModelConfig.from_env()
+        _optional.require_extra("Control agent support", "agent", ("openai",))
+        from openai import (
+            APIConnectionError,
+            APITimeoutError,
+            AsyncOpenAI,
+            InternalServerError,
+            RateLimitError,
+        )
+
         kwargs: dict[str, Any] = {
             "api_key": self.config.api_key,
             "timeout": _MODEL_TIMEOUT_SECONDS,
@@ -71,6 +74,12 @@ class ModelClient:
         if self.config.base_url:
             kwargs["base_url"] = self.config.base_url
         self._client = AsyncOpenAI(**kwargs)
+        self._retryable = (
+            APIConnectionError,
+            APITimeoutError,
+            InternalServerError,
+            RateLimitError,
+        )
 
     async def complete(
         self,
@@ -89,17 +98,11 @@ class ModelClient:
             "max_tokens": _MODEL_MAX_TOKENS,
         }
 
-        retryable = (
-            APIConnectionError,
-            APITimeoutError,
-            InternalServerError,
-            RateLimitError,
-        )
         for attempt in range(_MODEL_MAX_RETRIES + 1):
             try:
                 response = await self._client.chat.completions.create(**request)
                 break
-            except retryable:
+            except self._retryable:
                 if attempt >= _MODEL_MAX_RETRIES:
                     raise
                 await asyncio.sleep(min(8.0, 0.5 * (2**attempt)))

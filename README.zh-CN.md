@@ -249,6 +249,10 @@ uv run ruff check .
 uv run pytest
 ```
 
+基础宿主安装不再包含可选的 pipeline model、MCP 和 control agent 依赖。开发对应集成时分别安装
+`opensac[llm]`、`opensac[mcp]`、`opensac[agent]` 或 `opensac[full]`；仓库测试使用的 `dev`
+extra 已包含全部可选依赖。
+
 运行 `uv run opensac serve` 可启动前台源码服务。只有测试尚未发布的 SDK 或沙箱改动时，才需要运行
 `uv run opensac build-sandbox`。仓库结构和贡献约定见 [AGENTS.md](AGENTS.md)。
 
@@ -258,7 +262,7 @@ uv run pytest
 
 | 目标 | 文档 |
 | --- | --- |
-| 升级到 v0.6.5 | [v0.6.5 版本说明](docs/opensac-0.6.5.md) |
+| 升级到 v0.6.6 | [v0.6.6 版本说明](docs/opensac-0.6.6.md) |
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |
 | 配置可选的本地检索器 | [本地稠密检索](docs/local-search.md) |

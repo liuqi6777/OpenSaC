@@ -111,12 +111,10 @@ class PassageCorpusBackend:
         index = int(str(hit.url).rsplit("/", 1)[-1])
         self.fetched.append(index)
         if index in self.fail:
-            return ContentSnippet(
-                source=hit.source,
-                text="",
-                title=hit.title,
-                url=hit.url,
-                metadata={"fetch_error": "secret upstream response"},
+            raise ProviderRequestError(
+                "provider_rejected",
+                "Provider rejected one document.",
+                retryable=False,
             )
         return ContentSnippet(
             source=hit.source,
@@ -1763,10 +1761,10 @@ class CountingBackend:
     async def fetch(self, hit, *, query=None):
         self.fetched.append(hit.docid)
         if hit.docid in self.fail:
-            return ContentSnippet(
-                source=hit.source,
-                text="",
-                metadata={"docid": hit.docid, "fetch_error": "HTTPError: 403"},
+            raise ProviderRequestError(
+                "provider_rejected",
+                "Provider rejected one document.",
+                retryable=False,
             )
         return ContentSnippet(
             source=hit.source,

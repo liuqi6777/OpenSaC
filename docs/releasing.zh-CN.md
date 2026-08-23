@@ -46,8 +46,7 @@ uv run python scripts/release.py
 
    ```bash
    git tag -a vX.Y.Z -m "OpenSAC X.Y.Z"
-   git push origin main
-   git push origin vX.Y.Z
+   git push --atomic origin main vX.Y.Z
    ```
 
 4. 如果是第一次发布，在 GitHub Packages 中把两个 GHCR package 调整为 Public。

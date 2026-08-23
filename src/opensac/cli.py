@@ -7,6 +7,7 @@ import typer
 import uvicorn
 
 from opensac import __version__
+from opensac._optional import MissingOptionalDependency
 from opensac.config import Settings
 from opensac.sandbox import SANDBOX_CONTRACT
 
@@ -30,7 +31,11 @@ def serve_mcp() -> None:
     """Start the local OpenSAC MCP server over stdio."""
     from opensac.mcp_server import run
 
-    run()
+    try:
+        run()
+    except MissingOptionalDependency as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
 
 
 @app.command("agent-run")

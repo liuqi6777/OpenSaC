@@ -4,9 +4,10 @@ import asyncio
 import json
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from openai import AsyncOpenAI
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI
 
 from opensac.backends.rerank.base import ClosablePassageReranker, PassageReranker
 from opensac.backends.search.base import ClosableSearchBackend, SearchBackend
