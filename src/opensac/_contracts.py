@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Self
+from collections import Counter
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -104,29 +105,44 @@ class ContentMatch(BaseModel):
     ``line`` is 1-indexed and is the same coordinate ``content.read`` takes as
     ``offset``, so locating and reading compose without arithmetic:
 
-        report = sdk.content.grep_report(sources, r"born in \\d{4}")
+        report = sdk.content.grep(sources, r"born in \\d{4}")
         match = report.matches[0]
-        window = sdk.content.read([match.source], offset=max(1, match.line - 5))
+        window = sdk.content.read(match.source, offset=max(1, match.line - 5))
     """
 
-    source: str
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(min_length=1, max_length=4_096)
     title: str = ""
-    line: int
+    line: int = Field(ge=1)
     text: str
     # Empty unless `context` was requested. Kept as two lists rather than one
     # so a program can tell which side of the match a line came from.
     before: list[str] = Field(default_factory=list)
     after: list[str] = Field(default_factory=list)
-    # Populated by grep_report so duplicate input sources remain distinguishable.
-    input_index: int | None = Field(default=None, ge=0)
+    # Duplicate input sources remain distinguishable by their request position.
+    input_index: int = Field(ge=0)
 
 
 class ContentFailure(BaseModel):
     """A source that could not be fetched while other content work succeeded."""
 
+    model_config = ConfigDict(extra="forbid")
+
     input_index: int = Field(ge=0)
-    source: str
+    source: str = Field(min_length=1, max_length=4_096)
     failure: CapabilityFailure
+
+
+class ContentReadWindow(BaseModel):
+    """One independently sliced source window for ``content.read_many``."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    source: str = Field(min_length=1, max_length=4_096)
+    offset: int = Field(default=1, ge=1)
+    limit: int = Field(default=200, ge=1, le=5_000)
+    max_chars: int = Field(default=100_000, ge=1, le=400_000)
 
 
 class PassageCoordinates(BaseModel):
@@ -185,12 +201,77 @@ class ContentPassageReport(BaseModel):
         return self
 
 
-class ContentGrepReport(BaseModel):
-    """Matches plus sources that grep could not inspect."""
+class ContentGrepSourceResult(BaseModel):
+    """The scan outcome for one input source."""
 
+    model_config = ConfigDict(extra="forbid")
+
+    input_index: int = Field(ge=0)
+    source: str = Field(min_length=1, max_length=4_096)
+    title: str = ""
+    match_count: int = Field(ge=0)
+    scan_complete: bool
+    failure: CapabilityFailure | None = None
+
+
+class ContentGrepReport(BaseModel):
+    """Flat matches plus complete, input-aligned source scan status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pattern: str = Field(min_length=1, max_length=4_096)
+    mode: Literal["regex", "literal"]
+    case_sensitive: bool
+    context: int = Field(ge=0, le=20)
+    max_matches_per_source: int = Field(ge=1, le=200)
     matches: list[ContentMatch] = Field(default_factory=list)
-    failures: list[ContentFailure] = Field(default_factory=list)
+    source_results: list[ContentGrepSourceResult] = Field(default_factory=list)
     input_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> Self:
+        if len(self.source_results) != self.input_count:
+            raise ValueError("source_results must align one-to-one with inputs")
+        expected_indexes = list(range(self.input_count))
+        if [row.input_index for row in self.source_results] != expected_indexes:
+            raise ValueError("source_results input indexes must be contiguous and ordered")
+
+        counts = Counter(match.input_index for match in self.matches)
+        for match in self.matches:
+            if match.input_index >= self.input_count:
+                raise ValueError("match input_index is outside the input range")
+            source_result = self.source_results[match.input_index]
+            if source_result.failure is not None:
+                raise ValueError("a failed source cannot contain matches")
+            if match.source != source_result.source:
+                raise ValueError("match source must equal its source result")
+
+        for row in self.source_results:
+            if row.match_count != counts[row.input_index]:
+                raise ValueError("source result match_count does not match flat matches")
+            if row.failure is not None:
+                if row.match_count or row.scan_complete:
+                    raise ValueError("a failed source must be incomplete with zero matches")
+            elif not row.scan_complete and row.match_count != self.max_matches_per_source:
+                raise ValueError("an incomplete scan must have reached the per-source limit")
+        return self
+
+
+class ExtractionRow(BaseModel):
+    """One input-aligned structured extraction result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0)
+    data: dict[str, Any] | None = None
+    failure: OperationError | None = None
+    attempts: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _validate_result(self) -> Self:
+        if (self.data is None) == (self.failure is None):
+            raise ValueError("exactly one of data or failure must be present")
+        return self
 
 
 class RpcRequest(BaseModel):

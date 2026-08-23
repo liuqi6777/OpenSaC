@@ -9,6 +9,7 @@ from opensac._contracts import SearchBatch, SearchHit
 from opensac.backends.search.base import BatchSearchBackend, SearchBackend
 from opensac.broker.call_context import current_call
 from opensac.broker.session import BrokerSession, FlightGroup
+from opensac.broker.validation import integer, optional_string_list, string
 from opensac.models import HitRecord, ProviderAttemptRecord
 from opensac.provider import ProviderRequestError
 
@@ -70,17 +71,13 @@ class SearchCapabilities:
         """Validate one query without executing it or charging usage."""
         backend_name, backend = self._search_backend(state)
         state.policy.require_backend(backend_name)
-        query = str(params.get("query", "")).strip()
-        if not query:
-            raise ValueError("query must not be empty")
-        if len(query) > self.max_search_query_chars:
-            raise ValueError(
-                f"query has {len(query)} characters, exceeding the broker maximum "
-                f"of {self.max_search_query_chars}"
-            )
-        domains = params.get("domains")
-        if domains is not None and not isinstance(domains, list):
-            raise ValueError("domains must be a list when provided")
+        query = string(
+            params.get("query", ""),
+            "query",
+            strip=True,
+            max_chars=self.max_search_query_chars,
+        )
+        domains = optional_string_list(params.get("domains"), "domains")
         # Refused rather than dropped. A backend-neutral method name is only
         # honest if a parameter it cannot honour fails loudly: a program that
         # asked for one site and silently got the whole web draws exactly the
@@ -111,12 +108,8 @@ class SearchCapabilities:
         limit_key: str = "limit",
     ) -> tuple[int, int]:
         """Validate a requested retrieval window before clipping or fan-out."""
-        limit = max(int(params.get(limit_key, 10)), 1)
-        offset = max(int(params.get("offset", 0)), 0)
-        if limit > 100:
-            raise ValueError(f"{limit_key} must be at most 100, got {limit}")
-        if offset > 500:
-            raise ValueError(f"offset must be at most 500, got {offset}")
+        limit = integer(params.get(limit_key, 10), limit_key, minimum=1, maximum=100)
+        offset = integer(params.get("offset", 0), "offset", minimum=0, maximum=500)
         depth = offset + limit
         if depth > self.max_search_top_k:
             raise ValueError(
@@ -242,7 +235,7 @@ class SearchCapabilities:
         backend_name, _backend, query, domains, limit, offset = self._prepare_search(state, params)
         await state.policy.record_search()
         normalized_domains = (
-            sorted({str(domain).strip() for domain in domains if str(domain).strip()})
+            sorted(set(domains))
             if domains
             else None
         )
@@ -318,15 +311,17 @@ class SearchCapabilities:
                 f"query_many contains {len(raw_queries)} queries, exceeding the "
                 f"broker maximum of {self.max_search_queries_per_request}"
             )
-        queries = [str(query) for query in raw_queries]
+        if any(not isinstance(query, str) for query in raw_queries):
+            raise ValueError("queries must contain only strings")
+        queries = list(raw_queries)
         limit, offset = self._search_window(params, limit_key="limit_per_query")
-        domains_value = params.get("domains")
-        if domains_value is not None and not isinstance(domains_value, list):
-            raise ValueError("domains must be a list when provided")
-        domains = (
-            sorted({str(domain).strip() for domain in domains_value if str(domain).strip()})
-            if domains_value
-            else None
+        domains_value = optional_string_list(params.get("domains"), "domains")
+        domains = sorted(set(domains_value)) if domains_value else None
+        concurrency = integer(
+            params.get("concurrency", 5),
+            "concurrency",
+            minimum=1,
+            maximum=20,
         )
         backend_name, backend = self._search_backend(state)
         state.policy.require_backend(backend_name)
@@ -415,7 +410,7 @@ class SearchCapabilities:
                 offset=offset,
                 domains=domains,
                 request=request,
-                concurrency=min(max(int(params.get("concurrency", 5)), 1), 20),
+                concurrency=concurrency,
             )
         elif leaders and backend_name == "local" and isinstance(backend, BatchSearchBackend):
             leader_rows = await self._search_many_batched(
@@ -429,7 +424,7 @@ class SearchCapabilities:
                 request=request,
             )
         else:
-            gate = asyncio.Semaphore(min(max(int(params.get("concurrency", 5)), 1), 20))
+            gate = asyncio.Semaphore(concurrency)
 
             async def one(index: int) -> SearchBatch:
                 async with gate:

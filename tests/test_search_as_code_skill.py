@@ -15,8 +15,8 @@ from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 
 from opensac._contracts import (
     CapabilityFailure,
-    ContentFailure,
     ContentGrepReport,
+    ContentGrepSourceResult,
     ContentMatch,
     ContentSnippet,
     SearchBatch,
@@ -161,7 +161,7 @@ class FakeContent:
     def grep_widths(self) -> list[int]:
         return [len(sources) for _, sources in self.grep_calls]
 
-    def grep_report(self, sources: list[str], pattern: str, **_kwargs: object) -> ContentGrepReport:
+    def grep(self, sources: list[str], pattern: str, **_kwargs: object) -> ContentGrepReport:
         self.grep_calls.append((pattern, tuple(sources)))
         if self.grep_error:
             raise BrokerError(
@@ -187,40 +187,44 @@ class FakeContent:
                     text="1998" if is_year else "target phrase",
                 )
             ]
-        failures = (
-            [
-                ContentFailure(
-                    input_index=len(sources) - 1,
-                    source=sources[-1],
-                    failure=CapabilityFailure(
-                        code="provider_timeout",
-                        message="document fetch timed out",
-                        retryable=True,
-                        attempts=3,
-                    ),
-                )
-            ]
-            if self.partial_failure
-            else []
+        failed_index = len(sources) - 1 if self.partial_failure else None
+        failure = CapabilityFailure(
+            code="provider_timeout",
+            message="document fetch timed out",
+            retryable=True,
+            attempts=3,
         )
+        source_results = [
+            ContentGrepSourceResult(
+                input_index=index,
+                source=source,
+                title=source,
+                match_count=sum(match.input_index == index for match in matches),
+                scan_complete=index != failed_index,
+                failure=failure if index == failed_index else None,
+            )
+            for index, source in enumerate(sources)
+        ]
         return ContentGrepReport(
+            pattern=pattern,
+            mode="regex",
+            case_sensitive=False,
+            context=2,
+            max_matches_per_source=20,
             matches=matches,
-            failures=failures,
+            source_results=source_results,
             input_count=len(sources),
         )
 
-    def read(self, sources: list[str], **kwargs: object) -> list[ContentSnippet]:
-        source = sources[0]
+    def read(self, source: str, **kwargs: object) -> ContentSnippet:
         self.read_sources.append(source)
         offset = int(kwargs["offset"])
         text = f"{'1998' if offset > 50 else 'target phrase'} evidence for {source}"
-        return [
-            ContentSnippet(
-                source=source,
-                title=source,
-                text=text,
-            )
-        ]
+        return ContentSnippet(
+            source=source,
+            title=source,
+            text=text,
+        )
 
 
 class FakeOutput:
@@ -398,7 +402,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.search.fuse_rrf(" in explore
     assert "fuse_rrf(batches, k=60)[:8]" in explore
     assert "NEXT:" in explore
-    assert "sdk.content.grep_report(" not in explore
+    assert "sdk.content.grep(" not in explore
     assert "sdk.output.submit(" not in explore
 
     assert "sdk.search.many(" in rank
@@ -411,7 +415,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.search.many(" not in verify
     assert "NEXT:" in verify
     assert '"source": passage.source' in verify
-    assert verify.index("sdk.content.grep_report(") < verify.index("sdk.content.read(")
+    assert verify.index("sdk.content.grep(") < verify.index("sdk.content.read(")
     assert verify.index("sdk.content.read(") < verify.index("sdk.output.submit(")
     assert verify.count("sdk.output.submit(") == 1
 
@@ -429,7 +433,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert '"source_policy": source_policy' in stateful
     assert "ordered_sources" in stateful
     assert "attempted[name]" in stateful
-    assert "grep_report(list(pool)" not in stateful
+    assert "grep(list(pool)" not in stateful
     assert "sdk.output.submit(" in stateful
 
     stateful_reference = STATEFUL_PATH.read_text(encoding="utf-8")

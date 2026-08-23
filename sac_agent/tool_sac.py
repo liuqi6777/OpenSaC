@@ -43,7 +43,7 @@ from opensac_sdk import BrokerError, sdk
 Core SDK surface:
 
 - Search with `sdk.search.many(...)`; combine batches with `sdk.search.fuse_rrf(...)`.
-- Inspect documents with `sdk.content.grep_report(...)` and `sdk.content.read(...)`; read offsets
+- Inspect documents with `sdk.content.grep(...)` and `sdk.content.read(...)`; read offsets
   are 1-indexed.
 - Use `sdk.llm.extract_many(...)` only for bounded semantic mapping.
 - Persist optional research state with `sdk.state`—there is no `sdk.workspace` API. Inspect
@@ -80,12 +80,12 @@ import re
 
 sources = ["selected-source-url"]
 pattern = r"target phrase"
-report = sdk.content.grep_report(sources, pattern, context=2)
+report = sdk.content.grep(sources, pattern, context=2)
 passage = None
 for match in report.matches[:4]:
     item = sdk.content.read(
-        [match.source], offset=max(match.line - 8, 1), limit=30, max_chars=12_000
-    )[0]
+        match.source, offset=max(match.line - 8, 1), limit=30, max_chars=12_000
+    )
     if item.failure is None and re.search(pattern, item.text, re.IGNORECASE):
         passage = item
         break

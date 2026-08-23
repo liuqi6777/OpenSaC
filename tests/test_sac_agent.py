@@ -68,7 +68,7 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
         compile(example, "<sac-agent-prompt-example>", "exec")
     assert "sdk.search.many(" in examples[1]
     assert 'print("NEXT: choose sources and checks")' in examples[1]
-    assert examples[2].index("sdk.content.grep_report(") < examples[2].index("sdk.content.read(")
+    assert examples[2].index("sdk.content.grep(") < examples[2].index("sdk.content.read(")
     assert examples[2].index("sdk.content.read(") < examples[2].index("sdk.output.submit(")
 
 

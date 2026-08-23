@@ -8,12 +8,20 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from opensac._contracts import ContentPassage, ContentPassageReport, ContentSnippet, SearchHit
+from opensac._contracts import (
+    ContentGrepReport,
+    ContentPassage,
+    ContentPassageReport,
+    ContentReadWindow,
+    ContentSnippet,
+    SearchHit,
+)
 from opensac.backends.document import document_fetch_candidates
 from opensac.backends.rerank.base import PassageReranker
 from opensac.backends.search.base import SearchBackend
 from opensac.broker.call_context import current_call
 from opensac.broker.session import BrokerSession, FlightGroup
+from opensac.broker.validation import boolean, integer, string
 from opensac.models import HitRecord, PassageTraceRecord, ProviderAttemptRecord
 from opensac.provider import ProviderRequestError
 
@@ -206,6 +214,17 @@ class ContentCapabilities:
         if "sources" not in params:
             raise ValueError("content requests must provide sources")
         return params["sources"]
+
+    @staticmethod
+    def _content_source_argument(params: dict[str, Any]) -> str:
+        if "sources" in params:
+            raise ValueError("content.read uses singular source; use read_many for batches")
+        if "source" not in params:
+            raise ValueError("content.read must provide source")
+        source = params["source"]
+        if not isinstance(source, str):
+            raise ValueError("content source must be a string")
+        return source
 
     async def get_many(
         self,
@@ -426,7 +445,7 @@ class ContentCapabilities:
             unique_source_count=len(unique),
         ).model_dump(mode="json")
 
-    # `read` and `grep_report` share a 1-indexed line contract: a match line is
+    # `read`, `read_many`, and `grep` share a 1-indexed line contract: a match line is
     # directly usable as a read offset. Both operate on normalized backend text
     # and remain independent of the selected search provider.
 
@@ -438,79 +457,127 @@ class ContentCapabilities:
         self,
         state: BrokerSession,
         params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        sources = self._content_sources_argument(params)
-        hits = self._resolve_content_sources(state, sources)
+    ) -> dict[str, Any]:
+        source = self._content_source_argument(params)
+        offset = integer(params.get("offset", 1), "offset", minimum=1)
+        limit = integer(params.get("limit", 200), "limit", minimum=1, maximum=5_000)
+        max_chars = integer(
+            params.get("max_chars", 100_000),
+            "max_chars",
+            minimum=1,
+            maximum=400_000,
+        )
+        hits = self._resolve_content_sources(state, [source])
         rows = await self._fetch_content(state, hits, query=None)
-        # 1-indexed, and an offset below 1 is clamped rather than refused: a
-        # program computing `match.line - 5` near the top of a document is
-        # asking for the beginning, not making an error.
-        offset = max(int(params.get("offset", 1)), 1)
-        limit = min(max(int(params.get("limit", 200)), 1), 5_000)
-        # A line is not a fixed amount of text. In the local corpus a line is a
-        # sentence; in a scraped web page it is often a whole section, so the
-        # same `limit` spans two orders of magnitude between backends. This is
-        # a ceiling on the response, not a budget the program is meant to
-        # manage -- generous enough that ordinary reading never meets it.
-        max_chars = min(max(int(params.get("max_chars", 100_000)), 1), 400_000)
-        windows: list[dict[str, Any]] = []
-        for _hit, row in zip(hits, rows, strict=True):
-            lines = self._document_lines(row)
-            total = len(lines)
-            window = lines[offset - 1 : offset - 1 + limit]
-            # Trim by whole lines, so `end_line` keeps meaning what it says and
-            # a follow-up read resumes on a real boundary.
-            clipped = False
-            while window and len("\n".join(window)) > max_chars and len(window) > 1:
-                window.pop()
-                clipped = True
-            text = "\n".join(window)
-            partial_line = len(window) == 1 and len(text) > max_chars
-            if partial_line:
-                text = text[:max_chars]
-                clipped = True
-            end = offset - 1 + len(window)
-            metadata = {
-                **row.get("metadata", {}),
-                "start_line": offset if window else 0,
-                "end_line": end,
-                "total_lines": total,
-                # None at end of document, so `while next_offset:` is a correct
-                # scroll loop.
-                "next_offset": end + 1 if end < total else None,
+        return self._slice_content_row(
+            rows[0],
+            offset=offset,
+            limit=limit,
+            max_chars=max_chars,
+        )
+
+    async def read_many(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        raw_windows = params.get("windows")
+        if not isinstance(raw_windows, list):
+            raise ValueError("windows must be a list")
+        if len(raw_windows) > self.max_content_sources_per_request:
+            raise ValueError(
+                f"content request contains {len(raw_windows)} windows, exceeding the "
+                f"broker maximum of {self.max_content_sources_per_request}"
+            )
+        windows = [ContentReadWindow.model_validate(window) for window in raw_windows]
+        hits = self._resolve_content_sources(state, [window.source for window in windows])
+        rows = await self._fetch_content(state, hits, query=None)
+        return [
+            {
+                **self._slice_content_row(
+                    row,
+                    offset=window.offset,
+                    limit=window.limit,
+                    max_chars=window.max_chars,
+                ),
+                "input_index": input_index,
             }
-            if clipped:
-                metadata["truncated_by_max_chars"] = True
-            if partial_line:
-                # The public read coordinate is line-based, so a single line
-                # cannot be resumed mid-line. Report the partial window
-                # explicitly instead of claiming the prefix represents the whole line.
-                metadata["truncated_mid_line"] = True
-                metadata["partial_line_remaining_chars"] = len(window[0]) - len(text)
-            result = {**row, "text": text, "metadata": metadata}
-            windows.append(result)
-        return windows
+            for input_index, (window, row) in enumerate(zip(windows, rows, strict=True))
+        ]
+
+    def _slice_content_row(
+        self,
+        row: dict[str, Any],
+        *,
+        offset: int,
+        limit: int,
+        max_chars: int,
+    ) -> dict[str, Any]:
+        lines = self._document_lines(row)
+        total = len(lines)
+        window = lines[offset - 1 : offset - 1 + limit]
+        # A line can be much larger than the line count suggests. Trim whole
+        # lines first so end_line remains a resumable coordinate.
+        clipped = False
+        while window and len("\n".join(window)) > max_chars and len(window) > 1:
+            window.pop()
+            clipped = True
+        text = "\n".join(window)
+        partial_line = len(window) == 1 and len(text) > max_chars
+        if partial_line:
+            text = text[:max_chars]
+            clipped = True
+        end = offset - 1 + len(window)
+        metadata = {
+            **row.get("metadata", {}),
+            "start_line": offset if window else 0,
+            "end_line": end,
+            "total_lines": total,
+            "next_offset": end + 1 if end < total else None,
+        }
+        if clipped:
+            metadata["truncated_by_max_chars"] = True
+        if partial_line:
+            metadata["truncated_mid_line"] = True
+            metadata["partial_line_remaining_chars"] = len(window[0]) - len(text)
+        return {**row, "text": text, "metadata": metadata}
 
     @staticmethod
-    def _compile_pattern(pattern: str) -> re.Pattern[str]:
-        """Case-insensitive, and a malformed regex degrades to a literal search.
-
-        A program that meant to search for ``C++ (programming)`` should get its
-        matches rather than a traceback about an unbalanced parenthesis.
-        """
+    def _compile_pattern(
+        pattern: str,
+        *,
+        mode: str,
+        case_sensitive: bool,
+    ) -> re.Pattern[str]:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        expression = pattern if mode == "regex" else re.escape(pattern)
         try:
-            return re.compile(pattern, flags=re.IGNORECASE)
-        except re.error:
-            return re.compile(re.escape(pattern), flags=re.IGNORECASE)
+            return re.compile(expression, flags=flags)
+        except re.error as exc:
+            raise ValueError(f"pattern is not a valid regular expression: {exc}") from None
 
-    async def grep_report(
+    async def grep(
         self,
         state: BrokerSession,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        pattern = str(params.get("pattern", ""))
-        if not pattern:
-            raise ValueError("pattern must not be empty")
+        pattern = string(params.get("pattern", ""), "pattern", max_chars=4_096)
+        mode = params.get("mode", "regex")
+        if mode not in {"regex", "literal"}:
+            raise ValueError("mode must be 'regex' or 'literal'")
+        case_sensitive = boolean(params.get("case_sensitive", False), "case_sensitive")
+        context = integer(params.get("context", 0), "context", minimum=0, maximum=20)
+        max_per_source = integer(
+            params.get("max_matches_per_source", 20),
+            "max_matches_per_source",
+            minimum=1,
+            maximum=200,
+        )
+        regex = self._compile_pattern(
+            pattern,
+            mode=mode,
+            case_sensitive=case_sensitive,
+        )
         sources = self._content_sources_argument(
             params,
             legacy_options=("max_matches_per_ref",),
@@ -522,15 +589,9 @@ class ContentCapabilities:
             query=None,
             raise_on_all_failures=False,
         )
-        regex = self._compile_pattern(pattern)
-        context = min(max(int(params.get("context", 0)), 0), 20)
-        # Bounded per document rather than in total: an unbounded grep over 50
-        # candidates is how a program fills its own output budget with one call,
-        # and a global cap would let the first document starve the other 49.
-        max_per_source = min(max(int(params.get("max_matches_per_source", 20)), 1), 200)
         matches: list[dict[str, Any]] = []
-        failures: list[dict[str, Any]] = []
-        for input_index, (_hit, row) in enumerate(zip(hits, rows, strict=True)):
+        source_results: list[dict[str, Any]] = []
+        for input_index, (hit, row) in enumerate(zip(hits, rows, strict=True)):
             failure = row.get("failure")
             if failure is None and row.get("metadata", {}).get("fetch_error"):
                 failure = {
@@ -540,19 +601,21 @@ class ContentCapabilities:
                     "attempts": 1,
                 }
             if failure is not None:
-                failures.append(
+                source_results.append(
                     {
                         "input_index": input_index,
-                        "source": row.get("source", ""),
+                        "source": row.get("source") or hit.source,
+                        "title": row.get("title") or hit.title or "",
+                        "match_count": 0,
+                        "scan_complete": False,
                         "failure": failure,
                     }
                 )
                 continue
             lines = self._document_lines(row)
             found = 0
+            scan_complete = True
             for index, line in enumerate(lines):
-                if found >= max_per_source:
-                    break
                 if not regex.search(line):
                     continue
                 found += 1
@@ -568,11 +631,29 @@ class ContentCapabilities:
                     "input_index": input_index,
                 }
                 matches.append(match)
-        return {
-            "matches": matches,
-            "failures": failures,
-            "input_count": 1 if isinstance(sources, str) else len(sources),
-        }
+                if found >= max_per_source and index < len(lines) - 1:
+                    scan_complete = False
+                    break
+            source_results.append(
+                {
+                    "input_index": input_index,
+                    "source": row.get("source") or hit.source,
+                    "title": row.get("title") or hit.title or "",
+                    "match_count": found,
+                    "scan_complete": scan_complete,
+                    "failure": None,
+                }
+            )
+        return ContentGrepReport(
+            pattern=pattern,
+            mode=mode,
+            case_sensitive=case_sensitive,
+            context=context,
+            max_matches_per_source=max_per_source,
+            matches=matches,
+            source_results=source_results,
+            input_count=1 if isinstance(sources, str) else len(sources),
+        ).model_dump(mode="json")
 
     async def _fetch_content(
         self,

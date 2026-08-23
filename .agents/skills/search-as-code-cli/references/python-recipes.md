@@ -133,7 +133,7 @@ accepted = []
 suggested_queries = []
 if extraction_error is None:
     for passage, item, result in zip(usable, items, results, strict=True):
-        if result.error is not None:
+        if result.failure is not None:
             continue
         data = result.data or {}
         quote = data.get("evidence_quote")

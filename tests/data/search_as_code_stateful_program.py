@@ -163,12 +163,14 @@ for name, spec in constraints.items():
         chunk = available[start : start + CONTENT_BATCH]
         attempted[name].update(chunk)
         try:
-            report = sdk.content.grep_report(chunk, pattern, context=2)
+            report = sdk.content.grep(chunk, pattern, context=2)
         except BrokerError as error:
             print(f"grep failed: {name} code={error.code} retryable={error.retryable}")
             break
 
-        for failed in report.failures:
+        for failed in report.source_results:
+            if failed.failure is None:
+                continue
             print(
                 f"fetch failed: {name} input={failed.input_index} "
                 f"code={failed.failure.code} attempts={failed.failure.attempts}"
@@ -184,11 +186,11 @@ for name, spec in constraints.items():
             reads_for_constraint += 1
             try:
                 passage = sdk.content.read(
-                    [match.source],
+                    match.source,
                     offset=max(match.line - 10, 1),
                     limit=40,
                     max_chars=16_000,
-                )[0]
+                )
             except BrokerError as error:
                 print(f"read failed: {name} code={error.code}")
                 continue

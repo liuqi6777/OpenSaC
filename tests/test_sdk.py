@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -51,6 +52,14 @@ def test_package_root_exposes_only_runtime_entrypoints() -> None:
             importlib.import_module(f"opensac_sdk.{module}")
 
 
+def test_sdk_package_publishes_typing_metadata() -> None:
+    package = Path(opensac_sdk.__file__).parent
+    assert (package / "py.typed").is_file()
+    stub = package / "__init__.pyi"
+    assert stub.is_file()
+    assert "def read_many(" in stub.read_text(encoding="utf-8")
+
+
 def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
     declared = {(operation.resource, operation.method) for operation in SDK_SURFACE}
     assert len(declared) == len(SDK_SURFACE)
@@ -72,10 +81,13 @@ def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
 
 def test_surface_manifest_keeps_model_core_small() -> None:
     model_core = [operation for operation in SDK_SURFACE if operation.model_core]
-    assert len(model_core) <= 12
+    assert len(SDK_SURFACE) == 24
+    assert len([item for item in SDK_SURFACE if item.tier is not SurfaceTier.INTERNAL]) == 22
+    assert len(model_core) == 11
     assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
     assert not hasattr(ContentResource, "snippets")
-    assert not hasattr(ContentResource, "grep")
+    assert hasattr(ContentResource, "grep")
+    assert not hasattr(ContentResource, "grep_report")
 
 
 def test_public_resources_and_operations_have_bounded_runtime_docs() -> None:
@@ -487,7 +499,7 @@ def test_search_rrf_skips_failed_batches_without_copying_their_errors() -> None:
     assert batch.failure == failure
 
 
-def test_content_grep_report_returns_matches_and_source_aligned_failures() -> None:
+def test_content_grep_returns_matches_and_source_aligned_status() -> None:
     class GrepTransport:
         def __init__(self) -> None:
             self.calls = []
@@ -496,6 +508,11 @@ def test_content_grep_report_returns_matches_and_source_aligned_failures() -> No
             self.calls.append((method, params))
             return record(
                 {
+                    "pattern": "target",
+                    "mode": "literal",
+                    "case_sensitive": True,
+                    "context": 2,
+                    "max_matches_per_source": 4,
                     "matches": [
                         {
                             "source": "source_1",
@@ -504,10 +521,21 @@ def test_content_grep_report_returns_matches_and_source_aligned_failures() -> No
                             "input_index": 0,
                         }
                     ],
-                    "failures": [
+                    "source_results": [
+                        {
+                            "input_index": 0,
+                            "source": "source_1",
+                            "title": "One",
+                            "match_count": 1,
+                            "scan_complete": True,
+                            "failure": None,
+                        },
                         {
                             "input_index": 1,
                             "source": "source_2",
+                            "title": "Two",
+                            "match_count": 0,
+                            "scan_complete": False,
                             "failure": {
                                 "code": "provider_not_found",
                                 "message": "Document was not found",
@@ -522,9 +550,11 @@ def test_content_grep_report_returns_matches_and_source_aligned_failures() -> No
             )
 
     transport = GrepTransport()
-    report = ContentResource(transport).grep_report(
+    report = ContentResource(transport).grep(
         ["source_1", "source_2"],
         "target",
+        mode="literal",
+        case_sensitive=True,
         context=2,
         max_matches_per_source=4,
     )
@@ -532,19 +562,80 @@ def test_content_grep_report_returns_matches_and_source_aligned_failures() -> No
     assert isinstance(report, Record)
     assert report.matches[0].source == "source_1"
     assert report.matches[0].line == 3
-    assert report.failures[0].input_index == 1
-    assert report.failures[0].failure.code == "provider_not_found"
-    assert report.failures[0].failure.provider_status == 404
+    assert report.source_results[0].scan_complete is True
+    assert report.source_results[1].input_index == 1
+    assert report.source_results[1].failure.code == "provider_not_found"
+    assert report.source_results[1].failure.provider_status == 404
     assert report.input_count == 2
     assert transport.calls == [
         (
-            "content.grep_report",
+            "content.grep",
             {
                 "sources": ["source_1", "source_2"],
                 "pattern": "target",
+                "mode": "literal",
+                "case_sensitive": True,
                 "context": 2,
                 "max_matches_per_source": 4,
             },
+        )
+    ]
+
+
+def test_content_read_many_validates_and_forwards_windows() -> None:
+    transport = FakeTransport()
+    rows = ContentResource(transport).read_many(
+        [
+            {"source": "source_1", "offset": 4, "limit": 7},
+            {"source": "source_1", "max_chars": 50},
+        ]
+    )
+
+    assert rows[0].source == "source_1"
+    assert transport.calls == [
+        (
+            "content.read_many",
+            {
+                "windows": [
+                    {
+                        "source": "source_1",
+                        "offset": 4,
+                        "limit": 7,
+                        "max_chars": 100_000,
+                    },
+                    {
+                        "source": "source_1",
+                        "offset": 1,
+                        "limit": 200,
+                        "max_chars": 50,
+                    },
+                ]
+            },
+        )
+    ]
+
+    with pytest.raises(ValueError, match="unsupported field"):
+        ContentResource(transport).read_many([{"source": "source_1", "unknown": 1}])
+
+
+def test_content_read_accepts_one_source_and_returns_one_record() -> None:
+    class ReadTransport:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def call(self, method, params):
+            self.calls.append((method, params))
+            return record({"source": params["source"], "text": "body"})
+
+    transport = ReadTransport()
+    row = ContentResource(transport).read("source_1", offset=3, limit=4, max_chars=50)
+
+    assert row.source == "source_1"
+    assert row.text == "body"
+    assert transport.calls == [
+        (
+            "content.read",
+            {"source": "source_1", "offset": 3, "limit": 4, "max_chars": 50},
         )
     ]
 
@@ -615,10 +706,46 @@ def test_content_rejects_record_inputs_before_transport() -> None:
 
     with pytest.raises(ValueError, match="input index 0 must be a string"):
         content.get_many([record({"source": "https://example.com"})])
-    with pytest.raises(ValueError, match="input index 0 must not be empty"):
-        content.read(["  "])
+    with pytest.raises(ValueError, match="source must not be empty"):
+        content.read("  ")
 
     assert transport.calls == []
+
+
+def test_sdk_rejects_invalid_public_parameters_before_transport() -> None:
+    transport = FakeTransport()
+
+    with pytest.raises(ValueError, match="query must be a string"):
+        SearchResource(transport)(42)
+    with pytest.raises(ValueError, match="limit must be an integer"):
+        SearchResource(transport)("query", limit=True)
+    with pytest.raises(ValueError, match="offset must be at least 1"):
+        ContentResource(transport).read("source_1", offset=0)
+    with pytest.raises(ValueError, match="mode"):
+        ContentResource(transport).grep(["source_1"], "target", mode="auto")
+    with pytest.raises(ValueError, match="temperature"):
+        LLMResource(transport).complete("prompt", temperature=float("nan"))
+    with pytest.raises(ValueError, match="concurrency"):
+        LLMResource(transport).complete_many(["prompt"], concurrency=0)
+
+    assert transport.calls == []
+
+
+def test_session_capabilities_is_a_broker_operation() -> None:
+    class SessionTransport:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def call(self, method, params):
+            self.calls.append((method, params))
+            return record({"contracts": {"sandbox": 10, "capability": 9}})
+
+    transport = SessionTransport()
+    capabilities = SessionResource(transport).capabilities()
+
+    assert capabilities.contracts.sandbox == 10
+    assert capabilities.contracts.capability == 9
+    assert transport.calls == [("session.capabilities", {})]
 
 
 class ExtractionTransport:
@@ -634,11 +761,11 @@ class ExtractionTransport:
 def test_extract_many_returns_aligned_records_and_forwards_repair() -> None:
     transport = ExtractionTransport(
         [
-            {"index": 0, "data": {"matches": True}, "error": None, "attempts": 1},
+            {"index": 0, "data": {"matches": True}, "failure": None, "attempts": 1},
             {
                 "index": 1,
                 "data": None,
-                "error": {
+                "failure": {
                     "code": "schema_mismatch",
                     "message": "matches is required",
                     "retryable": False,
@@ -662,8 +789,8 @@ def test_extract_many_returns_aligned_records_and_forwards_repair() -> None:
 
     assert isinstance(results[0], Record)
     assert results[0].data.matches is True
-    assert results[1].error.code == "schema_mismatch"
-    assert results[1].error.message == "matches is required"
+    assert results[1].failure.code == "schema_mismatch"
+    assert results[1].failure.message == "matches is required"
     assert transport.calls[0] == (
         "llm.extract_many",
         {
@@ -685,9 +812,9 @@ def test_extract_many_rejects_non_json_values_before_transport() -> None:
     transport = ExtractionTransport([])
     llm = LLMResource(transport)
 
-    with pytest.raises(ValueError, match="schema must be JSON serializable"):
+    with pytest.raises(ValueError, match="schema must contain only strict JSON values"):
         llm.extract_many([], instruction="x", schema={"matches": bool})
-    with pytest.raises(ValueError, match=r"items\[1\] must be JSON serializable"):
+    with pytest.raises(ValueError, match=r"items\[1\] must contain only strict JSON values"):
         llm.extract_many([{"ok": 1}, {"bad": float("nan")}], instruction="x", schema={})
     with pytest.raises(ValueError, match="repair_attempts"):
         llm.extract_many([], instruction="x", schema={}, repair_attempts=2)
@@ -701,6 +828,22 @@ def test_state_round_trip_and_path_confinement(tmp_path) -> None:
     assert state.read_jsonl("nested/data.jsonl") == [{"a": 1}, {"a": 2}]
     with pytest.raises(ValueError, match="inside"):
         state.write_json("../escape.json", {})
+
+
+def test_state_rejects_non_json_without_replacing_existing_artifacts(tmp_path) -> None:
+    state = StateResource(str(tmp_path))
+    state.write_json("value.json", {"ok": "世界"})
+    state.write_jsonl("rows.jsonl", [{"ok": 1}])
+
+    with pytest.raises(ValueError, match="strict JSON"):
+        state.write_json("value.json", {"bad": {1, 2}})
+    with pytest.raises(ValueError, match=r"rows\[1\]"):
+        state.write_jsonl("rows.jsonl", [{"ok": 2}, {"bad": float("nan")}])
+    with pytest.raises(ValueError, match=r"rows\[0\]"):
+        state.append_jsonl("rows.jsonl", [{"bad": float("inf")}])
+
+    assert state.read_json("value.json").ok == "世界"
+    assert state.read_jsonl("rows.jsonl") == [{"ok": 1}]
 
 
 def test_state_accumulates_across_calls_without_rewriting(tmp_path) -> None:
