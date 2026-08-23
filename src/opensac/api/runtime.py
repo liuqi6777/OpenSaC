@@ -140,7 +140,6 @@ class ApplicationRuntime:
                     provider_policies["local.search"].attempt_timeout_seconds,
                     provider_policies["local.document"].attempt_timeout_seconds,
                 ),
-                fetch_concurrency=settings.backend_fetch_concurrency,
             )
         else:
             search_backend = SerperBackend(
@@ -150,7 +149,6 @@ class ApplicationRuntime:
                     provider_policies["web.search"].attempt_timeout_seconds,
                     provider_policies["web.scrape"].attempt_timeout_seconds,
                 ),
-                fetch_concurrency=settings.backend_fetch_concurrency,
             )
         passage_reranker = (
             JinaPassageReranker(

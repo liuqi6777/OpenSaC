@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from opensac._contracts import SearchHit
+from opensac.backends._response import json_object
 from opensac.backends.search import local_http
 from opensac.backends.search import serper as serper_module
 from opensac.backends.search.local_http import LocalSearchBackend, parse_document_frontmatter
@@ -25,15 +26,38 @@ DOCUMENT_TEXT = (
 
 
 class FakeResponse:
-    def __init__(self, payload: dict[str, Any], *, text: str = "") -> None:
+    def __init__(self, payload: Any, *, text: str = "") -> None:
         self._payload = payload
         self.text = text
 
     def raise_for_status(self) -> None:
         return None
 
-    def json(self) -> dict[str, Any]:
+    def json(self) -> Any:
         return self._payload
+
+
+def test_provider_json_object_accepts_mapping_payload() -> None:
+    assert json_object(FakeResponse({"result": "ok"})) == {"result": "ok"}
+
+
+def test_provider_json_object_rejects_non_object_payload() -> None:
+    with pytest.raises(ProviderRequestError) as raised:
+        json_object(FakeResponse(["not", "an", "object"]))
+
+    assert raised.value.code == "provider_invalid_response"
+
+
+def test_provider_json_object_sanitizes_decode_failure() -> None:
+    class InvalidJsonResponse:
+        def json(self) -> Any:
+            raise ValueError("secret provider response")
+
+    with pytest.raises(ProviderRequestError) as raised:
+        json_object(InvalidJsonResponse())
+
+    assert raised.value.code == "provider_invalid_response"
+    assert "secret provider response" not in str(raised.value)
 
 
 class FakeClient:

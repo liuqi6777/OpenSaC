@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 
 import httpx
@@ -12,6 +13,7 @@ from opensac.backends.search.serper import SerperBackend
 from opensac.broker.capabilities.documents import document_identity
 from opensac.broker.providers import ProviderExecutionConfig, ProviderExecutor
 from opensac.broker.providers.cache import ProviderResultCache
+from opensac.broker.providers.serialization import canonical_json_bytes
 from opensac.broker.service import BrokerService
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
@@ -305,6 +307,32 @@ def test_provider_fingerprint_normalizes_model_mapping_order() -> None:
     )
 
     assert ProviderExecutor.fingerprint(first) == ProviderExecutor.fingerprint(second)
+
+
+def test_provider_canonical_serialization_preserves_normalization_rules() -> None:
+    class ModelLike:
+        def model_dump(self, *, mode: str) -> dict[str, int]:
+            assert mode == "json"
+            return {"beta": 2, "alpha": 1}
+
+    class Fallback:
+        def __str__(self) -> str:
+            return "fallback"
+
+    cases = [
+        ({"beta": 2, "alpha": 1}, b'{"alpha":1,"beta":2}'),
+        ({"tags": {"beta", "alpha"}}, b'{"tags":["alpha","beta"]}'),
+        ({"model": ModelLike()}, b'{"model":{"alpha":1,"beta":2}}'),
+        ({"value": Fallback()}, b'{"value":"fallback"}'),
+    ]
+
+    for value, expected in cases:
+        encoded = canonical_json_bytes(value)
+        digest = hashlib.sha256(encoded).hexdigest()
+
+        assert encoded == expected
+        assert ProviderExecutor.fingerprint(value) == f"sha256:v1:{digest}"
+        assert ProviderResultCache._encoded_size(value) == len(encoded)
 
 
 async def test_local_query_many_deduplicates_before_one_transport_microbatch() -> None:

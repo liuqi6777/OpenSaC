@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
 from opensac._contracts import ContentSnippet, RetrievalMetadata, SearchHit
+from opensac.backends._response import json_object
 from opensac.provider import ProviderRequestError, invalid_provider_response
 
 
@@ -120,7 +120,7 @@ class SerperBackend:
             json={"q": query, "num": depth},
         )
         response.raise_for_status()
-        payload = self._json_object(response)
+        payload = json_object(response)
         organic = payload.get("organic", [])
         if not isinstance(organic, list) or not all(isinstance(hit, dict) for hit in organic):
             raise invalid_provider_response()
@@ -132,16 +132,6 @@ class SerperBackend:
             ]
         except (TypeError, ValueError) as exc:
             raise invalid_provider_response() from exc
-
-    @staticmethod
-    def _json_object(response: Any) -> dict[str, Any]:
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise invalid_provider_response() from exc
-        if not isinstance(payload, dict):
-            raise invalid_provider_response()
-        return payload
 
     def _normalize_hit(self, hit: dict, rank: int) -> SearchHit:
         url = str(hit.get("link", "") or "")

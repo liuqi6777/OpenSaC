@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import time
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
+
+from .serialization import canonical_json_bytes
 
 
 @dataclass(slots=True)
@@ -66,23 +67,7 @@ class ProviderResultCache:
 
     @staticmethod
     def _encoded_size(value: Any) -> int:
-        def normalize(item: Any) -> Any:
-            model_dump = getattr(item, "model_dump", None)
-            if callable(model_dump):
-                return model_dump(mode="json")
-            if isinstance(item, set):
-                return sorted(item, key=repr)
-            return str(item)
-
-        return len(
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                default=normalize,
-            ).encode("utf-8")
-        )
+        return len(canonical_json_bytes(value))
 
     def _remove(self, key: str) -> None:
         entry = self._entries.pop(key, None)
