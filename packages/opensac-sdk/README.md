@@ -14,3 +14,15 @@ can inspect one exact interface without calling the broker, for example:
 ```python
 print(sdk.content.passages.__doc__)
 ```
+
+The v0.6.4 content surface separates one-source and batch reads:
+
+```python
+row = sdk.content.read(source, offset=1, limit=200)
+rows = sdk.content.read_many([{"source": source, "offset": 201, "limit": 200}])
+report = sdk.content.grep(sources, pattern, mode="regex", context=2)
+```
+
+See the complete API reference in
+[English](https://github.com/liuqi6777/OpenSaC/blob/main/docs/sdk-reference.md) or
+[Chinese](https://github.com/liuqi6777/OpenSaC/blob/main/docs/sdk-reference.zh-CN.md).

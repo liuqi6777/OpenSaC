@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -52,11 +53,11 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v8",
+            "capability_contract_v9",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
-            "content_grep_report_v1",
+            "content_grep_v2",
             "direct_web_content_v1",
             "lightweight_url_citations_v1",
             "intra_call_dedupe_v1",
@@ -75,8 +76,14 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
-        assert payload["environment"]["sandbox_contract"] == 9
-        assert payload["environment"]["capability_contract"] == 8
+        assert payload["environment"]["sandbox_contract"] == 10
+        assert payload["environment"]["capability_contract"] == 9
+        sdk_capabilities = payload["environment"]["sdk_capabilities"]
+        assert sdk_capabilities["contracts"] == {"sandbox": 10, "capability": 9}
+        assert sdk_capabilities["search"]["backend"] == "local"
+        assert sdk_capabilities["search"]["supports_domains"] is False
+        assert sdk_capabilities["llm"]["available"] is False
+        assert "secret" not in json.dumps(sdk_capabilities).lower()
         capability_limits = payload["environment"]["capability_limits"]
         assert capability_limits["extract_many"]["max_items"] == 12
         assert capability_limits["content"]["max_sources_per_request"] == 256
@@ -196,7 +203,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.6.3"
+    assert schema["info"]["version"] == "0.6.4"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 

@@ -43,11 +43,15 @@ Content core:
 sdk.content.passages(
     query, sources, limit=20, max_per_source=3
 ) -> record
-sdk.content.grep_report(
-    sources, pattern, context=0, max_matches_per_source=20
+sdk.content.grep(
+    sources, pattern, mode="regex", case_sensitive=False,
+    context=0, max_matches_per_source=20
 ) -> record
 sdk.content.read(
-    sources, offset=1, limit=200, max_chars=100_000
+    source, offset=1, limit=200, max_chars=100_000
+) -> record
+sdk.content.read_many(
+    [{"source": source, "offset": 1, "limit": 200, "max_chars": 100_000}]
 ) -> list[record]
 ```
 
@@ -55,6 +59,7 @@ Session, state, and output:
 
 ```python
 sdk.session.usage() -> dict
+sdk.session.capabilities() -> dict
 sdk.state.write_json(path, value)
 sdk.state.write_jsonl(path, rows)
 sdk.state.append_jsonl(path, rows)
@@ -91,15 +96,17 @@ error; keep a deterministic fallback.
 - Fused candidate: the search-hit fields plus `provenance`, `raw_fused_score`, `domain_weight`,
   `fused_score`, and `fused_rank`.
 - Content row: `source`, `text`, `title`, `date`, `failure`, `metadata`.
-- Grep report: `matches`, `failures`, `input_count`. A match includes `source`, `title`, `line`,
-  `text`, `before`, `after`, and `input_index`.
+- Grep report: `pattern`, `mode`, `case_sensitive`, `context`, `max_matches_per_source`, `matches`,
+  `source_results`, and `input_count`. A match includes `source`, `title`, `line`, `text`, `before`,
+  `after`, and `input_index`. Each input-aligned source result includes `input_index`, `source`,
+  `title`, `match_count`, `scan_complete`, and `failure`.
 - Passage report: `query`, `passages`, `failures`, `input_count`, `unique_source_count`. A passage
   includes `source`, source metadata, exact `text`, `coordinates`, `rank`, `score`, and `ranker`.
 - Coordinates: `start_line`, `start_character`, `end_line`, `end_character`. Lines are 1-indexed;
   characters are 0-indexed and the end position is exclusive.
 - Failure: `code`, `message`, `retryable`, `attempts`, `provider_status`,
   `retry_after_seconds`. Content failures also carry `input_index` and `source`.
-- Extraction row: `index`, `data`, `error`, `attempts`; an error has `code`, `message`, and
+- Extraction row: `index`, `data`, `failure`, `attempts`; a failure has `code`, `message`, and
   `retryable`.
 
 There is no public SDK model hierarchy or `types` module. Join capability results by `source`.
@@ -109,16 +116,16 @@ There is no public SDK model hierarchy or `types` module. Join capability result
 - Catch `BrokerError` for a capability-wide or infrastructure failure. Inspect `code`,
   `retryable`, and `attempts`; attempts may be absent for a transport failure.
 - Inspect `batch.failure` for per-query failure. A failed batch has no hits.
-- Inspect `row.failure` for per-source failure. `read` returns one row per input source in the
-  same order.
+- Inspect `row.failure` for a single-source `read` failure. `read_many` returns one row per input
+  window in the same order and includes `input_index`.
 - `content.passages` exactly deduplicates sources in first-seen order, ranks successful documents
   together, and reports failed fetches in `report.failures`. Empty sources and zero
   passages are successful reports.
-- Use `grep_report` when coverage matters. Its `failures` are aligned by
-  `input_index`; plain `grep` omits partial failures.
+- Use `grep` when coverage matters. Its `source_results` align by `input_index`; inspect each
+  row's `failure` and `scan_complete` to distinguish failed, capped, and complete scans.
 - Treat empty search hits and zero grep matches as success, not failure.
-- Inspect each extraction row's `.data` or `.error`; exactly one is present. The result list aligns with
-  the input items.
+- Inspect each extraction row's `.data` or `.failure`; exactly one is present. The result list
+  aligns with the input items.
 - Let host policy own retries, rate limits, deduplication, and in-flight coalescing. A returned
   failure is final for that call.
 
@@ -132,7 +139,7 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   256 sources in one content request. Use smaller batches instead of depending on the maxima.
 - `content.passages` requires a non-empty query, accepts `limit=1..100` and
   `max_per_source=1..10`, and applies the per-source cap after global ranking.
-- `grep_report` fetches documents before matching them. Session caching can avoid another backend
+- `grep` fetches documents before matching them. Session caching can avoid another backend
   fetch, but every requested source still counts as a content fetch for strategy budgets.
 - `grep` match lines and `read` offsets are 1-indexed. `read.metadata` reports `start_line`,
   `end_line`, `total_lines`, and `next_offset`.
@@ -152,8 +159,10 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   than one research task while reusing the same session.
 - Use `merge_jsonl` for upserts, then `write_jsonl` when pruning a pool to a fixed bound.
 - Persist a constraint fingerprint with each evidence row and attempted sources per constraint.
-- `sdk.session.usage()` returns `exec_calls`, `search_calls`, `content_fetches`, `llm_calls`,
-  `pipeline_model_tokens`, `documents_seen`, `budget_remaining`, and `terminal_reason`.
+- `sdk.session.usage()` returns call counters, `content_backend_fetches`, token reservations,
+  sandbox/workspace usage, `budget_consumed`, `budget_remaining`, provider metrics, and
+  `terminal_reason`. Use `sdk.session.capabilities()` to discover the active contracts, limits,
+  methods, backends, and optional mechanisms instead of hard-coding deployment assumptions.
 - Only stdout, stderr, and `sdk.output.submit` return to the control model. They share roughly
   32,000 visible characters, with stdout considered first; reserve space for submitted output.
 - On `state_lost`, the failed program was not replayed and the next call starts a clean session.

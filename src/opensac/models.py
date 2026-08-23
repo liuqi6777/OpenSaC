@@ -6,6 +6,8 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
+CAPABILITY_CONTRACT = 9
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -42,8 +44,10 @@ CAPABILITY_METHODS: tuple[str, ...] = (
     "content.get_many",
     "content.passages",
     "content.read",
-    "content.grep_report",
+    "content.read_many",
+    "content.grep",
     "session.usage",
+    "session.capabilities",
     "llm.complete",
     "llm.complete_many",
     "llm.extract_many",
@@ -54,6 +58,7 @@ CAPABILITY_METHODS: tuple[str, ...] = (
 # rather than on "does this method exist".
 FANOUT_METHODS: dict[str, str] = {
     "search.query_many": "queries",
+    "content.read_many": "windows",
     "llm.complete_many": "prompts",
     "llm.extract_many": "items",
 }
@@ -233,6 +238,13 @@ def budget_remaining(
             None if ceiling is None else max(ceiling - getattr(usage, usage_field), 0)
         )
     return remaining
+
+
+def budget_consumed(usage: RunUsage) -> dict[str, float | int]:
+    return {
+        budget_field: getattr(usage, usage_field)
+        for budget_field, usage_field in _BUDGET_USAGE_FIELDS.items()
+    }
 
 
 class SessionTombstone(BaseModel):

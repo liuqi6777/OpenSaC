@@ -490,7 +490,7 @@ async def test_cancelled_provider_backoff_is_counted_without_a_retry_attempt() -
     assert len(trace.provider_attempts) == 1
 
 
-async def test_content_dedupes_sources_and_grep_report_keeps_failure_indexes() -> None:
+async def test_content_dedupes_sources_and_grep_keeps_failure_indexes() -> None:
     backend = LocalBackend(documents={"1": "target line", "2": "unreadable"})
     backend.failures["2"] = ProviderRequestError(
         "provider_not_found",
@@ -504,15 +504,19 @@ async def test_content_dedupes_sources_and_grep_report_keeps_failure_indexes() -
 
     report = await service.call(
         "token",
-        "content.grep_report",
+        "content.grep",
         {"sources": [sources[0], sources[1], sources[1]], "pattern": "target"},
         execution_id="grep-report",
     )
 
     assert report["input_count"] == 3
     assert report["matches"][0]["input_index"] == 0
-    assert [failure["input_index"] for failure in report["failures"]] == [1, 2]
-    assert all(failure["failure"]["code"] == "provider_not_found" for failure in report["failures"])
+    assert [row["input_index"] for row in report["source_results"]] == [0, 1, 2]
+    assert report["source_results"][0]["failure"] is None
+    assert all(
+        row["failure"]["code"] == "provider_not_found"
+        for row in report["source_results"][1:]
+    )
     assert backend.fetches == ["1", "2"]
     assert state.policy.usage.content_fetches == 3
     assert state.policy.usage.content_backend_fetches == 2
@@ -522,11 +526,11 @@ async def test_content_dedupes_sources_and_grep_report_keeps_failure_indexes() -
 
     only_failure = await service.call(
         "token",
-        "content.grep_report",
+        "content.grep",
         {"sources": [sources[1]], "pattern": "target"},
     )
     assert only_failure["matches"] == []
-    assert only_failure["failures"][0]["failure"]["code"] == "provider_not_found"
+    assert only_failure["source_results"][0]["failure"]["code"] == "provider_not_found"
 
 
 async def test_systemic_content_failure_is_promoted_and_never_cached() -> None:

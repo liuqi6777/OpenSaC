@@ -49,11 +49,13 @@ from opensac.broker.session import BrokerSession
 from opensac.config import Settings
 from opensac.metrics import CapacityGate
 from opensac.models import (
+    CAPABILITY_CONTRACT,
     CapabilityEvent,
     ExecCreate,
     ExecRecord,
     ExecRecordStatus,
     ExecResult,
+    Mechanisms,
     ProgramRecord,
     RunUsage,
     Session,
@@ -294,34 +296,42 @@ class ApplicationRuntime:
             package_version = importlib_metadata.version("opensac")
         except importlib_metadata.PackageNotFoundError:
             package_version = __version__
+        sdk_capabilities = self.broker.capability_manifest(
+            backend_name=self.settings.search_backend,
+            mechanisms=Mechanisms(),
+        )
+        search_limits = sdk_capabilities["search"]["limits"]
+        content_limits = sdk_capabilities["content"]["limits"]
+        llm_limits = sdk_capabilities["llm"]["limits"]
         return {
             "opensac_version": package_version,
             "build_commit": self.settings.build_commit,
             "sandbox_image": self.settings.sandbox_image,
             "sandbox_image_digest": self.settings.sandbox_image_digest,
             "sandbox_contract": SANDBOX_CONTRACT,
-            "capability_contract": 8,
+            "capability_contract": CAPABILITY_CONTRACT,
+            "sdk_capabilities": sdk_capabilities,
             "capability_limits": {
                 "search": {
-                    "max_queries_per_request": self.settings.search_max_queries_per_request,
-                    "max_query_chars": self.settings.search_max_query_chars,
-                    "max_top_k": self.settings.search_max_top_k,
+                    "max_queries_per_request": search_limits["max_queries_per_request"],
+                    "max_query_chars": search_limits["max_query_chars"],
+                    "max_top_k": search_limits["max_top_k"],
                 },
                 "extract_many": {
-                    "max_items": self.settings.extract_max_items,
-                    "max_instruction_bytes": self.settings.extract_max_instruction_bytes,
-                    "max_schema_bytes": self.settings.extract_max_schema_bytes,
-                    "max_item_bytes": self.settings.extract_max_item_bytes,
-                    "max_total_item_bytes": self.settings.extract_max_total_item_bytes,
-                    "max_schema_depth": self.settings.extract_max_schema_depth,
-                    "max_repair_attempts": self.settings.extract_max_repair_attempts,
+                    "max_items": llm_limits["extract_max_items"],
+                    "max_instruction_bytes": llm_limits["extract_max_instruction_bytes"],
+                    "max_schema_bytes": llm_limits["extract_max_schema_bytes"],
+                    "max_item_bytes": llm_limits["extract_max_item_bytes"],
+                    "max_total_item_bytes": llm_limits["extract_max_total_item_bytes"],
+                    "max_schema_depth": llm_limits["extract_max_schema_depth"],
+                    "max_repair_attempts": llm_limits["extract_max_repair_attempts"],
                 },
                 "content": {
-                    "max_sources_per_request": self.settings.content_max_sources_per_request,
-                    "url_admission": self.settings.content_url_admission,
+                    "max_sources_per_request": content_limits["max_sources_per_request"],
+                    "url_admission": sdk_capabilities["content"]["url_admission"],
                     "batch_deadline_seconds": self.settings.content_batch_deadline_seconds,
-                    "passage_limit": 100,
-                    "passage_max_per_source": 10,
+                    "passage_limit": content_limits["passage_limit"],
+                    "passage_max_per_source": content_limits["passage_max_per_source"],
                     "passage_chunk_chars": self.broker.passage_chunk_chars,
                     "passage_chunk_overlap_chars": (self.broker.passage_chunk_overlap_chars),
                     "passage_prefilter_limit": self.broker.passage_prefilter_limit,

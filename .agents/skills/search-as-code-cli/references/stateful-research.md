@@ -132,11 +132,11 @@ if sources:
     attempted.update(sources)
     attempts[name] = {"fingerprint": fingerprint, "sources": sorted(attempted)}
     sdk.state.write_json(attempts_path, attempts)
-    report = sdk.content.grep_report(sources, pattern, context=2)
+    report = sdk.content.grep(sources, pattern, context=2)
     for match in report.matches[:6]:
         passage = sdk.content.read(
-            [match.source], offset=max(match.line - 10, 1), limit=40, max_chars=16_000
-        )[0]
+            match.source, offset=max(match.line - 10, 1), limit=40, max_chars=16_000
+        )
         if passage.failure is None and re.search(pattern, passage.text, re.IGNORECASE):
             evidence[name] = {
                 "fingerprint": fingerprint,
