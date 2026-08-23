@@ -268,6 +268,10 @@ uv run ruff check .
 uv run pytest
 ```
 
+The base host installation excludes optional pipeline-model, MCP, and control-agent dependencies.
+Install `opensac[llm]`, `opensac[mcp]`, `opensac[agent]`, or `opensac[full]` when developing one of
+those integrations; the `dev` extra includes all of them for the repository test suite.
+
 Run `uv run opensac serve` for a foreground source service. Use
 `uv run opensac build-sandbox` only when testing unreleased SDK or sandbox changes. The repository
 layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
@@ -278,7 +282,7 @@ layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
 
 | Goal | Document |
 | --- | --- |
-| Upgrade to v0.6.5 | [v0.6.5 release notes](docs/opensac-0.6.5.md) |
+| Upgrade to v0.6.6 | [v0.6.6 release notes](docs/opensac-0.6.6.md) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Connect Codex, Claude Code, CLI, or a custom agent | [Agent integrations](docs/agent-integrations.md) |
 | Configure the optional local retriever | [Local dense search](docs/local-search.md) |

@@ -8,20 +8,35 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.116",
     "httpx[socks]>=0.28",
-    "jsonschema>=4.25",
-    "mcp>=1.27,<2",
-    "openai>=1.99",
     "pydantic-settings>=2.10",
     "typer>=0.16",
     "uvicorn>=0.35",
 ]
 
 [project.optional-dependencies]
+agent = [
+    "openai>=1.99",
+]
 dev = [
+    "jsonschema>=4.25",
+    "mcp>=1.27,<2",
     "mypy>=1.17",
+    "openai>=1.99",
     "pytest>=8.4",
     "pytest-asyncio>=1.1",
     "ruff>=0.12",
+]
+full = [
+    "jsonschema>=4.25",
+    "mcp>=1.27,<2",
+    "openai>=1.99",
+]
+llm = [
+    "jsonschema>=4.25",
+    "openai>=1.99",
+]
+mcp = [
+    "mcp>=1.27,<2",
 ]
 
 [project.scripts]

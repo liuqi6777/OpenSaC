@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 
+from opensac._optional import MissingOptionalDependency
+
 from .react import ReactAgent, ReactConfig
 
 
@@ -18,9 +20,12 @@ def _parser() -> argparse.ArgumentParser:
 
 async def _main() -> None:
     args = _parser().parse_args()
-    agent = ReactAgent(
-        config=ReactConfig(max_turns=max(1, args.max_turns), timeout_seconds=args.timeout)
-    )
+    try:
+        agent = ReactAgent(
+            config=ReactConfig(max_turns=max(1, args.max_turns), timeout_seconds=args.timeout)
+        )
+    except MissingOptionalDependency as exc:
+        raise SystemExit(str(exc)) from None
     try:
         result = await agent.arun(args.question)
         if result.answer:

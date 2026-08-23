@@ -7,11 +7,14 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
-from mcp.server.fastmcp import Context, FastMCP
 
+if TYPE_CHECKING:
+    from mcp.server.fastmcp import FastMCP
+
+from opensac import _optional
 from opensac.agent_session import (
     DEFAULT_LEASE_SECONDS,
     AgentContext,
@@ -127,10 +130,13 @@ class OpenSACMCP:
 
 
 def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
+    _optional.require_extra("MCP support", "mcp", ("mcp",))
+    from mcp.server.fastmcp import Context, FastMCP
+
     adapter = bridge or OpenSACMCP()
 
     @asynccontextmanager
-    async def lifespan(_server: FastMCP):
+    async def lifespan(_server: Any):
         try:
             yield adapter
         finally:
@@ -146,11 +152,12 @@ def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
         log_level="ERROR",
     )
 
-    @server.tool(name="sac_run")
-    async def sac_run(code: str, ctx: Context) -> str:
+    async def sac_run(code: str, ctx: Any) -> str:
         """Run Python code in this conversation's persistent OpenSAC workspace."""
         return await adapter.run_code(code, ctx.request_context.meta)
 
+    sac_run.__annotations__["ctx"] = Context
+    server.tool(name="sac_run")(sac_run)
     return server
 
 

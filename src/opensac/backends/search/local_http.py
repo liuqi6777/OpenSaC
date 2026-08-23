@@ -71,14 +71,9 @@ class LocalSearchBackend:
         self,
         base_url: str,
         timeout: float = 30.0,
-        fetch_concurrency: int = 6,
     ) -> None:
         self.base_url = base_url.rstrip("/") + "/"
         self.timeout = timeout
-        # Kept as a constructor compatibility shim while concurrency ownership
-        # moves to ProviderRuntime. The adapter itself performs one transport
-        # operation per method and has no hidden admission gate.
-        del fetch_concurrency
         self._client: httpx.AsyncClient | None = None
 
     @property

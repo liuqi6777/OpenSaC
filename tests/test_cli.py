@@ -3,7 +3,11 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+import typer
+
 from opensac import cli, mcp_server
+from opensac._optional import MissingOptionalDependency
 
 
 def test_mcp_command_starts_stdio_server(monkeypatch) -> None:
@@ -18,6 +22,21 @@ def test_mcp_command_starts_stdio_server(monkeypatch) -> None:
     cli.serve_mcp()
 
     assert called
+
+
+def test_mcp_command_reports_missing_extra(monkeypatch, capsys) -> None:
+    def unavailable() -> None:
+        raise MissingOptionalDependency(
+            "MCP support requires optional dependencies (mcp); install with 'opensac[mcp]'."
+        )
+
+    monkeypatch.setattr(mcp_server, "run", unavailable)
+
+    with pytest.raises(typer.Exit) as raised:
+        cli.serve_mcp()
+
+    assert raised.value.exit_code == 1
+    assert "opensac[mcp]" in capsys.readouterr().err
 
 
 def test_build_sandbox_builds_directly_from_source(monkeypatch) -> None:
@@ -72,3 +91,10 @@ def test_sandbox_dockerfile_installs_sdk_from_source() -> None:
     assert "RUN pip install --no-cache-dir /opt/opensac-sdk" in dockerfile
     assert "org.opencontainers.image.version=$OPENSAC_VERSION" in dockerfile
     assert "_sandbox_wheel" not in dockerfile
+
+
+def test_service_dockerfile_installs_pipeline_llm_profile() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    dockerfile = (repo_root / "Dockerfile").read_text()
+
+    assert 'python -m pip install --no-cache-dir "$1[llm]"' in dockerfile

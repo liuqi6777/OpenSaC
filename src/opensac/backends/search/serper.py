@@ -36,15 +36,11 @@ class SerperBackend:
         self,
         api_key: str = "",
         timeout: float = 30.0,
-        fetch_concurrency: int = 6,
         jina_api_key: str = "",
     ) -> None:
         self.api_key = api_key
         self.jina_api_key = jina_api_key
         self.timeout = timeout
-        # Kept while callers migrate concurrency ownership to ProviderRuntime.
-        # The adapter itself performs one transport operation per method.
-        del fetch_concurrency
         self._client: httpx.AsyncClient | None = None
 
     @property

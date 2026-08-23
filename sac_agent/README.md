@@ -46,8 +46,11 @@ OpenSAC server and is called only from generated sandbox programs.
 Install the repository dependencies:
 
 ```bash
-uv sync --extra dev
+uv sync --extra agent
 ```
+
+The `agent` profile installs the OpenAI-compatible control-model client. Repository contributors
+can use `uv sync --extra dev`, which also includes the test and lint toolchain.
 
 Configure and start OpenSAC from the repository root:
 

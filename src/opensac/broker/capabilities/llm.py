@@ -5,10 +5,11 @@ import json
 import math
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from jsonschema import Draft202012Validator
-from openai import AsyncOpenAI
+if TYPE_CHECKING:
+    from jsonschema import Draft202012Validator
+    from openai import AsyncOpenAI
 
 from opensac._contracts import ExtractionRow
 from opensac.broker.call_context import current_call, trace_error_message
@@ -220,6 +221,8 @@ class LLMCapabilities:
             raise ValueError(f"{label} must contain only JSON-serializable values") from None
 
     def _validate_schema_subset(self, schema: Any) -> Draft202012Validator:
+        from jsonschema import Draft202012Validator
+
         if not isinstance(schema, dict):
             raise ValueError("schema must be a JSON object")
         if schema.get("type") != "object":

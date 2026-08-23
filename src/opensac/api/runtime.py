@@ -22,9 +22,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
-from openai import AsyncOpenAI
-
-from opensac import __version__
+from opensac import __version__, _optional
 from opensac.api.errors import (
     ExecIdConflictError,
     ExecIndeterminateError,
@@ -76,6 +74,23 @@ from opensac.store import StateStore
 logger = logging.getLogger(__name__)
 
 
+class _DisabledModelClient:
+    async def close(self) -> None:
+        return None
+
+
+def _model_client(settings: Settings) -> Any:
+    if not settings.model_name:
+        return _DisabledModelClient()
+    _optional.require_extra("Pipeline LLM support", "llm", ("jsonschema", "openai"))
+    from openai import AsyncOpenAI
+
+    return AsyncOpenAI(
+        api_key=settings.model_api_key or "not-configured",
+        base_url=settings.model_base_url,
+    )
+
+
 class ApplicationRuntime:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -91,10 +106,7 @@ class ApplicationRuntime:
         self.session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
-        self.model_client = AsyncOpenAI(
-            api_key=settings.model_api_key or "not-configured",
-            base_url=settings.model_base_url,
-        )
+        self.model_client = _model_client(settings)
         provider_operations = list(
             ("local.search", "local.document")
             if settings.search_backend == "local"

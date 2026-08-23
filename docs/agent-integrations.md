@@ -19,7 +19,7 @@ endpoint exposed inside sandbox programs as `sdk.llm.*`.
 
 ## Prerequisites
 
-Start the public `v0.6.5` service image by following the main README's
+Start the public `v0.6.6` service image by following the main README's
 [Docker quick start](../README.md#quick-start-with-docker). The service itself needs no source
 checkout. PyPI publication is not planned, so a host that uses the CLI or MCP adapter should check
 out the matching release to install the adapter and skills:
@@ -27,8 +27,8 @@ out the matching release to install the adapter and skills:
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-git checkout v0.6.5
-uv tool install --editable /absolute/path/to/OpenSaC
+git checkout v0.6.6
+uv tool install --editable '/absolute/path/to/OpenSaC[mcp]'
 
 export SAC_API_BASE=http://127.0.0.1:8000
 export SAC_API_KEY=replace-with-your-opensac-key
@@ -43,6 +43,10 @@ export OPENSAC_REPO=/absolute/path/to/OpenSaC
 
 Never place a literal API key in a committed project configuration. Reference an environment
 variable or use a user-local configuration instead.
+
+The base package is sufficient for `opensac agent-run`. The MCP adapter requires the `mcp` extra,
+the bundled control loop requires `agent`, and a source service configured with `OPENSAC_MODEL_NAME`
+requires `llm`; `full` installs all three profiles.
 
 ## Custom agent loop
 

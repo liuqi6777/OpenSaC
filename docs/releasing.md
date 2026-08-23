@@ -49,8 +49,7 @@ CI also runs this check on every pull request.
 
    ```bash
    git tag -a vX.Y.Z -m "OpenSAC X.Y.Z"
-   git push origin main
-   git push origin vX.Y.Z
+   git push --atomic origin main vX.Y.Z
    ```
 
 4. Make the GHCR packages public if this is their first publication.

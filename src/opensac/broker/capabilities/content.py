@@ -637,13 +637,6 @@ class ContentCapabilities:
         source_results: list[dict[str, Any]] = []
         for input_index, (hit, row) in enumerate(zip(hits, rows, strict=True)):
             failure = row.get("failure")
-            if failure is None and row.get("metadata", {}).get("fetch_error"):
-                failure = {
-                    "code": "provider_rejected",
-                    "message": "Provider rejected one document.",
-                    "retryable": False,
-                    "attempts": 1,
-                }
             if failure is not None:
                 source_results.append(
                     {
@@ -847,29 +840,6 @@ class ContentCapabilities:
                 if representation:
                     metadata["representation"] = representation
                 row["metadata"] = metadata
-                legacy_error = metadata.get("fetch_error")
-                if row.get("failure") is None and legacy_error:
-                    attempts = max(
-                        (
-                            record.attempt
-                            for record in _provider_attempts()
-                            if input_index in record.request_indexes
-                            and record.operation == operation
-                        ),
-                        default=1,
-                    )
-                    total_attempts = max(total_attempts, attempts)
-                    if candidate_index + 1 < len(candidates):
-                        continue
-                    return key, self._content_failure_row(
-                        hit,
-                        {
-                            "code": "provider_rejected",
-                            "message": "Provider rejected one document.",
-                            "retryable": False,
-                            "attempts": total_attempts,
-                        },
-                    )
                 break
 
             if row is None:
