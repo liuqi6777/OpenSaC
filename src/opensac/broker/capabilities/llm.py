@@ -10,8 +10,16 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from openai import AsyncOpenAI
 
+from opensac._contracts import ExtractionRow
 from opensac.broker.call_context import current_call, trace_error_message
 from opensac.broker.session import BrokerSession
+from opensac.broker.validation import (
+    finite_number,
+    integer,
+    optional_integer,
+    optional_string,
+    string,
+)
 from opensac.metrics import CapacityGate
 from opensac.models import ModelAttemptRecord
 
@@ -113,29 +121,32 @@ class LLMCapabilities:
             raise RuntimeError("LLM access is not configured")
 
     @staticmethod
-    def _clamp_temperature(value: Any) -> float:
-        return min(max(float(value), 0.0), 2.0)
+    def _validate_temperature(value: Any) -> float:
+        return finite_number(value, "temperature", minimum=0.0, maximum=2.0)
 
     @staticmethod
-    def _clamp_max_tokens(value: Any) -> int | None:
-        if value is None:
-            return None
-        return min(max(int(value), 1), 32_000)
+    def _validate_max_tokens(value: Any) -> int | None:
+        return optional_integer(
+            value,
+            "max_tokens",
+            minimum=1,
+            maximum=32_000,
+        )
 
     async def complete(self, state: BrokerSession, params: dict[str, Any]) -> str:
+        prompt = string(params.get("prompt", ""), "prompt")
+        system = optional_string(params.get("system"), "system")
+        temperature = self._validate_temperature(params.get("temperature", 0.2))
+        requested_max_tokens = self._validate_max_tokens(params.get("max_tokens"))
         self._require_model()
-        prompt = str(params.get("prompt", "")).strip()
-        if not prompt:
-            raise ValueError("prompt must not be empty")
         max_tokens = await state.policy.reserve_llm(
             1,
-            max_tokens=self._clamp_max_tokens(params.get("max_tokens")),
+            max_tokens=requested_max_tokens,
         )
-        system = params.get("system")
         answer, tokens = await self._chat(
             prompt,
-            system=str(system) if system else None,
-            temperature=self._clamp_temperature(params.get("temperature", 0.2)),
+            system=system,
+            temperature=temperature,
             max_tokens=max_tokens,
         )
         await state.policy.record_pipeline_model_tokens(tokens)
@@ -145,8 +156,22 @@ class LLMCapabilities:
         return answer
 
     async def complete_many(self, state: BrokerSession, params: dict[str, Any]) -> list[str]:
+        raw_prompts = params.get("prompts", [])
+        if not isinstance(raw_prompts, list):
+            raise ValueError("prompts must be a list")
+        if any(not isinstance(prompt, str) for prompt in raw_prompts):
+            raise ValueError("prompts must contain only strings")
+        prompts = list(raw_prompts)
+        system = optional_string(params.get("system"), "system")
+        temperature = self._validate_temperature(params.get("temperature", 0.2))
+        requested_max_tokens = self._validate_max_tokens(params.get("max_tokens"))
+        concurrency = integer(
+            params.get("concurrency", 4),
+            "concurrency",
+            minimum=1,
+            maximum=12,
+        )
         self._require_model()
-        prompts = [str(prompt) for prompt in params.get("prompts", [])]
         if not prompts:
             return []
         if any(not prompt.strip() for prompt in prompts):
@@ -156,18 +181,15 @@ class LLMCapabilities:
         # at however far it got.
         max_tokens = await state.policy.reserve_llm(
             len(prompts),
-            max_tokens=self._clamp_max_tokens(params.get("max_tokens")),
+            max_tokens=requested_max_tokens,
         )
-        system = params.get("system")
-        temperature = self._clamp_temperature(params.get("temperature", 0.2))
-        concurrency = min(max(int(params.get("concurrency", 4)), 1), 12)
         gate = asyncio.Semaphore(concurrency)
 
         async def one(prompt: str) -> tuple[str, int]:
             async with gate:
                 return await self._chat(
                     prompt,
-                    system=str(system) if system else None,
+                    system=system,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
@@ -309,9 +331,11 @@ class LLMCapabilities:
                 f"extract_many contains {len(items)} items, exceeding the broker maximum "
                 f"of {self.max_extract_items}"
             )
-        instruction = params.get("instruction", "")
-        if not isinstance(instruction, str):
-            raise ValueError("instruction must be a string")
+        instruction = string(
+            params.get("instruction", ""),
+            "instruction",
+            nonempty=False,
+        )
         instruction_bytes = len(instruction.encode("utf-8"))
         if instruction_bytes > self.max_extract_instruction_bytes:
             raise ValueError(
@@ -356,11 +380,12 @@ class LLMCapabilities:
             raise ValueError(
                 f"repair_attempts exceeds the broker maximum of {self.max_extract_repair_attempts}"
             )
-        try:
-            concurrency = int(params.get("concurrency", 4))
-        except (TypeError, ValueError):
-            raise ValueError("concurrency must be an integer") from None
-        concurrency = min(max(concurrency, 1), 12)
+        concurrency = integer(
+            params.get("concurrency", 4),
+            "concurrency",
+            minimum=1,
+            maximum=12,
+        )
         return (
             items,
             item_json,
@@ -512,10 +537,10 @@ class LLMCapabilities:
             repair_attempts,
             concurrency,
         ) = self._prepare_extraction(params)
+        requested_max_tokens = self._validate_max_tokens(params.get("max_tokens"))
         self._require_model()
         if not items:
             return []
-        requested_max_tokens = self._clamp_max_tokens(params.get("max_tokens"))
         max_tokens = await state.policy.reserve_llm(
             len(items),
             max_tokens=requested_max_tokens,
@@ -564,12 +589,12 @@ class LLMCapabilities:
             raise ExtractionInfrastructureError()
 
         results = [
-            {
-                "index": index,
-                "data": data,
-                "error": error.wire() if error else None,
-                "attempts": 1,
-            }
+            ExtractionRow(
+                index=index,
+                data=data,
+                failure=error.wire() if error else None,
+                attempts=1,
+            ).model_dump(mode="json")
             for index, (data, error) in enumerate(checked)
         ]
         repair_indexes = [
@@ -635,10 +660,10 @@ class LLMCapabilities:
             [error for _, error in repair_checked],
         )
         for index, (data, error) in zip(repair_indexes, repair_checked, strict=True):
-            results[index] = {
-                "index": index,
-                "data": data,
-                "error": error.wire() if error else None,
-                "attempts": 2,
-            }
+            results[index] = ExtractionRow(
+                index=index,
+                data=data,
+                failure=error.wire() if error else None,
+                attempts=2,
+            ).model_dump(mode="json")
         return results

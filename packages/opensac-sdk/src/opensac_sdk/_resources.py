@@ -3,13 +3,22 @@ from __future__ import annotations
 import json
 import math
 import os
-import tempfile
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from ._json import atomic_write_text, strict_json_dumps, strict_jsonl_dumps
 from ._record import Record, record, wrap
+from ._validation import (
+    boolean,
+    finite_number,
+    integer,
+    optional_integer,
+    optional_string,
+    optional_string_list,
+    string,
+    string_list,
+)
 from .transport import UnixSocketTransport
 
 
@@ -49,6 +58,9 @@ class SearchResource:
         Raises:
             BrokerError: The whole search failed or the request was rejected.
         """
+        query = string(query, "query", strip=True, max_chars=4096)
+        limit, offset = self._search_window(limit, offset, limit_name="limit")
+        domains = optional_string_list(domains, "domains")
         return self._transport.call(
             "search.query",
             {"query": query, "limit": limit, "offset": offset, "domains": domains},
@@ -79,6 +91,19 @@ class SearchResource:
             BrokerError: The complete batch call failed before aligned results
                 could be returned.
         """
+        queries = string_list(
+            queries,
+            "queries",
+            max_items=64,
+            item_max_chars=4096,
+        )
+        limit_per_query, offset = self._search_window(
+            limit_per_query,
+            offset,
+            limit_name="limit_per_query",
+        )
+        concurrency = integer(concurrency, "concurrency", minimum=1, maximum=20)
+        domains = optional_string_list(domains, "domains")
         return self._transport.call(
             "search.query_many",
             {
@@ -89,6 +114,17 @@ class SearchResource:
                 "domains": domains,
             },
         )
+
+    @staticmethod
+    def _search_window(limit: Any, offset: Any, *, limit_name: str) -> tuple[int, int]:
+        validated_limit = integer(limit, limit_name, minimum=1, maximum=100)
+        validated_offset = integer(offset, "offset", minimum=0, maximum=500)
+        if validated_limit + validated_offset > 600:
+            raise ValueError(
+                f"offset={validated_offset} with {limit_name}={validated_limit} "
+                "must not exceed retrieval depth 600"
+            )
+        return validated_limit, validated_offset
 
     def fuse_rrf(
         self,
@@ -368,7 +404,7 @@ class SearchResource:
 class ContentResource:
     """Locate and read text from URL or local-document source strings.
 
-    Prefer ``passages`` for semantic discovery, ``grep_report`` for exact text,
+    Prefer ``passages`` for semantic discovery, ``grep`` for exact text,
     and ``read`` for deliberate line-window expansion. Content operations report
     partial fetch failures instead of silently dropping unreadable sources.
     """
@@ -380,6 +416,8 @@ class ContentResource:
     def _sources(sources: list[str]) -> list[str]:
         if not isinstance(sources, list):
             raise ValueError("sources must be a list of source strings")
+        if len(sources) > 256:
+            raise ValueError("sources must contain at most 256 items")
         validated: list[str] = []
         for input_index, source in enumerate(sources):
             if not isinstance(source, str):
@@ -393,6 +431,14 @@ class ContentResource:
                 )
             validated.append(source)
         return validated
+
+    @classmethod
+    def _source(cls, source: str) -> str:
+        try:
+            return cls._sources([source])[0]
+        except ValueError as exc:
+            message = str(exc).replace("source at input index 0", "source")
+            raise ValueError(message) from None
 
     def get_many(self, sources: list[str]) -> list[Record]:
         """Fetch complete normalized documents for advanced local processing.
@@ -409,63 +455,132 @@ class ContentResource:
 
     def read(
         self,
-        sources: list[str],
+        source: str,
         *,
         offset: int = 1,
         limit: int = 200,
         max_chars: int = 100_000,
-    ) -> list[Record]:
-        """Read the same 1-indexed line window from each referenced document.
+    ) -> Record:
+        """Read one 1-indexed line window from a source.
 
         ``offset`` is the first line and ``limit`` bounds line count; ``max_chars``
         also bounds unusually long lines. Use ``metadata.next_offset`` to continue.
 
         Returns:
-            Source-aligned content rows. ``metadata`` includes ``start_line``,
+            One content record. ``metadata`` includes ``start_line``,
             ``end_line``, ``total_lines``, and ``next_offset``. Inspect ``failure``
             on unreadable rows.
 
         Raises:
             BrokerError: The whole request failed or every failure was systemic.
         """
+        offset = integer(offset, "offset", minimum=1)
+        limit = integer(limit, "limit", minimum=1, maximum=5_000)
+        max_chars = integer(max_chars, "max_chars", minimum=1, maximum=400_000)
         return self._transport.call(
             "content.read",
             {
-                "sources": self._sources(sources),
+                "source": self._source(source),
                 "offset": offset,
                 "limit": limit,
                 "max_chars": max_chars,
             },
         )
 
-    def grep_report(
+    def read_many(self, windows: list[dict[str, Any]]) -> list[Record]:
+        """Read a different 1-indexed line window for each source.
+
+        Rows align one-to-one with ``windows`` and include ``input_index``.
+        Repeated sources are fetched once by the broker and sliced independently.
+
+        Raises:
+            ValueError: A window has unknown fields or invalid values.
+            BrokerError: The whole request failed or every failure was systemic.
+        """
+        if not isinstance(windows, list):
+            raise ValueError("windows must be a list")
+        if len(windows) > 256:
+            raise ValueError("windows must contain at most 256 items")
+        allowed = {"source", "offset", "limit", "max_chars"}
+        validated: list[dict[str, Any]] = []
+        for input_index, window in enumerate(windows):
+            if not isinstance(window, dict):
+                raise ValueError(f"windows[{input_index}] must be an object")
+            unknown = sorted(set(window) - allowed)
+            if unknown:
+                raise ValueError(
+                    f"windows[{input_index}] contains unsupported field {unknown[0]!r}"
+                )
+            if "source" not in window:
+                raise ValueError(f"windows[{input_index}] must provide source")
+            source = self._source(window["source"])
+            validated.append(
+                {
+                    "source": source,
+                    "offset": integer(
+                        window.get("offset", 1),
+                        f"windows[{input_index}].offset",
+                        minimum=1,
+                    ),
+                    "limit": integer(
+                        window.get("limit", 200),
+                        f"windows[{input_index}].limit",
+                        minimum=1,
+                        maximum=5_000,
+                    ),
+                    "max_chars": integer(
+                        window.get("max_chars", 100_000),
+                        f"windows[{input_index}].max_chars",
+                        minimum=1,
+                        maximum=400_000,
+                    ),
+                }
+            )
+        return self._transport.call("content.read_many", {"windows": validated})
+
+    def grep(
         self,
         sources: list[str],
         pattern: str,
         *,
+        mode: str = "regex",
+        case_sensitive: bool = False,
         context: int = 0,
         max_matches_per_source: int = 20,
     ) -> Record:
         """Search document lines and preserve per-source fetch failures.
 
-        ``pattern`` is a case-insensitive regular expression; malformed regex is
-        treated literally. ``context`` adds surrounding lines and
+        ``mode`` selects regular-expression or literal matching. ``context`` adds
+        surrounding lines and
         ``max_matches_per_source`` bounds each document's contribution. Match line
         numbers are 1-indexed and can be passed directly to ``read``.
 
         Returns:
-            A report with ``matches``, ``failures``, and ``input_count``. Each match
-            includes source metadata, ``line``, ``text``, context, and
-            ``input_index``. Zero matches is success.
+            A report with flat ``matches`` and one input-aligned ``source_results``
+            row per source. ``scan_complete`` distinguishes complete zero-match
+            scans from capped scans and failures.
 
         Raises:
             BrokerError: The report could not be produced.
         """
+        pattern = string(pattern, "pattern", max_chars=4096)
+        if mode not in {"regex", "literal"}:
+            raise ValueError("mode must be 'regex' or 'literal'")
+        case_sensitive = boolean(case_sensitive, "case_sensitive")
+        context = integer(context, "context", minimum=0, maximum=20)
+        max_matches_per_source = integer(
+            max_matches_per_source,
+            "max_matches_per_source",
+            minimum=1,
+            maximum=200,
+        )
         return self._transport.call(
-            "content.grep_report",
+            "content.grep",
             {
                 "sources": self._sources(sources),
                 "pattern": pattern,
+                "mode": mode,
+                "case_sensitive": case_sensitive,
                 "context": context,
                 "max_matches_per_source": max_matches_per_source,
             },
@@ -493,6 +608,14 @@ class ContentResource:
         Raises:
             BrokerError: The report could not be produced.
         """
+        query = string(query, "query", strip=True, max_chars=4096)
+        limit = integer(limit, "limit", minimum=1, maximum=100)
+        max_per_source = integer(
+            max_per_source,
+            "max_per_source",
+            minimum=1,
+            maximum=10,
+        )
         return self._transport.call(
             "content.passages",
             {
@@ -534,6 +657,20 @@ class LLMResource:
         Raises:
             BrokerError: The deployment has no pipeline model or completion fails.
         """
+        prompt = string(prompt, "prompt")
+        system = optional_string(system, "system")
+        temperature = finite_number(
+            temperature,
+            "temperature",
+            minimum=0.0,
+            maximum=2.0,
+        )
+        max_tokens = optional_integer(
+            max_tokens,
+            "max_tokens",
+            minimum=1,
+            maximum=32_000,
+        )
         return self._transport.call(
             "llm.complete",
             {
@@ -564,6 +701,21 @@ class LLMResource:
         Raises:
             BrokerError: The deployment has no pipeline model or the batch fails.
         """
+        prompts = string_list(prompts, "prompts", strip=False)
+        system = optional_string(system, "system")
+        temperature = finite_number(
+            temperature,
+            "temperature",
+            minimum=0.0,
+            maximum=2.0,
+        )
+        max_tokens = optional_integer(
+            max_tokens,
+            "max_tokens",
+            minimum=1,
+            maximum=32_000,
+        )
+        concurrency = integer(concurrency, "concurrency", minimum=1, maximum=12)
         return self._transport.call(
             "llm.complete_many",
             {
@@ -593,15 +745,27 @@ class LLMResource:
         apply to every item, while ``concurrency`` and ``max_tokens`` bound execution.
 
         Returns:
-            Rows containing ``index``, ``data``, ``error``, and ``attempts``. Exactly
-            one of ``data`` or ``error`` is present for each row.
+            Rows containing ``index``, ``data``, ``failure``, and ``attempts``.
+            Exactly one of ``data`` or ``failure`` is present for each row.
 
         Raises:
             ValueError: Local arguments are not JSON serializable or valid.
             BrokerError: Extraction infrastructure fails for the whole call.
         """
-        if repair_attempts not in {0, 1}:
-            raise ValueError("repair_attempts must be 0 or 1")
+        instruction = string(instruction, "instruction", nonempty=False)
+        concurrency = integer(concurrency, "concurrency", minimum=1, maximum=12)
+        max_tokens = optional_integer(
+            max_tokens,
+            "max_tokens",
+            minimum=1,
+            maximum=32_000,
+        )
+        repair_attempts = integer(
+            repair_attempts,
+            "repair_attempts",
+            minimum=0,
+            maximum=1,
+        )
         if not isinstance(schema, dict):
             raise ValueError("schema must be a JSON-serializable object")
         self._ensure_json_serializable(schema, "schema")
@@ -623,10 +787,7 @@ class LLMResource:
 
     @staticmethod
     def _ensure_json_serializable(value: Any, field: str) -> None:
-        try:
-            json.dumps(value, allow_nan=False)
-        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
-            raise ValueError(f"{field} must be JSON serializable: {exc}") from exc
+        strict_json_dumps(value, field=field)
 
 
 class SessionResource:
@@ -635,7 +796,7 @@ class SessionResource:
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
-    def usage(self) -> dict[str, Any]:
+    def usage(self) -> Record:
         """Return current capability spend, remaining budgets, and terminal state.
 
         Returns:
@@ -647,6 +808,14 @@ class SessionResource:
             BrokerError: Session usage cannot be read.
         """
         return self._transport.call("session.usage", {})
+
+    def capabilities(self) -> Record:
+        """Return session-visible capabilities, limits, and contract versions.
+
+        The record reflects the active backend and this session's mechanism
+        switches without exposing provider credentials or internal endpoints.
+        """
+        return self._transport.call("session.capabilities", {})
 
 
 class StateResource:
@@ -668,7 +837,7 @@ class StateResource:
 
     @staticmethod
     def _dump(rows: list[Any]) -> str:
-        return "".join(json.dumps(row, ensure_ascii=True, default=str) + "\n" for row in rows)
+        return strict_jsonl_dumps(rows)
 
     def write_jsonl(self, relative_path: str, rows: list[Any]) -> None:
         """Replace a JSONL artifact with ``rows``, creating parent directories.
@@ -679,9 +848,8 @@ class StateResource:
         Raises:
             ValueError: The path escapes the workspace.
         """
-        path = self._path(relative_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self._dump(rows), encoding="utf-8")
+        encoded = self._dump(rows)
+        atomic_write_text(self._path(relative_path), encoded)
 
     def append_jsonl(self, relative_path: str, rows: list[Any]) -> None:
         """Append rows to a JSONL artifact without reading or rewriting it.
@@ -693,9 +861,10 @@ class StateResource:
             ValueError: The path escapes the workspace.
         """
         path = self._path(relative_path)
+        encoded = self._dump(rows)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(self._dump(rows))
+            handle.write(encoded)
 
     def merge_jsonl(self, relative_path: str, rows: list[Any], key: str = "source") -> int:
         """Upsert JSONL rows by ``key`` while preserving first-seen order.
@@ -729,8 +898,7 @@ class StateResource:
                     f"rows have no identity."
                 )
             merged[row[key]] = row
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self._dump(list(merged.values())), encoding="utf-8")
+        atomic_write_text(path, self._dump(list(merged.values())))
         return len(merged)
 
     def exists(self, relative_path: str) -> bool:
@@ -777,12 +945,8 @@ class StateResource:
         Raises:
             ValueError: The path escapes the workspace.
         """
-        path = self._path(relative_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(value, ensure_ascii=True, indent=2, default=str),
-            encoding="utf-8",
-        )
+        encoded = strict_json_dumps(value, field="value", indent=2)
+        atomic_write_text(self._path(relative_path), encoded)
 
     def read_json(self, relative_path: str) -> Any:
         """Read a JSON artifact and recursively wrap its object values.
@@ -825,25 +989,12 @@ class OutputResource:
         if citations is not None and len(citations) > 256:
             raise ValueError("citations must contain at most 256 source strings")
         sources = [self._citation(item, index) for index, item in enumerate(citations or [])]
-        encoded = json.dumps(
+        encoded = strict_json_dumps(
             {"output": output, "citations": sources},
-            ensure_ascii=True,
+            field="output",
             indent=2,
-            default=str,
         )
-        self._output_path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary = tempfile.mkstemp(
-            dir=self._output_path.parent,
-            prefix=f".{self._output_path.name}.",
-            suffix=".tmp",
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(encoded)
-            os.replace(temporary, self._output_path)
-        finally:
-            with suppress(FileNotFoundError):
-                os.unlink(temporary)
+        atomic_write_text(self._output_path, encoded)
 
     @staticmethod
     def _citation(item: Any, input_index: int) -> str:

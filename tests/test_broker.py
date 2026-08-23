@@ -153,9 +153,9 @@ async def test_broker_scopes_sources_and_fetches_content() -> None:
     content = await service.call(
         "token",
         "content.read",
-        {"sources": [hits[0]["source"]]},
+        {"source": hits[0]["source"]},
     )
-    assert content[0]["text"] == "content:None"
+    assert content["text"] == "content:None"
 
 
 def test_source_collision_does_not_mutate_session_identity_map() -> None:
@@ -607,13 +607,13 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
     with pytest.raises(ValueError):
         await service.call(
             "token",
-            "content.grep_report",
+            "content.grep",
             {"sources": ["missing"], "pattern": ""},
             execution_id="exec-1",
         )
 
     trace = service.take_trace("token", "exec-1")
-    assert [event.method for event in trace] == ["search.query_many", "content.grep_report"]
+    assert [event.method for event in trace] == ["search.query_many", "content.grep"]
     # Also pins the `_many` suffix. `_trace_queries` and `_trace_input_count`
     # split on it, and the host's analysis derives queries-per-question from
     # this field; a batch method renamed without the suffix would leave both
@@ -964,10 +964,10 @@ async def test_extract_many_returns_checked_rows_and_rejects_non_strict_json() -
     assert rows[0] == {
         "index": 0,
         "data": {"name": "valid"},
-        "error": None,
+        "failure": None,
         "attempts": 1,
     }
-    assert [row["error"]["code"] for row in rows[1:]] == [
+    assert [row["failure"]["code"] for row in rows[1:]] == [
         "non_object",
         "invalid_json",
         "invalid_json",
@@ -1027,7 +1027,7 @@ async def test_extract_many_supports_nested_arrays_nullable_scalars_and_enum() -
         },
     )
 
-    assert rows[0]["error"] is None
+    assert rows[0]["failure"] is None
     assert rows[0]["data"]["details"] == {"count": 2}
 
 
@@ -1191,7 +1191,7 @@ async def test_extract_many_keeps_partial_provider_failure_and_success_tokens() 
         execution_id="exec-partial",
     )
 
-    assert rows[0]["error"] == {
+    assert rows[0]["failure"] == {
         "code": "provider_error",
         "message": "Extraction provider request failed",
         "retryable": True,
@@ -1255,11 +1255,11 @@ async def test_extract_many_repairs_in_index_order_after_one_budget_reservation(
     assert rows[0] == {
         "index": 0,
         "data": {"value": 1},
-        "error": None,
+        "failure": None,
         "attempts": 2,
     }
     assert rows[1]["attempts"] == 2
-    assert rows[1]["error"]["code"] == "schema_mismatch"
+    assert rows[1]["failure"]["code"] == "schema_mismatch"
     state = service.sessions["token"]
     assert state.policy.usage.llm_calls == 4
     assert state.policy.usage.pipeline_model_tokens == 28
@@ -1420,7 +1420,7 @@ async def test_offset_reaches_ranks_a_bare_limit_cannot() -> None:
     assert state.document_for_alias(deep[0]["source"]) is not None
 
 
-async def test_grep_report_line_numbers_are_read_offsets() -> None:
+async def test_grep_line_numbers_are_read_offsets() -> None:
     """The two halves compose without character arithmetic.
 
     This is the same contract the function-calling profiles keep, and matching
@@ -1448,7 +1448,7 @@ async def test_grep_report_line_numbers_are_read_offsets() -> None:
 
     report = await service.call(
         "token",
-        "content.grep_report",
+        "content.grep",
         {"sources": [source], "pattern": r"target \w+", "context": 1},
     )
     matches = report["matches"]
@@ -1456,13 +1456,18 @@ async def test_grep_report_line_numbers_are_read_offsets() -> None:
     assert matches[0]["line"] == 25
     assert matches[0]["before"] == ["line 24"]
     assert matches[0]["after"] == ["line 26"]
+    assert report["pattern"] == r"target \w+"
+    assert report["mode"] == "regex"
+    assert report["case_sensitive"] is False
+    assert report["source_results"][0]["match_count"] == 1
+    assert report["source_results"][0]["scan_complete"] is True
 
     window = await service.call(
-        "token", "content.read", {"sources": [source], "offset": matches[0]["line"], "limit": 2}
+        "token", "content.read", {"source": source, "offset": matches[0]["line"], "limit": 2}
     )
-    assert window[0]["text"].splitlines()[0] == "the target phrase is here"
-    assert window[0]["metadata"]["start_line"] == 25
-    assert window[0]["metadata"]["total_lines"] == 40
+    assert window["text"].splitlines()[0] == "the target phrase is here"
+    assert window["metadata"]["start_line"] == 25
+    assert window["metadata"]["total_lines"] == 40
 
 
 async def test_read_reports_where_to_continue_and_where_to_stop() -> None:
@@ -1483,19 +1488,79 @@ async def test_read_reports_where_to_continue_and_where_to_stop() -> None:
     service.register_session(make_session(backends=["local"]))
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    head = await service.call("token", "content.read", {"sources": [source], "limit": 3})
-    assert head[0]["text"] == "a\nb\nc"
-    assert head[0]["metadata"]["next_offset"] == 4
+    head = await service.call("token", "content.read", {"source": source, "limit": 3})
+    assert head["text"] == "a\nb\nc"
+    assert head["metadata"]["next_offset"] == 4
 
     tail = await service.call(
-        "token", "content.read", {"sources": [source], "offset": 4, "limit": 3}
+        "token", "content.read", {"source": source, "offset": 4, "limit": 3}
     )
-    assert tail[0]["text"] == "d\ne"
-    assert tail[0]["metadata"]["next_offset"] is None
+    assert tail["text"] == "d\ne"
+    assert tail["metadata"]["next_offset"] is None
 
 
-async def test_grep_report_falls_back_to_a_literal_search_for_a_bad_pattern() -> None:
-    """A program that meant `C++ (lang)` should get matches, not a traceback."""
+async def test_read_many_keeps_windows_aligned_and_deduplicates_fetches() -> None:
+    class Doc:
+        name = "local"
+        supports_domains = False
+        max_depth = None
+
+        def __init__(self) -> None:
+            self.fetches = 0
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            return [SearchHit(source="", backend="local", docid="d1", snippet="s", rank=1)]
+
+        async def fetch(self, hit, *, query=None):
+            self.fetches += 1
+            return ContentSnippet(source=hit.source, text="one\ntwo\nthree\nfour")
+
+    backend = Doc()
+    service = BrokerService({"local": backend})
+    state = service.register_session(make_session(backends=["local"]))
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
+
+    rows = await service.call(
+        "token",
+        "content.read_many",
+        {
+            "windows": [
+                {"source": source, "offset": 1, "limit": 2},
+                {"source": source, "offset": 3, "limit": 2},
+            ]
+        },
+    )
+
+    assert [row["input_index"] for row in rows] == [0, 1]
+    assert [row["text"] for row in rows] == ["one\ntwo", "three\nfour"]
+    assert backend.fetches == 1
+    assert state.policy.usage.content_fetches == 2
+    assert state.policy.usage.content_backend_fetches == 1
+
+
+async def test_read_many_rejects_invalid_windows_before_fetching() -> None:
+    backend = CountingBackend()
+    service = BrokerService({"local": backend})
+    state = service.register_session(make_session(backends=["local"]))
+
+    with pytest.raises(ValueError):
+        await service.call(
+            "token",
+            "content.read_many",
+            {"windows": [{"source": "1", "offset": 0}]},
+        )
+    with pytest.raises(ValueError):
+        await service.call(
+            "token",
+            "content.read_many",
+            {"windows": [{"source": "1", "offset": "2"}]},
+        )
+
+    assert backend.fetched == []
+    assert state.policy.usage.content_fetches == 0
+
+
+async def test_grep_literal_mode_and_malformed_regex_are_explicit() -> None:
 
     class Doc:
         name = "local"
@@ -1512,28 +1577,92 @@ async def test_grep_report_falls_back_to_a_literal_search_for_a_bad_pattern() ->
     service.register_session(make_session(backends=["local"]))
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
+    with pytest.raises(ValueError, match="valid regular expression"):
+        await service.call(
+            "token",
+            "content.grep",
+            {"sources": [source], "pattern": "C++ (", "mode": "regex"},
+        )
     report = await service.call(
-        "token", "content.grep_report", {"sources": [source], "pattern": "C++ ("}
+        "token",
+        "content.grep",
+        {"sources": [source], "pattern": "C++ (", "mode": "literal"},
     )
     matches = report["matches"]
     assert [match["line"] for match in matches] == [1]
+
+
+async def test_grep_reports_complete_capped_and_failed_sources() -> None:
+    class Docs:
+        name = "local"
+        supports_domains = False
+        max_depth = None
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            return [
+                SearchHit(source="", backend="local", docid="early", snippet="s", rank=1),
+                SearchHit(source="", backend="local", docid="last", snippet="s", rank=2),
+            ]
+
+        async def fetch(self, hit, *, query=None):
+            text = "Target\nother" if hit.docid == "early" else "other\nTarget"
+            return ContentSnippet(source=hit.source, title=hit.docid or "", text=text)
+
+    service = BrokerService({"local": Docs()})
+    service.register_session(make_session(backends=["local"]))
+    hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
+    report = await service.call(
+        "token",
+        "content.grep",
+        {
+            "sources": [hits[0]["source"], hits[1]["source"], "missing"],
+            "pattern": "target",
+            "mode": "literal",
+            "max_matches_per_source": 1,
+        },
+    )
+
+    assert report["pattern"] == "target"
+    assert report["mode"] == "literal"
+    assert report["max_matches_per_source"] == 1
+    assert [row["match_count"] for row in report["source_results"]] == [1, 1, 0]
+    assert [row["scan_complete"] for row in report["source_results"]] == [
+        False,
+        True,
+        False,
+    ]
+    assert report["source_results"][2]["failure"]["code"] == "unknown_source"
+    assert [match["input_index"] for match in report["matches"]] == [0, 1]
+
+    case_sensitive = await service.call(
+        "token",
+        "content.grep",
+        {
+            "sources": [hits[0]["source"]],
+            "pattern": "target",
+            "mode": "literal",
+            "case_sensitive": True,
+        },
+    )
+    assert case_sensitive["matches"] == []
+    assert case_sensitive["source_results"][0]["scan_complete"] is True
 
 
 async def test_read_does_not_expose_locator_or_trace_document_text() -> None:
     service = BrokerService({"web": FakeBackend("web")})
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
-    rows = await service.call(
+    row = await service.call(
         "token",
         "content.read",
-        {"sources": [source]},
+        {"source": source},
         execution_id="exec-read-no-locator",
     )
 
-    assert "locator" not in rows[0]
-    assert "locator_error" not in rows[0]
+    assert "locator" not in row
+    assert "locator_error" not in row
     trace = service.take_trace("token", "exec-read-no-locator")[0]
-    assert rows[0]["text"] not in trace.model_dump_json()
+    assert row["text"] not in trace.model_dump_json()
 
 
 async def test_read_reports_when_one_line_is_truncated() -> None:
@@ -1545,21 +1674,21 @@ async def test_read_reports_when_one_line_is_truncated() -> None:
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    rows = await service.call(
+    row = await service.call(
         "token",
         "content.read",
-        {"sources": [source], "limit": 1, "max_chars": 10},
+        {"source": source, "limit": 1, "max_chars": 10},
         execution_id="exec-partial-line",
     )
 
-    assert rows[0]["text"] == "x" * 10
-    assert rows[0]["metadata"]["truncated_by_max_chars"] is True
-    assert rows[0]["metadata"]["truncated_mid_line"] is True
-    assert rows[0]["metadata"]["partial_line_remaining_chars"] == 20
-    assert "locator" not in rows[0]
+    assert row["text"] == "x" * 10
+    assert row["metadata"]["truncated_by_max_chars"] is True
+    assert row["metadata"]["truncated_mid_line"] is True
+    assert row["metadata"]["partial_line_remaining_chars"] == 20
+    assert "locator" not in row
 
 
-async def test_grep_report_returns_context_without_locator() -> None:
+async def test_grep_returns_context_without_locator() -> None:
     class EvidenceBackend(FakeBackend):
         async def fetch(self, hit, *, query=None):
             return ContentSnippet(source=hit.source, text="before\ntarget\nafter")
@@ -1569,7 +1698,7 @@ async def test_grep_report_returns_context_without_locator() -> None:
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
     report = await service.call(
         "token",
-        "content.grep_report",
+        "content.grep",
         {"sources": [source], "pattern": "target", "context": 1},
     )
     matches = report["matches"]
@@ -1613,7 +1742,7 @@ class CountingBackend:
 
 
 async def test_a_document_is_retrieved_once_per_session() -> None:
-    """grep_report and read are meant to be used repeatedly over one pool.
+    """grep and read are meant to be used repeatedly over one pool.
 
     Without a cache the recommended survey/locate/verify shape refetches every
     candidate once per stage. Against a local index that is merely wasteful;
@@ -1626,8 +1755,12 @@ async def test_a_document_is_retrieved_once_per_session() -> None:
     sources = [hit["source"] for hit in hits]
 
     await service.call("token", "content.get_many", {"sources": sources})
-    await service.call("token", "content.grep_report", {"sources": sources, "pattern": "body"})
-    await service.call("token", "content.read", {"sources": sources})
+    await service.call("token", "content.grep", {"sources": sources, "pattern": "body"})
+    await service.call(
+        "token",
+        "content.read_many",
+        {"windows": [{"source": source} for source in sources]},
+    )
 
     assert backend.fetched == ["1", "2", "3"]
     # Both numbers are reported: one follows the program's behaviour, the other
@@ -1706,15 +1839,15 @@ async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
     service.register_session(make_session(backends=["local"]))
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    rows = await service.call(
-        "token", "content.read", {"sources": [source], "limit": 20, "max_chars": 1200}
+    row = await service.call(
+        "token", "content.read", {"source": source, "limit": 20, "max_chars": 1200}
     )
-    assert len(rows[0]["text"]) <= 1200
-    assert rows[0]["metadata"]["truncated_by_max_chars"] is True
+    assert len(row["text"]) <= 1200
+    assert row["metadata"]["truncated_by_max_chars"] is True
     # Trimmed on a line boundary, so the reported end_line is a real one and a
     # follow-up read resumes where this one stopped.
-    assert rows[0]["metadata"]["end_line"] == 2
-    assert rows[0]["metadata"]["next_offset"] == 3
+    assert row["metadata"]["end_line"] == 2
+    assert row["metadata"]["next_offset"] == 3
 
 
 async def test_a_program_can_read_what_it_has_spent() -> None:
@@ -1725,7 +1858,12 @@ async def test_a_program_can_read_what_it_has_spent() -> None:
     code and can be measured, and one the broker imposes can only be hit.
     """
     service = BrokerService({"local": FakeBackend("local", depth=5)})
-    service.register_session(make_session(backends=["local"]))
+    service.register_session(
+        make_session(
+            backends=["local"],
+            budget=ResourceBudget(max_search_queries=3, max_content_fetches=4),
+        )
+    )
     await service.call("token", "search.query", {"query": "q", "limit": 2})
     await service.call("token", "content.get_many", {"sources": ["1"]})
 
@@ -1733,18 +1871,41 @@ async def test_a_program_can_read_what_it_has_spent() -> None:
 
     assert usage["search_calls"] == 1
     assert usage["content_fetches"] == 1
+    assert usage["content_backend_fetches"] == 1
     assert usage["documents_seen"] == 2
+    assert usage["budget_consumed"]["max_search_queries"] == 1
+    assert usage["budget_consumed"]["max_content_fetches"] == 1
+    assert usage["budget_remaining"]["max_search_queries"] == 2
+    assert usage["budget_remaining"]["max_content_fetches"] == 3
+    assert (
+        usage["budget_consumed"]["max_search_queries"]
+        + usage["budget_remaining"]["max_search_queries"]
+        == 3
+    )
+    assert (
+        usage["budget_consumed"]["max_content_fetches"]
+        + usage["budget_remaining"]["max_content_fetches"]
+        == 4
+    )
+    assert usage["provider"]["search_attempts"] == 1
+    assert usage["provider"]["content_attempts"] == 1
     assert "max_search_calls" not in usage
     assert set(usage) == {
         "exec_calls",
         "search_calls",
         "content_fetches",
+        "content_backend_fetches",
         "direct_url_attempts",
         "direct_url_successes",
         "llm_calls",
         "pipeline_model_tokens",
+        "pipeline_output_tokens_reserved",
+        "sandbox_seconds",
+        "workspace_bytes",
         "documents_seen",
+        "budget_consumed",
         "budget_remaining",
+        "provider",
         "terminal_reason",
     }
 
@@ -1894,7 +2055,7 @@ async def test_unknown_source_is_data_while_invalid_pattern_is_an_error() -> Non
     with pytest.raises(ValueError):
         await service.call(
             "token",
-            "content.grep_report",
+            "content.grep",
             {"sources": ["1"], "pattern": ""},
             execution_id="exec-pattern",
         )
@@ -2011,7 +2172,7 @@ async def test_capability_methods_stay_in_step_with_the_handler_table() -> None:
     service.register_session(make_session())
     with pytest.raises(ValueError, match="Unsupported capability"):
         await service.call("token", "search.nope", {})
-    for removed in ("content.snippets", "content.grep"):
+    for removed in ("content.snippets", "content.grep_report"):
         with pytest.raises(ValueError, match="Unsupported capability"):
             await service.call("token", removed, {})
 
@@ -2020,13 +2181,54 @@ def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
     assert CAPABILITY_METHODS == BROKER_METHODS
     assert Mechanisms().capabilities() == list(CAPABILITY_METHODS)
     assert "content.snippets" not in CAPABILITY_METHODS
-    assert "content.grep" not in CAPABILITY_METHODS
+    assert "content.grep" in CAPABILITY_METHODS
+    assert "content.grep_report" not in CAPABILITY_METHODS
     without_llm = Mechanisms(llm_subroutine=False).capabilities()
     assert not any(method.startswith("llm.") for method in without_llm)
     assert "search.query_many" in without_llm
     # Batching bounds a call's width rather than removing it, so the method is
     # still reachable and must still be advertised.
     assert Mechanisms(batching=False).capabilities() == list(CAPABILITY_METHODS)
+
+
+async def test_session_capabilities_reflect_backend_limits_and_mechanisms() -> None:
+    service = BrokerService(
+        {"local": FakeBackend("local", depth=5)},
+        max_search_queries_per_request=7,
+        max_search_query_chars=123,
+        max_search_top_k=50,
+        max_content_sources_per_request=9,
+        content_url_admission="searched_only",
+    )
+    service.register_session(
+        make_session(
+            backends=["local"],
+            mechanisms=Mechanisms(batching=False, persistence=False),
+        )
+    )
+
+    capabilities = await service.call("token", "session.capabilities", {})
+
+    assert capabilities["contracts"] == {"sandbox": 10, "capability": 9}
+    assert capabilities["search"] == {
+        "backend": "local",
+        "supports_domains": False,
+        "max_depth": None,
+        "limits": {
+            "max_queries_per_request": 7,
+            "max_query_chars": 123,
+            "max_top_k": 50,
+            "max_limit": 100,
+            "max_offset": 500,
+            "max_concurrency": 20,
+        },
+    }
+    assert capabilities["content"]["url_admission"] == "searched_only"
+    assert capabilities["content"]["limits"]["max_sources_per_request"] == 9
+    assert capabilities["llm"]["available"] is False
+    assert capabilities["mechanisms"]["batching"] is False
+    assert capabilities["mechanisms"]["persistence"] is False
+    assert "model" not in json.dumps(capabilities).lower()
 
 
 async def test_equivalent_url_spelling_resolves_the_admitted_source() -> None:

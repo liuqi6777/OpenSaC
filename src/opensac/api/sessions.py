@@ -45,11 +45,11 @@ class SessionRoutes:
         if not self.runtime.settings.model_name:
             capabilities = [method for method in capabilities if not method.startswith("llm.")]
         features = [
-            "capability_contract_v8",
+            "capability_contract_v9",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
-            "content_grep_report_v1",
+            "content_grep_v2",
             "direct_web_content_v1",
             "lightweight_url_citations_v1",
             "intra_call_dedupe_v1",

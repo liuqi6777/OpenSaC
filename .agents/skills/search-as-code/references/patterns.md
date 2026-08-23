@@ -120,11 +120,15 @@ evidence = {}
 problems = []
 for name, pattern in checks.items():
     try:
-        report = sdk.content.grep_report(sources, pattern, context=2)
+        report = sdk.content.grep(sources, pattern, context=2)
     except BrokerError as error:
         problems.append(f"{name}:grep:{error.code}")
         continue
-    problems.extend(f"{name}:fetch:{item.failure.code}" for item in report.failures)
+    problems.extend(
+        f"{name}:fetch:{item.failure.code}"
+        for item in report.source_results
+        if item.failure is not None
+    )
 
     seen = set()
     for match in report.matches:
@@ -135,8 +139,8 @@ for name, pattern in checks.items():
         seen.add(match.source)
         try:
             passage = sdk.content.read(
-                [match.source], offset=max(match.line - 10, 1), limit=40, max_chars=16_000
-            )[0]
+                match.source, offset=max(match.line - 10, 1), limit=40, max_chars=16_000
+            )
         except BrokerError as error:
             problems.append(f"{name}:read:{error.code}")
             continue

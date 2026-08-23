@@ -18,8 +18,16 @@ from opensac.broker.policy import CapabilityPolicy, MechanismDisabled
 from opensac.broker.providers import ProviderExecutionConfig, ProviderExecutor
 from opensac.broker.session import BrokerSession
 from opensac.metrics import CapacityGate
-from opensac.models import CAPABILITY_METHODS, CapabilityEvent, Session
+from opensac.models import (
+    CAPABILITY_CONTRACT,
+    CAPABILITY_METHODS,
+    CapabilityEvent,
+    Mechanisms,
+    Session,
+    budget_consumed,
+)
 from opensac.provider import ProviderPolicy, ProviderRuntime
+from opensac.sandbox import SANDBOX_CONTRACT
 
 CapabilityHandler = Callable[[BrokerSession, dict[str, Any]], Awaitable[Any]]
 
@@ -157,8 +165,10 @@ class BrokerService:
             "content.get_many": self.content.get_many,
             "content.passages": self.content.passages,
             "content.read": self.content.read,
-            "content.grep_report": self.content.grep_report,
+            "content.read_many": self.content.read_many,
+            "content.grep": self.content.grep,
             "session.usage": self._session_usage,
+            "session.capabilities": self._session_capabilities,
             "llm.complete": self.llm.complete,
             "llm.complete_many": self.llm.complete_many,
             "llm.extract_many": self.llm.extract_many,
@@ -212,6 +222,64 @@ class BrokerService:
 
     def unregister_session(self, token: str) -> None:
         self.sessions.pop(token, None)
+
+    def capability_manifest(
+        self,
+        *,
+        backend_name: str,
+        mechanisms: Mechanisms,
+    ) -> dict[str, Any]:
+        backend = self.backends.get(backend_name)
+        if backend is None:
+            raise ValueError(f"Backend '{backend_name}' is not configured")
+        return {
+            "contracts": {
+                "sandbox": SANDBOX_CONTRACT,
+                "capability": CAPABILITY_CONTRACT,
+            },
+            "search": {
+                "backend": backend_name,
+                "supports_domains": backend.supports_domains,
+                "max_depth": backend.max_depth,
+                "limits": {
+                    "max_queries_per_request": self.max_search_queries_per_request,
+                    "max_query_chars": self.max_search_query_chars,
+                    "max_top_k": self.max_search_top_k,
+                    "max_limit": 100,
+                    "max_offset": 500,
+                    "max_concurrency": 20,
+                },
+            },
+            "content": {
+                "url_admission": self.content.content_url_admission,
+                "limits": {
+                    "max_sources_per_request": (
+                        self.content.max_content_sources_per_request
+                    ),
+                    "read_max_lines": 5_000,
+                    "read_max_chars": 400_000,
+                    "grep_max_context": 20,
+                    "grep_max_matches_per_source": 200,
+                    "passage_limit": 100,
+                    "passage_max_per_source": 10,
+                },
+            },
+            "llm": {
+                "available": bool(self.llm.model_client and self.llm.extraction_model),
+                "limits": {
+                    "max_concurrency": 12,
+                    "max_completion_tokens": 32_000,
+                    "extract_max_items": self.llm.max_extract_items,
+                    "extract_max_instruction_bytes": self.llm.max_extract_instruction_bytes,
+                    "extract_max_schema_bytes": self.llm.max_extract_schema_bytes,
+                    "extract_max_item_bytes": self.llm.max_extract_item_bytes,
+                    "extract_max_total_item_bytes": self.llm.max_extract_total_item_bytes,
+                    "extract_max_schema_depth": self.llm.max_extract_schema_depth,
+                    "extract_max_repair_attempts": self.llm.max_extract_repair_attempts,
+                },
+            },
+            "mechanisms": mechanisms.model_dump(mode="json"),
+        }
 
     async def cancel_execution(
         self,
@@ -405,6 +473,11 @@ class BrokerService:
         if method.startswith("search."):
             return len(params.get("queries", [])) if method.endswith("_many") else 1
         if method.startswith("content."):
+            if method == "content.read_many":
+                windows = params.get("windows", [])
+                return len(windows) if isinstance(windows, list) else 0
+            if method == "content.read":
+                return 1
             sources = params.get("sources", [])
             return (
                 1 if isinstance(sources, str) else len(sources) if isinstance(sources, list) else 0
@@ -420,7 +493,7 @@ class BrokerService:
             return sum(len(batch.get("hits", [])) for batch in result)
         if isinstance(result, list):
             return len(result)
-        if method == "content.grep_report" and isinstance(result, dict):
+        if method == "content.grep" and isinstance(result, dict):
             return len(result.get("matches", []))
         if method == "content.passages" and isinstance(result, dict):
             return len(result.get("passages", []))
@@ -431,17 +504,50 @@ class BrokerService:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        del params
+        if params:
+            raise ValueError("session.usage does not accept parameters")
         usage = state.policy.usage
         return {
             "exec_calls": usage.exec_calls,
             "search_calls": usage.search_calls,
             "content_fetches": usage.content_fetches,
+            "content_backend_fetches": usage.content_backend_fetches,
             "direct_url_attempts": usage.direct_url_attempts,
             "direct_url_successes": usage.direct_url_successes,
             "llm_calls": usage.llm_calls,
             "pipeline_model_tokens": usage.pipeline_model_tokens,
+            "pipeline_output_tokens_reserved": usage.pipeline_output_tokens_reserved,
+            "sandbox_seconds": usage.sandbox_seconds,
+            "workspace_bytes": usage.workspace_bytes,
             "documents_seen": len(state.documents_by_id),
+            "budget_consumed": budget_consumed(usage),
             "budget_remaining": state.policy.remaining(),
+            "provider": {
+                "search_attempts": usage.search_provider_attempts,
+                "content_attempts": usage.content_provider_attempts,
+                "retries": usage.provider_retries,
+                "intra_call_deduplicated_items": (
+                    usage.intra_call_deduplicated_items
+                ),
+                "coalesced_requests": usage.provider_coalesced_requests,
+                "queue_seconds": usage.provider_queue_seconds,
+                "rate_limit_wait_seconds": usage.provider_rate_limit_wait_seconds,
+                "backoff_seconds": usage.provider_backoff_seconds,
+            },
             "terminal_reason": state.policy.terminal_reason,
         }
+
+    async def _session_capabilities(
+        self,
+        state: BrokerSession,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        if params:
+            raise ValueError("session.capabilities does not accept parameters")
+        backend_names = sorted(state.policy.allowed_backends & set(self.backends))
+        if len(backend_names) != 1:
+            raise RuntimeError("A session must have exactly one configured search backend")
+        return self.capability_manifest(
+            backend_name=backend_names[0],
+            mechanisms=state.mechanisms,
+        )
