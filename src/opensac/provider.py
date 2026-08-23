@@ -34,6 +34,7 @@ ProviderOperation = Literal[
     "local.search",
     "local.document",
 ]
+FailureScope = Literal["request", "resource", "provider", "unknown"]
 
 _PROVIDER_OPERATIONS = {
     "web.search",
@@ -63,6 +64,9 @@ class ProviderRequestError(Exception):
         provider_status: int | None = None,
         retry_after_seconds: float | None = None,
         attempts: int = 0,
+        provider: str | None = None,
+        operation: ProviderOperation | None = None,
+        scope: FailureScope | None = None,
     ) -> None:
         super().__init__(message)
         if attempts < 0:
@@ -73,6 +77,9 @@ class ProviderRequestError(Exception):
         self.provider_status = provider_status
         self.retry_after_seconds = retry_after_seconds
         self.attempts = attempts
+        self.provider = provider
+        self.operation = operation
+        self.scope = scope
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +205,9 @@ def classify_provider_error(
             provider_status=error.provider_status,
             retry_after_seconds=retry_after,
             attempts=error.attempts,
+            provider=error.provider,
+            operation=error.operation,
+            scope=error.scope,
         )
 
     if isinstance(error, (httpx.InvalidURL, httpx.UnsupportedProtocol)):
@@ -294,6 +304,62 @@ def classify_provider_error(
         "provider_invalid_response",
         "Provider returned an invalid response.",
         retryable=False,
+    )
+
+
+def infer_failure_scope(
+    code: ProviderErrorCode,
+    operation: ProviderOperation,
+    *,
+    provider_status: int | None = None,
+) -> FailureScope:
+    """Classify the safest actionable layer without inspecting provider bodies."""
+
+    if code in {"invalid_request", "provider_cancelled"}:
+        return "request"
+    if code in {
+        "provider_not_configured",
+        "provider_rate_limited",
+        "provider_unavailable",
+    }:
+        return "provider"
+    if code == "provider_auth_failed":
+        # Reader 403 responses cannot reliably distinguish provider credentials
+        # from a target-site restriction. Do not tell a program to rotate a key
+        # when the transport status alone does not support that conclusion.
+        if operation == "web.scrape" and provider_status == 403:
+            return "unknown"
+        return "provider"
+    if code in {"provider_not_found", "provider_rejected"}:
+        return "resource" if operation in {"web.scrape", "local.document"} else "provider"
+    if code == "provider_invalid_response":
+        return "provider"
+    return "unknown"
+
+
+def contextualize_provider_error(
+    error: ProviderRequestError,
+    *,
+    provider: str,
+    operation: ProviderOperation,
+) -> ProviderRequestError:
+    """Attach secret-free provider identity, operation, and actionable scope."""
+
+    return ProviderRequestError(
+        error.code,
+        error.message,
+        retryable=error.retryable,
+        provider_status=error.provider_status,
+        retry_after_seconds=error.retry_after_seconds,
+        attempts=error.attempts,
+        provider=error.provider or provider,
+        operation=error.operation or operation,
+        scope=error.scope
+        or infer_failure_scope(
+            error.code,
+            operation,
+            provider_status=error.provider_status,
+        ),
     )
 
 
@@ -717,6 +783,9 @@ def _with_attempts(
         provider_status=error.provider_status,
         retry_after_seconds=error.retry_after_seconds,
         attempts=attempts,
+        provider=error.provider,
+        operation=error.operation,
+        scope=error.scope,
     )
 
 

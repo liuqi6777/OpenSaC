@@ -14,6 +14,7 @@ class JinaPassageReranker:
     """Strict adapter for Jina's index-addressed reranker response."""
 
     endpoint = "https://api.jina.ai/v1/rerank"
+    provider_name = "jina_reranker"
 
     def __init__(
         self,

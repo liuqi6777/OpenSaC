@@ -14,6 +14,7 @@ from opensac.provider import (
     ProviderRuntime,
     ProviderWait,
     classify_provider_error,
+    contextualize_provider_error,
     parse_retry_after,
 )
 
@@ -77,6 +78,41 @@ def test_classifier_uses_stable_sanitized_failures(
     assert failure.provider_status == status
     assert "secret" not in failure.message
     assert "secret" not in str(failure)
+
+
+@pytest.mark.parametrize(
+    ("code", "operation", "status", "scope"),
+    [
+        ("invalid_request", "web.scrape", None, "request"),
+        ("provider_not_found", "web.scrape", 404, "resource"),
+        ("provider_rejected", "local.document", 422, "resource"),
+        ("provider_auth_failed", "web.scrape", 403, "unknown"),
+        ("provider_auth_failed", "web.scrape", 401, "provider"),
+        ("provider_unavailable", "web.scrape", 503, "provider"),
+        ("provider_timeout", "web.scrape", 408, "unknown"),
+        ("provider_invalid_response", "web.rerank", None, "provider"),
+    ],
+)
+def test_provider_context_identifies_the_actionable_failure_layer(
+    code,
+    operation,
+    status,
+    scope,
+) -> None:
+    failure = contextualize_provider_error(
+        ProviderRequestError(
+            code,
+            "Sanitized provider failure.",
+            retryable=False,
+            provider_status=status,
+        ),
+        provider="jina_reader",
+        operation=operation,
+    )
+
+    assert failure.provider == "jina_reader"
+    assert failure.operation == operation
+    assert failure.scope == scope
 
 
 def test_retry_after_accepts_delta_or_http_date_and_rejects_loose_values() -> None:

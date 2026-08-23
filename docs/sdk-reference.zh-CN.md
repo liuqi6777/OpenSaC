@@ -37,6 +37,9 @@ except BrokerError as error:
         error.attempts,
         error.provider_status,
         error.retry_after_seconds,
+        error.provider,
+        error.operation,
+        error.scope,
     )
 ```
 
@@ -99,10 +102,15 @@ state 或 output 的值必须是严格 JSON；不支持的对象、NaN 和 Infin
     "attempts": int,
     "provider_status": int | None,       # 可缺省
     "retry_after_seconds": float | None, # 可缺省
+    "provider": str | None,              # 不含密钥的上游名称
+    "operation": str | None,             # 例如 web.scrape
+    "scope": "request" | "resource" | "provider" | "unknown" | None,
 }
 ```
 
-读取两个可缺省的 provider 字段时应使用 `failure.get(...)`。
+`scope` 表示现有传输证据能够支持的最安全处置层级：`request` 是调用输入问题，`resource` 是单个
+query/document 问题，`provider` 是共享服务、凭据或容量问题。状态码无法区分时会明确返回
+`unknown`，例如 Jina Reader 的 HTTP 403。SDK 不会暴露 provider 原始响应正文或含凭据的细节。
 
 ### `ContentRow`
 

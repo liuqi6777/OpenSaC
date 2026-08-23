@@ -26,6 +26,12 @@ class SerperBackend:
     # 100 draws exactly the wrong conclusion about why it found nothing.
     max_depth = 100
 
+    @staticmethod
+    def provider_for_operation(operation: str) -> str:
+        """Name the actual upstream behind the shared web backend."""
+
+        return "jina_reader" if operation == "web.scrape" else "serper"
+
     def __init__(
         self,
         api_key: str = "",
@@ -168,8 +174,13 @@ class SerperBackend:
         )
         response.raise_for_status()
         text = response.text
-        if not isinstance(text, str):
-            raise invalid_provider_response()
+        if not isinstance(text, str) or not text.strip():
+            raise ProviderRequestError(
+                "provider_invalid_response",
+                "Reader returned empty document text.",
+                retryable=False,
+                scope="resource",
+            )
         return ContentSnippet(
             source=hit.source,
             text=text,

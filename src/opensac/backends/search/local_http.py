@@ -57,6 +57,7 @@ def parse_document_frontmatter(text: str) -> tuple[dict[str, str], str]:
 
 class LocalSearchBackend:
     name = "local"
+    provider_name = "local_search"
     # The corpus has no notion of a site, and a filter that cannot be honoured
     # is refused by the broker rather than ignored here. It used to be silently
     # dropped, which handed a program filtering by domain an unfiltered result

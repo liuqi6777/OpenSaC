@@ -61,6 +61,9 @@ class CapabilityFailure(OperationError):
     attempts: int = Field(ge=0)
     provider_status: int | None = Field(default=None, ge=100, le=599)
     retry_after_seconds: float | None = Field(default=None, ge=0.0)
+    provider: str | None = None
+    operation: str | None = None
+    scope: Literal["request", "resource", "provider", "unknown"] | None = None
 
 
 class SearchBatch(BaseModel):
@@ -283,6 +286,9 @@ class RpcError(OperationError):
     attempts: int | None = Field(default=None, ge=0)
     provider_status: int | None = Field(default=None, ge=100, le=599)
     retry_after_seconds: float | None = Field(default=None, ge=0.0)
+    provider: str | None = None
+    operation: str | None = None
+    scope: Literal["request", "resource", "provider", "unknown"] | None = None
 
 
 class RpcResponse(BaseModel):

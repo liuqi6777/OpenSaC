@@ -1033,11 +1033,17 @@ class ContentCapabilities:
             )
         return rows
 
-    @staticmethod
     def _content_failure_row(
+        self,
         hit: SearchHit,
         failure: dict[str, Any],
     ) -> dict[str, Any]:
+        operation = "local.document" if hit.backend == "local" else "web.scrape"
+        failure = self.providers.contextualize_failure(
+            failure,
+            backend=self.backends.get(hit.backend),
+            operation=operation,
+        )
         return ContentSnippet(
             source=hit.source,
             text="",

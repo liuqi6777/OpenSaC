@@ -5,7 +5,7 @@ import copy
 import uuid
 from typing import Any
 
-from opensac._contracts import SearchBatch, SearchHit
+from opensac._contracts import CapabilityFailure, SearchBatch, SearchHit
 from opensac.backends.search.base import BatchSearchBackend, SearchBackend
 from opensac.broker.call_context import current_call
 from opensac.broker.session import BrokerSession, FlightGroup
@@ -352,26 +352,34 @@ class SearchCapabilities:
             if not query:
                 batches[index] = SearchBatch(
                     query=original_query,
-                    failure={
-                        "code": "invalid_request",
-                        "message": "query must not be empty",
-                        "retryable": False,
-                        "attempts": 0,
-                    },
+                    failure=self.providers.contextualize_failure(
+                        {
+                            "code": "invalid_request",
+                            "message": "query must not be empty",
+                            "retryable": False,
+                            "attempts": 0,
+                        },
+                        backend=backend,
+                        operation=f"{backend_name}.search",
+                    ),
                 )
                 continue
             if len(query) > self.max_search_query_chars:
                 batches[index] = SearchBatch(
                     query=original_query,
-                    failure={
-                        "code": "invalid_request",
-                        "message": (
-                            f"query has {len(query)} characters, exceeding the broker "
-                            f"maximum of {self.max_search_query_chars}"
-                        ),
-                        "retryable": False,
-                        "attempts": 0,
-                    },
+                    failure=self.providers.contextualize_failure(
+                        {
+                            "code": "invalid_request",
+                            "message": (
+                                f"query has {len(query)} characters, exceeding the broker "
+                                f"maximum of {self.max_search_query_chars}"
+                            ),
+                            "retryable": False,
+                            "attempts": 0,
+                        },
+                        backend=backend,
+                        operation=f"{backend_name}.search",
+                    ),
                 )
                 continue
             fingerprint = self.providers.fingerprint(
@@ -676,7 +684,13 @@ class SearchCapabilities:
         for index, batch in zip(leaders, returned, strict=True):
             failure = batch.failure
             if failure is not None:
-                failure = failure.model_copy(update={"attempts": attempts})
+                failure = CapabilityFailure.model_validate(
+                    self.providers.contextualize_failure(
+                        failure.model_dump(mode="json") | {"attempts": attempts},
+                        backend=resolved,
+                        operation=f"{backend_name}.search",
+                    )
+                )
                 if failure.code == "provider_rejected":
                     failure = failure.model_copy(
                         update={"message": "Provider rejected one search item."}

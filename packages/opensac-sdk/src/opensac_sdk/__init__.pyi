@@ -7,18 +7,26 @@ class BrokerError(RuntimeError):
     attempts: int | None
     provider_status: int | None
     retry_after_seconds: float | None
+    provider: str | None
+    operation: str | None
+    scope: Literal["request", "resource", "provider", "unknown"] | None
 
-class _FailureRecord(Protocol):
+class _OperationFailureRecord(Protocol):
     code: str
     message: str
     retryable: bool
-    attempts: int
-    provider_status: int | None
-    retry_after_seconds: float | None
     @overload
     def __getitem__(self, key: Literal["code", "message"]) -> str: ...
     @overload
     def __getitem__(self, key: Literal["retryable"]) -> bool: ...
+
+class _FailureRecord(_OperationFailureRecord, Protocol):
+    attempts: int
+    provider_status: int | None
+    retry_after_seconds: float | None
+    provider: str | None
+    operation: str | None
+    scope: Literal["request", "resource", "provider", "unknown"] | None
     @overload
     def __getitem__(self, key: Literal["attempts"]) -> int: ...
     @overload
@@ -31,6 +39,13 @@ class _FailureRecord(Protocol):
         self,
         key: Literal["retry_after_seconds"],
     ) -> float | None: ...
+    @overload
+    def __getitem__(self, key: Literal["provider", "operation"]) -> str | None: ...
+    @overload
+    def __getitem__(
+        self,
+        key: Literal["scope"],
+    ) -> Literal["request", "resource", "provider", "unknown"] | None: ...
 
 class _SearchHitRecord(Protocol):
     source: str
@@ -162,7 +177,7 @@ class _PassageReportRecord(Protocol):
 class _ExtractionRowRecord(Protocol):
     index: int
     data: dict[str, Any] | None
-    failure: _FailureRecord | None
+    failure: _OperationFailureRecord | None
     attempts: int
 
 class _ContractsRecord(Protocol):
