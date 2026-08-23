@@ -113,8 +113,9 @@ validate its quoted evidence, clean and cap proposed follow-up inputs, then make
   support claims about document content.
 - For every material document-content claim, inspect non-empty text. Output citations are optional,
   unverified URL/source labels; prefer primary sources and corroborate disputed claims.
-- Inspect `BrokerError` and typed item failures. Empty hits or zero matches are successful results,
-  not failures.
+- `[sac_run]` renders bounded external-failure warnings before stdout while keeping successful
+  rows. Inspect typed failures only when code must branch on them. Empty hits or zero matches
+  without a warning are successful results.
 
 ## End each stage deliberately
 

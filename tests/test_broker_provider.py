@@ -10,11 +10,7 @@ from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
 from opensac.broker.capabilities.documents import document_identity
-from opensac.broker.providers import (
-    CapabilityProviderError,
-    ProviderExecutionConfig,
-    ProviderExecutor,
-)
+from opensac.broker.providers import ProviderExecutionConfig, ProviderExecutor
 from opensac.broker.providers.cache import ProviderResultCache
 from opensac.broker.service import BrokerService
 from opensac.models import Mechanisms, ResourceBudget, Session
@@ -150,16 +146,18 @@ async def test_broker_runs_bundled_search_preflight_before_provider_usage() -> N
     service = BrokerService({"web": backend}, provider_runtime=runtime)
     state = service.register_session(make_session(backend="web"))
 
-    with pytest.raises(CapabilityProviderError) as caught:
-        await service.call(
-            "token",
-            "search.query_many",
-            {"queries": ["alpha", "beta"]},
-            execution_id="search-preflight",
-        )
+    rows = await service.call(
+        "token",
+        "search.query_many",
+        {"queries": ["alpha", "beta"]},
+        execution_id="search-preflight",
+    )
 
-    assert caught.value.code == "provider_not_configured"
-    assert caught.value.attempts == 0
+    assert [row["failure"]["code"] for row in rows] == [
+        "provider_not_configured",
+        "provider_not_configured",
+    ]
+    assert all(row["failure"]["attempts"] == 0 for row in rows)
     assert state.policy.usage.search_calls == 2
     assert state.policy.usage.search_provider_attempts == 0
     assert state.policy.usage.provider_retries == 0
@@ -395,7 +393,7 @@ async def test_safe_retry_changes_attempt_usage_not_logical_search_usage() -> No
     assert "secret" not in "".join(attempt.model_dump_json() for attempt in attempts)
 
 
-async def test_promoted_batch_uses_nonretryable_failure_and_total_attempts() -> None:
+async def test_all_failed_batch_preserves_each_failure_and_attempt_count() -> None:
     class MixedWeb:
         name = "web"
         supports_domains = True
@@ -422,16 +420,18 @@ async def test_promoted_batch_uses_nonretryable_failure_and_total_attempts() -> 
     service = BrokerService({"web": MixedWeb()})
     service.register_session(make_session(backend="web"))
 
-    with pytest.raises(CapabilityProviderError) as caught:
-        await service.call(
-            "token",
-            "search.query_many",
-            {"queries": ["temporary", "permanent"]},
-        )
+    rows = await service.call(
+        "token",
+        "search.query_many",
+        {"queries": ["temporary", "permanent"]},
+    )
 
-    assert caught.value.code == "provider_auth_failed"
-    assert caught.value.retryable is False
-    assert caught.value.attempts == 2
+    assert [row["failure"]["code"] for row in rows] == [
+        "provider_timeout",
+        "provider_auth_failed",
+    ]
+    assert [row["failure"]["retryable"] for row in rows] == [True, False]
+    assert [row["failure"]["attempts"] for row in rows] == [1, 1]
 
 
 async def test_cancelled_provider_backoff_is_counted_without_a_retry_attempt() -> None:
@@ -533,7 +533,7 @@ async def test_content_dedupes_sources_and_grep_keeps_failure_indexes() -> None:
     assert only_failure["source_results"][0]["failure"]["code"] == "provider_not_found"
 
 
-async def test_systemic_content_failure_is_promoted_and_never_cached() -> None:
+async def test_systemic_content_failure_stays_aligned_and_is_never_cached() -> None:
     backend = LocalBackend(documents={"1": "body"})
     backend.failures["1"] = ProviderRequestError(
         "provider_unavailable",
@@ -544,14 +544,13 @@ async def test_systemic_content_failure_is_promoted_and_never_cached() -> None:
     state = service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    with pytest.raises(CapabilityProviderError) as caught:
-        await service.call("token", "content.get_many", {"sources": [source]})
-    assert caught.value.code == "provider_unavailable"
-    assert caught.value.attempts == 1
+    rows = await service.call("token", "content.get_many", {"sources": [source]})
+    assert rows[0]["failure"]["code"] == "provider_unavailable"
+    assert rows[0]["failure"]["attempts"] == 1
     assert state.content_cache == {}
 
-    with pytest.raises(CapabilityProviderError):
-        await service.call("token", "content.get_many", {"sources": [source]})
+    repeated = await service.call("token", "content.get_many", {"sources": [source]})
+    assert repeated[0]["failure"]["code"] == "provider_unavailable"
     assert backend.fetches == ["1", "1"]
 
 

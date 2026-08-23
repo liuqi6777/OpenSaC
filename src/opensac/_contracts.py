@@ -194,6 +194,7 @@ class ContentPassageReport(BaseModel):
     query: str = Field(min_length=1)
     passages: list[ContentPassage] = Field(default_factory=list)
     failures: list[ContentFailure] = Field(default_factory=list)
+    warnings: list[CapabilityFailure] = Field(default_factory=list)
     input_count: int = Field(ge=0)
     unique_source_count: int = Field(ge=0)
 

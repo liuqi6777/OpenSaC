@@ -25,7 +25,7 @@ from opensac.broker.validation import boolean, integer, string
 from opensac.models import HitRecord, PassageTraceRecord, ProviderAttemptRecord
 from opensac.provider import ProviderRequestError
 
-from ..providers.execution import CapabilityProviderError, ProviderExecutor
+from ..providers.execution import ProviderExecutor
 from .documents import document_identity, normalize_source, public_web_url
 from .passages import (
     PassageCandidate,
@@ -240,34 +240,54 @@ class ContentCapabilities:
         state: BrokerSession,
         query: str,
         candidates: list[PassageCandidate],
-    ) -> tuple[str, list[tuple[PassageCandidate, float]]]:
+    ) -> tuple[str, list[tuple[PassageCandidate, float]], list[dict[str, Any]]]:
         reranker = self.passage_reranker
         if reranker is None:
-            return "lexical:bm25", [
-                (candidate, candidate.lexical_score) for candidate in candidates
-            ]
+            return (
+                "lexical:bm25",
+                [(candidate, candidate.lexical_score) for candidate in candidates],
+                [],
+            )
         if not candidates:
-            return reranker.name, []
+            return reranker.name, [], []
+
+        def lexical_fallback(
+            failure: dict[str, Any],
+        ) -> tuple[
+            str,
+            list[tuple[PassageCandidate, float]],
+            list[dict[str, Any]],
+        ]:
+            return (
+                "lexical:bm25",
+                [(candidate, candidate.lexical_score) for candidate in candidates],
+                [failure],
+            )
 
         async def request() -> Any:
             return await reranker.rerank(query, [candidate.text for candidate in candidates])
 
-        results = await self.providers.run(
-            state,
-            backend=reranker,
-            operation="web.rerank",
-            request_indexes=list(range(len(candidates))),
-            request_value={
-                "ranker": reranker.name,
-                "query": query,
-                "passages": [
-                    hashlib.sha256(candidate.text.encode("utf-8")).hexdigest()
-                    for candidate in candidates
-                ],
-            },
-            request=request,
-            preflight=reranker.preflight,
-        )
+        attempts_before = len(_provider_attempts())
+        try:
+            results = await self.providers.run(
+                state,
+                backend=reranker,
+                operation="web.rerank",
+                request_indexes=list(range(len(candidates))),
+                request_value={
+                    "ranker": reranker.name,
+                    "query": query,
+                    "passages": [
+                        hashlib.sha256(candidate.text.encode("utf-8")).hexdigest()
+                        for candidate in candidates
+                    ],
+                },
+                request=request,
+                preflight=reranker.preflight,
+            )
+        except ProviderRequestError as exc:
+            return lexical_fallback(self.providers.provider_failure(exc))
+        rerank_attempts = len(_provider_attempts()) - attempts_before
         scores: dict[int, float] = {}
         for result in results:
             index = getattr(result, "index", None)
@@ -282,13 +302,37 @@ class ContentCapabilities:
                 or not isinstance(score, (int, float))
                 or not math.isfinite(float(score))
             ):
-                raise ValueError("passage reranker returned invalid indexed scores")
+                return lexical_fallback(
+                    self.providers.contextualize_failure(
+                        {
+                            "code": "provider_invalid_response",
+                            "message": "Passage reranker returned invalid indexed scores.",
+                            "retryable": False,
+                            "attempts": rerank_attempts,
+                        },
+                        backend=reranker,
+                        operation="web.rerank",
+                    )
+                )
             scores[index] = float(score)
         if set(scores) != set(range(len(candidates))):
-            raise ValueError("passage reranker returned an incomplete score set")
-        return reranker.name, [
-            (candidate, scores[index]) for index, candidate in enumerate(candidates)
-        ]
+            return lexical_fallback(
+                self.providers.contextualize_failure(
+                    {
+                        "code": "provider_invalid_response",
+                        "message": "Passage reranker returned an incomplete score set.",
+                        "retryable": False,
+                        "attempts": rerank_attempts,
+                    },
+                    backend=reranker,
+                    operation="web.rerank",
+                )
+            )
+        return (
+            reranker.name,
+            [(candidate, scores[index]) for index, candidate in enumerate(candidates)],
+            [],
+        )
 
     async def passages(
         self,
@@ -401,7 +445,7 @@ class ContentCapabilities:
             max_per_source=max_per_source,
             limit=self.passage_prefilter_limit,
         )
-        ranker_name, reranked = await self._rerank_passages(state, query, retained)
+        ranker_name, reranked, rerank_warnings = await self._rerank_passages(state, query, retained)
         selected = select_passage_candidates(
             reranked,
             max_per_source=max_per_source,
@@ -441,6 +485,7 @@ class ContentCapabilities:
             query=query,
             passages=passages,
             failures=failures,
+            warnings=rerank_warnings,
             input_count=input_count,
             unique_source_count=len(unique),
         ).model_dump(mode="json")
@@ -587,7 +632,6 @@ class ContentCapabilities:
             state,
             hits,
             query=None,
-            raise_on_all_failures=False,
         )
         matches: list[dict[str, Any]] = []
         source_results: list[dict[str, Any]] = []
@@ -661,7 +705,6 @@ class ContentCapabilities:
         hits: list[SearchHit],
         *,
         query: str | None,
-        raise_on_all_failures: bool = False,
     ) -> list[dict[str, Any]]:
         """Text for every requested hit, in the order requested.
 
@@ -1021,16 +1064,6 @@ class ContentCapabilities:
                 row["date"] = hit.date
             rows.append(row)
 
-        failures = [row["failure"] for row in rows if row.get("failure") is not None]
-        all_failed = bool(rows) and len(failures) == len(rows)
-        all_systemic = all_failed and all(
-            self.providers.is_systemic_content_failure(failure) for failure in failures
-        )
-        if all_systemic or (raise_on_all_failures and all_failed):
-            raise CapabilityProviderError.from_failures(
-                failures,
-                attempts=len(_provider_attempts()),
-            )
         return rows
 
     def _content_failure_row(

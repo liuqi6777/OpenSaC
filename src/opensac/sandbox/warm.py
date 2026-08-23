@@ -599,6 +599,7 @@ class WarmDockerSandbox(DockerSandboxCore):
                     duration_seconds=duration_seconds,
                     output=submitted.get("output"),
                     citations=submitted.get("citations", []),
+                    warnings=submitted.get("warnings", []),
                     timed_out=captured.timed_out,
                     output_limit_exceeded=captured.output_limit_exceeded,
                     timings=self._timings(

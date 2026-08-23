@@ -154,7 +154,7 @@ class FailingModelClient:
         self.chat = SimpleNamespace(completions=Completions())
 
 
-async def test_extraction_infrastructure_error_is_retryable_and_sanitized(tmp_path) -> None:
+async def test_extraction_provider_failure_stays_aligned_and_sanitized(tmp_path) -> None:
     service = BrokerService(
         {"local": SocketBackend()},
         model_client=FailingModelClient(),
@@ -172,21 +172,22 @@ async def test_extraction_infrastructure_error_is_retryable_and_sanitized(tmp_pa
     await runtime.start()
     try:
         resource = LLMResource(UnixSocketTransport(str(runtime.socket_path), "secret"))
-        with pytest.raises(BrokerError, match="failed for every item") as raised:
-            await asyncio.to_thread(
-                resource.extract_many,
-                [{"value": 1}],
-                instruction="Copy the value.",
-                schema={
-                    "type": "object",
-                    "properties": {"value": {"type": "integer"}},
-                    "required": ["value"],
-                    "additionalProperties": False,
-                },
-            )
-        assert raised.value.code == "extraction_provider_unavailable"
-        assert raised.value.retryable is True
-        assert "provider response" not in str(raised.value)
+        rows = await asyncio.to_thread(
+            resource.extract_many,
+            [{"value": 1}],
+            instruction="Copy the value.",
+            schema={
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        )
+        assert len(rows) == 1
+        assert rows[0].data is None
+        assert rows[0].failure.code == "provider_error"
+        assert rows[0].failure.retryable is True
+        assert "provider response" not in rows[0].failure.message
     finally:
         await runtime.stop()
 

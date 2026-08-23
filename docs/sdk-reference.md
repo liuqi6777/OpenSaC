@@ -1,7 +1,7 @@
 # OpenSAC SDK API Reference
 
 This document covers all 22 public operations declared by `SDK_SURFACE` in the bundled
-`opensac_sdk` 0.6.4. The SDK is a synchronous interface for generated programs running inside an
+`opensac_sdk` 0.6.5. The SDK is a synchronous interface for generated programs running inside an
 OpenSAC sandbox. Host and sandbox images provide a version-matched SDK.
 
 ## 1. Entry point, return values, and errors
@@ -45,8 +45,9 @@ except BrokerError as error:
 ```
 
 Local argument errors normally raise `ValueError`. Reading a missing state file raises
-`FileNotFoundError`. Batch operations do not raise when they can safely preserve partial failures;
-instead, the failure is embedded in the corresponding result row.
+`FileNotFoundError`. Failure-aware operations preserve aligned results for both partial and complete
+external item failure. The typed failure remains in the result, and `sac_run` automatically renders
+a bounded warning before stdout. A legitimate empty result has no typed failure and no warning.
 
 Arguments are validated without coercion: for example, `"10"` is not accepted where an integer is
 required and `True` is not accepted as an integer. Values written to state or output must be strict
@@ -247,7 +248,8 @@ sdk.search.many(
   success without matches.
 - `concurrency` is effectively bounded from 1 through 20.
 - A default deployment accepts at most 64 queries per request; the host can configure this limit.
-- A failure that prevents aligned batch results raises `BrokerError`.
+- External query failures, including 0/N successful queries, remain aligned rows and produce an
+  automatic execution warning. A failure that prevents any aligned result raises `BrokerError`.
 
 **Example**
 
@@ -320,7 +322,8 @@ sdk.search.fuse_rrf(
 **Behavior and errors**
 
 - This helper is deterministic and local: it makes no broker call and incurs no provider work.
-- Failed batches are skipped; their original `failure` values are not copied to fused candidates.
+- Failed batches are skipped and produce an execution warning; their original `failure` values are
+  not copied to fused candidates. An identical warning already emitted by `search.many` is deduplicated.
 - Domain policies match an exact hostname and its subdomains. Non-Web sources are unaffected.
 - Domain policy is applied before the final `limit`.
 - Invalid weights, ranks, limits, or domain policies raise `ValueError`.
@@ -375,7 +378,8 @@ document or a structured fetch failure.
 
 - Duplicate inputs keep separate result positions while fetch work may be reused.
 - Prefer `passages` for evidence discovery and `read` for bounded line windows.
-- A request-wide or systemic failure raises `BrokerError`.
+- External fetch failures, including 0/N successful sources, remain aligned rows and produce an
+  automatic execution warning.
 
 **Example**
 
@@ -432,7 +436,8 @@ sdk.content.read(
 - Values are effectively constrained to `offset >= 1`, `1 <= limit <= 5000`, and
   `1 <= max_chars <= 400000`.
 - `next_offset is None` means the end of the document has been reached.
-- A request-wide or systemic failure raises `BrokerError`.
+- An external fetch failure returns a row with empty `text` and populated `failure`, and produces
+  an automatic execution warning.
 
 **Example**
 
@@ -472,7 +477,8 @@ window applies its own `offset`, `limit`, and `max_chars`.
 - Duplicate sources keep separate result positions and independent slices while broker fetch work
   may be reused.
 - Missing window options use the same defaults and bounds as `read`.
-- Invalid windows raise `ValueError`; a request-wide or systemic failure raises `BrokerError`.
+- Invalid windows raise `ValueError`; external fetch failures remain aligned rows and produce an
+  automatic execution warning.
 
 **Example**
 
@@ -560,7 +566,8 @@ sdk.content.grep(
   successful zero-match scan; a failure sets `scan_complete=False`, and a capped scan is also
   incomplete without being a failure.
 - Duplicate sources remain distinguishable through `input_index`.
-- A report-wide failure raises `BrokerError`.
+- External fetch failures, including 0/N successful scans, remain in `source_results` and produce
+  an automatic execution warning.
 
 **Example**
 
@@ -624,6 +631,7 @@ sdk.content.passages(
         }
     ],
     "failures": list[ContentFailure],
+    "warnings": list[CapabilityFailure], # Reranker fallback diagnostics
     "input_count": int,
     "unique_source_count": int,
 }
@@ -635,7 +643,10 @@ sdk.content.passages(
 - `limit` must be between 1 and 100; `max_per_source` must be between 1 and 10.
 - Scores are comparable only within one report.
 - `coordinates` is a half-open range in normalized document text.
-- Fetch failures appear in `failures`; a report-wide failure raises `BrokerError`.
+- Fetch failures appear in `failures` and produce an automatic execution warning, including when
+  no source succeeds.
+- A configured reranker failure falls back to `lexical:bm25`; its typed diagnostic appears in
+  `warnings` and is also rendered before stdout.
 
 **Example**
 
@@ -798,8 +809,8 @@ sdk.llm.extract_many(
 - Supported schema keywords are `$schema`, `type`, `properties`, `required`,
   `additionalProperties`, `items`, `enum`, and `description`.
 - A default deployment accepts at most 256 items; the host can configure size and nesting limits.
-- Per-item provider failures may coexist with success. If every item fails at the provider
-  infrastructure stage, the whole call raises `BrokerError`.
+- Per-item provider failures may coexist with success. If every item fails, all aligned rows are
+  still returned and `sac_run` renders a 0/N execution warning.
 
 **Example**
 

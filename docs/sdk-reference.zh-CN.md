@@ -1,6 +1,6 @@
 # OpenSAC SDK API 参考
 
-本文档对应仓库当前捆绑的 `opensac_sdk` 0.6.4，覆盖
+本文档对应仓库当前捆绑的 `opensac_sdk` 0.6.5，覆盖
 `SDK_SURFACE` 声明的全部 22 个公共操作。SDK 是同步接口，供 OpenSAC sandbox
 中的生成程序调用；宿主与 sandbox 镜像会提供版本匹配的 SDK。
 
@@ -43,8 +43,9 @@ except BrokerError as error:
     )
 ```
 
-本地参数错误通常抛出 `ValueError`，state 文件不存在会抛出 `FileNotFoundError`。批量方法能安全
-保留局部失败时不会抛异常，而是将失败写入对应结果行。
+本地参数错误通常抛出 `ValueError`，state 文件不存在会抛出 `FileNotFoundError`。具有 failure
+返回结构的方法会为局部失败和全部外部 item 失败保留输入对齐结果；typed failure 继续位于结果中，
+`sac_run` 会在 stdout 之前自动展示有界 warning。合法空结果没有 typed failure，也不会产生 warning。
 
 参数校验不会进行隐式转换：例如，需要整数时不接受 `"10"`，也不会把 `True` 当作整数。写入
 state 或 output 的值必须是严格 JSON；不支持的对象、NaN 和 Infinity 会在已有 artifact 被改动前
@@ -239,7 +240,8 @@ sdk.search.many(
   但未命中。
 - `concurrency` 实际限制在 1 到 20。
 - 默认部署单次最多接受 64 个 query；该限制可由宿主配置。
-- 无法返回输入对齐结果的整体失败会抛出 `BrokerError`。
+- 外部 query 失败（包括成功数为 0/N）会保留输入对齐行并自动产生 execution warning；无法构造
+  任何对齐结果的失败才抛出 `BrokerError`。
 
 **示例**
 
@@ -312,7 +314,8 @@ sdk.search.fuse_rrf(
 **行为与异常**
 
 - 这是确定性的本地 helper，不调用 broker，也不产生 provider 工作。
-- 失败 batch 会被跳过，原 batch 的 `failure` 不会复制到融合候选上。
+- 失败 batch 会被跳过并产生 execution warning；原 batch 的 `failure` 不会复制到融合候选上。
+  如果 `search.many` 已产生相同 warning，则会自动去重。
 - 域名策略匹配指定 hostname 及其子域；非 Web source 不受影响。
 - 域名策略在最终 `limit` 之前应用。
 - 非法权重、rank、limit 或域名策略会抛出 `ValueError`。
@@ -365,7 +368,7 @@ sdk.content.get_many(sources: list[str]) -> list[Record]
 
 - 重复输入保留独立结果位置，但抓取工作可以复用。
 - 证据发现优先使用 `passages`，有界行窗口优先使用 `read`。
-- 整体请求或系统性失败会抛出 `BrokerError`。
+- 外部抓取失败（包括成功数为 0/N）会保留输入对齐行并自动产生 execution warning。
 
 **示例**
 
@@ -421,7 +424,7 @@ sdk.content.read(
 
 - 有效值会被约束到 `offset >= 1`、`1 <= limit <= 5000`、`1 <= max_chars <= 400000`。
 - `next_offset is None` 表示已经到达文档末尾。
-- 整体请求或系统性失败会抛出 `BrokerError`。
+- 外部抓取失败会返回 `text` 为空且 `failure` 非空的行，并自动产生 execution warning。
 
 **示例**
 
@@ -460,7 +463,7 @@ window 独立使用自己的 `offset`、`limit` 和 `max_chars`。
 
 - 重复 source 保留独立结果位置和切片，broker 可以复用抓取工作。
 - 缺省的 window 参数使用与 `read` 相同的默认值和边界。
-- window 非法时抛出 `ValueError`；整体请求或系统性失败时抛出 `BrokerError`。
+- window 非法时抛出 `ValueError`；外部抓取失败会保留输入对齐行并自动产生 execution warning。
 
 **示例**
 
@@ -545,7 +548,7 @@ sdk.content.grep(
 - `source_results` 与输入一一对齐。`scan_complete=True` 且 `match_count=0` 表示成功的零匹配；
   失败会令 `scan_complete=False`，达到上限的扫描也会标记为不完整，但没有 `failure`。
 - 重复 source 可通过 `input_index` 区分。
-- 无法生成 report 时抛出 `BrokerError`。
+- 外部抓取失败（包括成功 scan 数为 0/N）保留在 `source_results` 中并自动产生 execution warning。
 
 **示例**
 
@@ -609,6 +612,7 @@ sdk.content.passages(
         }
     ],
     "failures": list[ContentFailure],
+    "warnings": list[CapabilityFailure], # reranker fallback 诊断
     "input_count": int,
     "unique_source_count": int,
 }
@@ -620,7 +624,8 @@ sdk.content.passages(
 - `limit` 必须在 1 到 100 之间；`max_per_source` 必须在 1 到 10 之间。
 - `score` 只在同一份 report 内部可比较。
 - `coordinates` 是标准化文档文本中的半开区间。
-- 抓取失败进入 `failures`；无法生成 report 时抛出 `BrokerError`。
+- 抓取失败进入 `failures` 并自动产生 execution warning，包括没有任何 source 成功的情况。
+- 配置的 reranker 失败时回退到 `lexical:bm25`；typed 诊断进入 `warnings`，并在 stdout 前展示。
 
 **示例**
 
@@ -781,8 +786,8 @@ sdk.llm.extract_many(
 - 支持的 schema 关键词为 `$schema`、`type`、`properties`、`required`、
   `additionalProperties`、`items`、`enum` 和 `description`。
 - 默认部署最多处理 256 个 item；大小与嵌套深度限制可由宿主配置。
-- 单项 provider 失败可与成功行并存；如果所有项都在 provider 基础设施阶段失败，整个调用抛出
-  `BrokerError`。
+- 单项 provider 失败可与成功行并存；如果所有项都失败，仍返回全部输入对齐行，`sac_run` 会展示
+  0/N execution warning。
 
 **示例**
 

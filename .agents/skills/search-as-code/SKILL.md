@@ -26,10 +26,11 @@ from opensac_sdk import BrokerError, sdk
 - Apply task-specific domain policy in `fuse_rrf` before its final limit.
 - Read the text used for each material claim. Output citations are optional, unverified URL/source
   labels; prefer primary sources and corroborate disputed claims.
-- Inspect item failure records and `BrokerError`. Empty hits and zero matches are successful
-  results. After a final failure, change the query, source, or candidate instead of repeating it.
-- Keep stdout small. Stdout, stderr, and submitted output share one observation budget, and noisy
-  progress can hide the final submitted result.
+- `sac_run` renders bounded external-failure warnings before stdout while preserving successful
+  rows. Inspect item failure records only when code must branch on them. Empty hits and zero matches
+  without a warning are successful results.
+- Keep stdout small. Warnings, stdout, stderr, and submitted output share one observation budget,
+  and noisy progress can hide the final submitted result.
 
 ## End stages deliberately
 

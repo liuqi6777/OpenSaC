@@ -36,9 +36,10 @@ If unavailable or reporting `context_*` or `configuration_error`, stop and repor
 - Apply task-specific domain policy in `fuse_rrf` before its final limit.
 - Read the text used for each material claim. Output citations are optional, unverified URL/source
   labels; prefer primary sources and corroborate disputed claims.
-- Inspect item failure records and `BrokerError`. Empty hits and zero matches are successful
-  results. After a final failure, change the query, source, or candidate instead of repeating it.
-- Keep stdout compact. Stdout, stderr, and submitted output share one observation budget.
+- `[sac_run]` renders bounded external-failure warnings before stdout while preserving successful
+  rows. Inspect item failure records only when code must branch on them. Empty hits and zero matches
+  without a warning are successful results.
+- Keep stdout compact. Warnings, stdout, stderr, and submitted output share one observation budget.
 
 ## End stages deliberately
 

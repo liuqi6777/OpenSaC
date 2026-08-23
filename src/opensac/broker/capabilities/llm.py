@@ -24,18 +24,6 @@ from opensac.metrics import CapacityGate
 from opensac.models import ModelAttemptRecord
 
 
-class ExtractionInfrastructureError(RuntimeError):
-    """Every item failed before the provider produced an extraction output."""
-
-    code = "extraction_provider_unavailable"
-    retryable = True
-
-    def __init__(self) -> None:
-        # Provider exception strings may contain response bodies. The public
-        # error deliberately carries only a stable, actionable classification.
-        super().__init__("The extraction provider failed for every item; retry the call.")
-
-
 @dataclass(frozen=True)
 class _ExtractionError:
     code: str
@@ -584,9 +572,6 @@ class LLMCapabilities:
             initial_outputs,
             [error for _, error in checked],
         )
-
-        if all(output.provider_failed for output in initial_outputs):
-            raise ExtractionInfrastructureError()
 
         results = [
             ExtractionRow(

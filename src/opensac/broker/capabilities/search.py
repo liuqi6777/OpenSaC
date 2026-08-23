@@ -481,23 +481,6 @@ class SearchCapabilities:
                     query_index=index,
                 )
 
-        provider_failures = [
-            batch.failure.model_dump(mode="json")
-            for index, batch in enumerate(finalized)
-            if index in fingerprints and batch.failure is not None
-        ]
-        if (
-            provider_failures
-            and len(provider_failures) == len(fingerprints)
-            and all(
-                self.providers.is_systemic_search_failure(failure) for failure in provider_failures
-            )
-        ):
-            attempts = len(_provider_attempts())
-            raise CapabilityProviderError.from_failures(
-                provider_failures,
-                attempts=attempts,
-            )
         payloads = [batch.model_dump(mode="json") for batch in finalized]
         for payload, batch in zip(payloads, finalized, strict=True):
             if batch.failure is None:

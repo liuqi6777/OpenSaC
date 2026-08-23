@@ -14,7 +14,9 @@ from opensac.sandbox.base import SandboxRequest
 _OUTPUT_LIMIT_MARKER = (
     b"\nOpenSAC terminated the sandbox process after stdout/stderr reached the output limit.\n"
 )
-SANDBOX_CONTRACT = 11
+_EXECUTION_WARNING_BYTES = 4_096
+_EXECUTION_ENVELOPE_OVERHEAD_BYTES = 64 * 1_024
+SANDBOX_CONTRACT = 12
 SANDBOX_CONTRACT_LABEL = "org.opensac.sandbox.contract"
 
 
@@ -253,12 +255,28 @@ class ExecutionWorkspace:
     def read_output(self, *, max_output_bytes: int) -> tuple[dict[str, Any], str]:
         if not self.output_path.exists():
             return {}, ""
-        if self.output_path.stat().st_size > max_output_bytes:
+        if self.output_path.stat().st_size > max_output_bytes + _EXECUTION_ENVELOPE_OVERHEAD_BYTES:
             return {}, ""
         try:
-            return json.loads(self.output_path.read_text(encoding="utf-8")), ""
+            value = json.loads(self.output_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return {}, "\nOpenSAC output was not valid JSON."
+        if not isinstance(value, dict):
+            return {}, "\nOpenSAC output was not a JSON object."
+        warnings = value.get("warnings")
+        warning_bytes = len(
+            json.dumps(warnings, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        if warning_bytes > _EXECUTION_WARNING_BYTES:
+            value.pop("warnings", None)
+        submitted = dict(value)
+        submitted.pop("warnings", None)
+        submitted_bytes = len(
+            json.dumps(submitted, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        if submitted_bytes > max_output_bytes:
+            return ({"warnings": value.get("warnings", [])} if "warnings" in value else {}), ""
+        return value, ""
 
     def cleanup(self) -> None:
         self.program_path.unlink(missing_ok=True)

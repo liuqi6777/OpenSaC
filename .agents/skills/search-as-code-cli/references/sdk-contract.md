@@ -100,8 +100,9 @@ error; keep a deterministic fallback.
   `source_results`, and `input_count`. A match includes `source`, `title`, `line`, `text`, `before`,
   `after`, and `input_index`. Each input-aligned source result includes `input_index`, `source`,
   `title`, `match_count`, `scan_complete`, and `failure`.
-- Passage report: `query`, `passages`, `failures`, `input_count`, `unique_source_count`. A passage
-  includes `source`, source metadata, exact `text`, `coordinates`, `rank`, `score`, and `ranker`.
+- Passage report: `query`, `passages`, `failures`, `warnings`, `input_count`,
+  `unique_source_count`. A passage includes `source`, source metadata, exact `text`, `coordinates`,
+  `rank`, `score`, and `ranker`.
 - Coordinates: `start_line`, `start_character`, `end_line`, `end_character`. Lines are 1-indexed;
   characters are 0-indexed and the end position is exclusive.
 - Failure: `code`, `message`, `retryable`, `attempts`, `provider_status`,
@@ -114,18 +115,23 @@ There is no public SDK model hierarchy or `types` module. Join capability result
 
 ## Failure and alignment semantics
 
-- Catch `BrokerError` for a capability-wide or infrastructure failure. Inspect `code`,
+- `sac_run` automatically renders external item-failure warnings before stdout. Partial and
+  complete item failures preserve aligned SDK results; inspect their typed fields only when code
+  must branch on them.
+- Catch `BrokerError` for a request/infrastructure failure that cannot return a safe documented
+  result shape. Inspect `code`,
   `retryable`, `attempts`, `provider`, `operation`, and `scope`; nullable fields may be absent for
   a broker transport failure. Treat `unknown` as deliberately unclassified, not provider-wide.
 - Inspect `batch.failure` for per-query failure. A failed batch has no hits.
 - Inspect `row.failure` for a single-source `read` failure. `read_many` returns one row per input
   window in the same order and includes `input_index`.
 - `content.passages` exactly deduplicates sources in first-seen order, ranks successful documents
-  together, and reports failed fetches in `report.failures`. Empty sources and zero
-  passages are successful reports.
+  together, and reports failed fetches in `report.failures`. A failed configured reranker falls
+  back to `lexical:bm25` and appears in `report.warnings`. Empty sources and zero passages without
+  typed failures are successful reports.
 - Use `grep` when coverage matters. Its `source_results` align by `input_index`; inspect each
   row's `failure` and `scan_complete` to distinguish failed, capped, and complete scans.
-- Treat empty search hits and zero grep matches as success, not failure.
+- Treat empty search hits and zero grep matches without a typed failure as success, not failure.
 - Inspect each extraction row's `.data` or `.failure`; exactly one is present. The result list
   aligns with the input items.
 - Let host policy own retries, rate limits, deduplication, and in-flight coalescing. A returned
@@ -165,8 +171,9 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   sandbox/workspace usage, `budget_consumed`, `budget_remaining`, provider metrics, and
   `terminal_reason`. Use `sdk.session.capabilities()` to discover the active contracts, limits,
   methods, backends, and optional mechanisms instead of hard-coding deployment assumptions.
-- Only stdout, stderr, and `sdk.output.submit` return to the control model. They share roughly
-  32,000 visible characters, with stdout considered first; reserve space for submitted output.
+- Structured external-failure warnings, stdout, stderr, and `sdk.output.submit` return to the
+  control model. They share roughly 32,000 visible characters; warnings use a bounded leading
+  section, then stdout is considered first. Reserve space for submitted output.
 - On `state_lost`, the failed program was not replayed and the next call starts a clean session.
   Rebuild workspace state and local-ID admission; public web URLs remain reusable.
 - Adapter observations such as `[sac_run] OpenSAC request failed` and tool-level timeouts occur

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from ._diagnostics import failure_detail, record_external_failures, write_submission
 from ._json import atomic_write_text, strict_json_dumps, strict_jsonl_dumps
 from ._record import Record, record, wrap
 from ._validation import (
@@ -104,7 +105,7 @@ class SearchResource:
         )
         concurrency = integer(concurrency, "concurrency", minimum=1, maximum=20)
         domains = optional_string_list(domains, "domains")
-        return self._transport.call(
+        batches = self._transport.call(
             "search.query_many",
             {
                 "queries": queries,
@@ -114,6 +115,21 @@ class SearchResource:
                 "domains": domains,
             },
         )
+        failures = [
+            failure_detail(
+                batch["failure"],
+                input_index=input_index,
+                query=batch.query,
+            )
+            for input_index, batch in enumerate(batches)
+            if batch.get("failure") is not None
+        ]
+        record_external_failures(
+            "search.many",
+            success_count=len(batches) - len(failures),
+            failures=failures,
+        )
+        return batches
 
     @staticmethod
     def _search_window(limit: Any, offset: Any, *, limit_name: str) -> tuple[int, int]:
@@ -139,14 +155,15 @@ class SearchResource:
     ) -> list[Record]:
         """Fuse successful search batches locally with domain-aware RRF.
 
-        This deterministic helper makes no broker call. Failed batches are skipped
-        and remain available to the caller through their original ``failure``
-        fields. ``weights`` must align one-to-one with ``batches``; ``k`` controls
-        rank smoothing and ``limit`` truncates the fused list. Domain policies match
-        an exact hostname or any of its subdomains. ``exclude_domains`` removes
-        candidates, ``domain_weights`` multiplies their RRF scores, and
-        ``max_per_domain`` caps candidates sharing one exact hostname before the
-        final limit is applied. Sources that are not web URLs are unaffected.
+        This deterministic helper makes no broker call. Failed batches are skipped,
+        recorded as an execution warning, and remain available to the caller through
+        their original ``failure`` fields. ``weights`` must align one-to-one with
+        ``batches``; ``k`` controls rank smoothing and ``limit`` truncates the fused
+        list. Domain policies match an exact hostname or any of its subdomains.
+        ``exclude_domains`` removes candidates, ``domain_weights`` multiplies their
+        RRF scores, and ``max_per_domain`` caps candidates sharing one exact hostname
+        before the final limit is applied. Sources that are not web URLs are
+        unaffected.
 
         Returns:
             Search-hit records extended with ``provenance``, ``raw_fused_score``,
@@ -165,6 +182,20 @@ class SearchResource:
         )
         normalized_domain_weights = self._normalize_domain_weights(domain_weights)
         self._validate_max_per_domain(max_per_domain)
+        failures = [
+            failure_detail(
+                batch["failure"],
+                input_index=input_index,
+                query=batch.query,
+            )
+            for input_index, batch in enumerate(parsed_batches)
+            if batch.get("failure") is not None
+        ]
+        record_external_failures(
+            "search.fuse_rrf",
+            success_count=len(parsed_batches) - len(failures),
+            failures=failures,
+        )
         candidates: dict[str, dict[str, Any]] = {}
 
         for batch_index, (batch, weight) in enumerate(
@@ -449,9 +480,11 @@ class ContentResource:
             structured ``failure``. Prefer narrower content operations when possible.
 
         Raises:
-            BrokerError: The whole request failed or every failure was systemic.
+            BrokerError: The broker could not return input-aligned content rows.
         """
-        return self._transport.call("content.get_many", {"sources": self._sources(sources)})
+        rows = self._transport.call("content.get_many", {"sources": self._sources(sources)})
+        self._record_row_failures("content.get_many", rows)
+        return rows
 
     def read(
         self,
@@ -472,12 +505,12 @@ class ContentResource:
             on unreadable rows.
 
         Raises:
-            BrokerError: The whole request failed or every failure was systemic.
+            BrokerError: The broker could not return a typed content row.
         """
         offset = integer(offset, "offset", minimum=1)
         limit = integer(limit, "limit", minimum=1, maximum=5_000)
         max_chars = integer(max_chars, "max_chars", minimum=1, maximum=400_000)
-        return self._transport.call(
+        row = self._transport.call(
             "content.read",
             {
                 "source": self._source(source),
@@ -486,6 +519,8 @@ class ContentResource:
                 "max_chars": max_chars,
             },
         )
+        self._record_row_failures("content.read", [row])
+        return row
 
     def read_many(self, windows: list[dict[str, Any]]) -> list[Record]:
         """Read a different 1-indexed line window for each source.
@@ -495,7 +530,7 @@ class ContentResource:
 
         Raises:
             ValueError: A window has unknown fields or invalid values.
-            BrokerError: The whole request failed or every failure was systemic.
+            BrokerError: The broker could not return input-aligned content rows.
         """
         if not isinstance(windows, list):
             raise ValueError("windows must be a list")
@@ -536,7 +571,9 @@ class ContentResource:
                     ),
                 }
             )
-        return self._transport.call("content.read_many", {"windows": validated})
+        rows = self._transport.call("content.read_many", {"windows": validated})
+        self._record_row_failures("content.read_many", rows)
+        return rows
 
     def grep(
         self,
@@ -574,7 +611,7 @@ class ContentResource:
             minimum=1,
             maximum=200,
         )
-        return self._transport.call(
+        report = self._transport.call(
             "content.grep",
             {
                 "sources": self._sources(sources),
@@ -585,6 +622,21 @@ class ContentResource:
                 "max_matches_per_source": max_matches_per_source,
             },
         )
+        failures = [
+            failure_detail(
+                row["failure"],
+                input_index=row.input_index,
+                source=row.source,
+            )
+            for row in report.source_results
+            if row.get("failure") is not None
+        ]
+        record_external_failures(
+            "content.grep",
+            success_count=report.input_count - len(failures),
+            failures=failures,
+        )
+        return report
 
     def passages(
         self,
@@ -601,9 +653,9 @@ class ContentResource:
         Scores are comparable only within this report.
 
         Returns:
-            A report with ``query``, ``passages``, ``failures``, ``input_count``, and
-            ``unique_source_count``. Each passage includes exact ``text``, coordinates,
-            and ranker metadata.
+            A report with ``query``, ``passages``, fetch ``failures``, reranker
+            ``warnings``, ``input_count``, and ``unique_source_count``. Each passage
+            includes exact ``text``, coordinates, and ranker metadata.
 
         Raises:
             BrokerError: The report could not be produced.
@@ -616,7 +668,7 @@ class ContentResource:
             minimum=1,
             maximum=10,
         )
-        return self._transport.call(
+        report = self._transport.call(
             "content.passages",
             {
                 "query": query,
@@ -624,6 +676,43 @@ class ContentResource:
                 "limit": limit,
                 "max_per_source": max_per_source,
             },
+        )
+        failures = [
+            failure_detail(
+                row["failure"],
+                input_index=row.input_index,
+                source=row.source,
+            )
+            for row in report.failures
+        ]
+        record_external_failures(
+            "content.passages",
+            success_count=max(report.unique_source_count - len(failures), 0),
+            failures=failures,
+        )
+        rerank_warnings = [failure_detail(warning) for warning in report.get("warnings", [])]
+        record_external_failures(
+            "content.passages.rerank",
+            success_count=0,
+            failures=rerank_warnings,
+        )
+        return report
+
+    @staticmethod
+    def _record_row_failures(method: str, rows: list[Record]) -> None:
+        failures = [
+            failure_detail(
+                row["failure"],
+                input_index=row.get("input_index", input_index),
+                source=row.source,
+            )
+            for input_index, row in enumerate(rows)
+            if row.get("failure") is not None
+        ]
+        record_external_failures(
+            method,
+            success_count=len(rows) - len(failures),
+            failures=failures,
         )
 
 
@@ -750,7 +839,7 @@ class LLMResource:
 
         Raises:
             ValueError: Local arguments are not JSON serializable or valid.
-            BrokerError: Extraction infrastructure fails for the whole call.
+            BrokerError: The broker cannot return input-aligned extraction rows.
         """
         instruction = string(instruction, "instruction", nonempty=False)
         concurrency = integer(concurrency, "concurrency", minimum=1, maximum=12)
@@ -783,7 +872,21 @@ class LLMResource:
         }
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
-        return self._transport.call("llm.extract_many", params)
+        rows = self._transport.call("llm.extract_many", params)
+        failures = [
+            failure_detail(
+                {**row["failure"], "attempts": row.attempts},
+                input_index=row.index,
+            )
+            for row in rows
+            if row.get("failure") is not None
+        ]
+        record_external_failures(
+            "llm.extract_many",
+            success_count=len(rows) - len(failures),
+            failures=failures,
+        )
+        return rows
 
     @staticmethod
     def _ensure_json_serializable(value: Any, field: str) -> None:
@@ -989,12 +1092,7 @@ class OutputResource:
         if citations is not None and len(citations) > 256:
             raise ValueError("citations must contain at most 256 source strings")
         sources = [self._citation(item, index) for index, item in enumerate(citations or [])]
-        encoded = strict_json_dumps(
-            {"output": output, "citations": sources},
-            field="output",
-            indent=2,
-        )
-        atomic_write_text(self._output_path, encoded)
+        write_submission(self._output_path, output, sources)
 
     @staticmethod
     def _citation(item: Any, input_index: int) -> str:
