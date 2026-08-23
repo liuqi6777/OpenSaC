@@ -10,7 +10,15 @@ from typing import Any
 from opensac.broker.call_context import current_call
 from opensac.broker.session import BrokerSession
 from opensac.models import CoalescedRequestRecord, DeduplicatedRequestRecord, ProviderAttemptRecord
-from opensac.provider import ProviderAttempt, ProviderRequestError, ProviderRuntime, ProviderWait
+from opensac.provider import (
+    ProviderAttempt,
+    ProviderOperation,
+    ProviderRequestError,
+    ProviderRuntime,
+    ProviderWait,
+    contextualize_provider_error,
+    infer_failure_scope,
+)
 
 from .cache import ProviderResultCache
 from .config import ProviderExecutionConfig
@@ -29,6 +37,9 @@ class CapabilityProviderError(RuntimeError):
         attempts: int,
         provider_status: int | None = None,
         retry_after_seconds: float | None = None,
+        provider: str | None = None,
+        operation: str | None = None,
+        scope: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -36,6 +47,9 @@ class CapabilityProviderError(RuntimeError):
         self.attempts = max(int(attempts), 0)
         self.provider_status = provider_status
         self.retry_after_seconds = retry_after_seconds
+        self.provider = provider
+        self.operation = operation
+        self.scope = scope
 
     @classmethod
     def from_failure(
@@ -51,6 +65,9 @@ class CapabilityProviderError(RuntimeError):
             attempts=(int(failure.get("attempts") or 0) if attempts is None else attempts),
             provider_status=failure.get("provider_status"),
             retry_after_seconds=failure.get("retry_after_seconds"),
+            provider=failure.get("provider"),
+            operation=failure.get("operation"),
+            scope=failure.get("scope"),
         )
 
     @classmethod
@@ -79,6 +96,12 @@ class CapabilityProviderError(RuntimeError):
             ]
             if retry_after:
                 aggregate["retry_after_seconds"] = max(retry_after)
+        providers = {failure.get("provider") for failure in failures}
+        operations = {failure.get("operation") for failure in failures}
+        scopes = {failure.get("scope") for failure in failures}
+        aggregate["provider"] = providers.pop() if len(providers) == 1 else None
+        aggregate["operation"] = operations.pop() if len(operations) == 1 else None
+        aggregate["scope"] = scopes.pop() if len(scopes) == 1 else "unknown"
         return cls.from_failure(aggregate, attempts=attempts)
 
 
@@ -214,12 +237,51 @@ class ProviderExecutor:
             "message": error.message,
             "retryable": error.retryable,
             "attempts": error.attempts,
+            "provider": error.provider,
+            "operation": error.operation,
+            "scope": error.scope,
         }
         if error.provider_status is not None:
             failure["provider_status"] = error.provider_status
         if error.retry_after_seconds is not None:
             failure["retry_after_seconds"] = error.retry_after_seconds
         return failure
+
+    @staticmethod
+    def provider_name(backend: Any, operation: str) -> str:
+        """Return a stable, secret-free provider label for public failures."""
+
+        resolver = getattr(backend, "provider_for_operation", None)
+        if callable(resolver):
+            resolved = str(resolver(operation) or "").strip()
+            if resolved:
+                return resolved
+        configured = str(getattr(backend, "provider_name", "") or "").strip()
+        if configured:
+            return configured
+        return str(getattr(backend, "name", "") or operation.partition(".")[0] or "unknown")
+
+    def contextualize_failure(
+        self,
+        failure: dict[str, Any],
+        *,
+        backend: Any,
+        operation: ProviderOperation,
+    ) -> dict[str, Any]:
+        """Fill stable diagnostic fields on broker-created failure rows."""
+
+        contextualized = dict(failure)
+        if not contextualized.get("provider"):
+            contextualized["provider"] = self.provider_name(backend, operation)
+        if not contextualized.get("operation"):
+            contextualized["operation"] = operation
+        if not contextualized.get("scope"):
+            contextualized["scope"] = infer_failure_scope(
+                contextualized.get("code") or "provider_invalid_response",
+                operation,
+                provider_status=contextualized.get("provider_status"),
+            )
+        return contextualized
 
     @staticmethod
     def is_systemic_search_failure(failure: dict[str, Any]) -> bool:
@@ -242,6 +304,9 @@ class ProviderExecutor:
         or corpus entry the caller asked to fetch.
         """
 
+        scope = failure.get("scope")
+        if scope in {"request", "resource", "unknown"}:
+            return False
         return str(failure.get("code") or "") in {
             "provider_rate_limited",
             "provider_unavailable",
@@ -253,7 +318,7 @@ class ProviderExecutor:
         state: BrokerSession,
         *,
         backend: Any,
-        operation: str,
+        operation: ProviderOperation,
         request_indexes: list[int],
         request_value: Any,
         request: Callable[[], Awaitable[Any]],
@@ -320,6 +385,8 @@ class ProviderExecutor:
             if context is not None:
                 context.provider_cache_misses += 1
 
+        provider_name = self.provider_name(backend, operation)
+
         async def execute_provider() -> Any:
             task = asyncio.create_task(
                 self.provider_runtime.run(
@@ -339,7 +406,14 @@ class ProviderExecutor:
                     context.execution_id,
                     task,
                 )
-            return await task
+            try:
+                return await task
+            except ProviderRequestError as exc:
+                raise contextualize_provider_error(
+                    exc,
+                    provider=provider_name,
+                    operation=operation,
+                ) from exc
 
         if cache_enabled:
             async with cache.flight(cache_key) as waited:

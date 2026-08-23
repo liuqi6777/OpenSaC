@@ -105,7 +105,8 @@ error; keep a deterministic fallback.
 - Coordinates: `start_line`, `start_character`, `end_line`, `end_character`. Lines are 1-indexed;
   characters are 0-indexed and the end position is exclusive.
 - Failure: `code`, `message`, `retryable`, `attempts`, `provider_status`,
-  `retry_after_seconds`. Content failures also carry `input_index` and `source`.
+  `retry_after_seconds`, `provider`, `operation`, and `scope`. Scope is `request`, `resource`,
+  `provider`, or `unknown`; content failures also carry `input_index` and `source`.
 - Extraction row: `index`, `data`, `failure`, `attempts`; a failure has `code`, `message`, and
   `retryable`.
 
@@ -114,7 +115,8 @@ There is no public SDK model hierarchy or `types` module. Join capability result
 ## Failure and alignment semantics
 
 - Catch `BrokerError` for a capability-wide or infrastructure failure. Inspect `code`,
-  `retryable`, and `attempts`; attempts may be absent for a transport failure.
+  `retryable`, `attempts`, `provider`, `operation`, and `scope`; nullable fields may be absent for
+  a broker transport failure. Treat `unknown` as deliberately unclassified, not provider-wide.
 - Inspect `batch.failure` for per-query failure. A failed batch has no hits.
 - Inspect `row.failure` for a single-source `read` failure. `read_many` returns one row per input
   window in the same order and includes `input_index`.

@@ -126,6 +126,9 @@ async def test_provider_error_details_round_trip_over_real_unix_socket(tmp_path)
         assert raised.value.attempts == 1
         assert raised.value.provider_status == 429
         assert raised.value.retry_after_seconds == 2.5
+        assert raised.value.provider == "local"
+        assert raised.value.operation == "local.search"
+        assert raised.value.scope == "provider"
     finally:
         await runtime.stop()
 

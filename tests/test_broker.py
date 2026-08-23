@@ -384,6 +384,9 @@ async def test_search_many_tolerates_partial_failure() -> None:
         "attempts": 0,
         "provider_status": None,
         "retry_after_seconds": None,
+        "provider": "web",
+        "operation": "web.search",
+        "scope": "request",
     }
 
 
@@ -913,6 +916,9 @@ async def test_jina_mode_has_no_silent_lexical_fallback_but_empty_pages_succeed(
 
     assert raised.value.code == "provider_not_configured"
     assert raised.value.attempts == 0
+    assert raised.value.provider == "jina_reranker"
+    assert raised.value.operation == "web.rerank"
+    assert raised.value.scope == "provider"
     trace = configured.take_trace("token", "passages-missing-jina")[0]
     assert trace.status == "error"
     assert not any(attempt.operation == "web.rerank" for attempt in trace.provider_attempts)
@@ -2209,7 +2215,7 @@ async def test_session_capabilities_reflect_backend_limits_and_mechanisms() -> N
 
     capabilities = await service.call("token", "session.capabilities", {})
 
-    assert capabilities["contracts"] == {"sandbox": 10, "capability": 9}
+    assert capabilities["contracts"] == {"sandbox": 11, "capability": 10}
     assert capabilities["search"] == {
         "backend": "local",
         "supports_domains": False,

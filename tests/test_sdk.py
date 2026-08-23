@@ -200,6 +200,9 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
                 "attempts": 3,
                 "provider_status": 503,
                 "retry_after_seconds": 1.5,
+                "provider": "jina_reader",
+                "operation": "web.scrape",
+                "scope": "provider",
             },
         },
     )
@@ -218,6 +221,9 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
     assert raised.value.attempts == 3
     assert raised.value.provider_status == 503
     assert raised.value.retry_after_seconds == 1.5
+    assert raised.value.provider == "jina_reader"
+    assert raised.value.operation == "web.scrape"
+    assert raised.value.scope == "provider"
 
 
 def test_unix_transport_rejects_invalid_json_as_a_protocol_error() -> None:
@@ -738,13 +744,13 @@ def test_session_capabilities_is_a_broker_operation() -> None:
 
         def call(self, method, params):
             self.calls.append((method, params))
-            return record({"contracts": {"sandbox": 10, "capability": 9}})
+            return record({"contracts": {"sandbox": 11, "capability": 10}})
 
     transport = SessionTransport()
     capabilities = SessionResource(transport).capabilities()
 
-    assert capabilities.contracts.sandbox == 10
-    assert capabilities.contracts.capability == 9
+    assert capabilities.contracts.sandbox == 11
+    assert capabilities.contracts.capability == 10
     assert transport.calls == [("session.capabilities", {})]
 
 

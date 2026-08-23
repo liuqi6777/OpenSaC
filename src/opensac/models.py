@@ -6,7 +6,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
-CAPABILITY_CONTRACT = 9
+CAPABILITY_CONTRACT = 10
 
 
 def utc_now() -> datetime:

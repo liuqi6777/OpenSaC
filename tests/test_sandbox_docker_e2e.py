@@ -43,7 +43,7 @@ def sandbox_image() -> str:
         )
 
 
-def test_built_image_exposes_contract_10_and_compact_sdk(sandbox_image: str) -> None:
+def test_built_image_exposes_contract_11_and_compact_sdk(sandbox_image: str) -> None:
     image = sandbox_image
     inspected = subprocess.run(
         [
@@ -58,7 +58,7 @@ def test_built_image_exposes_contract_10_and_compact_sdk(sandbox_image: str) -> 
         capture_output=True,
         text=True,
     )
-    assert inspected.stdout.strip() == "10"
+    assert inspected.stdout.strip() == "11"
 
     inspected_version = subprocess.run(
         [

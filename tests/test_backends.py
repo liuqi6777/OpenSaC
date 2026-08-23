@@ -368,6 +368,32 @@ async def test_serper_reuses_and_closes_one_http_client(monkeypatch) -> None:
     assert RecordingClient.instances[0].closed is True
 
 
+async def test_serper_reader_rejects_blank_success_text(monkeypatch) -> None:
+    class BlankReader:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def get(self, url, *, headers):
+            return FakeResponse({}, text=" \n\t")
+
+    monkeypatch.setattr(serper_module.httpx, "AsyncClient", BlankReader)
+    backend = SerperBackend("key")
+    hit = SearchHit(
+        source="https://example.com/blank",
+        backend="web",
+        url="https://example.com/blank",
+        rank=1,
+    )
+
+    with pytest.raises(ProviderRequestError, match="empty document text") as caught:
+        await backend.fetch(hit)
+
+    assert caught.value.code == "provider_invalid_response"
+    assert caught.value.scope == "resource"
+    assert backend.provider_for_operation("web.search") == "serper"
+    assert backend.provider_for_operation("web.scrape") == "jina_reader"
+
+
 async def test_serper_missing_credentials_is_a_zero_attempt_preflight_failure() -> None:
     backend = SerperBackend("")
 

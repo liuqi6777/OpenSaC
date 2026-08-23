@@ -555,6 +555,53 @@ async def test_systemic_content_failure_is_promoted_and_never_cached() -> None:
     assert backend.fetches == ["1", "1"]
 
 
+async def test_ambiguous_reader_403_stays_source_aligned() -> None:
+    class ForbiddenReaderBackend(LocalBackend):
+        name = "web"
+
+        @staticmethod
+        def provider_for_operation(operation: str) -> str:
+            return "jina_reader" if operation == "web.scrape" else "serper"
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            return [
+                SearchHit(
+                    backend="web",
+                    url="https://blocked.example/document",
+                    rank=1,
+                )
+            ]
+
+        async def fetch(self, hit, *, query=None):
+            raise ProviderRequestError(
+                "provider_auth_failed",
+                "Provider rejected its configured credentials or permissions.",
+                retryable=False,
+                provider_status=403,
+            )
+
+    backend = ForbiddenReaderBackend()
+    service = BrokerService({"web": backend})
+    service.register_session(make_session(backend="web"))
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
+
+    rows = await service.call("token", "content.get_many", {"sources": [source]})
+
+    assert rows[0]["source"] == source
+    assert rows[0]["text"] == ""
+    assert rows[0]["failure"] == {
+        "code": "provider_auth_failed",
+        "message": "Provider rejected its configured credentials or permissions.",
+        "retryable": False,
+        "attempts": 1,
+        "provider_status": 403,
+        "retry_after_seconds": None,
+        "provider": "jina_reader",
+        "operation": "web.scrape",
+        "scope": "unknown",
+    }
+
+
 @pytest.mark.parametrize(
     ("code", "attempts"),
     [
@@ -618,6 +665,9 @@ async def test_content_batch_deadline_returns_an_aligned_timeout_row() -> None:
         "attempts": 1,
         "provider_status": None,
         "retry_after_seconds": None,
+        "provider": "local",
+        "operation": "local.document",
+        "scope": "unknown",
     }
     assert backend.fetches == ["1"]
 

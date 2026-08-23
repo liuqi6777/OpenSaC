@@ -19,6 +19,9 @@ class BrokerError(RuntimeError):
         attempts: int | None = None,
         provider_status: int | None = None,
         retry_after_seconds: float | None = None,
+        provider: str | None = None,
+        operation: str | None = None,
+        scope: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -26,6 +29,9 @@ class BrokerError(RuntimeError):
         self.attempts = attempts
         self.provider_status = provider_status
         self.retry_after_seconds = retry_after_seconds
+        self.provider = provider
+        self.operation = operation
+        self.scope = scope
 
 
 class UnixSocketTransport:
@@ -85,6 +91,9 @@ class UnixSocketTransport:
                     attempts=error.get("attempts"),
                     provider_status=error.get("provider_status"),
                     retry_after_seconds=error.get("retry_after_seconds"),
+                    provider=error.get("provider"),
+                    operation=error.get("operation"),
+                    scope=error.get("scope"),
                 )
             raise BrokerError(
                 str(error or "Broker call failed"),

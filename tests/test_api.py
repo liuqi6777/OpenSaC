@@ -53,7 +53,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v9",
+            "capability_contract_v10",
             "content_passages_v1",
             "provider_reliability_v1",
             "typed_partial_failures_v1",
@@ -76,10 +76,10 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
-        assert payload["environment"]["sandbox_contract"] == 10
-        assert payload["environment"]["capability_contract"] == 9
+        assert payload["environment"]["sandbox_contract"] == 11
+        assert payload["environment"]["capability_contract"] == 10
         sdk_capabilities = payload["environment"]["sdk_capabilities"]
-        assert sdk_capabilities["contracts"] == {"sandbox": 10, "capability": 9}
+        assert sdk_capabilities["contracts"] == {"sandbox": 11, "capability": 10}
         assert sdk_capabilities["search"]["backend"] == "local"
         assert sdk_capabilities["search"]["supports_domains"] is False
         assert sdk_capabilities["llm"]["available"] is False

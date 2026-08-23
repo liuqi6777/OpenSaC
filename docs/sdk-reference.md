@@ -38,6 +38,9 @@ except BrokerError as error:
         error.attempts,
         error.provider_status,
         error.retry_after_seconds,
+        error.provider,
+        error.operation,
+        error.scope,
     )
 ```
 
@@ -103,10 +106,16 @@ The following JSON shapes are reused throughout this document. `None` marks a nu
     "attempts": int,
     "provider_status": int | None,       # May be absent
     "retry_after_seconds": float | None, # May be absent
+    "provider": str | None,              # Secret-free upstream name
+    "operation": str | None,             # For example web.scrape
+    "scope": "request" | "resource" | "provider" | "unknown" | None,
 }
 ```
 
-Use `failure.get(...)` when reading the two optional provider fields.
+`scope` is the safest actionable layer supported by transport evidence: `request` means caller
+input, `resource` means one query/document, and `provider` means shared service, credentials, or
+capacity. `unknown` is intentional when an HTTP status cannot distinguish those causes, such as a
+Jina Reader 403. Provider response bodies and credential-bearing details are never exposed.
 
 ### `ContentRow`
 

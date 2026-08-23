@@ -14,7 +14,7 @@ from opensac.sandbox.base import SandboxRequest
 _OUTPUT_LIMIT_MARKER = (
     b"\nOpenSAC terminated the sandbox process after stdout/stderr reached the output limit.\n"
 )
-SANDBOX_CONTRACT = 10
+SANDBOX_CONTRACT = 11
 SANDBOX_CONTRACT_LABEL = "org.opensac.sandbox.contract"
 
 

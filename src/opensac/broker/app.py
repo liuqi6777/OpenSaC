@@ -19,6 +19,9 @@ def _rpc_error(exc: Exception) -> RpcError:
             attempts=getattr(exc, "attempts", None),
             provider_status=getattr(exc, "provider_status", None),
             retry_after_seconds=getattr(exc, "retry_after_seconds", None),
+            provider=getattr(exc, "provider", None),
+            operation=getattr(exc, "operation", None),
+            scope=getattr(exc, "scope", None),
         )
     if isinstance(exc, BudgetExceeded):
         return RpcError(code="budget_exhausted", message=str(exc), retryable=False)
