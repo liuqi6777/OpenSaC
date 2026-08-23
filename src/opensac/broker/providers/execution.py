@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -23,6 +22,7 @@ from opensac.provider import (
 from .cache import ProviderResultCache
 from .config import ProviderExecutionConfig
 from .flights import ProviderFlightCoordinator
+from .serialization import canonical_json_bytes
 
 
 class CapabilityProviderError(RuntimeError):
@@ -162,21 +162,7 @@ class ProviderExecutor:
     def fingerprint(value: Any) -> str:
         """Versioned digest of a normalized, secret-free logical value."""
 
-        def normalize(item: Any) -> Any:
-            model_dump = getattr(item, "model_dump", None)
-            if callable(model_dump):
-                return model_dump(mode="json")
-            if isinstance(item, set):
-                return sorted(item, key=repr)
-            return str(item)
-
-        encoded = json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=normalize,
-        ).encode("utf-8")
+        encoded = canonical_json_bytes(value)
         return "sha256:v1:" + hashlib.sha256(encoded).hexdigest()
 
     @staticmethod

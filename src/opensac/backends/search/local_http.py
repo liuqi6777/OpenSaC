@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any
 from urllib.parse import urljoin
 
 import httpx
@@ -16,6 +15,7 @@ from opensac._contracts import (
     SearchBatch,
     SearchHit,
 )
+from opensac.backends._response import json_object
 from opensac.provider import ProviderRequestError, invalid_provider_response
 
 # Full documents in the local corpus carry a YAML frontmatter header ahead of
@@ -125,7 +125,7 @@ class LocalSearchBackend:
             json={"query": query, "top_k": depth},
         )
         response.raise_for_status()
-        payload = self._json_object(response)
+        payload = json_object(response)
         retrieval = self._retrieval_metadata(payload)
         rows = payload.get("results")
         if not isinstance(rows, list) or len(rows) != 1:
@@ -165,7 +165,7 @@ class LocalSearchBackend:
             json={"queries": queries, "top_k": depth},
         )
         response.raise_for_status()
-        payload = self._json_object(response)
+        payload = json_object(response)
         retrieval = self._retrieval_metadata(payload)
         rows = payload.get("results")
         if not isinstance(rows, list) or len(rows) != len(queries):
@@ -212,16 +212,6 @@ class LocalSearchBackend:
             except (TypeError, ValueError) as exc:
                 raise invalid_provider_response() from exc
         return batches
-
-    @staticmethod
-    def _json_object(response: Any) -> dict[str, Any]:
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise invalid_provider_response() from exc
-        if not isinstance(payload, dict):
-            raise invalid_provider_response()
-        return payload
 
     @staticmethod
     def _retrieval_metadata(payload: dict) -> RetrievalMetadata | None:
@@ -275,7 +265,7 @@ class LocalSearchBackend:
             json={"docid": hit.docid},
         )
         response.raise_for_status()
-        payload = self._json_object(response)
+        payload = json_object(response)
         raw_text = payload.get("text")
         if not isinstance(raw_text, str):
             raise invalid_provider_response()

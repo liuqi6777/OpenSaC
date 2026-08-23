@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Any
 
 import httpx
 
+from opensac.backends._response import json_object
 from opensac.backends.rerank.base import PassageRerankResult
 from opensac.provider import ProviderRequestError, invalid_provider_response
 
@@ -85,7 +85,7 @@ class JinaPassageReranker:
             },
         )
         response.raise_for_status()
-        payload = self._json_object(response)
+        payload = json_object(response)
         rows = payload.get("results")
         if not isinstance(rows, list) or len(rows) != len(documents):
             raise invalid_provider_response()
@@ -113,13 +113,3 @@ class JinaPassageReranker:
         if indexes != set(range(len(documents))):
             raise invalid_provider_response()
         return results
-
-    @staticmethod
-    def _json_object(response: Any) -> dict[str, Any]:
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise invalid_provider_response() from exc
-        if not isinstance(payload, dict):
-            raise invalid_provider_response()
-        return payload
