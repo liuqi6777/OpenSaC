@@ -39,7 +39,8 @@ CI also runs this check on every pull request.
    uv run ruff check .
    uv run pytest
    OPENSAC_DOCKER_E2E=1 uv run pytest tests/test_sandbox_docker_e2e.py
-   uv build --all-packages --out-dir dist --clear
+   uv build --package opensac-sdk --out-dir dist --clear
+   uv build --package opensac --out-dir dist
    uvx --from twine twine check dist/*
    uv run python scripts/release.py --tag vX.Y.Z
    ```
