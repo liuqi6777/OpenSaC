@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 import typer
 
-from opensac import cli, mcp_server
+from opensac import cli
 from opensac._optional import MissingOptionalDependency
+from opensac.agent import mcp
 
 
 def test_mcp_command_starts_stdio_server(monkeypatch) -> None:
@@ -17,7 +18,7 @@ def test_mcp_command_starts_stdio_server(monkeypatch) -> None:
         nonlocal called
         called = True
 
-    monkeypatch.setattr(mcp_server, "run", fake_run)
+    monkeypatch.setattr(mcp, "run", fake_run)
 
     cli.serve_mcp()
 
@@ -30,7 +31,7 @@ def test_mcp_command_reports_missing_extra(monkeypatch, capsys) -> None:
             "MCP support requires optional dependencies (mcp); install with 'opensac[mcp]'."
         )
 
-    monkeypatch.setattr(mcp_server, "run", unavailable)
+    monkeypatch.setattr(mcp, "run", unavailable)
 
     with pytest.raises(typer.Exit) as raised:
         cli.serve_mcp()

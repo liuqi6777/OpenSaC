@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from opensac.sac_run import (
+from opensac.agent.sac_run import (
     DEFAULT_TIMEOUT_SECONDS,
     AsyncSessionClient,
     render_observation,

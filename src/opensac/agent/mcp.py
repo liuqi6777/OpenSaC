@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
 from opensac import _optional
-from opensac.agent_session import (
+from opensac.agent.session import (
     DEFAULT_LEASE_SECONDS,
     AgentContext,
     AgentSessionConfig,

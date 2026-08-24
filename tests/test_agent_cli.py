@@ -8,7 +8,8 @@ from typing import Any
 import httpx
 from typer.testing import CliRunner
 
-from opensac import agent_cli, cli
+from opensac import cli
+from opensac.agent import cli as agent_cli
 
 
 class FakeOpenSAC:
@@ -334,8 +335,8 @@ def test_agent_run_reads_program_from_stdin(monkeypatch) -> None:
 
 def test_cli_and_mcp_adapters_do_not_import_each_other() -> None:
     root = Path(__file__).parents[1] / "src" / "opensac"
-    cli_source = (root / "agent_cli.py").read_text(encoding="utf-8")
-    mcp_source = (root / "mcp_server.py").read_text(encoding="utf-8")
+    cli_source = (root / "agent" / "cli.py").read_text(encoding="utf-8")
+    mcp_source = (root / "agent" / "mcp.py").read_text(encoding="utf-8")
 
-    assert "mcp_server" not in cli_source
-    assert "agent_cli" not in mcp_source
+    assert "opensac.agent.mcp" not in cli_source
+    assert "opensac.agent.cli" not in mcp_source

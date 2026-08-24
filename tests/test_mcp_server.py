@@ -12,7 +12,8 @@ import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from opensac.mcp_server import GenerationRegistry, MCPConfig, OpenSACMCP
+from opensac.agent.mcp import MCPConfig, OpenSACMCP
+from opensac.agent.session import GenerationRegistry
 
 
 class FakeOpenSAC:
@@ -333,12 +334,8 @@ async def test_restart_detects_state_loss_during_idempotent_create(tmp_path: Pat
     server.next_create_state_loss = "worker_restarted"
     second_bridge = _bridge(tmp_path, server)
     try:
-        lost = await second_bridge.run_code(
-            "must-not-replay", {"thread_id": "thread-create-loss"}
-        )
-        recovered = await second_bridge.run_code(
-            "fresh", {"thread_id": "thread-create-loss"}
-        )
+        lost = await second_bridge.run_code("must-not-replay", {"thread_id": "thread-create-loss"})
+        recovered = await second_bridge.run_code("fresh", {"thread_id": "thread-create-loss"})
     finally:
         await second_bridge.aclose()
 
@@ -360,9 +357,7 @@ async def test_transient_create_failures_reuse_generation(
     bridge = _bridge(tmp_path, server)
     try:
         failed = await bridge.run_code("first", {"thread_id": "thread-create-transient"})
-        recovered = await bridge.run_code(
-            "retry-later", {"thread_id": "thread-create-transient"}
-        )
+        recovered = await bridge.run_code("retry-later", {"thread_id": "thread-create-transient"})
     finally:
         await bridge.aclose()
 
@@ -412,7 +407,7 @@ def test_generation_registry_concurrent_loss_observers_converge(tmp_path: Path) 
 
 
 def test_mcp_adapter_does_not_depend_on_custom_agent_package() -> None:
-    module_path = Path(__file__).parents[1] / "src" / "opensac" / "mcp_server.py"
+    module_path = Path(__file__).parents[1] / "src" / "opensac" / "agent" / "mcp.py"
 
     assert "sac_agent" not in module_path.read_text(encoding="utf-8")
 
@@ -421,7 +416,7 @@ async def test_stdio_handshake_exposes_code_only_sac_run_schema(tmp_path: Path) 
     error_log_path = tmp_path / "mcp-stderr.log"
     parameters = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "opensac.mcp_server"],
+        args=["-m", "opensac.agent.mcp"],
         env={"SAC_MCP_STATE_DIR": str(tmp_path / "stdio-state")},
         cwd=str(Path(__file__).parents[1]),
     )

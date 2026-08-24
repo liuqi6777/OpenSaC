@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 
 from opensac import _optional
+from opensac.agent.mcp import create_server
 from opensac.api.runtime import ApplicationRuntime
 from opensac.config import Settings
-from opensac.mcp_server import create_server
 from sac_agent.client import ModelClient, ModelConfig
 
 

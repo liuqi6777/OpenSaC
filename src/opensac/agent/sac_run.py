@@ -33,9 +33,7 @@ class AsyncSessionClient:
             transport=transport,
         )
 
-    async def create_session(
-        self, payload: Mapping[str, Any] | None = None
-    ) -> dict[str, Any]:
+    async def create_session(self, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
         response = await self.http.post("/v1/sessions", json=dict(payload or {}))
         response.raise_for_status()
         return response.json()

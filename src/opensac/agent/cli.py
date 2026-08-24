@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import typer
 
-from opensac.agent_session import (
+from opensac.agent.session import (
     DEFAULT_LEASE_SECONDS,
     AgentContext,
     AgentSessionConfig,

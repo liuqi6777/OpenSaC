@@ -29,7 +29,7 @@ def serve() -> None:
 @app.command("mcp")
 def serve_mcp() -> None:
     """Start the local OpenSAC MCP server over stdio."""
-    from opensac.mcp_server import run
+    from opensac.agent.mcp import run
 
     try:
         run()
@@ -46,7 +46,7 @@ def agent_run(
     ] = "-",
 ) -> None:
     """Run a program in the current agent conversation's leased session."""
-    from opensac.agent_cli import run_command
+    from opensac.agent.cli import run_command
 
     run_command(source)
 

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 
-from opensac.sac_run import (
+from opensac.agent.sac_run import (
     DEFAULT_TIMEOUT_SECONDS,
     AsyncSessionClient,
     render_observation,
@@ -49,9 +49,7 @@ def parse_lease_seconds(raw_value: str, variable_name: str) -> int:
     except ValueError as exc:
         raise ValueError(f"{variable_name} must be an integer") from exc
     if not 1 <= lease_seconds <= MAX_LEASE_SECONDS:
-        raise ValueError(
-            f"{variable_name} must be between 1 and {MAX_LEASE_SECONDS}"
-        )
+        raise ValueError(f"{variable_name} must be between 1 and {MAX_LEASE_SECONDS}")
     return lease_seconds
 
 
@@ -76,9 +74,7 @@ def default_state_dir(environ: Mapping[str, str]) -> Path:
 class GenerationRegistry:
     """Small process-safe context-hash to generation registry."""
 
-    def __init__(
-        self, state_dir: Path, *, database_name: str = "mcp_sessions.sqlite3"
-    ) -> None:
+    def __init__(self, state_dir: Path, *, database_name: str = "mcp_sessions.sqlite3") -> None:
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             state_dir.chmod(0o700)
@@ -209,12 +205,8 @@ class AgentSessionManager:
         async with self._locks_guard:
             return self._context_locks.setdefault(hashed_context, asyncio.Lock())
 
-    def _new_entry(
-        self, host: str, hashed_context: str, generation: int
-    ) -> _SessionEntry:
-        request_id = (
-            f"agent:{host}:{hashed_context}:{self._policy_hash}:g{generation}"
-        )
+    def _new_entry(self, host: str, hashed_context: str, generation: int) -> _SessionEntry:
+        request_id = f"agent:{host}:{hashed_context}:{self._policy_hash}:g{generation}"
         return _SessionEntry(
             generation=generation,
             request_id=request_id,
@@ -226,9 +218,7 @@ class AgentSessionManager:
             ),
         )
 
-    async def _discard_entry(
-        self, hashed_context: str, entry: _SessionEntry
-    ) -> None:
+    async def _discard_entry(self, hashed_context: str, entry: _SessionEntry) -> None:
         if self._entries.get(hashed_context) is entry:
             self._entries.pop(hashed_context)
         await entry.client.close()
