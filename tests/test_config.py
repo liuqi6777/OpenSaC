@@ -186,6 +186,7 @@ def test_deployment_files_mount_yaml_and_inject_only_secrets() -> None:
     root = Path(__file__).resolve().parents[1]
     compose = (root / "compose.yaml").read_text(encoding="utf-8")
     entrypoint = (root / "docker/service-entrypoint.sh").read_text(encoding="utf-8")
+    docker_e2e = (root / "tests/test_sandbox_docker_e2e.py").read_text(encoding="utf-8")
     dotenv_names = {
         line.split("=", 1)[0]
         for line in (root / ".env.example").read_text(encoding="utf-8").splitlines()
@@ -199,4 +200,6 @@ def test_deployment_files_mount_yaml_and_inject_only_secrets() -> None:
     assert "OPENSAC_DATA_DIR" not in entrypoint
     assert "OPENSAC_BROKER_SOCKET" not in entrypoint
     assert "OPENSAC_SANDBOX_DOCKER_HOST_PLATFORM" not in entrypoint
+    assert '"OPENSAC_SANDBOX_IMAGE": image' not in docker_e2e
+    assert '"build-sandbox",\n                    "--config"' in docker_e2e
     assert dotenv_names == SECRET_ENV_NAMES

@@ -6,6 +6,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -24,23 +25,32 @@ pytestmark = pytest.mark.skipif(
 def sandbox_image() -> str:
     repo_root = Path(__file__).resolve().parents[1]
     image = f"opensac-sandbox-e2e:{os.getpid()}"
-    environment = {**os.environ, "OPENSAC_SANDBOX_IMAGE": image}
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "opensac.cli", "build-sandbox"],
-            cwd=repo_root,
-            env=environment,
-            check=True,
-            timeout=600,
-        )
-        yield image
-    finally:
-        subprocess.run(
-            ["docker", "image", "rm", "--force", image],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        config = Path(temporary_directory) / "opensac.yaml"
+        config.write_text(f"sandbox:\n  image: {image}\n", encoding="utf-8")
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "opensac.cli",
+                    "build-sandbox",
+                    "--config",
+                    str(config),
+                ],
+                cwd=repo_root,
+                env=os.environ,
+                check=True,
+                timeout=600,
+            )
+            yield image
+        finally:
+            subprocess.run(
+                ["docker", "image", "rm", "--force", image],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
 
 def test_built_image_exposes_contract_13_and_compact_sdk(sandbox_image: str) -> None:
