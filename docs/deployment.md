@@ -349,6 +349,20 @@ curl -fsS http://127.0.0.1:8081/healthz  # local backend only
 OpenSAC `/healthz` does not execute a sandbox or call the provider. Run the Search-as-Code example
 in the main README once to verify the complete API, sandbox, broker, and backend path.
 
+The built-in runtime dashboard is available at `http://127.0.0.1:8000/dashboard` when the API is
+bound to a loopback address. It shows process and capacity snapshots plus live execution and
+capability diagnostics; debug history stays in the open browser tab and is not persisted. To expose
+it from a non-loopback deployment, configure both an API key and an explicit opt-in:
+
+```yaml
+dashboard:
+  enabled: true
+```
+
+The page prompts for the API key and keeps it only in the current tab's JavaScript memory. A
+non-loopback service without the explicit setting does not mount the dashboard routes; enabling
+them without `OPENSAC_API_KEY` is rejected during configuration loading.
+
 When another host needs access, put OpenSAC behind an HTTPS reverse proxy or private network.
 Forward `Authorization`, set the proxy read timeout above `sandbox.timeout_seconds`, and
 restrict `/healthz`, `/docs`, and `/openapi.json` if operational metadata should not be public.

@@ -280,7 +280,8 @@ those integrations; the `dev` extra includes all of them for the repository test
 Run `uv run opensac serve --config configs/local.yaml` for a foreground source service. Use
 `uv run opensac build-sandbox --config configs/local.yaml` only when testing unreleased SDK or
 sandbox changes. Additional Web, performance, and Docker profiles are in `configs/`. The repository
-layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
+layout and contribution conventions are documented in [AGENTS.md](AGENTS.md). A loopback-bound
+service also exposes the live runtime dashboard at `http://127.0.0.1:8000/dashboard`.
 
 </details>
 

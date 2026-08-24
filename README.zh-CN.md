@@ -262,7 +262,8 @@ extra 已包含全部可选依赖。
 运行 `uv run opensac serve --config configs/local.yaml` 可启动前台源码服务。只有测试尚未发布的 SDK
 或沙箱改动时，才需要运行 `uv run opensac build-sandbox --config configs/local.yaml`。标准 Web、性能和
 Docker 模板都在 `configs/` 中；选择说明见[配置模板](docs/deployment.md#configuration-profiles)。仓库结构
-和贡献约定见 [AGENTS.md](AGENTS.md)。
+和贡献约定见 [AGENTS.md](AGENTS.md)。服务绑定 loopback 地址时，还可通过
+`http://127.0.0.1:8000/dashboard` 打开实时运行 Dashboard。
 
 </details>
 

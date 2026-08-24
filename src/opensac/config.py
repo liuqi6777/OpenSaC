@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Mapping
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,6 +25,7 @@ _SECRET_ENV_FIELDS = {
 
 _YAML_FIELDS = {
     "api": {"host": "api_host", "port": "api_port"},
+    "dashboard": {"enabled": "dashboard_enabled"},
     "storage": {"data_dir": "data_dir", "broker_socket": "broker_socket"},
     "deployment": {
         "worker_id": "worker_id",
@@ -168,6 +170,8 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     api_key: str = ""
+    # None enables the dashboard only for an explicitly loopback-bound API.
+    dashboard_enabled: bool | None = None
     # Stable across restarts for scheduler affinity.  Empty derives a stable
     # value from hostname and data_dir; every process still gets a fresh epoch.
     worker_id: str = ""
@@ -300,6 +304,34 @@ class Settings(BaseSettings):
             raise ValueError(
                 "provider_operation_burst requires requests_per_second for: "
                 f"{sorted(missing_rates)}"
+            )
+        return self
+
+    @staticmethod
+    def _is_loopback_host(host: str) -> bool:
+        normalized = host.strip().removeprefix("[").removesuffix("]")
+        if normalized.lower() == "localhost":
+            return True
+        try:
+            return ip_address(normalized).is_loopback
+        except ValueError:
+            return False
+
+    @property
+    def dashboard_is_enabled(self) -> bool:
+        if self.dashboard_enabled is not None:
+            return self.dashboard_enabled
+        return self._is_loopback_host(self.api_host)
+
+    @model_validator(mode="after")
+    def validate_dashboard_exposure(self) -> Settings:
+        if (
+            self.dashboard_enabled is True
+            and not self._is_loopback_host(self.api_host)
+            and not self.api_key
+        ):
+            raise ValueError(
+                "dashboard.enabled on a non-loopback API host requires OPENSAC_API_KEY"
             )
         return self
 

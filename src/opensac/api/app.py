@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
 
 from opensac import __version__
+from opensac.api.dashboard import create_dashboard_router
 from opensac.api.errors import install_exception_handlers
 from opensac.api.routes import create_api_router
 from opensac.api.runtime import ApplicationRuntime
@@ -31,6 +32,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.runtime = runtime
     install_exception_handlers(app)
     app.include_router(create_api_router(runtime, authorize))
+    if settings.dashboard_is_enabled:
+        app.include_router(create_dashboard_router(runtime, authorize))
 
     @app.middleware("http")
     async def worker_identity_header(request: Request, call_next):

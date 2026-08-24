@@ -25,6 +25,9 @@ def serve(
 ) -> None:
     """Start the public OpenSAC API and capability broker."""
     settings = _load_cli_settings(config)
+    if settings.dashboard_is_enabled:
+        host = f"[{settings.api_host}]" if ":" in settings.api_host else settings.api_host
+        typer.echo(f"Dashboard: http://{host}:{settings.api_port}/dashboard")
     uvicorn.run(
         create_app(settings),
         host=settings.api_host,

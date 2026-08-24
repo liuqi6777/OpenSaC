@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from opensac import __version__, _optional
+from opensac.api.dashboard import DashboardTelemetry
 from opensac.api.errors import (
     ExecIdConflictError,
     ExecIndeterminateError,
@@ -98,6 +99,15 @@ def _model_client(settings: Settings) -> Any:
 class ApplicationRuntime:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.dashboard = DashboardTelemetry(
+            enabled=settings.dashboard_is_enabled,
+            secrets=[
+                settings.api_key,
+                settings.model_api_key,
+                settings.serper_api_key,
+                settings.jina_api_key,
+            ],
+        )
         self.store = StateStore(settings.data_dir)
         identity_seed = f"{socket.gethostname()}|{settings.data_dir.resolve()}"
         self.worker_id = settings.worker_id or (
@@ -205,6 +215,7 @@ class ApplicationRuntime:
             ),
             provider_runtime=provider_runtime,
             backend_revision=settings.backend_revision,
+            capability_observer=self.dashboard if self.dashboard.enabled else None,
         )
         broker_socket = resolve_broker_socket_path(settings.broker_socket)
         self.broker_runtime = BrokerRuntime(self.broker, broker_socket)
@@ -418,6 +429,49 @@ class ApplicationRuntime:
             "fd_count": fd_count,
             "uptime_seconds": time.monotonic() - self.started_monotonic,
         }
+
+    def health_snapshot(self) -> dict[str, Any]:
+        sessions = self.store.sessions()
+        current_time = utc_now()
+        active_sessions = [
+            item
+            for item in sessions
+            if not item.closing and not self._is_expired(item, current_time)
+        ]
+        warm_snapshot = getattr(self.sandbox, "snapshot", None)
+        return {
+            "status": "ok",
+            "worker_id": self.worker_id,
+            "worker_epoch": self.worker_epoch,
+            "state": "accepting" if self.accepting else "draining",
+            "accepting": self.accepting,
+            "build": self.environment_manifest(),
+            "process": self.process_snapshot(),
+            "sandbox_mode": self.settings.sandbox_mode,
+            "sandbox": self.sandbox_gate.snapshot(),
+            "warm": warm_snapshot() if callable(warm_snapshot) else None,
+            "persistent_interpreter": (
+                self.persistent_sandbox.snapshot()
+                if self.settings.experimental_persistent_interpreter
+                and self.persistent_sandbox is not None
+                else None
+            ),
+            "broker": self.broker.capacity_gate.snapshot(),
+            "provider_cache": self.broker.providers.result_cache.snapshot(),
+            "sessions": {
+                "capacity": self.settings.max_active_sessions,
+                "active": len(active_sessions),
+                "waiting": 0,
+                "leased": sum(item.lease_expires_at is not None for item in active_sessions),
+                "executing": sum(
+                    bool(self._active_session_tasks(item.id)) for item in active_sessions
+                ),
+            },
+            "inflight_execs": len(self.exec_tasks),
+        }
+
+    def dashboard_snapshot(self) -> dict[str, Any]:
+        return self.dashboard.snapshot(self.health_snapshot())
 
     @staticmethod
     def _session_request_hash(request: SessionCreate) -> str:
@@ -841,8 +895,19 @@ class ApplicationRuntime:
                     )
                 return await asyncio.shield(task)
 
+        dashboard_id = self.dashboard.start_execution(
+            session_id=session_id,
+            exec_id=request.exec_id,
+            execution_mode=session.execution_mode,
+            code=request.code,
+        )
         task = asyncio.create_task(
-            self._execute_code_once(session_id, request, request_hash=request_hash),
+            self._execute_code_observed(
+                session_id,
+                request,
+                request_hash=request_hash,
+                dashboard_id=dashboard_id,
+            ),
             name=f"opensac-exec-{session_id}",
         )
         self.exec_tasks.add(task)
@@ -854,12 +919,37 @@ class ApplicationRuntime:
         # continues to completion and atomically replaces its pending record.
         return await asyncio.shield(task)
 
+    async def _execute_code_observed(
+        self,
+        session_id: str,
+        request: ExecCreate,
+        *,
+        request_hash: str,
+        dashboard_id: str | None,
+    ) -> ExecResult:
+        try:
+            result = await self._execute_code_once(
+                session_id,
+                request,
+                request_hash=request_hash,
+                dashboard_id=dashboard_id,
+            )
+        except asyncio.CancelledError:
+            self.dashboard.complete_execution(dashboard_id, cancelled=True)
+            raise
+        except Exception as exc:
+            self.dashboard.complete_execution(dashboard_id, error=exc)
+            raise
+        self.dashboard.complete_execution(dashboard_id, result=result)
+        return result
+
     async def _execute_code_once(
         self,
         session_id: str,
         request: ExecCreate,
         *,
         request_hash: str,
+        dashboard_id: str | None = None,
     ) -> ExecResult:
         server_started = time.monotonic()
         # One execution at a time per session. The workspace, the program
@@ -871,6 +961,7 @@ class ApplicationRuntime:
         session_queue_started = time.monotonic()
         async with self.session_locks[session_id]:
             session_queue_seconds = time.monotonic() - session_queue_started
+            self.dashboard.set_phase(dashboard_id, "preparing")
             prepare_started = time.monotonic()
             session = self.get_session(session_id)
             session = self.store.touch_session(session_id)
@@ -935,6 +1026,7 @@ class ApplicationRuntime:
             # same trace, and it is drained unconditionally below, so nothing
             # accumulates for a caller that never asks for it.
             execution_id = uuid.uuid4().hex
+            self.dashboard.bind_execution(dashboard_id, execution_id)
             request_names = {
                 "program_filename": f".opensac-program-{sequence:03d}.py",
                 "output_filename": f".opensac-output-{sequence:03d}.json",
@@ -949,7 +1041,9 @@ class ApplicationRuntime:
                     sandbox_queue_seconds = 0.0
                     sandbox_execute_seconds = 0.0
                     try:
+                        self.dashboard.set_phase(dashboard_id, "sandbox_queue")
                         async with self.sandbox_gate.slot() as sandbox_queue_seconds:
+                            self.dashboard.set_phase(dashboard_id, "sandbox_running")
                             sandbox_started = time.monotonic()
                             sandbox = self._sandbox_for(session)
                             result = await sandbox.execute(
@@ -976,6 +1070,7 @@ class ApplicationRuntime:
                         rejection = f"Rejected by the sandbox code validator: {exc}"
                         sandbox_execute_seconds = time.monotonic() - sandbox_started
 
+                    self.dashboard.set_phase(dashboard_id, "postprocessing")
                     postprocess_started = time.monotonic()
                     if result is not None:
                         await state.policy.record_sandbox_seconds(result.duration_seconds)

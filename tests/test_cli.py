@@ -112,6 +112,17 @@ def test_serve_loads_configuration_once(monkeypatch, tmp_path: Path) -> None:
     assert calls == [(app_instance, "0.0.0.0", 9000)]
 
 
+def test_serve_prints_local_dashboard_url(monkeypatch, capsys) -> None:
+    settings = cli.Settings(api_host="127.0.0.1", api_port=8123)
+    monkeypatch.setattr(cli, "load_settings", lambda _: settings)
+    monkeypatch.setattr(cli, "create_app", lambda _: object())
+    monkeypatch.setattr(cli.uvicorn, "run", lambda *args, **kwargs: None)
+
+    cli.serve()
+
+    assert "Dashboard: http://127.0.0.1:8123/dashboard" in capsys.readouterr().out
+
+
 def test_build_sandbox_uses_image_from_yaml(monkeypatch, tmp_path: Path) -> None:
     config = tmp_path / "opensac.yaml"
     config.write_text("sandbox:\n  image: example/opensac-sandbox:test\n", encoding="utf-8")

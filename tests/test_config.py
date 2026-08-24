@@ -83,6 +83,32 @@ def test_no_config_uses_defaults() -> None:
 
     assert settings.api_host == "127.0.0.1"
     assert settings.search_backend == "local"
+    assert settings.dashboard_is_enabled is True
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+def test_dashboard_defaults_to_enabled_only_on_loopback(host: str) -> None:
+    assert Settings(api_host=host).dashboard_is_enabled is True
+
+
+def test_dashboard_remote_exposure_requires_explicit_enable_and_api_key() -> None:
+    assert Settings(api_host="0.0.0.0").dashboard_is_enabled is False
+    with pytest.raises(ValueError, match="requires OPENSAC_API_KEY"):
+        Settings(api_host="0.0.0.0", dashboard_enabled=True)
+
+    settings = Settings(
+        api_host="0.0.0.0",
+        dashboard_enabled=True,
+        api_key="configured-secret",
+    )
+    assert settings.dashboard_is_enabled is True
+
+
+def test_dashboard_yaml_can_disable_loopback_default(tmp_path: Path) -> None:
+    config = tmp_path / "opensac.yaml"
+    config.write_text("dashboard:\n  enabled: false\n", encoding="utf-8")
+
+    assert load_settings(config).dashboard_is_enabled is False
 
 
 def test_environment_api_keys_override_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:

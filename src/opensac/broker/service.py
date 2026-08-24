@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
@@ -31,6 +32,25 @@ from opensac.provider import ProviderPolicy, ProviderRuntime
 from opensac.sandbox import SANDBOX_CONTRACT
 
 CapabilityHandler = Callable[[BrokerSession, dict[str, Any]], Awaitable[Any]]
+logger = logging.getLogger(__name__)
+
+
+class CapabilityObserver(Protocol):
+    def capability_started(
+        self,
+        execution_id: str,
+        sequence: int,
+        method: str,
+        params: dict[str, Any],
+    ) -> None: ...
+
+    def capability_completed(
+        self,
+        execution_id: str,
+        sequence: int,
+        event: CapabilityEvent,
+        result: Any,
+    ) -> None: ...
 
 
 class BrokerService:
@@ -65,12 +85,14 @@ class BrokerService:
         provider_execution_config: ProviderExecutionConfig | None = None,
         provider_runtime: ProviderRuntime | None = None,
         backend_revision: str = "",
+        capability_observer: CapabilityObserver | None = None,
     ) -> None:
         self.backends = backends
         self.passage_reranker = passage_reranker
         self.sessions: dict[str, BrokerSession] = {}
         self.capacity_gate = CapacityGate(max_concurrency)
         self.max_context_payload_bytes = max_context_payload_bytes
+        self.capability_observer = capability_observer
 
         retrieval_limits = {
             "max_search_queries_per_request": max_search_queries_per_request,
@@ -333,6 +355,7 @@ class BrokerService:
 
         sequence = state.next_trace_sequence()
         started = time.monotonic()
+        self._observe_capability_started(execution_id, sequence, method, params)
         with call_scope(token, execution_id) as context:
             try:
                 blocked = state.mechanisms.blocked_reason(method) or state.mechanisms.fanout_reason(
@@ -354,6 +377,7 @@ class BrokerService:
                     error="Capability execution was cancelled.",
                 )
                 self._finish_trace(state, execution_id, context, event)
+                self._observe_capability_completed(execution_id, sequence, event, None)
                 raise
             except Exception as exc:
                 event = self._event(
@@ -368,6 +392,7 @@ class BrokerService:
                     error=trace_error_message(exc),
                 )
                 self._finish_trace(state, execution_id, context, event)
+                self._observe_capability_completed(execution_id, sequence, event, None)
                 raise
             else:
                 payload, truncated = self._context_payload(state, result)
@@ -384,7 +409,46 @@ class BrokerService:
                     result_payload_truncated=truncated,
                 )
                 self._finish_trace(state, execution_id, context, event)
+                self._observe_capability_completed(execution_id, sequence, event, result)
                 return result
+
+    def _observe_capability_started(
+        self,
+        execution_id: str | None,
+        sequence: int,
+        method: str,
+        params: dict[str, Any],
+    ) -> None:
+        if execution_id is None or self.capability_observer is None:
+            return
+        try:
+            self.capability_observer.capability_started(
+                execution_id,
+                sequence,
+                method,
+                params,
+            )
+        except Exception:
+            logger.exception("capability_observer_start_failed")
+
+    def _observe_capability_completed(
+        self,
+        execution_id: str | None,
+        sequence: int,
+        event: CapabilityEvent,
+        result: Any,
+    ) -> None:
+        if execution_id is None or self.capability_observer is None:
+            return
+        try:
+            self.capability_observer.capability_completed(
+                execution_id,
+                sequence,
+                event,
+                result,
+            )
+        except Exception:
+            logger.exception("capability_observer_completion_failed")
 
     def _event(
         self,
