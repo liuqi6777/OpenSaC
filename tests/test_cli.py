@@ -164,3 +164,12 @@ def test_service_dockerfile_installs_pipeline_llm_profile() -> None:
     dockerfile = (repo_root / "Dockerfile").read_text()
 
     assert 'python -m pip install --no-cache-dir "$1[llm]"' in dockerfile
+
+
+def test_service_dockerfile_copies_dashboard_before_building_wheel() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    dockerfile = (repo_root / "Dockerfile").read_text()
+
+    dashboard_copy = dockerfile.index("COPY dashboard ./dashboard")
+    wheel_build = dockerfile.index("RUN uv build --all-packages --wheel")
+    assert dashboard_copy < wheel_build

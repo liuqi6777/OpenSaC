@@ -14,6 +14,7 @@ WORKDIR /build
 
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
+COPY dashboard ./dashboard
 COPY sac_agent ./sac_agent
 COPY packages/opensac-sdk ./packages/opensac-sdk
 
