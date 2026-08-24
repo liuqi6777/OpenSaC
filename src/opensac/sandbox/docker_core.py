@@ -6,7 +6,7 @@ import os
 import sys
 from contextlib import suppress
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from opensac.sandbox.base import SandboxRequest
@@ -16,7 +16,7 @@ _OUTPUT_LIMIT_MARKER = (
 )
 _EXECUTION_WARNING_BYTES = 4_096
 _EXECUTION_ENVELOPE_OVERHEAD_BYTES = 64 * 1_024
-SANDBOX_CONTRACT = 12
+SANDBOX_CONTRACT = 13
 SANDBOX_CONTRACT_LABEL = "org.opensac.sandbox.contract"
 
 
@@ -349,7 +349,7 @@ class DockerSandboxCore:
             str(cid_path),
             *extra_args,
             "--mount",
-            f"type=bind,src={request.workspace.resolve()},dst=/workspace",
+            f"type=bind,src={self.host_mount_workspace(request)},dst=/workspace",
         ]
         command += broker_socket_mount_args(
             self.broker_socket,
@@ -362,6 +362,20 @@ class DockerSandboxCore:
             "OPENSAC_WORKSPACE=/workspace",
         ]
         return command
+
+    @staticmethod
+    def host_mount_workspace(request: SandboxRequest) -> Path:
+        return (request.mount_workspace or request.workspace).resolve()
+
+    @classmethod
+    def container_execution_workspace(cls, request: SandboxRequest) -> str:
+        mount = cls.host_mount_workspace(request)
+        workspace = request.workspace.resolve()
+        try:
+            relative = workspace.relative_to(mount)
+        except ValueError as exc:
+            raise ValueError("execution workspace must be inside the sandbox mount") from exc
+        return str(PurePosixPath("/workspace", *relative.parts))
 
     def _execution_timeout(self, request: SandboxRequest) -> float:
         return min(

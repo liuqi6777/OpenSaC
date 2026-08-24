@@ -929,12 +929,18 @@ class StateResource:
     host reports ``state_lost``. Public web URLs remain meaningful across sessions.
     """
 
-    def __init__(self, workspace: str) -> None:
-        self._workspace = Path(workspace).resolve()
+    def __init__(self, workspace: str | None) -> None:
+        self._workspace = Path(workspace).resolve() if workspace is not None else None
+
+    def _workspace_path(self) -> Path:
+        if self._workspace is not None:
+            return self._workspace
+        return Path(os.environ.get("OPENSAC_WORKSPACE", "/workspace")).resolve()
 
     def _path(self, relative_path: str) -> Path:
-        path = (self._workspace / relative_path).resolve()
-        if not path.is_relative_to(self._workspace):
+        workspace = self._workspace_path()
+        path = (workspace / relative_path).resolve()
+        if not path.is_relative_to(workspace):
             raise ValueError("State path must remain inside the session workspace")
         return path
 
@@ -1018,13 +1024,14 @@ class StateResource:
         Runtime files whose names start with ``.opensac-`` are hidden. An absent
         workspace returns an empty list.
         """
-        if not self._workspace.exists():
+        workspace = self._workspace_path()
+        if not workspace.exists():
             return []
         return sorted(
             relative
-            for path in self._workspace.rglob("*")
+            for path in workspace.rglob("*")
             if path.is_file() and not path.name.startswith(".opensac-")
-            for relative in [str(path.relative_to(self._workspace))]
+            for relative in [str(path.relative_to(workspace))]
             if relative.startswith(prefix)
         )
 
@@ -1064,14 +1071,19 @@ class StateResource:
 
     @classmethod
     def from_environment(cls) -> StateResource:
-        return cls(os.environ.get("OPENSAC_WORKSPACE", "/workspace"))
+        return cls(None)
 
 
 class OutputResource:
     """Submit the final structured result and optional source strings."""
 
-    def __init__(self, output_path: str) -> None:
-        self._output_path = Path(output_path)
+    def __init__(self, output_path: str | None) -> None:
+        self._output_path = Path(output_path) if output_path is not None else None
+
+    def _path(self) -> Path:
+        if self._output_path is not None:
+            return self._output_path
+        return Path(os.environ.get("OPENSAC_OUTPUT_PATH", "/workspace/.opensac-output.json"))
 
     def submit(
         self,
@@ -1092,7 +1104,7 @@ class OutputResource:
         if citations is not None and len(citations) > 256:
             raise ValueError("citations must contain at most 256 source strings")
         sources = [self._citation(item, index) for index, item in enumerate(citations or [])]
-        write_submission(self._output_path, output, sources)
+        write_submission(self._path(), output, sources)
 
     @staticmethod
     def _citation(item: Any, input_index: int) -> str:
@@ -1109,4 +1121,4 @@ class OutputResource:
 
     @classmethod
     def from_environment(cls) -> OutputResource:
-        return cls(os.environ.get("OPENSAC_OUTPUT_PATH", "/workspace/.opensac-output.json"))
+        return cls(None)

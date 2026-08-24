@@ -27,6 +27,11 @@ class SandboxRequest:
     session_id: str | None = None
     # A session budget may lower the deployment-wide timeout for this call.
     timeout_seconds: float | None = None
+    # Persistent interpreters keep one stable container mount while a session
+    # with filesystem persistence disabled receives a different execution
+    # directory on every call. Omitted preserves the historical mount.
+    mount_workspace: Path | None = None
+    kernel_result_filename: str = ".opensac-kernel-result.json"
 
 
 @dataclass
@@ -51,6 +56,12 @@ class SandboxResult:
     # alternate sandbox implementations.
     output_limit_exceeded: bool = False
     warnings: list[dict[str, Any]] = field(default_factory=list)
+    # True once user code may have started. Persistent interpreters use this
+    # to distinguish retryable startup failure from lost in-memory state.
+    execution_started: bool = False
+    interpreter_state: str = "not_applicable"
+    interpreter_loss_reason: str | None = None
+    namespace_symbol_count: int | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -59,6 +70,7 @@ class SandboxResult:
             and not self.timed_out
             and not self.output_limit_exceeded
             and self.launch_error is None
+            and self.interpreter_state != "lost"
         )
 
 

@@ -17,14 +17,14 @@ OpenSAC 提供执行运行时，而不负责控制循环。智能体集成应只
 
 ## 前置条件
 
-按照主 README 的 [Docker 快速开始](../README.zh-CN.md#使用-docker-快速开始)启动公开的 `v0.6.6`
+按照主 README 的 [Docker 快速开始](../README.zh-CN.md#使用-docker-快速开始)启动公开的 `v0.7.0`
 服务镜像，服务本身不需要源码检出。项目不发布 PyPI 包，因此使用 CLI 或 MCP 适配器的宿主机需要检出
 相同的发布版本，以安装适配命令和 skill：
 
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-git checkout v0.6.6
+git checkout v0.7.0
 uv tool install --editable '/absolute/path/to/OpenSaC[mcp]'
 
 export SAC_API_BASE=http://127.0.0.1:8000
@@ -46,8 +46,10 @@ export OPENSAC_REPO=/absolute/path/to/OpenSaC
 ## 自定义 agent loop
 
 将 `POST /v1/sessions/{session_id}/exec` 或 `OpenSAC.exec_code` 包装成单一的 `sac_run(code)` 工具。
-Rollout 开始时创建 session，跨轮次复用，并在结束时删除或中止。这样既能保留工作空间文件与受 session
-约束的本地文档 ID，又不会让模型生成或处理 session ID；公开来源 URL 可以跨 session 传递。
+Rollout 开始时创建 session，跨轮次复用，并在结束时删除或中止。默认的
+`execution_mode="program"` 既能保留工作空间文件与受 session 约束的本地文档 ID，又不会让模型生成或
+处理 session ID；公开来源 URL 可以跨 session 传递。实验模式则使用
+`OpenSAC.create_session(execution_mode="persistent_interpreter")`，详见下文。
 
 应在 stdout 之前展示执行响应中有界的 `warnings` 列表。即使生成代码只打印成功值，这些 warning
 也能暴露局部或全部外部 item 失败，同时不会让原本成功的执行变成失败。
@@ -114,6 +116,7 @@ export SAC_AGENT_HOST=my-agent
 | --- | --- | --- |
 | `SAC_API_BASE` | `http://127.0.0.1:8000` | 适配层访问的 OpenSAC API |
 | `SAC_API_KEY` | 空，随后回退到 `OPENSAC_API_KEY` | Bearer 凭据；不会写入 registry |
+| `SAC_CLI_EXECUTION_MODE` | `program` | Session 执行模式；实验组使用 `persistent_interpreter` |
 | `SAC_CLI_LEASE_SECONDS` | `3600` | 可续租 session lease，范围为 `1` 到 `86400` 秒 |
 | `SAC_CLI_STATE_DIR` | 平台用户状态目录 | CLI SQLite generation registry |
 | `SAC_AGENT_CONTEXT_ID` | 未设置 | 其他 CLI agent 显式提供的对话 ID |
@@ -175,6 +178,7 @@ Codex 会在 MCP 请求 metadata 中提供当前 task 身份。该字段缺失�
 | --- | --- | --- |
 | `SAC_API_BASE` | `http://127.0.0.1:8000` | 适配层访问的 OpenSAC API |
 | `SAC_API_KEY` | 空，随后回退到 `OPENSAC_API_KEY` | Bearer 凭据；不会写入 MCP registry |
+| `SAC_MCP_EXECUTION_MODE` | `program` | Session 执行模式；实验组使用 `persistent_interpreter` |
 | `SAC_MCP_LEASE_SECONDS` | `3600` | 可续租 session lease，范围为 `1` 到 `86400` 秒 |
 | `SAC_MCP_STATE_DIR` | 平台用户状态目录 | MCP SQLite generation registry |
 
@@ -182,6 +186,44 @@ Codex 会在 MCP 请求 metadata 中提供当前 task 身份。该字段缺失�
 一个 task 复用一个带 lease 的 OpenSAC session，并能在 MCP 重启后恢复。MCP 退出只关闭 HTTP client，
 不会删除 session。遇到 `session_expired` 或 `worker_restarted` 时不会重放失败程序；本次调用返回
 `state_lost`，下一次调用从干净 generation 开始。
+
+## 实验性持久解释器
+
+服务端和适配层都必须显式启用该特性。仅在隔离的实验中设置：
+
+```bash
+# OpenSAC 服务配置
+export OPENSAC_EXPERIMENTAL_PERSISTENT_INTERPRETER=true
+
+# 实验组进程只选择一种适配方式。
+export SAC_CLI_EXECUTION_MODE=persistent_interpreter
+# 或：export SAC_MCP_EXECUTION_MODE=persistent_interpreter
+```
+
+每个实验组 session 在第一次执行时懒启动一个内部 `default` Python 解释器。顶层变量、函数、import，
+以及普通异常发生前已经完成的赋值会保留到下一次 `sac_run`。`mechanisms.persistence` 仍然只控制文件：
+设为 false 时，每个 cell 使用临时 workspace，但 Python globals 继续存在。持久 session 会固定占用其
+sandbox 容器直到删除或过期，因此容量规划应按并发实验 session 计算，而不是依赖 warm LRU 上限。
+
+将实验 skill 与 baseline skill 并列安装：
+
+```bash
+# MCP 实验 skill（Codex）
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-repl" "$AGENT_PROJECT/.agents/skills/"
+
+# CLI 实验 skill（Codex 或 Claude Code）
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-repl-cli" "$AGENT_PROJECT/.agents/skills/"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-repl-cli" "$AGENT_PROJECT/.claude/skills/"
+```
+
+REPL skill 禁止隐式调用。实验组 prompt 必须明确写 `$search-as-code-repl` 或
+`$search-as-code-repl-cli`；baseline 继续使用现有 skill 和 `program` 模式。第一条 observation 会报告
+实际 execution mode，REPL skill 在模式不匹配时立即报告配置错误。
+
+响应会报告 `interpreter_state`（`not_started`、`ready` 或 `lost`）、可选的 loss reason，以及顶层用户
+symbol 数量；不会记录 symbol 名称或值。超时、输出超限、kernel 退出、协议损坏或遗留后台线程都会将
+解释器标为 lost 并删除容器。失败 cell 不会被重放，直接继续执行该 session 会得到
+`410 interpreter_lost`，适配层则会在下一次调用时切换到干净 session。
 
 ## 安全与正确性规则
 

@@ -219,6 +219,13 @@ The provider result cache is process-local and only stores successful `web.searc
 results. It never caches failures, reranker responses, or LLM output. Keep the TTL at zero when
 cross-session freshness must take precedence over latency and provider cost.
 
+The experimental persistent interpreter is a separate opt-in lifecycle and does not use the warm
+LRU. Set `OPENSAC_EXPERIMENTAL_PERSISTENT_INTERPRETER=true` only for treatment deployments, then
+create sessions with `execution_mode="persistent_interpreter"`. Each active treatment session pins
+one container until deletion or expiry; size `OPENSAC_SANDBOX_MAX_CONCURRENCY` and host memory for
+the maximum concurrent treatment sessions. See [Agent integrations](agent-integrations.md) for
+adapter mode selection, explicit REPL skills, loss semantics, and the baseline/treatment split.
+
 ### Benchmark before and after tuning
 
 Run the same program against each deployment with identical Docker resources and provider settings.

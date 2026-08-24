@@ -1,0 +1,6 @@
+interface:
+  display_name: "Search as Code REPL CLI"
+  short_description: "Run persistent OpenSAC research through a local CLI"
+  default_prompt: "Use $search-as-code-repl-cli to research this question with the persistent OpenSAC CLI and cite inspected source URLs."
+policy:
+  allow_implicit_invocation: false

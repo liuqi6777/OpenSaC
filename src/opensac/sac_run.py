@@ -11,7 +11,7 @@ import httpx
 DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_OUTPUT_LIMIT = 32_000
 _WARNING_OUTPUT_LIMIT = 4_096
-_STATE_LOSS_CODES = frozenset({"session_expired", "worker_restarted"})
+_STATE_LOSS_CODES = frozenset({"session_expired", "worker_restarted", "interpreter_lost"})
 
 
 class AsyncSessionClient:
@@ -83,12 +83,27 @@ def render_observation(
         return f"[sac_run] {payload['error']}"
 
     usage = payload.get("usage") or {}
+    execution_mode = str(payload.get("execution_mode") or "program")
+    interpreter_state = str(payload.get("interpreter_state") or "not_applicable")
+    namespace_count = payload.get("namespace_symbol_count")
+    namespace_summary = (
+        f"namespace_symbols={namespace_count} " if namespace_count is not None else ""
+    )
     sections = [
         f"[sac_run] exit_code={payload.get('exit_code')} "
         f"duration={float(payload.get('duration_seconds', 0.0)):.1f}s "
+        f"execution_mode={execution_mode} "
+        f"interpreter_state={interpreter_state} "
+        f"{namespace_summary}"
         f"search_calls={usage.get('search_calls', 0)} "
         f"docs_fetched={usage.get('content_fetches', 0)}"
     ]
+    if interpreter_state == "lost":
+        reason = str(payload.get("interpreter_loss_reason") or "unknown")
+        sections.append(
+            "state_lost: The persistent interpreter was lost "
+            f"({reason}). The submitted cell will not be replayed."
+        )
     remaining = output_limit
     warning_body = _render_warnings(payload.get("warnings"))
     if warning_body and remaining > 0:

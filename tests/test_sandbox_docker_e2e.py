@@ -43,7 +43,7 @@ def sandbox_image() -> str:
         )
 
 
-def test_built_image_exposes_contract_12_and_compact_sdk(sandbox_image: str) -> None:
+def test_built_image_exposes_contract_13_and_compact_sdk(sandbox_image: str) -> None:
     image = sandbox_image
     inspected = subprocess.run(
         [
@@ -58,7 +58,7 @@ def test_built_image_exposes_contract_12_and_compact_sdk(sandbox_image: str) -> 
         capture_output=True,
         text=True,
     )
-    assert inspected.stdout.strip() == "12"
+    assert inspected.stdout.strip() == "13"
 
     inspected_version = subprocess.run(
         [
@@ -135,6 +135,7 @@ def test_compose_service_executes_a_sandbox_program(sandbox_image: str) -> None:
         "OPENSAC_ENV_FILE": "/dev/null",
         "OPENSAC_SERVICE_IMAGE": service_image,
         "OPENSAC_SANDBOX_IMAGE": sandbox_image,
+        "OPENSAC_EXPERIMENTAL_PERSISTENT_INTERPRETER": "true",
         "OPENSAC_CONTAINER_SEARCH_BACKEND": "web",
         "OPENSAC_PORT": str(port),
     }
@@ -190,15 +191,37 @@ def test_compose_service_executes_a_sandbox_program(sandbox_image: str) -> None:
                 time.sleep(1)
 
         with OpenSAC(base_url=f"http://127.0.0.1:{port}", timeout=60) as client:
-            session = client.create_session()
+            session_ids = []
             try:
+                session = client.create_session()
+                session_ids.append(session["id"])
                 result = client.exec_code(session["id"], "print('compose-sandbox-ok')")
+
+                repl = client.create_session(execution_mode="persistent_interpreter")
+                session_ids.append(repl["id"])
+                initialized = client.exec_code(
+                    repl["id"],
+                    "value = 41\n\ndef plus_one(number):\n    return number + 1",
+                )
+                reused = client.exec_code(repl["id"], "print(plus_one(value))")
+                failed = client.exec_code(
+                    repl["id"], "assigned_before_error = 7\nraise ValueError('ordinary')"
+                )
+                recovered = client.exec_code(repl["id"], "print(assigned_before_error)")
             finally:
-                client.delete_session(session["id"])
+                for session_id in session_ids:
+                    client.delete_session(session_id)
 
         assert result["exit_code"] == 0
         assert result["stdout"] == "compose-sandbox-ok\n"
         assert result["succeeded"] is True
+        assert initialized["interpreter_state"] == "ready"
+        assert initialized["namespace_symbol_count"] >= 2
+        assert reused["stdout"] == "42\n"
+        assert reused["execution_mode"] == "persistent_interpreter"
+        assert failed["exit_code"] == 1
+        assert failed["interpreter_state"] == "ready"
+        assert recovered["stdout"] == "7\n"
     finally:
         subprocess.run(
             [*compose, "down", "--remove-orphans"],

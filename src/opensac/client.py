@@ -4,15 +4,21 @@ from typing import Any
 
 import httpx
 
+from opensac.models import ExecutionMode
+
 
 def _session_payload(
     *,
     mechanisms: dict[str, Any] | None,
+    execution_mode: ExecutionMode,
     request_id: str | None,
     lease_seconds: float | None,
     budget: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {"mechanisms": mechanisms or {}}
+    payload: dict[str, Any] = {
+        "mechanisms": mechanisms or {},
+        "execution_mode": execution_mode,
+    }
     if budget is not None:
         payload["budget"] = budget
     if request_id is not None:
@@ -38,12 +44,14 @@ class OpenSAC:
         self,
         *,
         mechanisms: dict[str, Any] | None = None,
+        execution_mode: ExecutionMode = "program",
         request_id: str | None = None,
         lease_seconds: float | None = None,
         budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = _session_payload(
             mechanisms=mechanisms,
+            execution_mode=execution_mode,
             request_id=request_id,
             lease_seconds=lease_seconds,
             budget=budget,
@@ -133,12 +141,14 @@ class AsyncOpenSAC:
         self,
         *,
         mechanisms: dict[str, Any] | None = None,
+        execution_mode: ExecutionMode = "program",
         request_id: str | None = None,
         lease_seconds: float | None = None,
         budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = _session_payload(
             mechanisms=mechanisms,
+            execution_mode=execution_mode,
             request_id=request_id,
             lease_seconds=lease_seconds,
             budget=budget,

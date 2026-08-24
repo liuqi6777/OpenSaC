@@ -76,6 +76,7 @@ class WarmDockerSandbox(DockerSandboxCore):
 
     _KEEPALIVE = "import time; time.sleep(315360000)"
     _ENTRYPOINT = "/opt/runner/entrypoint.py"
+    _SANDBOX_LABEL = "warm"
 
     def __init__(
         self,
@@ -152,7 +153,7 @@ class WarmDockerSandbox(DockerSandboxCore):
             init=True,
             extra_args=(
                 "--label",
-                "opensac.sandbox=warm",
+                f"opensac.sandbox={self._SANDBOX_LABEL}",
                 "--label",
                 f"opensac.owner={self.owner_label}",
                 "--label",
@@ -182,7 +183,7 @@ class WarmDockerSandbox(DockerSandboxCore):
                 "--quiet",
                 "--no-trunc",
                 "--filter",
-                "label=opensac.sandbox=warm",
+                f"label=opensac.sandbox={self._SANDBOX_LABEL}",
                 "--filter",
                 f"label=opensac.owner={self.owner_label}",
                 stdout=asyncio.subprocess.PIPE,
@@ -257,7 +258,7 @@ class WarmDockerSandbox(DockerSandboxCore):
                 "--quiet",
                 "--no-trunc",
                 "--filter",
-                "label=opensac.sandbox=warm",
+                f"label=opensac.sandbox={self._SANDBOX_LABEL}",
                 "--filter",
                 f"label=opensac.owner={self.owner_label}",
                 "--filter",
@@ -278,19 +279,22 @@ class WarmDockerSandbox(DockerSandboxCore):
         return set(stdout_bytes.decode("utf-8", errors="replace").split())
 
     def execution_command(self, container_id: str, request: SandboxRequest) -> list[str]:
+        execution_workspace = self.container_execution_workspace(request)
         command = [
             "docker",
             "exec",
             "--user",
             f"{os.getuid()}:{os.getgid()}",
             "--workdir",
-            "/workspace",
+            execution_workspace,
             "--env",
             f"OPENSAC_SESSION_TOKEN={request.session_token}",
             "--env",
-            f"OPENSAC_OUTPUT_PATH=/workspace/{request.output_filename}",
+            f"OPENSAC_OUTPUT_PATH={execution_workspace}/{request.output_filename}",
             "--env",
-            f"OPENSAC_READY_PATH=/workspace/{request.output_filename}.ready",
+            f"OPENSAC_READY_PATH={execution_workspace}/{request.output_filename}.ready",
+            "--env",
+            f"OPENSAC_WORKSPACE={execution_workspace}",
         ]
         if request.execution_id:
             command += ["--env", f"OPENSAC_EXECUTION_ID={request.execution_id}"]
@@ -299,7 +303,7 @@ class WarmDockerSandbox(DockerSandboxCore):
             "python",
             "-I",
             self._ENTRYPOINT,
-            f"/workspace/{request.program_filename}",
+            f"{execution_workspace}/{request.program_filename}",
         ]
         return command
 
@@ -319,7 +323,7 @@ class WarmDockerSandbox(DockerSandboxCore):
 
     async def _reserve(self, request: SandboxRequest) -> _WarmSession:
         key = self._session_key(request)
-        workspace = request.workspace.resolve()
+        workspace = self.host_mount_workspace(request)
         while True:
             waiter: asyncio.Event | None = None
             replace: _WarmSession | None = None
@@ -611,6 +615,7 @@ class WarmDockerSandbox(DockerSandboxCore):
                         duration_seconds=duration_seconds,
                     ),
                     launch_error=launch_error,
+                    execution_started=workspace.ready_path.exists(),
                 )
         finally:
             workspace.cleanup()

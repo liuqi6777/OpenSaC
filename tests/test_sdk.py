@@ -1104,6 +1104,65 @@ def test_state_can_be_asked_what_is_there(tmp_path) -> None:
     assert ".opensac-output.json" not in state.list()
 
 
+def test_environment_resources_follow_each_persistent_cell_context(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    first_output = tmp_path / "first-output.json"
+    second_output = tmp_path / "second-output.json"
+    state = StateResource.from_environment()
+    output = OutputResource.from_environment()
+
+    monkeypatch.setenv("OPENSAC_WORKSPACE", str(first_workspace))
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(first_output))
+    state.write_json("state.json", {"cell": 1})
+    output.submit({"cell": 1})
+
+    monkeypatch.setenv("OPENSAC_WORKSPACE", str(second_workspace))
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(second_output))
+    state.write_json("state.json", {"cell": 2})
+    output.submit({"cell": 2})
+
+    assert json.loads((first_workspace / "state.json").read_text()) == {"cell": 1}
+    assert json.loads((second_workspace / "state.json").read_text()) == {"cell": 2}
+    assert json.loads(first_output.read_text())["output"] == {"cell": 1}
+    assert json.loads(second_output.read_text())["output"] == {"cell": 2}
+
+
+def test_environment_transport_refreshes_token_and_execution_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, str]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        observed.append(
+            (
+                request.headers["Authorization"],
+                request.headers["X-OpenSAC-Execution-ID"],
+            )
+        )
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    monkeypatch.setenv("OPENSAC_BROKER_SOCKET", "/tmp/broker.sock")
+    monkeypatch.setenv("OPENSAC_SESSION_TOKEN", "token-1")
+    transport = UnixSocketTransport.from_environment()
+    transport._client = httpx.Client(
+        base_url="http://opensac",
+        transport=httpx.MockTransport(handle),
+    )
+    try:
+        monkeypatch.setenv("OPENSAC_EXECUTION_ID", "exec-1")
+        transport.call("session.usage", {})
+        monkeypatch.setenv("OPENSAC_SESSION_TOKEN", "token-2")
+        monkeypatch.setenv("OPENSAC_EXECUTION_ID", "exec-2")
+        transport.call("session.usage", {})
+    finally:
+        transport.close()
+
+    assert observed == [("Bearer token-1", "exec-1"), ("Bearer token-2", "exec-2")]
+
+
 def test_output_submission(tmp_path) -> None:
     path = tmp_path / "output.json"
     OutputResource(str(path)).submit(

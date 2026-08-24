@@ -19,7 +19,7 @@ endpoint exposed inside sandbox programs as `sdk.llm.*`.
 
 ## Prerequisites
 
-Start the public `v0.6.6` service image by following the main README's
+Start the public `v0.7.0` service image by following the main README's
 [Docker quick start](../README.md#quick-start-with-docker). The service itself needs no source
 checkout. PyPI publication is not planned, so a host that uses the CLI or MCP adapter should check
 out the matching release to install the adapter and skills:
@@ -27,7 +27,7 @@ out the matching release to install the adapter and skills:
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-git checkout v0.6.6
+git checkout v0.7.0
 uv tool install --editable '/absolute/path/to/OpenSaC[mcp]'
 
 export SAC_API_BASE=http://127.0.0.1:8000
@@ -52,8 +52,10 @@ requires `llm`; `full` installs all three profiles.
 
 Wrap `POST /v1/sessions/{session_id}/exec`, or `OpenSAC.exec_code`, as a single `sac_run(code)`
 tool. Create one session when the rollout starts, reuse it across turns, and delete or abort it at
-the end. This preserves workspace files and session-bound local document IDs while keeping session
-IDs out of model-generated arguments. Public source URLs can be carried across sessions.
+the end. The default `execution_mode="program"` preserves workspace files and session-bound local
+document IDs while keeping session IDs out of model-generated arguments. Public source URLs can be
+carried across sessions. The experimental alternative is
+`OpenSAC.create_session(execution_mode="persistent_interpreter")`, described below.
 
 Render the execution response's bounded `warnings` list before stdout. These warnings expose
 partial or complete external item failures even when generated code only prints successful values;
@@ -126,6 +128,7 @@ export SAC_AGENT_HOST=my-agent
 | --- | --- | --- |
 | `SAC_API_BASE` | `http://127.0.0.1:8000` | OpenSAC API used by the adapter |
 | `SAC_API_KEY` | empty, then `OPENSAC_API_KEY` | Bearer credential; never stored in the registry |
+| `SAC_CLI_EXECUTION_MODE` | `program` | Session execution mode; treatment uses `persistent_interpreter` |
 | `SAC_CLI_LEASE_SECONDS` | `3600` | Renewable session lease, from `1` to `86400` seconds |
 | `SAC_CLI_STATE_DIR` | platform user-state directory | CLI SQLite generation registry |
 | `SAC_AGENT_CONTEXT_ID` | unset | Explicit conversation ID for another CLI agent |
@@ -188,6 +191,7 @@ fails closed and does not fall back to a process-wide or working-directory sessi
 | --- | --- | --- |
 | `SAC_API_BASE` | `http://127.0.0.1:8000` | OpenSAC API used by the adapter |
 | `SAC_API_KEY` | empty, then `OPENSAC_API_KEY` | Bearer credential; never stored in the MCP registry |
+| `SAC_MCP_EXECUTION_MODE` | `program` | Session execution mode; treatment uses `persistent_interpreter` |
 | `SAC_MCP_LEASE_SECONDS` | `3600` | Renewable session lease, from `1` to `86400` seconds |
 | `SAC_MCP_STATE_DIR` | platform user-state directory | MCP SQLite generation registry |
 
@@ -196,6 +200,48 @@ SQLite. A task reuses one leased OpenSAC session and can recover it after an MCP
 shutdown closes HTTP clients without deleting sessions. On `session_expired` or
 `worker_restarted`, the failed program is not replayed; the current call returns `state_lost`, and
 the next call starts a clean generation.
+
+## Experimental persistent interpreter
+
+This feature is opt-in on both the service and adapter. Enable it only for an isolated experiment:
+
+```bash
+# OpenSAC service configuration
+export OPENSAC_EXPERIMENTAL_PERSISTENT_INTERPRETER=true
+
+# Choose exactly one adapter for the treatment process.
+export SAC_CLI_EXECUTION_MODE=persistent_interpreter
+# or: export SAC_MCP_EXECUTION_MODE=persistent_interpreter
+```
+
+Each treatment session lazily starts one internal `default` Python interpreter. Top-level
+variables, functions, imports, and assignments completed before an ordinary exception survive the
+next `sac_run` call. `mechanisms.persistence` still controls files only: when it is false, each cell
+gets a temporary workspace while Python globals remain alive. Persistent sessions pin their
+sandbox container until deletion or expiry, so capacity planning must count concurrent treatment
+sessions rather than the warm-container LRU limit.
+
+Install the matching skill alongside the baseline skill:
+
+```bash
+# MCP treatment skill (Codex)
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-repl" "$AGENT_PROJECT/.agents/skills/"
+
+# CLI treatment skill (Codex or Claude Code)
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-repl-cli" "$AGENT_PROJECT/.agents/skills/"
+cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-repl-cli" "$AGENT_PROJECT/.claude/skills/"
+```
+
+The REPL skills disable implicit invocation. Prompt the treatment explicitly with
+`$search-as-code-repl` or `$search-as-code-repl-cli`; continue using the existing skill and
+`program` mode for the baseline. The first observation reports the actual execution mode, and the
+REPL skill treats a mismatch as a configuration error.
+
+Responses report `interpreter_state` as `not_started`, `ready`, or `lost` plus an optional loss
+reason and a count of top-level user symbols. Symbol names and values are not recorded. A timeout,
+output overflow, kernel exit, protocol failure, or leftover background thread marks the interpreter
+lost and removes its container. The failed cell is never replayed, later direct execution returns
+`410 interpreter_lost`, and adapters rotate to a clean session on their next invocation.
 
 ## Security and correctness rules
 

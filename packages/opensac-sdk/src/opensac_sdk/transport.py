@@ -38,12 +38,15 @@ class UnixSocketTransport:
     def __init__(
         self,
         socket_path: str,
-        session_token: str,
+        session_token: str | None,
         timeout: float | None = None,
+        *,
+        environment_context: bool = False,
     ) -> None:
         self.socket_path = socket_path
         self.session_token = session_token
         self.timeout = timeout
+        self.environment_context = environment_context
         self._client: httpx.Client | None = None
         self._client_lock = threading.Lock()
 
@@ -53,12 +56,16 @@ class UnixSocketTransport:
         session_token = os.environ.get("OPENSAC_SESSION_TOKEN")
         if not socket_path or not session_token:
             raise RuntimeError("OpenSAC broker environment is not configured")
-        return cls(socket_path, session_token)
+        return cls(socket_path, None, environment_context=True)
 
     def call(self, method: str, params: dict[str, Any]) -> Any:
         client = self._http()
         try:
-            response = client.post("/v1/call", json={"method": method, "params": params})
+            response = client.post(
+                "/v1/call",
+                json={"method": method, "params": params},
+                headers=self._headers(),
+            )
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise BrokerError(
@@ -114,12 +121,18 @@ class UnixSocketTransport:
                 transport=transport,
                 base_url="http://opensac",
                 timeout=self.timeout,
-                headers=self._headers(),
             )
             return self._client
 
     def _headers(self) -> dict[str, str]:
-        headers = {"Authorization": f"Bearer {self.session_token}"}
+        session_token = (
+            os.environ.get("OPENSAC_SESSION_TOKEN")
+            if self.environment_context
+            else self.session_token
+        )
+        if not session_token:
+            raise RuntimeError("OpenSAC broker environment is not configured")
+        headers = {"Authorization": f"Bearer {session_token}"}
         execution_id = os.environ.get("OPENSAC_EXECUTION_ID", "").strip()
         if execution_id:
             headers["X-OpenSAC-Execution-ID"] = execution_id

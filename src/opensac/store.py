@@ -11,6 +11,7 @@ from pathlib import Path
 
 from opensac.models import (
     ExecRecord,
+    InterpreterState,
     ProgramRecord,
     RunUsage,
     Session,
@@ -55,6 +56,12 @@ class StateStore:
             token=secrets.token_urlsafe(32),
             backends=[backend],
             workspace=str(workspace),
+            execution_mode=request.execution_mode,
+            interpreter_state=(
+                "not_started"
+                if request.execution_mode == "persistent_interpreter"
+                else "not_applicable"
+            ),
             # Frozen onto the session, not read from process settings: the arm a
             # run belongs to has to stay recoverable from its own record after
             # the server has been restarted with a different configuration.
@@ -74,6 +81,19 @@ class StateStore:
             created_at=created_at,
             last_access=created_at,
         )
+        self.save_session(session)
+        return session
+
+    def save_interpreter_state(
+        self,
+        session_id: str,
+        state: InterpreterState,
+        *,
+        loss_reason: str | None = None,
+    ) -> Session:
+        session = self.get_session(session_id)
+        session.interpreter_state = state
+        session.interpreter_loss_reason = loss_reason
         self.save_session(session)
         return session
 

@@ -1,6 +1,6 @@
 # OpenSAC SDK API 参考
 
-本文档对应仓库当前捆绑的 `opensac_sdk` 0.6.6，覆盖
+本文档对应仓库当前捆绑的 `opensac_sdk` 0.7.0，覆盖
 `SDK_SURFACE` 声明的全部 22 个公共操作。SDK 是同步接口，供 OpenSAC sandbox
 中的生成程序调用；宿主与 sandbox 镜像会提供版本匹配的 SDK。
 

@@ -45,6 +45,14 @@ class SessionExpiredError(RuntimeError):
     pass
 
 
+class ExperimentalFeatureDisabledError(RuntimeError):
+    pass
+
+
+class InterpreterLostError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ErrorContract:
     status_code: int
@@ -64,6 +72,8 @@ ERROR_CONTRACTS: dict[type[Exception], ErrorContract] = {
     SessionCreateConflictError: ErrorContract(409, "session_request_conflict", False),
     SessionLostError: ErrorContract(410, "worker_restarted", False),
     SessionExpiredError: ErrorContract(410, "session_expired", False),
+    ExperimentalFeatureDisabledError: ErrorContract(400, "experimental_feature_disabled", False),
+    InterpreterLostError: ErrorContract(410, "interpreter_lost", False),
     SessionClosingError: ErrorContract(409, "session_closing", False),
     SessionCleanupError: ErrorContract(503, "cleanup_failed", True),
     ExecIdConflictError: ErrorContract(409, "exec_id_conflict", False),

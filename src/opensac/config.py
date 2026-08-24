@@ -168,6 +168,9 @@ class Settings(BaseSettings):
     # container per active session while still starting a fresh Python process
     # for every program.
     sandbox_mode: Literal["cold", "warm"] = "cold"
+    # Experimental session-scoped REPL. Disabled by default so deployments do
+    # not pin one interpreter container per active session unless they opt in.
+    experimental_persistent_interpreter: bool = False
     sandbox_warm_idle_seconds: float = Field(default=300.0, ge=0.0)
     # Zero preserves the previous unbounded warm registry.  RL deployments set
     # this below max_active_sessions and let idle namespaces be recreated.

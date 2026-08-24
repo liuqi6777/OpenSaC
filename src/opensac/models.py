@@ -8,6 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CAPABILITY_CONTRACT = 11
 
+ExecutionMode = Literal["program", "persistent_interpreter"]
+InterpreterState = Literal["not_applicable", "not_started", "ready", "lost"]
+
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
@@ -134,6 +137,7 @@ class Mechanisms(BaseModel):
 
 class SessionCreate(BaseModel):
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
+    execution_mode: ExecutionMode = "program"
     request_id: str | None = Field(default=None, min_length=1, max_length=256)
     lease_seconds: float | None = Field(default=None, gt=0.0, le=86_400.0)
     budget: ResourceBudget = Field(default_factory=ResourceBudget)
@@ -154,6 +158,9 @@ class Session(BaseModel):
     token: str
     backends: list[str]
     workspace: str
+    execution_mode: ExecutionMode = "program"
+    interpreter_state: InterpreterState = "not_applicable"
+    interpreter_loss_reason: str | None = None
     mechanisms: Mechanisms = Field(default_factory=Mechanisms)
     request_id: str | None = None
     request_hash: str | None = None
@@ -485,6 +492,10 @@ class ExecResult(BaseModel):
     artifacts: list[str] = Field(default_factory=list)
     trace: list[CapabilityEvent] = Field(default_factory=list)
     timings: dict[str, float] = Field(default_factory=dict)
+    execution_mode: ExecutionMode = "program"
+    interpreter_state: InterpreterState = "not_applicable"
+    interpreter_loss_reason: str | None = None
+    namespace_symbol_count: int | None = Field(default=None, ge=0)
     session_state: str = "active"
     terminal_reason: str | None = None
     budget_remaining: dict[str, float | int | None] = Field(default_factory=dict)
@@ -529,6 +540,7 @@ class ProgramRecord(BaseModel):
     sequence: int
     path: str
     code: str
+    execution_mode: ExecutionMode = "program"
     exit_code: int | None = None
     timed_out: bool = False
     output_limit_exceeded: bool = False
@@ -542,6 +554,7 @@ class ProgramRecord(BaseModel):
     # belong in an archive that is meant to be publishable.
     stdout_bytes: int = 0
     stderr_bytes: int = 0
+    namespace_symbol_count: int | None = Field(default=None, ge=0)
     capability_calls: dict[str, int] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -549,6 +562,9 @@ class ProgramRecord(BaseModel):
 class PublicSession(BaseModel):
     id: str
     backends: list[str]
+    execution_mode: ExecutionMode = "program"
+    interpreter_state: InterpreterState = "not_applicable"
+    interpreter_loss_reason: str | None = None
     mechanisms: Mechanisms
     # Derived from `mechanisms`, returned so a host can build its skill text from
     # what the session can actually reach instead of from a duplicated constant.
