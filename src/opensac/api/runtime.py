@@ -20,12 +20,14 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from opensac import __version__, _optional
 from opensac.api.errors import (
     ExecIdConflictError,
     ExecIndeterminateError,
+    ExperimentalFeatureDisabledError,
+    InterpreterLostError,
     SessionCapacityError,
     SessionCleanupError,
     SessionClosingError,
@@ -54,6 +56,7 @@ from opensac.models import (
     ExecRecordStatus,
     ExecResult,
     ExecutionWarning,
+    InterpreterState,
     Mechanisms,
     ProgramRecord,
     RunUsage,
@@ -65,6 +68,7 @@ from opensac.provider import ProviderPolicy, ProviderRuntime
 from opensac.sandbox import (
     SANDBOX_CONTRACT,
     DockerSandbox,
+    PersistentDockerSandbox,
     UnsafeCodeError,
     WarmDockerSandbox,
 )
@@ -219,6 +223,15 @@ class ApplicationRuntime:
             sandbox_kwargs["idle_timeout_seconds"] = settings.sandbox_warm_idle_seconds
             sandbox_kwargs["max_containers"] = settings.sandbox_max_warm_containers
         self.sandbox = sandbox_type(**sandbox_kwargs)
+        has_persisted_interpreter = any(
+            session.execution_mode == "persistent_interpreter"
+            for session in self.store.sessions()
+        )
+        self.persistent_sandbox = (
+            PersistentDockerSandbox(**sandbox_kwargs)
+            if settings.experimental_persistent_interpreter or has_persisted_interpreter
+            else None
+        )
         self.sandbox_gate = CapacityGate(settings.sandbox_max_concurrency)
         # /exec is driven by an external harness that may have dozens of
         # rollouts in flight. Without a ceiling each in-flight tool call would
@@ -239,6 +252,8 @@ class ApplicationRuntime:
         reap_orphans = getattr(self.sandbox, "reap_orphans", None)
         if callable(reap_orphans):
             await reap_orphans()
+        if self.persistent_sandbox is not None:
+            await self.persistent_sandbox.reap_orphans()
         # A process may have died after persisting `closing=true` but before it
         # removed the directory. Finish that cleanup before accepting new work.
         for session in self.store.sessions():
@@ -276,15 +291,16 @@ class ApplicationRuntime:
         )
 
     async def _close_sandbox(self) -> None:
-        close = getattr(self.sandbox, "close", None)
-        if not callable(close):
-            return
-        try:
-            outcome = close()
-            if inspect.isawaitable(outcome):
-                await outcome
-        except Exception:
-            logger.exception("sandbox_close_failed")
+        for sandbox in (self.sandbox, self.persistent_sandbox):
+            close = getattr(sandbox, "close", None)
+            if not callable(close):
+                continue
+            try:
+                outcome = close()
+                if inspect.isawaitable(outcome):
+                    await outcome
+            except Exception:
+                logger.exception("sandbox_close_failed")
 
     async def _reaper_loop(self) -> None:
         while True:
@@ -372,6 +388,9 @@ class ApplicationRuntime:
             "backend_metadata_hash": self.settings.backend_metadata_hash,
             "search_backend": self.settings.search_backend,
             "passage_ranker": self.settings.passage_ranker,
+            "experimental_persistent_interpreter": (
+                self.settings.experimental_persistent_interpreter
+            ),
             "local_search_base_url": self.settings.local_search_base_url,
         }
 
@@ -427,6 +446,13 @@ class ApplicationRuntime:
     async def create_session(self, request: SessionCreate) -> tuple[Session, bool]:
         if not self.accepting:
             raise WorkerDrainingError("Worker is draining")
+        if (
+            request.execution_mode == "persistent_interpreter"
+            and not self.settings.experimental_persistent_interpreter
+        ):
+            raise ExperimentalFeatureDisabledError(
+                "Persistent interpreters are disabled on this OpenSAC worker"
+            )
         request_hash = self._session_request_hash(request)
         async with self.session_create_lock:
             if not self.accepting:
@@ -501,6 +527,8 @@ class ApplicationRuntime:
     def session_state(session: Session) -> str:
         if session.closing:
             return "closing"
+        if session.interpreter_state == "lost":
+            return "lost"
         if session.terminal_reason:
             return "exhausted"
         return "active"
@@ -546,7 +574,8 @@ class ApplicationRuntime:
 
     async def _close_sandbox_session(self, session: Session) -> None:
         """Optional connection point for a stateful or pooled sandbox backend."""
-        close = getattr(self.sandbox, "close_session", None)
+        sandbox = self._sandbox_for(session)
+        close = getattr(sandbox, "close_session", None)
         if not callable(close):
             return
         try:
@@ -556,6 +585,15 @@ class ApplicationRuntime:
         except Exception as exc:
             logger.exception("sandbox_session_close_failed session_id=%s", session.id)
             raise SessionCleanupError(f"Sandbox cleanup failed for session '{session.id}'") from exc
+
+    def _sandbox_for(self, session: Session) -> Any:
+        if session.execution_mode != "persistent_interpreter":
+            return self.sandbox
+        if self.persistent_sandbox is None:
+            raise ExperimentalFeatureDisabledError(
+                "Persistent interpreters are disabled on this OpenSAC worker"
+            )
+        return self.persistent_sandbox
 
     def _session_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
         lock = self.session_lifecycle_locks.get(session_id)
@@ -718,7 +756,15 @@ class ApplicationRuntime:
             workspace.mkdir(parents=True, exist_ok=True)
             yield workspace
             return
-        with tempfile.TemporaryDirectory(prefix="opensac-ephemeral-") as directory:
+        temporary_parent = (
+            Path(session.workspace) if session.execution_mode == "persistent_interpreter" else None
+        )
+        if temporary_parent is not None:
+            temporary_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".opensac-ephemeral-" if temporary_parent else "opensac-ephemeral-",
+            dir=temporary_parent,
+        ) as directory:
             yield Path(directory)
 
     @staticmethod
@@ -843,6 +889,11 @@ class ApplicationRuntime:
                     if previous.result is None:
                         raise RuntimeError("Completed execution record has no result")
                     return previous.result
+            if session.interpreter_state == "lost":
+                reason = session.interpreter_loss_reason or "unknown"
+                raise InterpreterLostError(
+                    f"Session '{session_id}' lost its persistent interpreter: {reason}"
+                )
 
             state = self.bind_session(session)
             state.policy.require_active()
@@ -887,6 +938,7 @@ class ApplicationRuntime:
             request_names = {
                 "program_filename": f".opensac-program-{sequence:03d}.py",
                 "output_filename": f".opensac-output-{sequence:03d}.json",
+                "kernel_result_filename": f".opensac-kernel-result-{sequence:03d}.json",
             }
             prepare_seconds = time.monotonic() - prepare_started
             drain_task: asyncio.Task[list[CapabilityEvent]] | None = None
@@ -899,7 +951,8 @@ class ApplicationRuntime:
                     try:
                         async with self.sandbox_gate.slot() as sandbox_queue_seconds:
                             sandbox_started = time.monotonic()
-                            result = await self.sandbox.execute(
+                            sandbox = self._sandbox_for(session)
+                            result = await sandbox.execute(
                                 SandboxRequest(
                                     code=request.code,
                                     workspace=workspace,
@@ -907,6 +960,11 @@ class ApplicationRuntime:
                                     session_id=session.id,
                                     execution_id=execution_id,
                                     timeout_seconds=sandbox_timeout,
+                                    mount_workspace=(
+                                        Path(session.workspace)
+                                        if session.execution_mode == "persistent_interpreter"
+                                        else None
+                                    ),
                                     **request_names,
                                 )
                             )
@@ -976,6 +1034,13 @@ class ApplicationRuntime:
                 raise
 
             await state.policy.record_workspace_bytes(workspace_bytes)
+            if result is not None and session.execution_mode == "persistent_interpreter":
+                session = self.store.save_interpreter_state(
+                    session.id,
+                    cast(InterpreterState, result.interpreter_state),
+                    loss_reason=result.interpreter_loss_reason,
+                )
+                state.session = session
             persisted_session = self.store.save_session_usage(
                 session.id,
                 state.policy.usage,
@@ -988,6 +1053,7 @@ class ApplicationRuntime:
                     sequence=sequence,
                     path=str(program_path),
                     code=request.code,
+                    execution_mode=session.execution_mode,
                     exit_code=result.exit_code if result else -1,
                     timed_out=bool(result.timed_out) if result else False,
                     output_limit_exceeded=(bool(result.output_limit_exceeded) if result else False),
@@ -998,6 +1064,7 @@ class ApplicationRuntime:
                     ),
                     stdout_bytes=len(result.stdout.encode()) if result else 0,
                     stderr_bytes=len(result.stderr.encode()) if result else 0,
+                    namespace_symbol_count=(result.namespace_symbol_count if result else None),
                     capability_calls=dict(Counter(event.method for event in trace)),
                 ),
             )
@@ -1038,6 +1105,10 @@ class ApplicationRuntime:
                     include_trace=request.include_trace,
                 ),
                 timings=timings,
+                execution_mode=session.execution_mode,
+                interpreter_state=persisted_session.interpreter_state,
+                interpreter_loss_reason=persisted_session.interpreter_loss_reason,
+                namespace_symbol_count=(result.namespace_symbol_count if result else None),
                 session_state=self.session_state(persisted_session),
                 terminal_reason=state.policy.terminal_reason,
                 budget_remaining=state.policy.remaining(),

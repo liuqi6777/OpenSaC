@@ -77,10 +77,10 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
-        assert payload["environment"]["sandbox_contract"] == 12
+        assert payload["environment"]["sandbox_contract"] == 13
         assert payload["environment"]["capability_contract"] == 11
         sdk_capabilities = payload["environment"]["sdk_capabilities"]
-        assert sdk_capabilities["contracts"] == {"sandbox": 12, "capability": 11}
+        assert sdk_capabilities["contracts"] == {"sandbox": 13, "capability": 11}
         assert sdk_capabilities["search"]["backend"] == "local"
         assert sdk_capabilities["search"]["supports_domains"] is False
         assert sdk_capabilities["llm"]["available"] is False
@@ -204,7 +204,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.6.6"
+    assert schema["info"]["version"] == "0.7.0"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
@@ -351,6 +351,41 @@ class RecordingSandbox:
         )
 
 
+class RecordingPersistentSandbox(RecordingSandbox):
+    def __init__(self, *, lose_on_call: int | None = None) -> None:
+        super().__init__()
+        self.lose_on_call = lose_on_call
+        self.closed_sessions: list[str] = []
+
+    async def reap_orphans(self) -> int:
+        return 0
+
+    async def close(self) -> None:
+        return None
+
+    async def close_session(self, session) -> None:
+        self.closed_sessions.append(session.id)
+
+    def snapshot(self) -> dict[str, int]:
+        return {"containers": 0, "ready": 0}
+
+    async def execute(self, request: SandboxRequest) -> SandboxResult:
+        self.requests.append(request)
+        call = len(self.requests)
+        lost = call == self.lose_on_call
+        return SandboxResult(
+            exit_code=-9 if lost else 0,
+            stdout="partial\n" if lost else f"cell-{call}\n",
+            stderr="",
+            duration_seconds=0.25,
+            timed_out=lost,
+            execution_started=True,
+            interpreter_state="lost" if lost else "ready",
+            interpreter_loss_reason="timeout" if lost else None,
+            namespace_symbol_count=call,
+        )
+
+
 class WarningSandbox(RecordingSandbox):
     async def execute(self, request: SandboxRequest) -> SandboxResult:
         self.requests.append(request)
@@ -453,6 +488,18 @@ def exec_client(tmp_path, sandbox) -> TestClient:
     app = create_app(settings)
     client = TestClient(app)
     app.state.runtime.sandbox = sandbox
+    return client
+
+
+def repl_client(tmp_path, sandbox: RecordingPersistentSandbox) -> TestClient:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        broker_socket=tmp_path / "broker.sock",
+        experimental_persistent_interpreter=True,
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+    app.state.runtime.persistent_sandbox = sandbox
     return client
 
 
@@ -1321,6 +1368,99 @@ def test_exec_rejects_unknown_session(tmp_path) -> None:
     with exec_client(tmp_path, RecordingSandbox()) as client:
         response = client.post("/v1/sessions/sess_missing/exec", json={"code": "pass\n"})
         assert response.status_code == 404
+
+
+def test_persistent_interpreter_is_opt_in_and_feature_gated(tmp_path) -> None:
+    with exec_client(tmp_path, RecordingSandbox()) as client:
+        disabled = client.post(
+            "/v1/sessions",
+            json={"execution_mode": "persistent_interpreter"},
+        )
+
+    assert disabled.status_code == 400
+    assert disabled.json()["detail"]["code"] == "experimental_feature_disabled"
+
+    sandbox = RecordingPersistentSandbox()
+    with repl_client(tmp_path / "enabled", sandbox) as client:
+        created = client.post(
+            "/v1/sessions",
+            json={"execution_mode": "persistent_interpreter"},
+        )
+
+    assert created.status_code == 200
+    payload = created.json()
+    assert payload["execution_mode"] == "persistent_interpreter"
+    assert payload["interpreter_state"] == "not_started"
+    assert "persistent_interpreter_v1" in payload["features"]
+
+
+def test_persistent_exec_reports_namespace_and_routes_to_pinned_mount(tmp_path) -> None:
+    sandbox = RecordingPersistentSandbox()
+    with repl_client(tmp_path, sandbox) as client:
+        session = client.post(
+            "/v1/sessions",
+            json={
+                "execution_mode": "persistent_interpreter",
+                "mechanisms": {"persistence": False},
+            },
+        ).json()
+        first = client.post(
+            f"/v1/sessions/{session['id']}/exec",
+            json={"code": "value = 41\n", "exec_id": "cell-1"},
+        )
+        second = client.post(
+            f"/v1/sessions/{session['id']}/exec",
+            json={"code": "print(value + 1)\n", "exec_id": "cell-2"},
+        )
+        stored = client.app.state.runtime.store.get_session(session["id"])
+        programs = client.app.state.runtime.store.programs(stored)
+
+    assert first.status_code == 200
+    assert first.json()["execution_mode"] == "persistent_interpreter"
+    assert first.json()["interpreter_state"] == "ready"
+    assert first.json()["namespace_symbol_count"] == 1
+    assert second.json()["namespace_symbol_count"] == 2
+    assert len(sandbox.requests) == 2
+    assert sandbox.requests[0].workspace != sandbox.requests[1].workspace
+    assert sandbox.requests[0].mount_workspace == Path(stored.workspace)
+    assert sandbox.requests[1].mount_workspace == Path(stored.workspace)
+    assert [item.execution_mode for item in programs] == [
+        "persistent_interpreter",
+        "persistent_interpreter",
+    ]
+    assert [item.namespace_symbol_count for item in programs] == [1, 2]
+
+
+def test_lost_interpreter_returns_result_once_then_rejects_new_cells(tmp_path) -> None:
+    sandbox = RecordingPersistentSandbox(lose_on_call=1)
+    with repl_client(tmp_path, sandbox) as client:
+        session_id = client.post(
+            "/v1/sessions",
+            json={"execution_mode": "persistent_interpreter"},
+        ).json()["id"]
+        lost = client.post(
+            f"/v1/sessions/{session_id}/exec",
+            json={"code": "while True: pass\n", "exec_id": "lost-cell"},
+        )
+        replay = client.post(
+            f"/v1/sessions/{session_id}/exec",
+            json={"code": "while True: pass\n", "exec_id": "lost-cell"},
+        )
+        next_cell = client.post(
+            f"/v1/sessions/{session_id}/exec",
+            json={"code": "print('must not run')\n"},
+        )
+        session = client.get(f"/v1/sessions/{session_id}").json()
+
+    assert lost.status_code == 200
+    assert lost.json()["session_state"] == "lost"
+    assert lost.json()["interpreter_loss_reason"] == "timeout"
+    assert replay.status_code == 200
+    assert replay.json() == lost.json()
+    assert next_cell.status_code == 410
+    assert next_cell.json()["detail"]["code"] == "interpreter_lost"
+    assert len(sandbox.requests) == 1
+    assert session["state"] == "lost"
 
 
 class TurnMarkingSandbox:

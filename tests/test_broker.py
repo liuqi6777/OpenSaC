@@ -2283,7 +2283,7 @@ async def test_session_capabilities_reflect_backend_limits_and_mechanisms() -> N
 
     capabilities = await service.call("token", "session.capabilities", {})
 
-    assert capabilities["contracts"] == {"sandbox": 12, "capability": 11}
+    assert capabilities["contracts"] == {"sandbox": 13, "capability": 11}
     assert capabilities["search"] == {
         "backend": "local",
         "supports_domains": False,

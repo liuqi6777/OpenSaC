@@ -17,6 +17,7 @@ class FakeOpenSAC:
         self.exec_calls: list[tuple[str, str]] = []
         self.deleted: list[str] = []
         self.sessions_by_request: dict[str, str] = {}
+        self.execution_mode_by_session: dict[str, str] = {}
         self.workspace: dict[str, set[str]] = defaultdict(set)
         self.next_state_loss: str | None = None
 
@@ -28,6 +29,7 @@ class FakeOpenSAC:
             session_id = self.sessions_by_request.setdefault(
                 request_id, f"session-{len(self.sessions_by_request) + 1}"
             )
+            self.execution_mode_by_session[session_id] = payload.get("execution_mode", "program")
             return httpx.Response(200, json={"id": session_id})
         if request.method == "POST" and request.url.path.endswith("/exec"):
             session_id = request.url.path.split("/")[3]
@@ -65,6 +67,19 @@ class FakeOpenSAC:
                     "artifacts": sorted(self.workspace[session_id]),
                     "usage": {"search_calls": 0, "content_fetches": 0},
                     "error": None,
+                    "execution_mode": self.execution_mode_by_session.get(session_id, "program"),
+                    "interpreter_state": (
+                        "ready"
+                        if self.execution_mode_by_session.get(session_id)
+                        == "persistent_interpreter"
+                        else "not_applicable"
+                    ),
+                    "namespace_symbol_count": (
+                        3
+                        if self.execution_mode_by_session.get(session_id)
+                        == "persistent_interpreter"
+                        else None
+                    ),
                 },
             )
         if request.method == "DELETE":
@@ -227,6 +242,47 @@ async def test_invalid_cli_configuration_fails_before_http(tmp_path: Path) -> No
 
     assert "configuration_error" in observation
     assert requests == 0
+
+
+async def test_invalid_cli_execution_mode_fails_before_http(tmp_path: Path) -> None:
+    requests = 0
+
+    def handle(_: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(500)
+
+    observation = await agent_cli.run_cli_code(
+        "work",
+        environ=_env(
+            tmp_path,
+            CODEX_THREAD_ID="codex",
+            SAC_CLI_EXECUTION_MODE="shared-idle-pool",
+        ),
+        transport=httpx.MockTransport(handle),
+    )
+
+    assert "configuration_error" in observation
+    assert "SAC_CLI_EXECUTION_MODE" in observation
+    assert requests == 0
+
+
+async def test_cli_requests_persistent_execution_mode(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    observation = await agent_cli.run_cli_code(
+        "value = 1",
+        environ=_env(
+            tmp_path,
+            CODEX_THREAD_ID="repl-thread",
+            SAC_CLI_EXECUTION_MODE="persistent_interpreter",
+        ),
+        transport=httpx.MockTransport(server),
+    )
+
+    assert server.create_payloads[0]["execution_mode"] == "persistent_interpreter"
+    assert "execution_mode=persistent_interpreter" in observation
+    assert "interpreter_state=ready" in observation
+    assert "namespace_symbols=3" in observation
 
 
 async def test_invalid_explicit_host_fails_before_http(tmp_path: Path) -> None:

@@ -25,8 +25,10 @@ from opensac.sac_run import (
 
 DEFAULT_LEASE_SECONDS = 3_600
 MAX_LEASE_SECONDS = 86_400
+EXECUTION_MODES = frozenset({"program", "persistent_interpreter"})
 STATE_LOST_OBSERVATION = (
-    "[sac_run] state_lost: The OpenSAC session expired or its worker restarted. "
+    "[sac_run] state_lost: The OpenSAC session expired, its worker restarted, or its "
+    "persistent interpreter was lost. "
     "The submitted program was not replayed. The next sac_run call will start in a "
     "clean session."
 )
@@ -38,6 +40,7 @@ class AgentSessionConfig:
     api_key: str
     lease_seconds: int
     state_dir: Path
+    execution_mode: str = "program"
 
 
 def parse_lease_seconds(raw_value: str, variable_name: str) -> int:
@@ -50,6 +53,14 @@ def parse_lease_seconds(raw_value: str, variable_name: str) -> int:
             f"{variable_name} must be between 1 and {MAX_LEASE_SECONDS}"
         )
     return lease_seconds
+
+
+def parse_execution_mode(raw_value: str, variable_name: str) -> str:
+    execution_mode = raw_value.strip()
+    if execution_mode not in EXECUTION_MODES:
+        allowed = ", ".join(sorted(EXECUTION_MODES))
+        raise ValueError(f"{variable_name} must be one of: {allowed}")
+    return execution_mode
 
 
 def default_state_dir(environ: Mapping[str, str]) -> Path:
@@ -155,6 +166,7 @@ def _policy_hash(config: AgentSessionConfig) -> str:
         {
             "api_base": config.api_base,
             "lease_seconds": config.lease_seconds,
+            "execution_mode": config.execution_mode,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -244,11 +256,18 @@ class AgentSessionManager:
                         {
                             "request_id": entry.request_id,
                             "lease_seconds": self.config.lease_seconds,
+                            "execution_mode": self.config.execution_mode,
                         }
                     )
                     entry.session_id = str(session["id"])
                 payload = await entry.client.exec_code(entry.session_id, code)
-                return render_observation(payload)
+                observation = render_observation(payload)
+                if payload.get("interpreter_state") == "lost":
+                    self._registry.advance(hashed_context, generation)
+                    with contextlib.suppress(httpx.HTTPError):
+                        await entry.client.delete_session(entry.session_id)
+                    await self._discard_entry(hashed_context, entry)
+                return observation
             except httpx.TimeoutException:
                 return f"[sac_run] Timed out after {DEFAULT_TIMEOUT_SECONDS:.0f}s."
             except httpx.HTTPStatusError as exc:

@@ -1,7 +1,7 @@
 # OpenSAC SDK API Reference
 
 This document covers all 22 public operations declared by `SDK_SURFACE` in the bundled
-`opensac_sdk` 0.6.6. The SDK is a synchronous interface for generated programs running inside an
+`opensac_sdk` 0.7.0. The SDK is a synchronous interface for generated programs running inside an
 OpenSAC sandbox. Host and sandbox images provide a version-matched SDK.
 
 ## 1. Entry point, return values, and errors

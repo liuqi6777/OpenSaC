@@ -19,6 +19,7 @@ from opensac.agent_session import (
     AgentSessionConfig,
     AgentSessionManager,
     default_state_dir,
+    parse_execution_mode,
     parse_lease_seconds,
 )
 
@@ -40,6 +41,10 @@ class CLIConfig(AgentSessionConfig):
             env.get("SAC_CLI_LEASE_SECONDS", str(DEFAULT_LEASE_SECONDS)),
             "SAC_CLI_LEASE_SECONDS",
         )
+        execution_mode = parse_execution_mode(
+            env.get("SAC_CLI_EXECUTION_MODE", "program"),
+            "SAC_CLI_EXECUTION_MODE",
+        )
         configured_state_dir = env.get("SAC_CLI_STATE_DIR")
         state_dir = (
             Path(configured_state_dir).expanduser()
@@ -51,6 +56,7 @@ class CLIConfig(AgentSessionConfig):
             api_key=env.get("SAC_API_KEY") or env.get("OPENSAC_API_KEY") or "",
             lease_seconds=lease_seconds,
             state_dir=state_dir,
+            execution_mode=execution_mode,
         )
 
 

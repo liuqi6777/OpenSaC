@@ -66,6 +66,8 @@ class SessionRoutes:
             features.append("inflight_coalescing_v1")
         if self.runtime.settings.provider_result_cache_ttl_seconds > 0:
             features.append("provider_result_cache_v1")
+        if self.runtime.settings.experimental_persistent_interpreter:
+            features.append("persistent_interpreter_v1")
         return PublicSession.model_validate(
             {
                 **session.model_dump(exclude={"token", "workspace"}),

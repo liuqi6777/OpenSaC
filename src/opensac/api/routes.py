@@ -38,6 +38,12 @@ def create_api_router(runtime: ApplicationRuntime, authorize: Authorize) -> APIR
             "sandbox_mode": runtime.settings.sandbox_mode,
             "sandbox": runtime.sandbox_gate.snapshot(),
             "warm": warm_snapshot() if callable(warm_snapshot) else None,
+            "persistent_interpreter": (
+                runtime.persistent_sandbox.snapshot()
+                if runtime.settings.experimental_persistent_interpreter
+                and runtime.persistent_sandbox is not None
+                else None
+            ),
             "broker": runtime.broker.capacity_gate.snapshot(),
             "provider_cache": runtime.broker.providers.result_cache.snapshot(),
             "sessions": {

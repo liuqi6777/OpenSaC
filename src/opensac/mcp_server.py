@@ -22,6 +22,7 @@ from opensac.agent_session import (
     AgentSessionManager,
     GenerationRegistry,
     default_state_dir,
+    parse_execution_mode,
     parse_lease_seconds,
 )
 
@@ -40,6 +41,10 @@ class MCPConfig(AgentSessionConfig):
             env.get("SAC_MCP_LEASE_SECONDS", str(DEFAULT_LEASE_SECONDS)),
             "SAC_MCP_LEASE_SECONDS",
         )
+        execution_mode = parse_execution_mode(
+            env.get("SAC_MCP_EXECUTION_MODE", "program"),
+            "SAC_MCP_EXECUTION_MODE",
+        )
         configured_state_dir = env.get("SAC_MCP_STATE_DIR")
         state_dir = (
             Path(configured_state_dir).expanduser()
@@ -51,6 +56,7 @@ class MCPConfig(AgentSessionConfig):
             api_key=env.get("SAC_API_KEY") or env.get("OPENSAC_API_KEY") or "",
             lease_seconds=lease_seconds,
             state_dir=state_dir,
+            execution_mode=execution_mode,
         )
 
 
@@ -146,7 +152,8 @@ def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
         "OpenSAC",
         instructions=(
             "Run Search-as-Code programs with sac_run. The current agent conversation is "
-            "bound by the MCP host; never create, pass, display, or delete OpenSAC sessions."
+            "bound by the MCP host; never create, pass, display, or delete OpenSAC sessions. "
+            f"The execution mode is {adapter.config.execution_mode}."
         ),
         lifespan=lifespan,
         log_level="ERROR",

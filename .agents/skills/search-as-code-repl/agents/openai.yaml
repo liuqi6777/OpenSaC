@@ -1,0 +1,6 @@
+interface:
+  display_name: "Search as Code REPL"
+  short_description: "Research with a persistent OpenSAC Python runtime"
+  default_prompt: "Use $search-as-code-repl to research this question with the persistent OpenSAC runtime and cite inspected source URLs."
+policy:
+  allow_implicit_invocation: false

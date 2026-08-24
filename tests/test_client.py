@@ -49,6 +49,7 @@ def test_sync_client_negotiates_idempotency_and_preserves_explicit_options() -> 
         assert session["features"] == ["idempotent_exec"]
         assert server.requests[0][2] == {
             "mechanisms": {"persistence": False},
+            "execution_mode": "program",
         }
         assert not hasattr(client, "create_run")
         assert not hasattr(client, "create_and_wait")

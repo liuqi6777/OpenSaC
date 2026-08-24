@@ -1,6 +1,6 @@
 FROM python:3.12.12-slim
 
-ARG OPENSAC_SANDBOX_CONTRACT=12
+ARG OPENSAC_SANDBOX_CONTRACT=13
 ARG OPENSAC_VERSION=0.0.0
 ENV OPENSAC_SANDBOX_CONTRACT=$OPENSAC_SANDBOX_CONTRACT
 LABEL org.opensac.sandbox.contract=$OPENSAC_SANDBOX_CONTRACT
@@ -16,6 +16,8 @@ ENV PIP_TRUSTED_HOST=$PIP_TRUSTED_HOST
 
 COPY packages/opensac-sdk /opt/opensac-sdk
 COPY sandbox/entrypoint.py /opt/runner/entrypoint.py
+COPY sandbox/kernel.py /opt/runner/kernel.py
+COPY sandbox/relay.py /opt/runner/relay.py
 RUN pip install --no-cache-dir /opt/opensac-sdk \
     && rm -rf /opt/opensac-sdk
 

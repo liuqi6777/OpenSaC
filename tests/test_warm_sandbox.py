@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from opensac.sandbox import SandboxRequest, WarmDockerSandbox
+from opensac.sandbox import PersistentDockerSandbox, SandboxRequest, WarmDockerSandbox
 from opensac.sandbox.docker import broker_socket_mount_args
 
 
@@ -72,7 +73,7 @@ class _FakeDocker:
         top_outputs: list[bytes] | None = None,
         ps_outputs: list[bytes] | None = None,
         rm_results: list[tuple[int, bytes]] | None = None,
-        image_contract: bytes = b"12\n",
+        image_contract: bytes = b"13\n",
     ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.exec_gates = list(exec_gates or [])
@@ -244,7 +245,7 @@ async def test_warm_sandbox_reports_stale_image_as_launch_error(
     result = await sandbox.execute(_request(tmp_path))
 
     assert result.exit_code == 125
-    assert "has contract '2'; expected 12" in (result.launch_error or "")
+    assert "has contract '2'; expected 13" in (result.launch_error or "")
     assert fake.operations("run") == []
 
 
@@ -482,3 +483,105 @@ async def test_empty_registry_closes_labeled_orphan_and_propagates_rm_failure(
         "crash-orphan",
     ]
     assert all("--no-trunc" in command for command in fake.operations("ps"))
+
+
+async def test_persistent_sandbox_reuses_kernel_and_reads_namespace_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDocker()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
+    socket = tmp_path / "broker.sock"
+    socket.touch()
+    sandbox = PersistentDockerSandbox(image="opensac-test", broker_socket=socket)
+    workspace = tmp_path / "workspace"
+
+    def write_metadata(_: tuple[str, ...], index: int) -> None:
+        path = workspace / f".opensac-kernel-result-{index + 1:03d}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "protocol": 1,
+                    "complete": True,
+                    "exit_code": 0,
+                    "namespace_symbol_count": index + 1,
+                    "interpreter_loss_reason": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    fake.on_exec = write_metadata
+    first_request = _request(tmp_path, sequence=1)
+    first_request = SandboxRequest(
+        **{
+            **first_request.__dict__,
+            "kernel_result_filename": ".opensac-kernel-result-001.json",
+        }
+    )
+    second_request = _request(tmp_path, sequence=2)
+    second_request = SandboxRequest(
+        **{
+            **second_request.__dict__,
+            "kernel_result_filename": ".opensac-kernel-result-002.json",
+        }
+    )
+
+    first = await sandbox.execute(first_request)
+    second = await sandbox.execute(second_request)
+
+    assert first.interpreter_state == "ready"
+    assert first.namespace_symbol_count == 1
+    assert second.interpreter_state == "ready"
+    assert second.namespace_symbol_count == 2
+    assert len(fake.operations("run")) == 1
+    assert len(fake.operations("exec")) == 2
+    assert await sandbox.reap_idle(0) == 0
+    assert len(fake.operations("rm")) == 0
+    await sandbox.close()
+    assert len(fake.operations("rm")) == 1
+
+
+async def test_persistent_sandbox_marks_timeout_lost_and_removes_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = asyncio.Event()
+    fake = _FakeDocker(exec_gates=[gate])
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
+    socket = tmp_path / "broker.sock"
+    socket.touch()
+    sandbox = PersistentDockerSandbox(
+        image="opensac-test",
+        broker_socket=socket,
+        timeout_seconds=0.001,
+    )
+
+    result = await sandbox.execute(_request(tmp_path))
+
+    assert result.timed_out is True
+    assert result.interpreter_state == "lost"
+    assert result.interpreter_loss_reason == "timeout"
+    assert len(fake.operations("rm")) == 1
+
+
+async def test_persistent_sandbox_marks_corrupt_protocol_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeDocker()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
+    socket = tmp_path / "broker.sock"
+    socket.touch()
+    sandbox = PersistentDockerSandbox(image="opensac-test", broker_socket=socket)
+    workspace = tmp_path / "workspace"
+
+    def write_corrupt_metadata(_: tuple[str, ...], __: int) -> None:
+        (workspace / ".opensac-kernel-result.json").write_text(
+            '{"protocol":1,"complete":true}', encoding="utf-8"
+        )
+        (workspace / ".opensac-output-001.json.ready").write_text("0", encoding="utf-8")
+
+    fake.on_exec = write_corrupt_metadata
+    result = await sandbox.execute(_request(tmp_path))
+
+    assert result.interpreter_state == "lost"
+    assert result.interpreter_loss_reason == "kernel_protocol_error"
+    assert len(fake.operations("rm")) == 1

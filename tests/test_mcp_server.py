@@ -22,6 +22,7 @@ class FakeOpenSAC:
         self.exec_calls: list[tuple[str, str]] = []
         self.deleted: list[str] = []
         self.sessions_by_request: dict[str, str] = {}
+        self.execution_mode_by_session: dict[str, str] = {}
         self.workspace: dict[str, set[str]] = defaultdict(set)
         self.next_exec_failure: int | str | None = None
         self.next_create_failure: int | str | None = None
@@ -59,6 +60,7 @@ class FakeOpenSAC:
             session_id = self.sessions_by_request.setdefault(
                 request_id, f"session-{len(self.sessions_by_request) + 1}"
             )
+            self.execution_mode_by_session[session_id] = payload.get("execution_mode", "program")
             return httpx.Response(200, json={"id": session_id})
 
         if request.method == "POST" and request.url.path.endswith("/exec"):
@@ -102,6 +104,7 @@ class FakeOpenSAC:
                     if code == "read"
                     else "ok"
                 )
+                interpreter_lost = code == "lose-kernel"
                 return httpx.Response(
                     200,
                     json={
@@ -114,6 +117,22 @@ class FakeOpenSAC:
                         "artifacts": sorted(self.workspace[session_id]),
                         "usage": {"search_calls": 0, "content_fetches": 0},
                         "error": None,
+                        "execution_mode": self.execution_mode_by_session.get(session_id, "program"),
+                        "interpreter_state": (
+                            "lost"
+                            if interpreter_lost
+                            else "ready"
+                            if self.execution_mode_by_session.get(session_id)
+                            == "persistent_interpreter"
+                            else "not_applicable"
+                        ),
+                        "interpreter_loss_reason": ("timeout" if interpreter_lost else None),
+                        "namespace_symbol_count": (
+                            3
+                            if self.execution_mode_by_session.get(session_id)
+                            == "persistent_interpreter"
+                            else None
+                        ),
                     },
                 )
             finally:
@@ -133,6 +152,16 @@ def _config(tmp_path: Path, *, api_key: str = "") -> MCPConfig:
         lease_seconds=3_600,
         state_dir=tmp_path / "state",
     )
+
+
+def test_mcp_execution_mode_configuration_is_constrained(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="SAC_MCP_EXECUTION_MODE"):
+        MCPConfig.from_env(
+            {
+                "SAC_MCP_STATE_DIR": str(tmp_path),
+                "SAC_MCP_EXECUTION_MODE": "shared-idle-pool",
+            }
+        )
 
 
 def _bridge(tmp_path: Path, server: FakeOpenSAC, *, api_key: str = "") -> OpenSACMCP:
@@ -206,7 +235,7 @@ async def test_restart_resumes_same_leased_session_and_workspace(tmp_path: Path)
     assert not server.deleted
 
 
-@pytest.mark.parametrize("loss_code", ["session_expired", "worker_restarted"])
+@pytest.mark.parametrize("loss_code", ["session_expired", "worker_restarted", "interpreter_lost"])
 async def test_state_loss_rotates_generation_without_replaying_code(
     tmp_path: Path, loss_code: str
 ) -> None:
@@ -248,6 +277,51 @@ async def test_transient_failures_do_not_rotate_generation(
     assert "exit_code=0" in recovered
     assert len(server.create_payloads) == 1
     assert server.create_payloads[0]["request_id"].endswith(":g1")
+
+
+async def test_mcp_requests_persistent_mode_and_reports_it(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    config = MCPConfig(
+        api_base="http://opensac.test",
+        api_key="",
+        lease_seconds=3_600,
+        state_dir=tmp_path / "state",
+        execution_mode="persistent_interpreter",
+    )
+    bridge = OpenSACMCP(config, transport=httpx.MockTransport(server))
+    try:
+        observation = await bridge.run_code("value = 1", {"thread_id": "repl"})
+    finally:
+        await bridge.aclose()
+
+    assert server.create_payloads[0]["execution_mode"] == "persistent_interpreter"
+    assert "execution_mode=persistent_interpreter" in observation
+    assert "interpreter_state=ready" in observation
+    assert "namespace_symbols=3" in observation
+
+
+async def test_lost_interpreter_result_rotates_without_replaying_cell(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    config = MCPConfig(
+        api_base="http://opensac.test",
+        api_key="",
+        lease_seconds=3_600,
+        state_dir=tmp_path / "state",
+        execution_mode="persistent_interpreter",
+    )
+    bridge = OpenSACMCP(config, transport=httpx.MockTransport(server))
+    try:
+        lost = await bridge.run_code("lose-kernel", {"thread_id": "repl-loss"})
+        recovered = await bridge.run_code("fresh", {"thread_id": "repl-loss"})
+    finally:
+        await bridge.aclose()
+
+    assert "state_lost" in lost
+    assert "will not be replayed" in lost
+    assert [code for _, code in server.exec_calls].count("lose-kernel") == 1
+    assert "interpreter_state=ready" in recovered
+    assert len(server.create_payloads) == 2
+    assert len(server.deleted) == 1
 
 
 async def test_restart_detects_state_loss_during_idempotent_create(tmp_path: Path) -> None:
