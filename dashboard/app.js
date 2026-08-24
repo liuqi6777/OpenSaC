@@ -67,7 +67,7 @@ function hideAuth() {
 }
 
 async function requestSnapshot() {
-  const response = await fetch("/dashboard/api/snapshot", {
+  const response = await fetch("api/snapshot", {
     headers: headers(),
     cache: "no-store",
   });
@@ -448,7 +448,7 @@ async function connectStream() {
   state.streamAbort = controller;
   setConnection("Connecting", "status-connecting");
   try {
-    const response = await fetch("/dashboard/api/events", {
+    const response = await fetch("api/events", {
       headers: { ...headers(), Accept: "text/event-stream" },
       cache: "no-store",
       signal: controller.signal,

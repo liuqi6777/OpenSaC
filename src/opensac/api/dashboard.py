@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 
 from opensac.models import CapabilityEvent
 
@@ -433,6 +433,10 @@ def create_dashboard_router(
     protected = APIRouter(dependencies=[Depends(authorize)], include_in_schema=False)
 
     @router.get("/dashboard")
+    async def dashboard_redirect() -> RedirectResponse:
+        # Keep the Location relative so a reverse-proxy prefix remains in the browser URL.
+        return RedirectResponse(url="dashboard/", status_code=307)
+
     @router.get("/dashboard/")
     async def dashboard_index() -> Response:
         try:

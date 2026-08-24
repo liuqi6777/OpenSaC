@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tomllib
 from pathlib import Path
+from urllib.parse import urljoin
 
 import pytest
 from fastapi import Request
@@ -26,13 +27,18 @@ def _settings(tmp_path: Path, **overrides) -> Settings:
 
 def test_dashboard_routes_serve_packaged_assets_and_snapshot(tmp_path: Path) -> None:
     with TestClient(create_app(_settings(tmp_path))) as client:
-        page = client.get("/dashboard")
+        redirect = client.get("/dashboard", follow_redirects=False)
+        page = client.get("/dashboard/")
         script = client.get("/dashboard/assets/app.js")
         styles = client.get("/dashboard/assets/styles.css")
         snapshot = client.get("/dashboard/api/snapshot")
 
+    assert redirect.status_code == 307
+    assert redirect.headers["location"] == "dashboard/"
     assert page.status_code == 200
     assert "OpenSAC Runtime" in page.text
+    assert 'href="assets/styles.css"' in page.text
+    assert 'src="assets/app.js"' in page.text
     assert "default-src 'none'" in page.headers["content-security-policy"]
     assert page.headers["x-content-type-options"] == "nosniff"
     assert script.status_code == 200
@@ -42,6 +48,21 @@ def test_dashboard_routes_serve_packaged_assets_and_snapshot(tmp_path: Path) -> 
     assert snapshot.status_code == 200
     assert snapshot.json()["version"] == 1
     assert snapshot.json()["health"]["status"] == "ok"
+
+
+def test_dashboard_relative_urls_preserve_reverse_proxy_prefix() -> None:
+    page_url = "https://example.test/opensac/dashboard/"
+
+    assert urljoin(page_url, "assets/styles.css") == (
+        "https://example.test/opensac/dashboard/assets/styles.css"
+    )
+    assert urljoin(page_url, "assets/app.js") == (
+        "https://example.test/opensac/dashboard/assets/app.js"
+    )
+    assert urljoin(page_url, "api/snapshot") == (
+        "https://example.test/opensac/dashboard/api/snapshot"
+    )
+    assert urljoin(page_url, "api/events") == ("https://example.test/opensac/dashboard/api/events")
 
 
 def test_dashboard_debug_apis_reuse_bearer_authentication(tmp_path: Path) -> None:
