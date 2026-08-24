@@ -120,6 +120,24 @@ def test_compose_service_executes_a_sandbox_program(sandbox_image: str) -> None:
     project = f"opensac-e2e-{os.getpid()}"
     data_dir = repo_root / f".opensac-service-e2e-{os.getpid()}"
     data_dir.mkdir()
+    config_path = data_dir / "opensac.yaml"
+    docker_host_platform = "darwin" if sys.platform == "darwin" else "linux"
+    config_path.write_text(
+        f"""
+api:
+  host: 0.0.0.0
+storage:
+  data_dir: {data_dir}
+  broker_socket: {data_dir}/broker.sock
+search:
+  backend: web
+sandbox:
+  image: {sandbox_image}
+  docker_host_platform: {docker_host_platform}
+  experimental_persistent_interpreter: true
+""",
+        encoding="utf-8",
+    )
 
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -129,14 +147,12 @@ def test_compose_service_executes_a_sandbox_program(sandbox_image: str) -> None:
     environment = {
         **os.environ,
         "OPENSAC_CONTAINER_DATA_DIR": str(data_dir),
+        "OPENSAC_CONFIG_FILE": str(config_path),
         "OPENSAC_UID": str(os.getuid()),
         "OPENSAC_GID": str(os.getgid()),
         "OPENSAC_DOCKER_GID": str(docker_gid),
         "OPENSAC_ENV_FILE": "/dev/null",
         "OPENSAC_SERVICE_IMAGE": service_image,
-        "OPENSAC_SANDBOX_IMAGE": sandbox_image,
-        "OPENSAC_EXPERIMENTAL_PERSISTENT_INTERPRETER": "true",
-        "OPENSAC_CONTAINER_SEARCH_BACKEND": "web",
         "OPENSAC_PORT": str(port),
     }
     compose = ["docker", "compose", "-p", project]

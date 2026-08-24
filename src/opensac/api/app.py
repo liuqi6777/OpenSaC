@@ -8,11 +8,11 @@ from opensac import __version__
 from opensac.api.errors import install_exception_handlers
 from opensac.api.routes import create_api_router
 from opensac.api.runtime import ApplicationRuntime
-from opensac.config import Settings
+from opensac.config import Settings, load_settings
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or Settings()
+    settings = settings or load_settings()
     runtime = ApplicationRuntime(settings)
 
     @asynccontextmanager

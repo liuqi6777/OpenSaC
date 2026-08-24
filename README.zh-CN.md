@@ -79,7 +79,7 @@ OpenSAC 有意不负责 agent loop。外部控制平面选择模型、生成程�
 <details>
 <summary><strong>1. 配置并启动 Docker 服务</strong></summary>
 
-通过环境变量配置运行参数：
+环境变量只保存 API Key 和 Docker CLI 所需的宿主机参数：
 
 ```bash
 export OPENSAC_API_KEY=replace-with-a-long-random-value
@@ -98,6 +98,15 @@ fi
 mkdir -p "$OPENSAC_RUNTIME_DIR"
 ```
 
+下载 `configs/docker.yaml`，然后把其中两个 `storage` 路径分别改成
+`$OPENSAC_RUNTIME_DIR` 和 `$OPENSAC_RUNTIME_DIR/broker.sock`：
+
+```bash
+mkdir -p configs
+curl -fsSLo configs/docker.yaml \
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/configs/docker.yaml
+```
+
 启动已发布镜像：
 
 ```bash
@@ -111,20 +120,16 @@ docker run --detach \
   --env OPENSAC_API_KEY \
   --env OPENSAC_SERPER_API_KEY \
   --env OPENSAC_JINA_API_KEY \
-  --env OPENSAC_API_HOST=0.0.0.0 \
-  --env OPENSAC_API_PORT=8000 \
-  --env OPENSAC_SEARCH_BACKEND=web \
-  --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
-  --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
-  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:latest \
   --publish 127.0.0.1:8000:8000 \
+  --mount "type=bind,source=$PWD/configs/docker.yaml,target=/etc/opensac/opensac.yaml,readonly" \
   --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
   --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:latest
+  ghcr.io/liuqi6777/opensac:latest \
+  opensac serve --config /etc/opensac/opensac.yaml
 ```
 
 等待几秒后，无需在宿主机安装客户端即可检查服务：
@@ -147,6 +152,7 @@ docker start opensac
 ```
 
 Compose 备选方案、不同平台参数、升级回滚和 systemd 配置见[部署指南](docs/deployment.md)。
+各 YAML 模板的适用场景集中列在[配置模板](docs/deployment.md#configuration-profiles)。
 
 </details>
 
@@ -220,7 +226,7 @@ MCP 协议只暴露一个操作 `sac_run(code)`。对话绑定、session 创建�
 
 | 方式 | 状态 | 适用场景 |
 | --- | --- | --- |
-| Docker CLI | 可用 | 无本地配置文件的最快启动方式 |
+| Docker CLI | 可用 | 挂载一个 YAML profile 的最快启动方式 |
 | Docker Compose | 可用 | 声明式、可复现部署 |
 | Git 源码 | 可用 | 开发、实验和尚未发布的改动 |
 
@@ -253,8 +259,10 @@ uv run pytest
 `opensac[llm]`、`opensac[mcp]`、`opensac[agent]` 或 `opensac[full]`；仓库测试使用的 `dev`
 extra 已包含全部可选依赖。
 
-运行 `uv run opensac serve` 可启动前台源码服务。只有测试尚未发布的 SDK 或沙箱改动时，才需要运行
-`uv run opensac build-sandbox`。仓库结构和贡献约定见 [AGENTS.md](AGENTS.md)。
+运行 `uv run opensac serve --config configs/local.yaml` 可启动前台源码服务。只有测试尚未发布的 SDK
+或沙箱改动时，才需要运行 `uv run opensac build-sandbox --config configs/local.yaml`。标准 Web、性能和
+Docker 模板都在 `configs/` 中；选择说明见[配置模板](docs/deployment.md#configuration-profiles)。仓库结构
+和贡献约定见 [AGENTS.md](AGENTS.md)。
 
 </details>
 
@@ -263,6 +271,7 @@ extra 已包含全部可选依赖。
 | 目标 | 文档 |
 | --- | --- |
 | 升级到 v0.7.0 | [v0.7.0 版本说明](docs/opensac-0.7.0.md) |
+| 选择 YAML 配置模板 | [配置模板](docs/deployment.md#configuration-profiles) |
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |
 | 配置可选的本地检索器 | [本地稠密检索](docs/local-search.md) |

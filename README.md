@@ -109,6 +109,15 @@ fi
 mkdir -p "$OPENSAC_RUNTIME_DIR"
 ```
 
+Download `configs/docker.yaml`, then set its two `storage` paths to `$OPENSAC_RUNTIME_DIR` and
+`$OPENSAC_RUNTIME_DIR/broker.sock` respectively:
+
+```bash
+mkdir -p configs
+curl -fsSLo configs/docker.yaml \
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/configs/docker.yaml
+```
+
 Start the published image:
 
 ```bash
@@ -122,20 +131,16 @@ docker run --detach \
   --env OPENSAC_API_KEY \
   --env OPENSAC_SERPER_API_KEY \
   --env OPENSAC_JINA_API_KEY \
-  --env OPENSAC_API_HOST=0.0.0.0 \
-  --env OPENSAC_API_PORT=8000 \
-  --env OPENSAC_SEARCH_BACKEND=web \
-  --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
-  --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
-  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:latest \
   --publish 127.0.0.1:8000:8000 \
+  --mount "type=bind,source=$PWD/configs/docker.yaml,target=/etc/opensac/opensac.yaml,readonly" \
   --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
   --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:latest
+  ghcr.io/liuqi6777/opensac:latest \
+  opensac serve --config /etc/opensac/opensac.yaml
 ```
 
 After a few seconds, verify the service without installing a host-side client:
@@ -238,7 +243,7 @@ lease renewal, and state-loss handling stay in the adapter. See the complete
 
 | Path | Status | Best for |
 | --- | --- | --- |
-| Docker CLI | Available | Fastest start with no local configuration files |
+| Docker CLI | Available | Fastest start with one mounted YAML profile |
 | Docker Compose | Available | Declarative, repeatable deployment |
 | Git source | Available | Development, experiments, and unreleased changes |
 
@@ -272,8 +277,9 @@ The base host installation excludes optional pipeline-model, MCP, and control-ag
 Install `opensac[llm]`, `opensac[mcp]`, `opensac[agent]`, or `opensac[full]` when developing one of
 those integrations; the `dev` extra includes all of them for the repository test suite.
 
-Run `uv run opensac serve` for a foreground source service. Use
-`uv run opensac build-sandbox` only when testing unreleased SDK or sandbox changes. The repository
+Run `uv run opensac serve --config configs/local.yaml` for a foreground source service. Use
+`uv run opensac build-sandbox --config configs/local.yaml` only when testing unreleased SDK or
+sandbox changes. Additional Web, performance, and Docker profiles are in `configs/`. The repository
 layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
 
 </details>
@@ -283,6 +289,7 @@ layout and contribution conventions are documented in [AGENTS.md](AGENTS.md).
 | Goal | Document |
 | --- | --- |
 | Upgrade to v0.7.0 | [v0.7.0 release notes](docs/opensac-0.7.0.md) |
+| Choose a YAML configuration profile | [Configuration profiles](docs/deployment.md#configuration-profiles) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Connect Codex, Claude Code, CLI, or a custom agent | [Agent integrations](docs/agent-integrations.md) |
 | Configure the optional local retriever | [Local dense search](docs/local-search.md) |

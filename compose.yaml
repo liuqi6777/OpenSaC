@@ -10,18 +10,20 @@ services:
     env_file:
       - path: ${OPENSAC_ENV_FILE:-.env}
         required: false
+    command:
+      - opensac
+      - serve
+      - --config
+      - /etc/opensac/opensac.yaml
     environment:
       HOME: /tmp/opensac-home
-      OPENSAC_API_HOST: 0.0.0.0
-      OPENSAC_API_PORT: "8000"
-      OPENSAC_BROKER_SOCKET: ${OPENSAC_CONTAINER_DATA_DIR:?Set an absolute OPENSAC_CONTAINER_DATA_DIR}/broker.sock
-      OPENSAC_DATA_DIR: ${OPENSAC_CONTAINER_DATA_DIR}
-      OPENSAC_SANDBOX_IMAGE: ${OPENSAC_SANDBOX_IMAGE:-ghcr.io/liuqi6777/opensac-sandbox:0.7.0}
-      OPENSAC_EXPERIMENTAL_PERSISTENT_INTERPRETER: ${OPENSAC_EXPERIMENTAL_PERSISTENT_INTERPRETER:-false}
-      OPENSAC_SEARCH_BACKEND: ${OPENSAC_CONTAINER_SEARCH_BACKEND:-web}
     ports:
       - "${OPENSAC_BIND_ADDRESS:-127.0.0.1}:${OPENSAC_PORT:-8000}:8000"
     volumes:
+      - type: bind
+        source: ${OPENSAC_CONFIG_FILE:-./configs/docker.yaml}
+        target: /etc/opensac/opensac.yaml
+        read_only: true
       - type: bind
         source: ${OPENSAC_CONTAINER_DATA_DIR}
         target: ${OPENSAC_CONTAINER_DATA_DIR}

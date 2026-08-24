@@ -1,7 +1,7 @@
 # Deployment
 
-OpenSAC `v0.6.3` is publicly available as version-matched service and sandbox images on GHCR.
-The Docker CLI provides a no-checkout, no-configuration-file quick start. Docker Compose remains
+OpenSAC `v0.7.0` is publicly available as version-matched service and sandbox images on GHCR.
+The Docker CLI provides a no-checkout quick start with one YAML profile. Docker Compose remains
 available for declarative deployments. Both run the API and capability broker from the service
 image and start an isolated sandbox container for each execution. Neither builds nor runs the
 `local_search` service. OpenSAC does not publish a PyPI package. For the shortest setup path, use
@@ -22,9 +22,43 @@ Docker Compose. A source deployment needs Git, Python 3.12+, and `uv`.
 
 See [RL environment worker deployment](rl-environment-workers.md) for worker-pool details.
 
+## Configuration profiles
+
+All service YAML templates live in `configs/`. Pass exactly one profile with `--config`; omitted
+fields retain the validated built-in defaults.
+
+| Profile | Use it for | Important notes |
+| --- | --- | --- |
+| `configs/local.yaml` | Source development with the local retrieval service | Complete reference profile; state paths resolve to the repository `.opensac` directory. |
+| `configs/web.yaml` | Normal Web retrieval with cold, per-execution sandboxes | Requires `OPENSAC_API_KEY`, `OPENSAC_SERPER_API_KEY`, and `OPENSAC_JINA_API_KEY` as needed. |
+| `configs/web-performance.yaml` | Eight-core Web deployments where warm sandboxes and a short result cache have been benchmarked | Starts directly with the performance settings; compare it against `web.yaml` on the target host. |
+| `configs/docker.yaml` | Docker CLI and Docker Compose deployments | Replace both storage paths with the same absolute host path used for the bind mount; use `darwin` for Docker Desktop on macOS. |
+
+For source deployments, start a profile directly:
+
+```bash
+uv run opensac serve --config configs/local.yaml
+uv run opensac serve --config configs/web.yaml
+```
+
+Only the four API-key variables from `.env` or the real process environment are accepted:
+`OPENSAC_API_KEY`, `OPENSAC_MODEL_API_KEY`, `OPENSAC_SERPER_API_KEY`, and
+`OPENSAC_JINA_API_KEY`. Other service settings belong in YAML. Unknown or duplicate YAML keys fail
+startup, and relative `storage` paths resolve from the selected profile's directory.
+
 ## Container deployment
 
-### Direct Docker run without configuration files
+### Direct Docker run
+
+Download and edit the Docker configuration profile. Set both storage paths to the absolute runtime
+directory used below, and set `sandbox.docker_host_platform` to `darwin` when using Docker Desktop
+for macOS:
+
+```bash
+mkdir -p configs
+curl -fsSLo configs/docker.yaml \
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/configs/docker.yaml
+```
 
 Export the provider credentials and host-specific runtime values in the current shell:
 
@@ -59,20 +93,16 @@ docker run --detach \
   --env OPENSAC_API_KEY \
   --env OPENSAC_SERPER_API_KEY \
   --env OPENSAC_JINA_API_KEY \
-  --env OPENSAC_API_HOST=0.0.0.0 \
-  --env OPENSAC_API_PORT=8000 \
-  --env OPENSAC_SEARCH_BACKEND=web \
-  --env OPENSAC_DATA_DIR="$OPENSAC_RUNTIME_DIR" \
-  --env OPENSAC_BROKER_SOCKET="$OPENSAC_RUNTIME_DIR/broker.sock" \
-  --env OPENSAC_SANDBOX_IMAGE=ghcr.io/liuqi6777/opensac-sandbox:0.6.3 \
   --publish 127.0.0.1:8000:8000 \
+  --mount "type=bind,source=$PWD/configs/docker.yaml,target=/etc/opensac/opensac.yaml,readonly" \
   --mount "type=bind,source=$OPENSAC_RUNTIME_DIR,target=$OPENSAC_RUNTIME_DIR" \
   --mount "type=bind,source=$OPENSAC_DOCKER_SOCKET,target=/var/run/docker.sock,readonly" \
   --read-only \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:0.6.3
+  ghcr.io/liuqi6777/opensac:0.7.0 \
+  opensac serve --config /etc/opensac/opensac.yaml
 ```
 
 After a few seconds, verify the service with the Python runtime already installed in the image:
@@ -83,8 +113,8 @@ docker exec opensac python -c \
 ```
 
 `docker run` pulls the service image when necessary; the first program execution pulls the
-version-matched sandbox image. The environment values are stored in the container configuration,
-so restrict Docker daemon access just as you would protect an `.env` file.
+version-matched sandbox image. Only API keys are stored in the container environment, and all
+non-secret service settings come from the read-only YAML mount.
 
 Use `docker logs -f opensac`, `docker stop opensac`, and `docker start opensac` for the basic
 lifecycle. To recreate or upgrade the service, drain active sessions, remove only the stopped
@@ -100,22 +130,26 @@ source repository, build an image, or install Python packages:
 mkdir opensac-deploy
 cd opensac-deploy
 curl -fsSLo compose.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.6.3/compose.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/compose.yaml
 curl -fsSLo .env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.6.3/.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/.env.example
 curl -fsSLo compose.env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.6.3/compose.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/compose.env.example
+mkdir -p configs
+curl -fsSLo configs/docker.yaml \
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/configs/docker.yaml
 mkdir -p "$PWD/.opensac"
 ```
 
-Set `OPENSAC_API_KEY`, `OPENSAC_SERPER_API_KEY`, and `OPENSAC_JINA_API_KEY` in `.env`. Keep
-`OPENSAC_SEARCH_BACKEND=web`. Then edit `compose.env`:
+Set `OPENSAC_API_KEY`, `OPENSAC_SERPER_API_KEY`, and `OPENSAC_JINA_API_KEY` in `.env`. Then edit
+`configs/docker.yaml` so both storage paths equal the absolute `.opensac` path. Edit `compose.env`:
 
 - Set `OPENSAC_CONTAINER_DATA_DIR` to the absolute path printed by `pwd`, followed by `/.opensac`.
 - Set `OPENSAC_UID` and `OPENSAC_GID` from `id -u` and `id -g`.
 - On Linux, set `OPENSAC_DOCKER_GID` from `stat -c '%g' /var/run/docker.sock`; on Docker Desktop,
   keep it at `0`.
-- Keep the service and sandbox image tags identical to the downloaded release files.
+- Keep the service image in `compose.env` and sandbox image in `configs/docker.yaml` on identical
+  release versions.
 
 Pull and start the service image:
 
@@ -174,12 +208,14 @@ highly privileged, so do not share that account with unrelated services.
 ./local_search/run --host 127.0.0.1 --port 8081
 ```
 
-Pin `INDEX_COMMIT_SHA` for reproducibility. In `.env`, keep:
+Pin `INDEX_COMMIT_SHA` for reproducibility. Start from `configs/local.yaml` and set:
 
-```bash
-OPENSAC_SEARCH_BACKEND=local
-OPENSAC_LOCAL_SEARCH_BASE_URL=http://127.0.0.1:8081
-OPENSAC_BACKEND_REVISION=replace-with-index-revision
+```yaml
+deployment:
+  backend_revision: replace-with-index-revision
+search:
+  backend: local
+  local_base_url: http://127.0.0.1:8081
 ```
 
 The first start downloads and loads `Qwen/Qwen3-Embedding-8B`. Device and index options are in
@@ -187,10 +223,9 @@ The first start downloads and loads `Qwen/Qwen3-Embedding-8B`. Device and index 
 
 ### Web search
 
-Set provider credentials only on the OpenSAC host:
+Use `configs/web.yaml` and set provider credentials only on the OpenSAC host or in `.env`:
 
 ```bash
-OPENSAC_SEARCH_BACKEND=web
 OPENSAC_SERPER_API_KEY=replace-with-serper-key
 OPENSAC_JINA_API_KEY=replace-with-jina-key
 ```
@@ -204,26 +239,18 @@ settings. Warm mode keeps one hardened container per active session but still st
 process for every execution. Eight 512 MB sandbox limits leave room for the service, Docker, and the
 128 MB provider cache.
 
-```bash
-OPENSAC_SANDBOX_MODE=warm
-OPENSAC_SANDBOX_MAX_WARM_CONTAINERS=8
-OPENSAC_SANDBOX_MAX_CONCURRENCY=8
-OPENSAC_SANDBOX_WARM_IDLE_SECONDS=300
-OPENSAC_MAX_CONCURRENCY=12
-OPENSAC_BACKEND_FETCH_CONCURRENCY=6
-OPENSAC_PROVIDER_RESULT_CACHE_TTL_SECONDS=300
-OPENSAC_PROVIDER_RESULT_CACHE_MAX_BYTES=128000000
-```
+Use the ready-to-run `configs/web-performance.yaml` profile, or copy its `providers`, `sandbox`,
+and `limits` sections into a deployment-specific YAML file.
 
 The provider result cache is process-local and only stores successful `web.search` and `web.scrape`
 results. It never caches failures, reranker responses, or LLM output. Keep the TTL at zero when
 cross-session freshness must take precedence over latency and provider cost.
 
 The experimental persistent interpreter is a separate opt-in lifecycle and does not use the warm
-LRU. Set `OPENSAC_EXPERIMENTAL_PERSISTENT_INTERPRETER=true` only for treatment deployments, then
+LRU. Set `sandbox.experimental_persistent_interpreter: true` only for treatment deployments, then
 create sessions with `execution_mode="persistent_interpreter"`. Each active treatment session pins
-one container until deletion or expiry; size `OPENSAC_SANDBOX_MAX_CONCURRENCY` and host memory for
-the maximum concurrent treatment sessions. See [Agent integrations](agent-integrations.md) for
+one container until deletion or expiry; size `sandbox.max_concurrency` and host memory for the
+maximum concurrent treatment sessions. See [Agent integrations](agent-integrations.md) for
 adapter mode selection, explicit REPL skills, loss semantics, and the baseline/treatment split.
 
 ### Benchmark before and after tuning
@@ -250,29 +277,32 @@ version upgrade and container reuse remain separately attributable.
 
 ### 3. Configure and start OpenSAC
 
-For local-only use, the defaults in `.env` are sufficient. For a persistent service, use absolute
-state paths and set an API key:
+For local-only use, start with `configs/local.yaml`. For a persistent service, copy a profile,
+use absolute state paths, and set the service API key in `.env`:
 
-```bash
-OPENSAC_API_HOST=127.0.0.1
-OPENSAC_API_PORT=8000
-OPENSAC_API_KEY=replace-with-a-long-random-value
-OPENSAC_DATA_DIR=/var/lib/opensac
-OPENSAC_BROKER_SOCKET=/var/lib/opensac/broker.sock
-OPENSAC_WORKER_ID=node-a-0
-OPENSAC_BUILD_COMMIT=replace-with-git-commit
-OPENSAC_SESSION_TTL_SECONDS=3600
+```yaml
+api:
+  host: 127.0.0.1
+  port: 8000
+storage:
+  data_dir: /var/lib/opensac
+  broker_socket: /var/lib/opensac/broker.sock
+deployment:
+  worker_id: node-a-0
+  build_commit: replace-with-git-commit
+sessions:
+  ttl_seconds: 3600
 ```
 
 Create the data directory with write permission for the service account, then start OpenSAC:
 
 ```bash
-uv run opensac serve
+uv run opensac serve --config configs/local.yaml
 ```
 
 For a released revision, the first execution pulls the release-matched sandbox image from GHCR.
-Run `uv run opensac build-sandbox` before `serve` only when testing unreleased SDK or sandbox
-changes. The serve command stays in the foreground.
+Run `uv run opensac build-sandbox --config configs/local.yaml` before `serve` only when testing
+unreleased SDK or sandbox changes. The serve command stays in the foreground.
 
 ### Minimal systemd service
 
@@ -290,7 +320,7 @@ Group=opensac
 SupplementaryGroups=docker
 WorkingDirectory=/opt/opensac
 EnvironmentFile=/opt/opensac/.env
-ExecStart=/opt/opensac/.venv/bin/opensac serve
+ExecStart=/opt/opensac/.venv/bin/opensac serve --config /opt/opensac/configs/local.yaml
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=180
@@ -320,7 +350,7 @@ OpenSAC `/healthz` does not execute a sandbox or call the provider. Run the Sear
 in the main README once to verify the complete API, sandbox, broker, and backend path.
 
 When another host needs access, put OpenSAC behind an HTTPS reverse proxy or private network.
-Forward `Authorization`, set the proxy read timeout above `OPENSAC_SANDBOX_TIMEOUT_SECONDS`, and
+Forward `Authorization`, set the proxy read timeout above `sandbox.timeout_seconds`, and
 restrict `/healthz`, `/docs`, and `/openapi.json` if operational metadata should not be public.
 
 ### 5. Upgrade
@@ -339,11 +369,11 @@ sudo systemctl stop opensac.service
 git fetch --tags
 git checkout NEW_COMMIT_SHA
 uv sync --locked
-# If .env pins OPENSAC_SANDBOX_IMAGE, update it to the new release tag here.
+# Update sandbox.image in the selected YAML profile to the matching release tag.
 sudo systemctl start opensac.service
 ```
 
-Update `OPENSAC_BUILD_COMMIT` and repeat the end-to-end check. Rollback uses the same steps with
+Update `deployment.build_commit` and repeat the end-to-end check. Rollback uses the same steps with
 the previous commit.
 
 For a blue-green upgrade, start the new worker on a different port with its own data directory and
@@ -357,6 +387,6 @@ pass; rollback then consists only of sending new sessions back to that worker.
 - Docker permission error: verify the service account can run `docker info`.
 - Sandbox contract mismatch: select the image matching the OpenSAC release, or rebuild it from
   the checked-out revision.
-- Docker status 125 with `NanoCPUs`: set `OPENSAC_SANDBOX_CPUS=0` if the host has no CPU cgroup.
+- Docker status 125 with `NanoCPUs`: set `sandbox.cpus: 0` if the host has no CPU cgroup.
 - `429 capacity_exhausted`: retry according to `Retry-After` or select another worker.
 - `410 worker_restarted` or `session_expired`: create a new session.

@@ -43,6 +43,9 @@ def test_release_publishes_service_and_sandbox_images() -> None:
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
     compose = (root / "compose.yaml").read_text(encoding="utf-8")
+    configuration_profiles = [
+        path.read_text(encoding="utf-8") for path in sorted((root / "configs").glob("*.yaml"))
+    ]
     dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 
     assert "ghcr.io/${{ github.repository_owner }}/opensac\n" in workflow
@@ -54,3 +57,5 @@ def test_release_publishes_service_and_sandbox_images() -> None:
     assert "/dist/*.whl" not in dockerfile
     assert "  local_search:" not in compose
     assert "  local-search:" not in compose
+    assert configuration_profiles
+    assert all("ghcr.io/liuqi6777/opensac-sandbox:0.7.0" in text for text in configuration_profiles)

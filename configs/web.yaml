@@ -1,0 +1,14 @@
+# Standard Web-provider profile. Set OPENSAC_API_KEY, OPENSAC_SERPER_API_KEY,
+# and OPENSAC_JINA_API_KEY in the environment or repository `.env`.
+
+storage:
+  data_dir: ../.opensac
+  broker_socket: ../.opensac/broker.sock
+
+search:
+  backend: web
+  passage_ranker: lexical
+
+sandbox:
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.7.0
+  mode: cold

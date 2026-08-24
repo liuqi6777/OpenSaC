@@ -16,7 +16,7 @@ from opensac.api.errors import (
     SessionClosingError,
     SessionExpiredError,
 )
-from opensac.config import Settings
+from opensac.config import Settings, load_settings
 from opensac.models import (
     CapabilityEvent,
     ExecCreate,
@@ -160,12 +160,16 @@ def test_provider_policy_config_rejects_unknown_operations_and_orphan_bursts() -
         Settings(provider_operation_attempt_timeout_seconds={"local.search": 0})
 
 
-def test_settings_load_jina_api_key_from_environment(monkeypatch) -> None:
+def test_settings_load_jina_api_key_from_environment(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENSAC_JINA_API_KEY", "jina-secret")
-    monkeypatch.setenv("OPENSAC_PASSAGE_RANKER", "jina")
-    monkeypatch.setenv("OPENSAC_PASSAGE_RERANKER_MODEL", "jina-reranker-v3")
+    config = tmp_path / "opensac.yaml"
+    config.write_text(
+        "search:\n  passage_ranker: jina\n  passage_reranker_model: jina-reranker-v3\n",
+        encoding="utf-8",
+    )
 
-    settings = Settings(_env_file=None)
+    settings = load_settings(config)
 
     assert settings.jina_api_key == "jina-secret"
     assert settings.passage_ranker == "jina"

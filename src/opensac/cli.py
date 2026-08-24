@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -8,19 +9,24 @@ import uvicorn
 
 from opensac import __version__
 from opensac._optional import MissingOptionalDependency
-from opensac.config import Settings
+from opensac.api.app import create_app
+from opensac.config import ConfigurationError, Settings, load_settings
 from opensac.sandbox import SANDBOX_CONTRACT
 
 app = typer.Typer(no_args_is_help=True)
 
 
 @app.command()
-def serve() -> None:
+def serve(
+    config: Annotated[
+        Path | None,
+        typer.Option(help="Nested YAML service configuration file."),
+    ] = None,
+) -> None:
     """Start the public OpenSAC API and capability broker."""
-    settings = Settings()
+    settings = _load_cli_settings(config)
     uvicorn.run(
-        "opensac.api.app:create_app",
-        factory=True,
+        create_app(settings),
         host=settings.api_host,
         port=settings.api_port,
     )
@@ -53,6 +59,10 @@ def agent_run(
 
 @app.command("build-sandbox")
 def build_sandbox(
+    config: Annotated[
+        Path | None,
+        typer.Option(help="Nested YAML service configuration file."),
+    ] = None,
     network: Annotated[
         str | None,
         typer.Option(help="Docker build network mode, for example 'host'."),
@@ -67,7 +77,7 @@ def build_sandbox(
     ] = None,
 ) -> None:
     """Build the hardened sandbox image with Docker."""
-    settings = Settings()
+    settings = _load_cli_settings(config)
     command = ["docker", "build"]
     if network is not None:
         command.extend(["--network", network])
@@ -96,6 +106,13 @@ def build_sandbox(
         command,
         check=True,
     )
+
+
+def _load_cli_settings(config: Path | None) -> Settings:
+    try:
+        return load_settings(config)
+    except ConfigurationError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--config") from exc
 
 
 if __name__ == "__main__":

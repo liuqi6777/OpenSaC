@@ -1,0 +1,24 @@
+# Eight-core Web profile with warm sandboxes and a short provider result cache.
+# Benchmark this profile on the target host before production use.
+
+storage:
+  data_dir: ../.opensac
+  broker_socket: ../.opensac/broker.sock
+
+search:
+  backend: web
+
+providers:
+  fetch_concurrency: 6
+  result_cache_ttl_seconds: 300
+  result_cache_max_bytes: 128000000
+
+sandbox:
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.7.0
+  mode: warm
+  warm_idle_seconds: 300
+  max_warm_containers: 8
+  max_concurrency: 8
+
+limits:
+  max_concurrency: 12

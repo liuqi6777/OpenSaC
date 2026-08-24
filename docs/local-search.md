@@ -117,12 +117,10 @@ the best query coverage. Set `LOCAL_SEARCH_RESULT_MODE` before starting the serv
 
 ## 5. Connect OpenSAC
 
-In a second terminal:
+In a second terminal, use the local configuration profile:
 
 ```bash
-export OPENSAC_SEARCH_BACKEND=local
-export OPENSAC_LOCAL_SEARCH_BASE_URL=http://127.0.0.1:8081
-uv run opensac serve
+uv run opensac serve --config configs/local.yaml
 ```
 
 OpenSAC sends search and document requests over HTTP. Keep the search service bound to

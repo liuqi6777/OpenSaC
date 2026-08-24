@@ -4,28 +4,31 @@ Run one OpenSAC process per worker endpoint. Each instance needs a unique worker
 directory, broker socket and API port; do not put a round-robin proxy in front of stateful
 session routes.
 
-```bash
-OPENSAC_WORKER_ID=node-a-0 \
-OPENSAC_API_PORT=8000 \
-OPENSAC_DATA_DIR=/var/lib/opensac/worker-0 \
-OPENSAC_BROKER_SOCKET=/var/lib/opensac/worker-0/broker.sock \
-OPENSAC_SANDBOX_MODE=warm \
-OPENSAC_BACKEND_METADATA_HASH=sha256:replace-with-index-metadata-hash \
-OPENSAC_MAX_ACTIVE_SESSIONS=128 \
-OPENSAC_SANDBOX_MAX_WARM_CONTAINERS=32 \
-OPENSAC_SANDBOX_MAX_CONCURRENCY=16 \
-uv run opensac serve
+Create `configs/worker-0.yaml` and `configs/worker-1.yaml`. The first contains:
 
-OPENSAC_WORKER_ID=node-a-1 \
-OPENSAC_API_PORT=8001 \
-OPENSAC_DATA_DIR=/var/lib/opensac/worker-1 \
-OPENSAC_BROKER_SOCKET=/var/lib/opensac/worker-1/broker.sock \
-OPENSAC_SANDBOX_MODE=warm \
-OPENSAC_BACKEND_METADATA_HASH=sha256:replace-with-index-metadata-hash \
-OPENSAC_MAX_ACTIVE_SESSIONS=128 \
-OPENSAC_SANDBOX_MAX_WARM_CONTAINERS=32 \
-OPENSAC_SANDBOX_MAX_CONCURRENCY=16 \
-uv run opensac serve
+```yaml
+api:
+  port: 8000
+storage:
+  data_dir: /var/lib/opensac/worker-0
+  broker_socket: /var/lib/opensac/worker-0/broker.sock
+deployment:
+  worker_id: node-a-0
+  backend_metadata_hash: sha256:replace-with-index-metadata-hash
+sessions:
+  max_active: 128
+sandbox:
+  mode: warm
+  max_warm_containers: 32
+  max_concurrency: 16
+```
+
+The second uses the same fields with port `8001`, worker ID `node-a-1`, and `worker-1` storage
+paths. Start each worker with its own file:
+
+```bash
+uv run opensac serve --config configs/worker-0.yaml
+uv run opensac serve --config configs/worker-1.yaml
 ```
 
 The scheduler polls `/healthz` and chooses only workers with `accepting=true`. It stores the

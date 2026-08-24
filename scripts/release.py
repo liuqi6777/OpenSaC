@@ -90,7 +90,12 @@ def validate_release(tag: str | None = None) -> ReleaseMetadata:
     image_tag_pattern = re.compile(
         r"ghcr\.io/liuqi6777/opensac(?:-sandbox)?:([0-9]+\.[0-9]+\.[0-9]+)"
     )
-    for relative_path in (".env.example", "compose.env.example", "compose.yaml"):
+    release_metadata_paths = [
+        Path("compose.env.example"),
+        Path("compose.yaml"),
+        *(path.relative_to(REPO_ROOT) for path in sorted((REPO_ROOT / "configs").glob("*.yaml"))),
+    ]
+    for relative_path in release_metadata_paths:
         configured_tags = image_tag_pattern.findall(
             (REPO_ROOT / relative_path).read_text(encoding="utf-8")
         )

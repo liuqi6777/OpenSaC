@@ -1,0 +1,19 @@
+# Docker/Compose profile. Replace the storage path with the same absolute host
+# path used by OPENSAC_CONTAINER_DATA_DIR in compose.env.
+
+api:
+  host: 0.0.0.0
+  port: 8000
+
+storage:
+  data_dir: /absolute/path/to/opensac-data
+  broker_socket: /absolute/path/to/opensac-data/broker.sock
+
+search:
+  backend: web
+
+sandbox:
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.7.0
+  # Change to darwin when the service talks to Docker Desktop for macOS.
+  docker_host_platform: linux
+  mode: cold
