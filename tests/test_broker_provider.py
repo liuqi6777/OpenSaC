@@ -462,6 +462,44 @@ async def test_all_failed_batch_preserves_each_failure_and_attempt_count() -> No
     assert [row["failure"]["attempts"] for row in rows] == [1, 1]
 
 
+async def test_content_provider_timeout_retries_real_fetch_attempts() -> None:
+    class TimeoutContentWeb(WebCacheBackend):
+        async def fetch(self, hit, *, query=None):
+            del hit, query
+            self.fetch_calls += 1
+            raise httpx.ReadTimeout("secret provider endpoint")
+
+    backend = TimeoutContentWeb()
+    runtime = ProviderRuntime(
+        {
+            "web.scrape": ProviderPolicy(
+                retry_profile="safe",
+                max_attempts=3,
+                base_backoff_seconds=0,
+            )
+        }
+    )
+    service = BrokerService({"web": backend}, provider_runtime=runtime)
+    state = service.register_session(make_session(backend="web"))
+    source = (await service.call("token", "search.query", {"query": "timeout"}))[0]["source"]
+
+    rows = await service.call(
+        "token",
+        "content.get_many",
+        {"sources": [source]},
+        execution_id="content-timeout-retry",
+    )
+
+    assert rows[0]["failure"]["code"] == "provider_timeout"
+    assert rows[0]["failure"]["attempts"] == 3
+    assert backend.fetch_calls == 3
+    assert state.policy.usage.content_provider_attempts == 3
+    assert state.policy.usage.provider_retries == 2
+    attempts = service.take_trace("token", "content-timeout-retry")[0].provider_attempts
+    assert [attempt.attempt for attempt in attempts] == [1, 2, 3]
+    assert [attempt.error_code for attempt in attempts] == ["provider_timeout"] * 3
+
+
 async def test_cancelled_provider_backoff_is_counted_without_a_retry_attempt() -> None:
     waiting = asyncio.Event()
 

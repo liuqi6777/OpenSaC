@@ -26,7 +26,12 @@ from opensac.models import HitRecord, PassageTraceRecord, ProviderAttemptRecord
 from opensac.provider import ProviderRequestError
 
 from ..providers.execution import ProviderExecutor
-from .documents import document_identity, normalize_source, public_web_url
+from .documents import (
+    document_identity,
+    normalize_source,
+    normalize_web_source,
+    public_web_url,
+)
 from .passages import (
     PassageCandidate,
     normalize_document_text,
@@ -100,7 +105,11 @@ class ContentCapabilities:
             if not isinstance(raw_source, str):
                 raise ValueError(f"content source at input index {input_index} must be a string")
             try:
-                source = normalize_source(raw_source)
+                source = (
+                    normalize_web_source(raw_source)
+                    if backend_name == "web"
+                    else normalize_source(raw_source)
+                )
             except ValueError as exc:
                 raise ValueError(
                     f"content source at input index {input_index} is invalid: {exc}"
@@ -182,7 +191,12 @@ class ContentCapabilities:
         context = current_call()
         if context is not None:
             for hit in hits:
-                registered = state.document_for_alias(normalize_source(hit.source))
+                normalized_hit_source = (
+                    normalize_web_source(hit.source)
+                    if hit.backend == "web"
+                    else normalize_source(hit.source)
+                )
+                registered = state.document_for_alias(normalized_hit_source)
                 admission = (
                     "direct_url"
                     if hit.metadata.get("_opensac_direct_url")
@@ -858,7 +872,7 @@ class ContentCapabilities:
             if hit.metadata.get("_opensac_direct_url"):
                 registered_hit = hit.model_copy(deep=True)
                 registered_hit.metadata.pop("_opensac_direct_url", None)
-                candidate_source = normalize_source(hit.source)
+                candidate_source = normalize_web_source(hit.source)
                 aliases = {candidate_source}
                 if hit.url:
                     aliases.add(normalize_source(hit.url))

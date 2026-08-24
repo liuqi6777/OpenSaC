@@ -12,7 +12,7 @@ from opensac._contracts import ContentSnippet, RetrievalMetadata, SearchBatch, S
 from opensac.backends.rerank.base import PassageRerankResult
 from opensac.backends.rerank.jina import JinaPassageReranker
 from opensac.broker.call_context import trace_error_message
-from opensac.broker.capabilities.documents import canonical_url
+from opensac.broker.capabilities.documents import canonical_url, normalize_web_source
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
 from opensac.broker.providers import InflightCapacityError, ProviderExecutionConfig
 from opensac.broker.service import BrokerService
@@ -1953,6 +1953,10 @@ def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:
     # can prove otherwise.
     assert canonical("https://e.com/a") != canonical("https://e.com/a/")
     assert canonical("https://e.com/%25C3%25A9") != canonical("https://e.com/%C3%A9")
+    assert normalize_web_source("Example.COM/a?utm_source=x&id=7#frag") == (
+        "https://example.com/a?id=7"
+    )
+    assert normalize_web_source("opaque-docid") == "opaque-docid"
 
 
 async def test_web_content_directly_admits_a_public_url() -> None:
@@ -1979,6 +1983,43 @@ async def test_web_content_directly_admits_a_public_url() -> None:
     assert event.hits[0].admission == "direct_url"
 
 
+async def test_web_content_directly_admits_a_public_url_without_a_scheme() -> None:
+    service = BrokerService({"web": RankedBackend([])})
+    state = service.register_session(make_session())
+    source = "Example.com/direct?b=2&utm_source=x&a=1#section"
+
+    rows = await service.call("token", "content.get_many", {"sources": [source]})
+
+    assert rows[0]["source"] == source
+    assert rows[0]["text"] == "body"
+    record = state.document_for_alias("https://example.com/direct?a=1&b=2")
+    assert record is not None
+    assert record.fetch_url == "https://example.com/direct?a=1&b=2"
+    assert record.admission == "direct_url"
+
+
+async def test_schemeless_web_source_matches_a_search_admission() -> None:
+    service = BrokerService(
+        {"web": RankedBackend(["https://example.com/searched"])},
+        content_url_admission="searched_only",
+    )
+    state = service.register_session(make_session())
+    await service.call("token", "search.query", {"query": "q"})
+
+    rows = await service.call(
+        "token",
+        "content.get_many",
+        {"sources": ["example.com/searched"]},
+        execution_id="exec-schemeless-search-source",
+    )
+
+    assert rows[0]["source"] == "example.com/searched"
+    assert rows[0]["text"] == "body"
+    assert state.policy.usage.direct_url_attempts == 0
+    event = service.take_trace("token", "exec-schemeless-search-source")[0]
+    assert event.hits[0].admission == "search"
+
+
 async def test_strict_content_admission_returns_an_aligned_refusal() -> None:
     service = BrokerService(
         {"web": RankedBackend([])},
@@ -1997,14 +2038,15 @@ async def test_strict_content_admission_returns_an_aligned_refusal() -> None:
     assert state.documents_by_id == {}
 
 
-async def test_direct_content_rejects_private_urls_before_provider_work() -> None:
+@pytest.mark.parametrize("source", ["http://127.0.0.1/private", "127.0.0.1/private"])
+async def test_direct_content_rejects_private_urls_before_provider_work(source: str) -> None:
     service = BrokerService({"web": RankedBackend([])})
     state = service.register_session(make_session())
 
     rows = await service.call(
         "token",
         "content.get_many",
-        {"sources": ["http://127.0.0.1/private"]},
+        {"sources": [source]},
     )
 
     assert rows[0]["failure"]["code"] == "unknown_source"

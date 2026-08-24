@@ -47,7 +47,7 @@ def canonical_url(url: str) -> str:
 def public_web_url(value: Any) -> str:
     """Validate and normalize a bounded public HTTP(S) document address."""
 
-    source = normalize_source(value)
+    source = normalize_web_source(value)
     if any(ord(character) < 32 for character in source):
         raise ValueError("URL contains control characters")
     parts = urlsplit(source)
@@ -116,6 +116,35 @@ def normalize_source(value: Any) -> str:
     if parts.scheme.lower() in {"http", "https"} and parts.netloc:
         return canonical_url(source)
     return source
+
+
+def normalize_web_source(value: Any) -> str:
+    """Normalize a web source, inferring HTTPS for an unambiguous bare host."""
+
+    source = normalize_source(value)
+    parts = urlsplit(source)
+    if parts.scheme.lower() in {"http", "https"} and parts.netloc:
+        return source
+    if "://" in source:
+        return source
+
+    candidate = f"https:{source}" if source.startswith("//") else f"https://{source}"
+    candidate_parts = urlsplit(candidate)
+    try:
+        hostname = candidate_parts.hostname or ""
+        _ = candidate_parts.port
+    except ValueError:
+        return source
+    lowered = hostname.rstrip(".").lower()
+    if not lowered:
+        return source
+    try:
+        ipaddress.ip_address(lowered)
+    except ValueError:
+        looks_like_host = "." in lowered or lowered == "localhost"
+    else:
+        looks_like_host = True
+    return canonical_url(candidate) if looks_like_host else source
 
 
 def resolve_sources(state: BrokerSession, sources: list[str]) -> list[SearchHit]:
