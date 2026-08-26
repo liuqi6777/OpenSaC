@@ -9,12 +9,24 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-from opensac._contracts import ContentSnippet, SearchHit
 from opensac.api import create_app
 from opensac.api.dashboard import DashboardTelemetry, dashboard_event_stream
+from opensac.backends.document import DocumentContent, DocumentHandle
+from opensac.backends.search import SearchHit
 from opensac.broker.service import BrokerService
 from opensac.config import Settings
-from opensac.models import CapabilityEvent, ExecResult, RunUsage, Session
+from opensac.models import ExecResult, RunUsage, Session
+from opensac.tracing import CapabilityEvent
+
+
+def _broker_service(search_backends, *, document_backends=None, **kwargs):
+    if document_backends is None:
+        document_backends = search_backends
+    return BrokerService(
+        search_backends,
+        document_backends=document_backends,
+        **kwargs,
+    )
 
 
 def _settings(tmp_path: Path, **overrides) -> Settings:
@@ -169,6 +181,7 @@ def test_telemetry_redacts_bounds_and_cleans_up_execution_state() -> None:
 async def test_broker_publishes_capability_lifecycle_to_dashboard() -> None:
     class Backend:
         name = "local"
+        source_kind = "opaque"
         provider_identity = "dashboard-test"
         supports_domains = False
         max_depth = 10
@@ -188,7 +201,11 @@ async def test_broker_publishes_capability_lifecycle_to_dashboard() -> None:
 
         async def fetch(self, hit, *, query=None):
             del query
-            return ContentSnippet(source=hit.source, text="document")
+            return DocumentContent(source=hit.source, text="document")
+
+        @staticmethod
+        def fetch_candidates(hit: DocumentHandle) -> list[DocumentHandle]:
+            return [hit]
 
     telemetry = DashboardTelemetry(enabled=True, secrets=[])
     queue = telemetry.subscribe()
@@ -200,7 +217,7 @@ async def test_broker_publishes_capability_lifecycle_to_dashboard() -> None:
     )
     assert task_id is not None
     telemetry.bind_execution(task_id, "internal-dashboard-exec")
-    service = BrokerService(
+    service = _broker_service(
         {"local": Backend()},
         capability_observer=telemetry,
     )

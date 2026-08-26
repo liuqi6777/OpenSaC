@@ -9,12 +9,13 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from opensac._version import __version__
 
 DEFAULT_SANDBOX_IMAGE = f"ghcr.io/liuqi6777/opensac-sandbox:{__version__}"
+DEFAULT_LOCAL_BACKEND_BASE_URL = "http://127.0.0.1:8081"
 
 _SECRET_ENV_FIELDS = {
     "OPENSAC_API_KEY": "api_key",
@@ -41,30 +42,6 @@ _YAML_FIELDS = {
         "tombstone_ttl_seconds": "session_tombstone_ttl_seconds",
         "content_cache_bytes": "session_content_cache_bytes",
     },
-    "model": {"base_url": "model_base_url", "name": "model_name"},
-    "search": {
-        "backend": "search_backend",
-        "local_base_url": "local_search_base_url",
-        "passage_ranker": "passage_ranker",
-        "passage_reranker_model": "passage_reranker_model",
-        "max_queries_per_request": "search_max_queries_per_request",
-        "max_query_chars": "search_max_query_chars",
-        "max_top_k": "search_max_top_k",
-    },
-    "extraction": {
-        "max_items": "extract_max_items",
-        "max_instruction_bytes": "extract_max_instruction_bytes",
-        "max_schema_bytes": "extract_max_schema_bytes",
-        "max_item_bytes": "extract_max_item_bytes",
-        "max_total_item_bytes": "extract_max_total_item_bytes",
-        "max_schema_depth": "extract_max_schema_depth",
-        "max_repair_attempts": "extract_max_repair_attempts",
-    },
-    "content": {
-        "max_sources_per_request": "content_max_sources_per_request",
-        "url_admission": "content_url_admission",
-        "batch_deadline_seconds": "content_batch_deadline_seconds",
-    },
     "providers": {
         "fetch_concurrency": "backend_fetch_concurrency",
         "retry_profile": "provider_retry_profile",
@@ -75,11 +52,7 @@ _YAML_FIELDS = {
         "max_backoff_seconds": "provider_max_backoff_seconds",
         "max_total_backoff_seconds": "provider_max_total_backoff_seconds",
         "max_retry_after_seconds": "provider_max_retry_after_seconds",
-        "operation_concurrency": "provider_operation_concurrency",
-        "operation_requests_per_second": "provider_operation_requests_per_second",
-        "operation_burst": "provider_operation_burst",
-        "operation_attempt_timeout_seconds": "provider_operation_attempt_timeout_seconds",
-        "operation_logical_deadline_seconds": "provider_operation_logical_deadline_seconds",
+        "services": "provider_services",
         "inflight_coalescing": "provider_inflight_coalescing",
         "max_inflight_keys": "provider_max_inflight_keys",
         "max_waiters_per_key": "provider_max_waiters_per_key",
@@ -106,20 +79,201 @@ _YAML_FIELDS = {
     },
 }
 
+_BACKEND_YAML_FIELDS = {
+    "search": {"provider", "base_url"},
+    "document": {"provider", "base_url"},
+    "rerank": {"provider", "model"},
+    "llm": {"provider", "model", "base_url"},
+}
+
+_CAPABILITY_YAML_FIELDS = {
+    "search": {"max_queries_per_request", "max_query_chars", "max_top_k"},
+    "content": {
+        "max_sources_per_request",
+        "url_admission",
+        "batch_deadline_seconds",
+    },
+    "extraction": {
+        "max_items",
+        "max_instruction_bytes",
+        "max_schema_bytes",
+        "max_item_bytes",
+        "max_total_item_bytes",
+        "max_schema_depth",
+        "max_repair_attempts",
+    },
+}
+
+_NESTED_YAML_FIELDS = {
+    "backends": _BACKEND_YAML_FIELDS,
+    "capabilities": _CAPABILITY_YAML_FIELDS,
+}
+
 _SECRET_YAML_FIELDS = {
     ("api", "key"): "OPENSAC_API_KEY",
     ("api", "api_key"): "OPENSAC_API_KEY",
-    ("model", "key"): "OPENSAC_MODEL_API_KEY",
-    ("model", "api_key"): "OPENSAC_MODEL_API_KEY",
-    ("search", "serper_api_key"): "OPENSAC_SERPER_API_KEY",
-    ("search", "jina_api_key"): "OPENSAC_JINA_API_KEY",
     ("providers", "serper_api_key"): "OPENSAC_SERPER_API_KEY",
     ("providers", "jina_api_key"): "OPENSAC_JINA_API_KEY",
+}
+
+_SECRET_BACKEND_YAML_FIELDS = {
+    ("search", "key"): "OPENSAC_SERPER_API_KEY",
+    ("search", "api_key"): "OPENSAC_SERPER_API_KEY",
+    ("document", "key"): "OPENSAC_JINA_API_KEY",
+    ("document", "api_key"): "OPENSAC_JINA_API_KEY",
+    ("rerank", "key"): "OPENSAC_JINA_API_KEY",
+    ("rerank", "api_key"): "OPENSAC_JINA_API_KEY",
+    ("llm", "key"): "OPENSAC_MODEL_API_KEY",
+    ("llm", "api_key"): "OPENSAC_MODEL_API_KEY",
 }
 
 
 class ConfigurationError(ValueError):
     """Raised when deployment configuration cannot be loaded safely."""
+
+
+class SearchBackendSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["local", "serper"] = "local"
+    base_url: str | None = None
+
+    @model_validator(mode="after")
+    def validate_connection(self) -> SearchBackendSettings:
+        if self.provider == "local":
+            self.base_url = self.base_url or DEFAULT_LOCAL_BACKEND_BASE_URL
+        elif self.base_url is not None:
+            raise ValueError("backends.search.base_url is supported only by the local provider")
+        return self
+
+
+class DocumentBackendSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["local", "jina"] = "local"
+    base_url: str | None = None
+
+    @model_validator(mode="after")
+    def validate_connection(self) -> DocumentBackendSettings:
+        if self.provider == "local":
+            self.base_url = self.base_url or DEFAULT_LOCAL_BACKEND_BASE_URL
+        elif self.base_url is not None:
+            raise ValueError("backends.document.base_url is supported only by the local provider")
+        return self
+
+
+class RerankBackendSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["lexical", "jina"] = "lexical"
+    model: str = ""
+
+    @model_validator(mode="after")
+    def validate_provider(self) -> RerankBackendSettings:
+        if self.provider == "jina" and not self.model.strip():
+            raise ValueError("backends.rerank.model is required for the jina provider")
+        if self.provider == "lexical" and self.model.strip():
+            raise ValueError("backends.rerank.model is supported only by the jina provider")
+        return self
+
+
+class LLMBackendSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["none", "openai_compatible"] = "none"
+    model: str = ""
+    base_url: str | None = None
+
+    @model_validator(mode="after")
+    def validate_provider(self) -> LLMBackendSettings:
+        if self.provider == "openai_compatible" and not self.model.strip():
+            raise ValueError("backends.llm.model is required for the openai_compatible provider")
+        if self.provider == "none" and (self.model or self.base_url is not None):
+            raise ValueError("backends.llm.model and base_url require an enabled LLM provider")
+        return self
+
+
+class BackendSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    search: SearchBackendSettings = Field(default_factory=SearchBackendSettings)
+    document: DocumentBackendSettings = Field(default_factory=DocumentBackendSettings)
+    rerank: RerankBackendSettings = Field(default_factory=RerankBackendSettings)
+    llm: LLMBackendSettings = Field(default_factory=LLMBackendSettings)
+
+
+class SearchCapabilitySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Admission limits are enforced by the broker before query fan-out. Keep
+    # the defaults wide enough for research pipelines while bounding one
+    # malformed/generated call independently of rollout-level usage metrics.
+    max_queries_per_request: int = Field(default=64, ge=1)
+    max_query_chars: int = Field(default=4096, ge=1)
+    # Retrieval depth (offset + limit), matching the local backend's top_k.
+    max_top_k: int = Field(default=600, ge=1)
+
+
+class ContentCapabilitySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_sources_per_request: int = Field(default=256, ge=1)
+    # Web deployments accept bounded public HTTP(S) URLs directly so a URL
+    # selected from an earlier agent execution remains usable. Local docids
+    # always remain search-admitted only.
+    url_admission: Literal["searched_only", "searched_or_public_web"] = "searched_or_public_web"
+    batch_deadline_seconds: float = Field(default=60.0, gt=0.0)
+
+
+class ExtractionCapabilitySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Byte limits use UTF-8 encoded request sizes so non-ASCII inputs cannot
+    # exceed the admission budget while appearing short in Python characters.
+    max_items: int = Field(default=256, ge=1)
+    max_instruction_bytes: int = Field(default=16_384, ge=1)
+    max_schema_bytes: int = Field(default=65_536, ge=1)
+    max_item_bytes: int = Field(default=65_536, ge=1)
+    max_total_item_bytes: int = Field(default=2_097_152, ge=1)
+    max_schema_depth: int = Field(default=8, ge=1)
+    max_repair_attempts: int = Field(default=1, ge=0, le=1)
+
+
+class CapabilitySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    search: SearchCapabilitySettings = Field(default_factory=SearchCapabilitySettings)
+    content: ContentCapabilitySettings = Field(default_factory=ContentCapabilitySettings)
+    extraction: ExtractionCapabilitySettings = Field(default_factory=ExtractionCapabilitySettings)
+
+
+class ProviderServicePolicySettings(BaseModel):
+    """Optional deployment overrides for one reusable provider service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    concurrency: int | None = Field(default=None, ge=1)
+    requests_per_second: float | None = Field(default=None, gt=0.0)
+    burst: int | None = Field(default=None, ge=1)
+    attempt_timeout_seconds: float | None = Field(default=None, gt=0.0)
+    logical_deadline_seconds: float | None = Field(default=None, gt=0.0)
+
+    @model_validator(mode="after")
+    def validate_rate_limit(self) -> ProviderServicePolicySettings:
+        if self.burst is not None and self.requests_per_second is None:
+            raise ValueError("burst requires requests_per_second")
+        return self
+
+
+class ProviderServicesSettings(BaseModel):
+    """Fixed execution-policy slots for reusable broker services."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    search: ProviderServicePolicySettings = Field(default_factory=ProviderServicePolicySettings)
+    document: ProviderServicePolicySettings = Field(default_factory=ProviderServicePolicySettings)
+    rerank: ProviderServicePolicySettings = Field(default_factory=ProviderServicePolicySettings)
+    llm: ProviderServicePolicySettings = Field(default_factory=ProviderServicePolicySettings)
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -187,43 +341,14 @@ class Settings(BaseSettings):
     session_reaper_interval_seconds: float = Field(default=60.0, gt=0.0)
     session_tombstone_ttl_seconds: float = Field(default=86_400.0, ge=0.0)
 
+    # Backend selection and connection settings are explicit and deployment-wide.
+    # Sessions inherit one validated source family so callers cannot switch
+    # corpora or credentials through the public API.
+    backends: BackendSettings = Field(default_factory=BackendSettings)
+    capabilities: CapabilitySettings = Field(default_factory=CapabilitySettings)
     model_api_key: str = ""
-    model_base_url: str | None = None
-    model_name: str = ""
-
-    # One deployment-wide search backend. Sessions inherit this value so a
-    # caller cannot switch corpora or credentials through the public API.
-    search_backend: Literal["local", "web"] = "local"
-    local_search_base_url: str = "http://127.0.0.1:8081"
     serper_api_key: str = ""
     jina_api_key: str = ""
-    passage_ranker: Literal["lexical", "jina"] = "lexical"
-    passage_reranker_model: str = ""
-    # Admission limits are enforced by the broker before query fan-out. Keep
-    # the defaults wide enough for research pipelines while bounding one
-    # malformed/generated call independently of rollout-level usage metrics.
-    search_max_queries_per_request: int = Field(default=64, ge=1)
-    search_max_query_chars: int = Field(default=4096, ge=1)
-    # Retrieval depth (offset + limit), matching the local backend's top_k.
-    search_max_top_k: int = Field(default=600, ge=1)
-    # Structured extraction limits are enforced before the provider is called.
-    # Byte limits use UTF-8 encoded request sizes so non-ASCII inputs cannot
-    # exceed the admission budget while appearing short in Python characters.
-    extract_max_items: int = Field(default=256, ge=1)
-    extract_max_instruction_bytes: int = Field(default=16_384, ge=1)
-    extract_max_schema_bytes: int = Field(default=65_536, ge=1)
-    extract_max_item_bytes: int = Field(default=65_536, ge=1)
-    extract_max_total_item_bytes: int = Field(default=2_097_152, ge=1)
-    extract_max_schema_depth: int = Field(default=8, ge=1)
-    extract_max_repair_attempts: int = Field(default=1, ge=0, le=1)
-    content_max_sources_per_request: int = Field(default=256, ge=1)
-    # Web deployments accept bounded public HTTP(S) URLs directly so a URL
-    # selected from an earlier agent execution remains usable. Local docids
-    # always remain search-admitted only.
-    content_url_admission: Literal["searched_only", "searched_or_public_web"] = (
-        "searched_or_public_web"
-    )
-    content_batch_deadline_seconds: float = Field(default=60.0, gt=0.0)
     # Concurrent document fetches inside one `content.*` call. The broker's own
     # semaphore admits a whole call as one unit, so without this a program
     # asking for fifty pages opens fifty simultaneous requests to the provider,
@@ -250,60 +375,38 @@ class Settings(BaseSettings):
     provider_max_backoff_seconds: float = Field(default=4.0, ge=0.0)
     provider_max_total_backoff_seconds: float = Field(default=15.0, ge=0.0)
     provider_max_retry_after_seconds: float = Field(default=15.0, ge=0.0)
-    # JSON dictionaries keyed by local.search/local.document/web.search/web.scrape/web.rerank.
-    # Empty RPS/burst maps disable request-rate limiting. Concurrency falls back
-    # to max_concurrency for search, two for reranking, and
-    # backend_fetch_concurrency for documents.
-    provider_operation_concurrency: dict[str, int] = Field(default_factory=dict)
-    provider_operation_requests_per_second: dict[str, float] = Field(default_factory=dict)
-    provider_operation_burst: dict[str, int] = Field(default_factory=dict)
-    provider_operation_attempt_timeout_seconds: dict[str, float] = Field(default_factory=dict)
-    provider_operation_logical_deadline_seconds: dict[str, float] = Field(default_factory=dict)
+    # Each reusable service binds one policy runtime. Missing values inherit the
+    # deployment-wide reliability defaults above and role-specific concurrency.
+    provider_services: ProviderServicesSettings = Field(default_factory=ProviderServicesSettings)
+
+    @model_validator(mode="after")
+    def validate_optional_service_policies(self) -> Settings:
+        llm_policy = self.provider_services.llm.model_dump(exclude_none=True)
+        if self.backends.llm.provider == "none" and llm_policy:
+            raise ValueError("providers.services.llm requires an enabled LLM provider")
+        return self
 
     # 0.3.1 in-flight sharing. Disabled by default so upgrading cannot alter a
     # frozen baseline's latency or failure timing.
     provider_inflight_coalescing: bool = False
     provider_max_inflight_keys: int = Field(default=256, ge=1)
     provider_max_waiters_per_key: int = Field(default=64, ge=1)
-    # Successful web search/scrape results may be shared across sessions for a
-    # short deployment-owned window. Zero keeps the cache disabled so upgrading
-    # does not change provider freshness or accounting by default.
+    # Backends may opt successful results into a short process-local cache.
+    # Zero keeps it disabled so upgrading does not change provider freshness or
+    # accounting by default.
     provider_result_cache_ttl_seconds: float = Field(default=0.0, ge=0.0)
     provider_result_cache_max_bytes: int = Field(default=128_000_000, ge=1)
 
+    @property
+    def backend_name(self) -> Literal["local", "web"]:
+        return "local" if self.backends.search.provider == "local" else "web"
+
     @model_validator(mode="after")
-    def validate_provider_operation_maps(self) -> Settings:
-        allowed = {
-            "local.search",
-            "local.document",
-            "web.search",
-            "web.scrape",
-            "web.rerank",
-        }
-        mappings = {
-            "provider_operation_concurrency": self.provider_operation_concurrency,
-            "provider_operation_requests_per_second": (self.provider_operation_requests_per_second),
-            "provider_operation_burst": self.provider_operation_burst,
-            "provider_operation_attempt_timeout_seconds": (
-                self.provider_operation_attempt_timeout_seconds
-            ),
-            "provider_operation_logical_deadline_seconds": (
-                self.provider_operation_logical_deadline_seconds
-            ),
-        }
-        for name, values in mappings.items():
-            unknown = set(values) - allowed
-            if unknown:
-                raise ValueError(f"{name} has unknown operations: {sorted(unknown)}")
-            if name.endswith("_seconds") and any(float(value) <= 0 for value in values.values()):
-                raise ValueError(f"{name} values must be positive")
-        missing_rates = set(self.provider_operation_burst) - set(
-            self.provider_operation_requests_per_second
-        )
-        if missing_rates:
+    def validate_backend_pair(self) -> Settings:
+        pair = (self.backends.search.provider, self.backends.document.provider)
+        if pair not in {("local", "local"), ("serper", "jina")}:
             raise ValueError(
-                "provider_operation_burst requires requests_per_second for: "
-                f"{sorted(missing_rates)}"
+                "backends.search and backends.document must use local + local or serper + jina"
             )
         return self
 
@@ -373,9 +476,33 @@ class Settings(BaseSettings):
 
 def _legacy_env_names() -> set[str]:
     secret_fields = set(_SECRET_ENV_FIELDS.values())
-    return {
+    names = {
         f"OPENSAC_{name.upper()}" for name in Settings.model_fields if name not in secret_fields
     }
+    names.update(
+        {
+            "OPENSAC_LOCAL_SEARCH_BASE_URL",
+            "OPENSAC_MODEL_BASE_URL",
+            "OPENSAC_MODEL_NAME",
+            "OPENSAC_SEARCH_BACKEND",
+            "OPENSAC_CONTENT_BATCH_DEADLINE_SECONDS",
+            "OPENSAC_CONTENT_MAX_SOURCES_PER_REQUEST",
+            "OPENSAC_CONTENT_URL_ADMISSION",
+            "OPENSAC_EXTRACT_MAX_INSTRUCTION_BYTES",
+            "OPENSAC_EXTRACT_MAX_ITEM_BYTES",
+            "OPENSAC_EXTRACT_MAX_ITEMS",
+            "OPENSAC_EXTRACT_MAX_REPAIR_ATTEMPTS",
+            "OPENSAC_EXTRACT_MAX_SCHEMA_BYTES",
+            "OPENSAC_EXTRACT_MAX_SCHEMA_DEPTH",
+            "OPENSAC_EXTRACT_MAX_TOTAL_ITEM_BYTES",
+            "OPENSAC_PASSAGE_RANKER",
+            "OPENSAC_PASSAGE_RERANKER_MODEL",
+            "OPENSAC_SEARCH_MAX_QUERIES_PER_REQUEST",
+            "OPENSAC_SEARCH_MAX_QUERY_CHARS",
+            "OPENSAC_SEARCH_MAX_TOP_K",
+        }
+    )
+    return names
 
 
 def _read_dotenv(path: Path) -> dict[str, str | None]:
@@ -431,10 +558,45 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
     flattened: dict[str, Any] = {}
     for section, section_values in loaded.items():
-        if not isinstance(section, str) or section not in _YAML_FIELDS:
+        if not isinstance(section, str) or (
+            section not in _YAML_FIELDS and section not in _NESTED_YAML_FIELDS
+        ):
             raise ConfigurationError(f"Unknown OpenSAC configuration section: {section!r}")
         if not isinstance(section_values, Mapping):
             raise ConfigurationError(f"Configuration section '{section}' must be a mapping")
+        if section in _NESTED_YAML_FIELDS:
+            nested_schema = _NESTED_YAML_FIELDS[section]
+            item_label = "backend" if section == "backends" else "capability"
+            nested_values: dict[str, Any] = {}
+            for item_kind, item_config in section_values.items():
+                if not isinstance(item_kind, str) or item_kind not in nested_schema:
+                    raise ConfigurationError(
+                        f"Unknown OpenSAC configuration {item_label}: {section}.{item_kind}"
+                    )
+                if not isinstance(item_config, Mapping):
+                    raise ConfigurationError(
+                        f"Configuration {item_label} '{section}.{item_kind}' must be a mapping"
+                    )
+                parsed_item: dict[str, Any] = {}
+                for name, value in item_config.items():
+                    secret_env = (
+                        _SECRET_BACKEND_YAML_FIELDS.get((item_kind, name))
+                        if section == "backends"
+                        else None
+                    )
+                    if secret_env is not None:
+                        raise ConfigurationError(
+                            f"Secret '{section}.{item_kind}.{name}' is not allowed in YAML; "
+                            f"use {secret_env}"
+                        )
+                    if name not in nested_schema[item_kind]:
+                        raise ConfigurationError(
+                            f"Unknown OpenSAC configuration field: {section}.{item_kind}.{name}"
+                        )
+                    parsed_item[name] = value
+                nested_values[item_kind] = parsed_item
+            flattened[section] = nested_values
+            continue
         for name, value in section_values.items():
             secret_env = _SECRET_YAML_FIELDS.get((section, name))
             if secret_env is not None:

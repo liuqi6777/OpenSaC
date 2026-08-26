@@ -1,14 +1,13 @@
+"""Broker-owned source normalization, admission, conversion, and identity."""
+
 from __future__ import annotations
 
 import ipaddress
-from copy import deepcopy
 from typing import Any
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
-from opensac._contracts import SearchHit
-from opensac.broker.call_context import current_call
-from opensac.broker.session import BrokerSession
-from opensac.models import HitRecord
+from opensac.backends.document import DocumentHandle
+from opensac.backends.search import SearchHit
 
 _TRACKING_PARAMS = frozenset(
     {
@@ -28,7 +27,6 @@ _TRACKING_PARAMS = frozenset(
     }
 )
 _MAX_SOURCE_CHARS = 4_096
-_MAX_ERROR_SOURCE_CHARS = 160
 
 
 def canonical_url(url: str) -> str:
@@ -94,14 +92,27 @@ def source_for(hit: SearchHit) -> str:
     return source
 
 
-def document_identity(hit: SearchHit) -> str:
+def document_handle_for_hit(hit: SearchHit, *, source: str) -> DocumentHandle:
+    """Copy one search result into the document backend's input contract."""
+
+    return DocumentHandle(
+        source=source,
+        url=hit.url,
+        docid=hit.docid,
+        title=hit.title,
+        date=hit.date,
+        metadata=dict(hit.metadata),
+    )
+
+
+def document_identity(route: str, handle: DocumentHandle) -> str:
     """Return the private backend-scoped identity used by caches and traces."""
 
-    if hit.docid:
-        return f"{hit.backend}:docid:{hit.docid}"
-    if hit.url:
-        return f"{hit.backend}:url:{canonical_url(hit.url)}"
-    raise ValueError("Search backend returned a hit without a URL or docid")
+    if handle.docid:
+        return f"{route}:docid:{handle.docid}"
+    if handle.url:
+        return f"{route}:url:{canonical_url(handle.url)}"
+    raise ValueError("Document handle has neither a URL nor a document identifier")
 
 
 def normalize_source(value: Any) -> str:
@@ -145,35 +156,3 @@ def normalize_web_source(value: Any) -> str:
     else:
         looks_like_host = True
     return canonical_url(candidate) if looks_like_host else source
-
-
-def resolve_sources(state: BrokerSession, sources: list[str]) -> list[SearchHit]:
-    """Resolve only sources admitted by search in this live session."""
-
-    resolved = [(source, state.document_for_alias(normalize_source(source))) for source in sources]
-    missing = [source for source, record in resolved if record is None]
-    if missing:
-        rendered = ", ".join(str(source)[:_MAX_ERROR_SOURCE_CHARS] for source in missing[:3])
-        raise ValueError(
-            f"Unknown sources: {rendered}. Pass a source that search returned in this session."
-        )
-    hits: list[SearchHit] = []
-    for requested_source, record in resolved:
-        if record is None:
-            continue
-        hit = deepcopy(record.hit)
-        hit.source = requested_source.strip()
-        hits.append(hit)
-    context = current_call()
-    if context is not None:
-        context.hits.extend(
-            HitRecord(
-                identity=document_identity(hit),
-                rank=hit.rank,
-                score=hit.score,
-                admission=record.admission,
-            )
-            for hit, (_requested_source, record) in zip(hits, resolved, strict=True)
-            if record is not None
-        )
-    return hits

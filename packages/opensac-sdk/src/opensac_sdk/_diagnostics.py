@@ -23,7 +23,7 @@ _FAILURE_FIELDS = (
     "provider_status",
     "retry_after_seconds",
     "provider",
-    "operation",
+    "component",
     "scope",
 )
 
@@ -79,7 +79,7 @@ def failure_detail(
             continue
         if field == "message":
             value = str(value)[:_MAX_MESSAGE_CHARS]
-        elif field in {"code", "provider", "operation", "scope"}:
+        elif field in {"code", "provider", "component", "scope"}:
             value = str(value)[:_MAX_CONTEXT_CHARS]
         detail[field] = value
     return detail

@@ -13,14 +13,13 @@ from opensac_sdk._record import Record, record
 from opensac_sdk._resources import SearchResource, StateResource
 from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 
-from opensac._contracts import (
-    CapabilityFailure,
+from opensac.backends.document import DocumentContent
+from opensac.backends.search import SearchBatch, SearchHit
+from opensac.broker.capabilities.content import (
+    ContentFailure,
     ContentGrepReport,
     ContentGrepSourceResult,
     ContentMatch,
-    ContentSnippet,
-    SearchBatch,
-    SearchHit,
 )
 from opensac.sandbox.validator import validate_code
 
@@ -78,7 +77,7 @@ class FakeSearch:
         self.hits_per_query = hits_per_query
         self.turn = 1
 
-    def many(self, queries: list[str], **_kwargs: object) -> list[Record]:
+    def many(self, queries: list[str], **_kwargs: object) -> Record:
         prefix = f"turn_{self.turn}_" if self.vary_by_turn else ""
         if self.hits_per_query == 2:
             batches = [
@@ -109,7 +108,16 @@ class FakeSearch:
                 )
                 for index, query in enumerate(queries)
             ]
-            return [record(batch.model_dump(mode="json")) for batch in batches]
+            return record(
+                {
+                    "results": [
+                        {"input_index": index, **batch.model_dump(mode="json")}
+                        for index, batch in enumerate(batches)
+                    ],
+                    "failures": [],
+                    "input_count": len(queries),
+                }
+            )
 
         batches = [
             SearchBatch(
@@ -130,10 +138,19 @@ class FakeSearch:
             )
             for query_index, query in enumerate(queries)
         ]
-        return [record(batch.model_dump(mode="json")) for batch in batches]
+        return record(
+            {
+                "results": [
+                    {"input_index": index, **batch.model_dump(mode="json")}
+                    for index, batch in enumerate(batches)
+                ],
+                "failures": [],
+                "input_count": len(queries),
+            }
+        )
 
-    def fuse_rrf(self, batches: list[Record], **kwargs: object):
-        return self._resource.fuse_rrf(batches, **kwargs)
+    def fuse_rrf(self, report: Record, **kwargs: object):
+        return self._resource.fuse_rrf(report, **kwargs)
 
 
 class FakeContent:
@@ -188,23 +205,31 @@ class FakeContent:
                 )
             ]
         failed_index = len(sources) - 1 if self.partial_failure else None
-        failure = CapabilityFailure(
-            code="provider_timeout",
-            message="document fetch timed out",
-            retryable=True,
-            attempts=3,
-        )
         source_results = [
             ContentGrepSourceResult(
                 input_index=index,
                 source=source,
                 title=source,
                 match_count=sum(match.input_index == index for match in matches),
-                scan_complete=index != failed_index,
-                failure=failure if index == failed_index else None,
+                scan_complete=True,
             )
             for index, source in enumerate(sources)
+            if index != failed_index
         ]
+        if failed_index is not None:
+            matches = [match for match in matches if match.input_index != failed_index]
+            failures = [
+                ContentFailure(
+                    input_index=failed_index,
+                    source=sources[failed_index],
+                    code="provider_timeout",
+                    message="document fetch timed out",
+                    retryable=True,
+                    attempts=3,
+                )
+            ]
+        else:
+            failures = []
         return ContentGrepReport(
             pattern=pattern,
             mode="regex",
@@ -213,14 +238,15 @@ class FakeContent:
             max_matches_per_source=20,
             matches=matches,
             source_results=source_results,
+            failures=failures,
             input_count=len(sources),
         )
 
-    def read(self, source: str, **kwargs: object) -> ContentSnippet:
+    def read(self, source: str, **kwargs: object) -> DocumentContent:
         self.read_sources.append(source)
         offset = int(kwargs["offset"])
         text = f"{'1998' if offset > 50 else 'target phrase'} evidence for {source}"
-        return ContentSnippet(
+        return DocumentContent(
             source=source,
             title=source,
             text=text,
@@ -288,36 +314,54 @@ def _run_pattern(
     return sdk, content, output, printed.getvalue()
 
 
-def test_skill_is_small_and_routes_detailed_contracts() -> None:
+def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
+    flat_skill = " ".join(skill.split())
 
     assert len(skill) < 6_000
-    assert "MCP tool `sac_run(code)`" in skill
-    assert "Never create, resume, or delete REST sessions" in skill
-    assert "request metadata" in skill
-    assert "state_lost" in skill
-    assert "submitted program was not replayed" in skill
-    assert "execution outcome may be" in skill
-    assert "same program blindly" in skill
-    assert "Public web URLs" in skill
-    assert "references/sdk-contract.md" in skill
-    assert "references/advanced.md" in skill
-    assert "references/patterns.md" in skill
-    assert "references/python-recipes.md" in skill
-    assert "references/stateful-research.md" in skill
-    assert "Split on model judgment" in skill
-    assert "exploratory search-only stage is valid" in skill
-    assert "A final research result must use `submit`" in skill
-    assert "semantic map, not an inner tool-calling agent" in skill
-    assert "Use the workspace as program memory" in skill
-    assert "program-to-program memory" in skill
-    assert "Observations show artifact paths, not their contents" in skill
-    assert "Before ending with `NEXT:`" in skill
-    assert "no `sdk.workspace` API" in skill
-    assert "search.fuse_rrf` -> `content.passages" in skill
+    assert "MCP tool `sac_run(code)`" in flat_skill
+    assert "Never create, resume, or delete REST sessions" in flat_skill
+    assert "request metadata" in flat_skill
+    assert "state_lost" in flat_skill
+    assert "submitted program was not replayed" in flat_skill
+    assert "execution outcome may be" in flat_skill
+    assert "same program blindly" in flat_skill
+    assert "Public web URLs" in flat_skill
+    assert "references/sdk-contract.md" in flat_skill
+    assert "references/advanced.md" in flat_skill
+    assert "references/patterns.md" in flat_skill
+    assert "references/python-recipes.md" in flat_skill
+    assert "references/stateful-research.md" in flat_skill
+    assert "Choose the research strategy from the task and observations" in flat_skill
+    assert "No fixed query count, capability" in flat_skill
+    assert "stage split, or workspace schema is required" in flat_skill
+    assert "A final research result must use `submit`" in flat_skill
+    assert "not as new evidence" in flat_skill
+    assert "program-to-program memory" in flat_skill
+    assert "observations show artifact paths, not their" in flat_skill
+    assert "no `sdk.workspace` API" in flat_skill
+    assert "sdk.content.passages" in flat_skill
+    assert "sdk.content.grep" in flat_skill
+    assert "sdk.content.read" in flat_skill
+    assert "Treat every example as a starting point rather than a required pipeline" in flat_skill
     assert "fact checking" in skill.split("---", 2)[1]
-    assert "session_id" not in skill
-    assert "SAC_MCP_" not in skill
+    assert "Use 2-4 queries" not in flat_skill
+    assert "6-12" not in flat_skill
+    assert "Before ending with `NEXT:`" not in flat_skill
+    assert "session_id" not in flat_skill
+    assert "SAC_MCP_" not in flat_skill
+
+
+def test_example_references_are_explicitly_non_prescriptive() -> None:
+    patterns = PATTERNS_PATH.read_text(encoding="utf-8")
+    stateful = STATEFUL_PATH.read_text(encoding="utf-8")
+    flat_patterns = " ".join(patterns.split())
+    flat_stateful = " ".join(stateful.split())
+
+    assert "not a required pipeline" in flat_patterns
+    assert "query count, bounds, call grouping, and stopping point are examples" in flat_patterns
+    assert "not a required workspace schema or stage sequence" in flat_stateful
+    assert "choosing the state shape freely" in flat_stateful
 
 
 def test_skill_has_codex_catalog_metadata() -> None:
@@ -400,7 +444,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert len(explore.splitlines()) <= 45
     assert "sdk.search.many(" in explore
     assert "sdk.search.fuse_rrf(" in explore
-    assert "fuse_rrf(batches, k=60)[:8]" in explore
+    assert "fuse_rrf(report, k=60)[:8]" in explore
     assert "NEXT:" in explore
     assert "sdk.content.grep(" not in explore
     assert "sdk.output.submit(" not in explore
@@ -440,15 +484,17 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert len(stateful_reference.splitlines()) <= 225
     assert len(stateful_stages) == 4
     assert max(len(program.splitlines()) for program in stateful_stages) <= 55
-    assert "code block is one stage" in stateful_reference
-    assert "Searching first" in stateful_reference
+    assert "Use, combine, or replace" in stateful_reference
+    assert "not a required workspace schema or stage sequence" in stateful_reference
     assert "## Canonical stateful pattern" not in stateful_reference
-    assert "## Workspace contract" in stateful_reference
+    assert "## Example workspace layout" in stateful_reference
     assert "| `manifest.json` |" in stateful_reference
     assert "| `pool.jsonl` |" in stateful_reference
     assert "| `evidence.json` |" in stateful_reference
     assert "| `attempts.json` |" in stateful_reference
-    assert "workspace is the program's durable notebook" in stateful_reference
+    assert "workspace is the program's durable notebook" in " ".join(
+        stateful_reference.lower().split()
+    )
 
     assert len(recipes) == 4
     recipe_text = "\n".join(recipes)
@@ -629,8 +675,7 @@ def test_pattern_verifies_far_apart_constraints_in_the_same_document(tmp_path: P
     evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
     assert {row.source for row in evidence.values()} == {"doc_consensus"}
     assert all(
-        set(row) == {"fingerprint", "requirement", "source", "text"}
-        for row in evidence.values()
+        set(row) == {"fingerprint", "requirement", "source", "text"} for row in evidence.values()
     )
     assert len(output.submissions) == 1
     _, citations = output.submissions[0]

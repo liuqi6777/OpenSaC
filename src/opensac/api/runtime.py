@@ -37,7 +37,10 @@ from opensac.api.errors import (
     SessionLostError,
     WorkerDrainingError,
 )
-from opensac.backends.rerank.jina import JinaPassageReranker
+from opensac.backends.document.jina import JinaReaderBackend
+from opensac.backends.document.local_http import LocalDocumentBackend
+from opensac.backends.llm import OpenAICompatibleBackend
+from opensac.backends.rerank import JinaReranker, LexicalReranker
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
 from opensac.broker import (
@@ -47,11 +50,10 @@ from opensac.broker import (
     resolve_broker_socket_path,
 )
 from opensac.broker.session import BrokerSession
-from opensac.config import Settings
+from opensac.config import DEFAULT_LOCAL_BACKEND_BASE_URL, Settings
 from opensac.metrics import CapacityGate
 from opensac.models import (
     CAPABILITY_CONTRACT,
-    CapabilityEvent,
     ExecCreate,
     ExecRecord,
     ExecRecordStatus,
@@ -75,24 +77,20 @@ from opensac.sandbox import (
 )
 from opensac.sandbox.base import SandboxRequest, SandboxResult
 from opensac.store import StateStore
+from opensac.tracing import CapabilityEvent
 
 logger = logging.getLogger(__name__)
 
 
-class _DisabledModelClient:
-    async def close(self) -> None:
+def _llm_backend(settings: Settings) -> OpenAICompatibleBackend | None:
+    config = settings.backends.llm
+    if config.provider == "none":
         return None
-
-
-def _model_client(settings: Settings) -> Any:
-    if not settings.model_name:
-        return _DisabledModelClient()
     _optional.require_extra("Pipeline LLM support", "llm", ("jsonschema", "openai"))
-    from openai import AsyncOpenAI
-
-    return AsyncOpenAI(
-        api_key=settings.model_api_key or "not-configured",
-        base_url=settings.model_base_url,
+    return OpenAICompatibleBackend(
+        model=config.model,
+        api_key=settings.model_api_key,
+        base_url=config.base_url,
     )
 
 
@@ -120,92 +118,102 @@ class ApplicationRuntime:
         self.session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
-        self.model_client = _model_client(settings)
-        provider_operations = list(
-            ("local.search", "local.document")
-            if settings.search_backend == "local"
-            else ("web.search", "web.scrape")
-        )
-        if settings.passage_ranker == "jina":
-            provider_operations.append("web.rerank")
-        self.provider_operations = tuple(provider_operations)
-        provider_policies = {
-            operation: ProviderPolicy(
+        llm_backend = _llm_backend(settings)
+        backend_name = settings.backend_name
+        search_capability = settings.capabilities.search
+        content_capability = settings.capabilities.content
+        extraction_capability = settings.capabilities.extraction
+        llm_enabled = llm_backend is not None
+        service_configs = {
+            "search": settings.provider_services.search,
+            "document": settings.provider_services.document,
+            "rerank": settings.provider_services.rerank,
+        }
+        if llm_enabled:
+            service_configs["llm"] = settings.provider_services.llm
+        self.provider_services = tuple(service_configs)
+        default_concurrency = {
+            "search": settings.max_concurrency,
+            "document": settings.backend_fetch_concurrency,
+            "rerank": 2,
+            "llm": settings.max_concurrency,
+        }
+        service_policies = {
+            name: ProviderPolicy(
                 retry_profile=settings.provider_retry_profile,
                 max_attempts=settings.provider_max_attempts,
-                attempt_timeout_seconds=settings.provider_operation_attempt_timeout_seconds.get(
-                    operation, settings.provider_attempt_timeout_seconds
+                attempt_timeout_seconds=(
+                    config.attempt_timeout_seconds or settings.provider_attempt_timeout_seconds
                 ),
-                logical_deadline_seconds=settings.provider_operation_logical_deadline_seconds.get(
-                    operation, settings.provider_logical_deadline_seconds
+                logical_deadline_seconds=(
+                    config.logical_deadline_seconds or settings.provider_logical_deadline_seconds
                 ),
                 base_backoff_seconds=settings.provider_base_backoff_seconds,
                 max_backoff_seconds=settings.provider_max_backoff_seconds,
                 max_total_backoff_seconds=settings.provider_max_total_backoff_seconds,
                 max_retry_after_seconds=settings.provider_max_retry_after_seconds,
-                concurrency=settings.provider_operation_concurrency.get(
-                    operation,
-                    (
-                        settings.max_concurrency
-                        if operation.endswith(".search")
-                        else 2
-                        if operation == "web.rerank"
-                        else settings.backend_fetch_concurrency
-                    ),
-                ),
-                requests_per_second=settings.provider_operation_requests_per_second.get(operation),
-                burst=settings.provider_operation_burst.get(operation),
+                concurrency=config.concurrency or default_concurrency[name],
+                requests_per_second=config.requests_per_second,
+                burst=config.burst,
             )
-            for operation in self.provider_operations
+            for name, config in service_configs.items()
         }
-        provider_runtime = ProviderRuntime(provider_policies)
-        if settings.search_backend == "local":
+        service_runtimes = {
+            name: ProviderRuntime(policy) for name, policy in service_policies.items()
+        }
+        search_timeout = service_policies["search"].attempt_timeout_seconds
+        document_timeout = service_policies["document"].attempt_timeout_seconds
+        if backend_name == "local":
+            search_base_url = settings.backends.search.base_url
+            document_base_url = settings.backends.document.base_url
+            assert search_base_url is not None
+            assert document_base_url is not None
             search_backend = LocalSearchBackend(
-                settings.local_search_base_url,
-                timeout=max(
-                    provider_policies["local.search"].attempt_timeout_seconds,
-                    provider_policies["local.document"].attempt_timeout_seconds,
-                ),
+                search_base_url,
+                timeout=search_timeout,
+            )
+            document_backend = LocalDocumentBackend(
+                document_base_url,
+                timeout=document_timeout,
             )
         else:
             search_backend = SerperBackend(
                 settings.serper_api_key,
-                jina_api_key=settings.jina_api_key,
-                timeout=max(
-                    provider_policies["web.search"].attempt_timeout_seconds,
-                    provider_policies["web.scrape"].attempt_timeout_seconds,
-                ),
+                timeout=search_timeout,
             )
-        passage_reranker = (
-            JinaPassageReranker(
+            document_backend = JinaReaderBackend(
+                settings.jina_api_key,
+                timeout=document_timeout,
+            )
+        if settings.backends.rerank.provider == "jina":
+            reranker = JinaReranker(
                 api_key=settings.jina_api_key,
-                model=settings.passage_reranker_model,
-                timeout=provider_policies["web.rerank"].attempt_timeout_seconds,
+                model=settings.backends.rerank.model,
+                timeout=service_policies["rerank"].attempt_timeout_seconds,
             )
-            if settings.passage_ranker == "jina"
-            else None
-        )
+        else:
+            reranker = LexicalReranker()
         self.broker = BrokerService(
-            {settings.search_backend: search_backend},
-            model_client=self.model_client if settings.model_name else None,
-            extraction_model=settings.model_name,
-            passage_reranker=passage_reranker,
+            {backend_name: search_backend},
+            document_backends={backend_name: document_backend},
+            llm_backend=llm_backend,
+            reranker=reranker,
             max_concurrency=settings.max_concurrency,
             max_context_payload_bytes=settings.max_context_payload_bytes,
             session_content_cache_bytes=settings.session_content_cache_bytes,
-            max_search_queries_per_request=settings.search_max_queries_per_request,
-            max_search_query_chars=settings.search_max_query_chars,
-            max_search_top_k=settings.search_max_top_k,
-            max_extract_items=settings.extract_max_items,
-            max_extract_instruction_bytes=settings.extract_max_instruction_bytes,
-            max_extract_schema_bytes=settings.extract_max_schema_bytes,
-            max_extract_item_bytes=settings.extract_max_item_bytes,
-            max_extract_total_item_bytes=settings.extract_max_total_item_bytes,
-            max_extract_schema_depth=settings.extract_max_schema_depth,
-            max_extract_repair_attempts=settings.extract_max_repair_attempts,
-            max_content_sources_per_request=settings.content_max_sources_per_request,
-            content_url_admission=settings.content_url_admission,
-            content_batch_deadline_seconds=settings.content_batch_deadline_seconds,
+            max_search_queries_per_request=search_capability.max_queries_per_request,
+            max_search_query_chars=search_capability.max_query_chars,
+            max_search_top_k=search_capability.max_top_k,
+            max_extract_items=extraction_capability.max_items,
+            max_extract_instruction_bytes=extraction_capability.max_instruction_bytes,
+            max_extract_schema_bytes=extraction_capability.max_schema_bytes,
+            max_extract_item_bytes=extraction_capability.max_item_bytes,
+            max_extract_total_item_bytes=extraction_capability.max_total_item_bytes,
+            max_extract_schema_depth=extraction_capability.max_schema_depth,
+            max_extract_repair_attempts=extraction_capability.max_repair_attempts,
+            max_content_sources_per_request=content_capability.max_sources_per_request,
+            content_url_admission=content_capability.url_admission,
+            content_batch_deadline_seconds=content_capability.batch_deadline_seconds,
             provider_execution_config=ProviderExecutionConfig(
                 inflight_coalescing=settings.provider_inflight_coalescing,
                 max_inflight_keys=settings.provider_max_inflight_keys,
@@ -213,7 +221,10 @@ class ApplicationRuntime:
                 result_cache_ttl_seconds=settings.provider_result_cache_ttl_seconds,
                 result_cache_max_bytes=settings.provider_result_cache_max_bytes,
             ),
-            provider_runtime=provider_runtime,
+            search_runtime=service_runtimes["search"],
+            document_runtime=service_runtimes["document"],
+            rerank_runtime=service_runtimes["rerank"],
+            llm_runtime=service_runtimes.get("llm"),
             backend_revision=settings.backend_revision,
             capability_observer=self.dashboard if self.dashboard.enabled else None,
         )
@@ -235,8 +246,7 @@ class ApplicationRuntime:
             sandbox_kwargs["max_containers"] = settings.sandbox_max_warm_containers
         self.sandbox = sandbox_type(**sandbox_kwargs)
         has_persisted_interpreter = any(
-            session.execution_mode == "persistent_interpreter"
-            for session in self.store.sessions()
+            session.execution_mode == "persistent_interpreter" for session in self.store.sessions()
         )
         self.persistent_sandbox = (
             PersistentDockerSandbox(**sandbox_kwargs)
@@ -291,10 +301,7 @@ class ApplicationRuntime:
             try:
                 await self._close_sandbox()
             finally:
-                try:
-                    await self.broker_runtime.stop()
-                finally:
-                    await self.model_client.close()
+                await self.broker_runtime.stop()
 
     def _warm_reaper_enabled(self) -> bool:
         return self.settings.sandbox_warm_idle_seconds > 0 and callable(
@@ -335,12 +342,20 @@ class ApplicationRuntime:
         except importlib_metadata.PackageNotFoundError:
             package_version = __version__
         sdk_capabilities = self.broker.capability_manifest(
-            backend_name=self.settings.search_backend,
+            backend_name=self.settings.backend_name,
             mechanisms=Mechanisms(),
         )
         search_limits = sdk_capabilities["search"]["limits"]
         content_limits = sdk_capabilities["content"]["limits"]
         llm_limits = sdk_capabilities["llm"]["limits"]
+        cacheable_services = [
+            name
+            for name, backends in (
+                ("search", self.broker.search_backends.values()),
+                ("document", self.broker.document_backends.values()),
+            )
+            if any(getattr(backend, "result_cacheable", False) for backend in backends)
+        ]
         return {
             "opensac_version": package_version,
             "build_commit": self.settings.build_commit,
@@ -367,7 +382,9 @@ class ApplicationRuntime:
                 "content": {
                     "max_sources_per_request": content_limits["max_sources_per_request"],
                     "url_admission": sdk_capabilities["content"]["url_admission"],
-                    "batch_deadline_seconds": self.settings.content_batch_deadline_seconds,
+                    "batch_deadline_seconds": (
+                        self.settings.capabilities.content.batch_deadline_seconds
+                    ),
                     "passage_limit": content_limits["passage_limit"],
                     "passage_max_per_source": content_limits["passage_max_per_source"],
                     "passage_chunk_chars": self.broker.passage_chunk_chars,
@@ -383,26 +400,28 @@ class ApplicationRuntime:
                     "enabled": self.settings.provider_result_cache_ttl_seconds > 0,
                     "ttl_seconds": self.settings.provider_result_cache_ttl_seconds,
                     "max_bytes": self.settings.provider_result_cache_max_bytes,
-                    "operations": ["web.search", "web.scrape"],
+                    "services": cacheable_services,
                 },
             },
-            "provider_policies": {
-                operation: {
-                    **asdict(self.broker.provider_runtime.policy_for(operation)),
-                    "max_attempts": self.broker.provider_runtime.policy_for(
-                        operation
-                    ).effective_max_attempts,
+            "service_policies": {
+                name: {
+                    **asdict(self.broker.service_runtimes[name].policy),
+                    "max_attempts": self.broker.service_runtimes[
+                        name
+                    ].policy.effective_max_attempts,
                 }
-                for operation in self.provider_operations
+                for name in self.provider_services
             },
             "backend_revision": self.settings.backend_revision,
             "backend_metadata_hash": self.settings.backend_metadata_hash,
-            "search_backend": self.settings.search_backend,
-            "passage_ranker": self.settings.passage_ranker,
+            "search_backend": self.settings.backend_name,
+            "passage_ranker": self.settings.backends.rerank.provider,
             "experimental_persistent_interpreter": (
                 self.settings.experimental_persistent_interpreter
             ),
-            "local_search_base_url": self.settings.local_search_base_url,
+            "local_search_base_url": (
+                self.settings.backends.search.base_url or DEFAULT_LOCAL_BACKEND_BASE_URL
+            ),
         }
 
     def process_snapshot(self) -> dict[str, float | int]:
@@ -456,7 +475,7 @@ class ApplicationRuntime:
                 and self.persistent_sandbox is not None
                 else None
             ),
-            "broker": self.broker.capacity_gate.snapshot(),
+            "provider_services": self.broker.provider_service_snapshot(),
             "provider_cache": self.broker.providers.result_cache.snapshot(),
             "sessions": {
                 "capacity": self.settings.max_active_sessions,
@@ -560,7 +579,7 @@ class ApplicationRuntime:
             )
             session = self.store.create_session(
                 request,
-                backend=self.settings.search_backend,
+                backend=self.settings.backend_name,
                 worker_id=self.worker_id,
                 worker_epoch=self.worker_epoch,
                 request_hash=request_hash,

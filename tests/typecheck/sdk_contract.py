@@ -7,21 +7,24 @@ source: str = hits[0].source
 rank: int = hits[0]["rank"]
 
 batches = sdk.search.many(["OpenSAC", "search as code"])
-if batches[0].failure is not None:
-    failure_provider: str | None = batches[0].failure.provider
-    failure_operation: str | None = batches[0].failure.operation
-    failure_scope: str | None = batches[0].failure.scope
+if batches.failures:
+    failure_provider: str | None = batches.failures[0].provider
+    failure_component: str | None = batches.failures[0].component
+    failure_scope: str | None = batches.failures[0].scope
 else:
-    failure_provider = failure_operation = failure_scope = None
+    failure_provider = failure_component = failure_scope = None
+
+fused = sdk.search.fuse_rrf(batches)
+fused_rank: int | None = fused[0].rank if fused else None
 
 try:
     sdk.search("provider diagnostics")
 except BrokerError as error:
     broker_provider: str | None = error.provider
-    broker_operation: str | None = error.operation
+    broker_component: str | None = error.component
     broker_scope: str | None = error.scope
 else:
-    broker_provider = broker_operation = broker_scope = None
+    broker_provider = broker_component = broker_scope = None
 
 row = sdk.content.read(source, offset=1, limit=20)
 text: str = row.text
@@ -33,7 +36,7 @@ rows = sdk.content.read_many(
         {"source": source, "offset": 21, "limit": 20, "max_chars": 8_000},
     ]
 )
-input_index: int = rows[0].input_index
+input_index: int = rows.results[0].input_index
 
 report = sdk.content.grep([source], "OpenSAC", mode="literal", case_sensitive=True)
 match_line: int = report.matches[0].line
@@ -54,13 +57,12 @@ extractions = sdk.llm.extract_many(
         "additionalProperties": False,
     },
 )
-failure_code: str | None = (
-    extractions[0].failure.code if extractions[0].failure is not None else None
-)
+failure_code: str | None = extractions.failures[0].code if extractions.failures else None
 
 sdk.output.submit(
     {
         "rank": rank,
+        "fused_rank": fused_rank,
         "input_index": input_index,
         "match_line": match_line,
         "scan_complete": scan_complete,
@@ -68,10 +70,10 @@ sdk.output.submit(
         "content_backend_fetches": content_backend_fetches,
         "failure_code": failure_code,
         "failure_provider": failure_provider,
-        "failure_operation": failure_operation,
+        "failure_component": failure_component,
         "failure_scope": failure_scope,
         "broker_provider": broker_provider,
-        "broker_operation": broker_operation,
+        "broker_component": broker_component,
         "broker_scope": broker_scope,
         "next_offset": next_offset,
     },

@@ -4,20 +4,24 @@ from __future__ import annotations
 
 from urllib.parse import quote, unquote, urlsplit
 
-from opensac._contracts import SearchHit
+from .base import DocumentHandle
 
 
-def document_fetch_candidates(hit: SearchHit) -> list[SearchHit]:
+def document_fetch_candidates(handle: DocumentHandle) -> list[DocumentHandle]:
     """Return the original target followed by safe, provider-agnostic fallbacks."""
 
-    candidates = [hit]
-    fallback_url = _internet_archive_text_url(hit.url)
-    if fallback_url is None or fallback_url == hit.url:
+    candidates = [handle]
+    fallback_url = _internet_archive_text_url(handle.url)
+    if fallback_url is None or fallback_url == handle.url:
         return candidates
-    fallback = hit.model_copy(deep=True)
-    fallback.url = fallback_url
-    fallback.metadata["_opensac_representation"] = "internet_archive_djvu_text"
-    candidates.append(fallback)
+    candidates.append(
+        handle.model_copy(
+            update={
+                "url": fallback_url,
+                "representation": "internet_archive_djvu_text",
+            }
+        )
+    )
     return candidates
 
 

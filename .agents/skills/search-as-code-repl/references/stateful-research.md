@@ -1,26 +1,26 @@
-# REPL namespace, checkpoint, and recovery
+# REPL namespace and optional recovery checkpoints
 
-The persistent interpreter is the working notebook. Python globals are cheap working state;
-`sdk.state` is a deliberate recovery checkpoint. Keep temporary candidates and helper functions in
-memory, and serialize only expensive results or verified evidence at meaningful phase boundaries.
+This reference shows one possible use of the persistent namespace and `sdk.state`; it is not a
+required state layout or cell sequence. Python globals are live working memory. Files are a separate,
+optional recovery mechanism when the deployment enables persistence.
 
 ## Contents
 
-- [Namespace contract](#namespace-contract)
+- [Runtime semantics](#runtime-semantics)
 - [1. Build live working state](#1-build-live-working-state)
 - [2. Verify incrementally](#2-verify-incrementally)
 - [3. Inspect after an uncertain failure](#3-inspect-after-an-uncertain-failure)
-- [4. Checkpoint and submit](#4-checkpoint-and-submit)
+- [4. Optionally checkpoint and submit](#4-optionally-checkpoint-and-submit)
 - [Interpreter loss](#interpreter-loss)
 
-## Namespace contract
+## Runtime semantics
 
-- Use semantic names such as `candidate_pool`, `passage_report`, and `verified_evidence`.
-- End review cells with `NEXT:` and explicitly name every global the next cell should reuse.
-- Overwrite or `del` objects that no longer reflect the current strategy.
+- Choose global names and structures that fit the task. Names in these examples are illustrative.
+- Reuse live objects, recompute them, or overwrite and delete them as useful. The example `NEXT:`
+  lines are optional stdout conventions, not a cell protocol.
 - Ordinary Python exceptions do not clear assignments completed earlier in the same cell.
-- Checkpoint expensive capability results and verified evidence at phase boundaries, not after every
-  mutation. Treat `sdk.state` as recovery state rather than a mirror of the namespace.
+- Choose whether to checkpoint from recomputation cost and failure risk. No checkpoint boundary or
+  schema is required; avoid mirroring the entire namespace by default.
 - Confirm `sdk.session.capabilities()["mechanisms"]["persistence"]` before relying on a checkpoint.
   With persistence disabled, `sdk.state` uses the current temporary workspace and cannot recover a
   later cell or a lost interpreter.
@@ -48,11 +48,11 @@ checkpoint_root = f"runs/{research_id}"
 queries = ['"exact phrase" entity', "entity alternate wording", "rare clue organization"]
 
 try:
-    search_batches = sdk.search.many(queries, limit_per_query=10, concurrency=4)
+    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
 except BrokerError as error:
     print(f"ERROR: search code={error.code} retryable={error.retryable}")
 else:
-    candidate_pool = sdk.search.fuse_rrf(search_batches, k=60, limit=40)
+    candidate_pool = sdk.search.fuse_rrf(search_report, k=60, limit=40)
     verified_evidence = {}
     print(f"candidates={len(candidate_pool)} research={research_id}")
     print(
@@ -83,7 +83,7 @@ else:
         passage = sdk.content.read(
             match.source, offset=max(match.line - 10, 1), limit=40, max_chars=16_000
         )
-        if passage.failure is None and re.search(pattern, passage.text, re.IGNORECASE):
+        if re.search(pattern, passage.text, re.IGNORECASE):
             verified_evidence[constraint_name] = {
                 "source": passage.source,
                 "text": passage.text,
@@ -126,10 +126,11 @@ print(
 )
 ```
 
-## 4. Checkpoint and submit
+## 4. Optionally checkpoint and submit
 
-Checkpoint only at a stable phase boundary. Convert SDK records to plain dictionaries at that
-boundary so recovery does not depend on in-memory record classes.
+This example saves a compact recovery artifact only when filesystem persistence is enabled. Adapt or
+omit the artifact, schema, and timing. Converting SDK records to plain dictionaries keeps a saved
+checkpoint independent of in-memory record classes.
 
 ```python
 from opensac_sdk import sdk
@@ -141,7 +142,10 @@ checkpoint = {
     "candidates": [dict(item) for item in candidate_pool[:40]],
     "evidence": verified_evidence,
 }
-sdk.state.write_json(f"{checkpoint_root}/checkpoint.json", checkpoint)
+capabilities = sdk.session.capabilities()
+persistence_enabled = bool(capabilities["mechanisms"]["persistence"])
+if persistence_enabled:
+    sdk.state.write_json(f"{checkpoint_root}/checkpoint.json", checkpoint)
 
 if missing_constraints:
     print(
@@ -158,6 +162,6 @@ else:
 ## Interpreter loss
 
 An observation with `interpreter_state=lost` or `state_lost` means the cell is never replayed.
-The adapter discards that session; the next invocation starts a clean one. Restore only an existing
-phase checkpoint, re-admit local sources, and redo operations absent from the checkpoint. Never infer
-completion merely because a capability was present in the lost cell's source code.
+The adapter discards that session; the next invocation starts a clean one. Restore a trustworthy
+checkpoint if one exists, re-admit local sources, and redo any work that evidence does not show as
+complete. Never infer completion merely because a capability appeared in the lost cell's source.

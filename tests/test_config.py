@@ -34,8 +34,15 @@ def test_local_template_defines_a_valid_complete_configuration() -> None:
 
     assert settings.api_host == "127.0.0.1"
     assert settings.data_dir == example.parent.parent / ".opensac"
-    assert settings.search_backend == "local"
-    assert settings.provider_operation_concurrency == {}
+    assert settings.backend_name == "local"
+    assert settings.backends.search.provider == "local"
+    assert settings.backends.document.provider == "local"
+    assert settings.backends.rerank.provider == "lexical"
+    assert settings.backends.llm.provider == "none"
+    assert settings.capabilities.search.max_top_k == 600
+    assert settings.capabilities.extraction.max_items == 256
+    assert settings.provider_services.search.concurrency is None
+    assert settings.provider_services.llm.concurrency is None
     assert settings.sandbox_docker_host_platform in {"darwin", "linux"}
 
 
@@ -45,7 +52,9 @@ def test_profile_templates_are_valid(name: str) -> None:
 
     settings = load_settings(config)
 
-    assert settings.search_backend == "web"
+    assert settings.backend_name == "web"
+    assert settings.backends.search.provider == "serper"
+    assert settings.backends.document.provider == "jina"
 
 
 def test_partial_yaml_uses_defaults_and_resolves_storage_paths(tmp_path: Path) -> None:
@@ -59,11 +68,18 @@ api:
 storage:
   data_dir: state
   broker_socket: run/broker.sock
-search:
-  backend: web
+backends:
+  search:
+    provider: serper
+  document:
+    provider: jina
+capabilities:
+  search:
+    max_top_k: 42
 providers:
-  operation_concurrency:
-    web.search: 4
+  services:
+    search:
+      concurrency: 4
 """,
         encoding="utf-8",
     )
@@ -74,15 +90,18 @@ providers:
     assert settings.api_port == 9000
     assert settings.data_dir == (deployment / "state").resolve()
     assert settings.broker_socket == (deployment / "run/broker.sock").resolve()
-    assert settings.search_backend == "web"
-    assert settings.provider_operation_concurrency == {"web.search": 4}
+    assert settings.backend_name == "web"
+    assert settings.capabilities.search.max_top_k == 42
+    assert settings.provider_services.search.concurrency == 4
 
 
 def test_no_config_uses_defaults() -> None:
     settings = load_settings()
 
     assert settings.api_host == "127.0.0.1"
-    assert settings.search_backend == "local"
+    assert settings.backend_name == "local"
+    assert settings.backends.search.base_url == "http://127.0.0.1:8081"
+    assert settings.backends.document.base_url == "http://127.0.0.1:8081"
     assert settings.dashboard_is_enabled is True
 
 
@@ -148,6 +167,22 @@ def test_direct_settings_construction_does_not_read_environment(
         ("- api\n- storage\n", "must contain a YAML mapping"),
         ("unknown:\n  value: 1\n", "Unknown OpenSAC configuration section"),
         ("api:\n  unknown: 1\n", "Unknown OpenSAC configuration field: api.unknown"),
+        (
+            "backends:\n  search:\n    unknown: 1\n",
+            "Unknown OpenSAC configuration field: backends.search.unknown",
+        ),
+        (
+            "backends:\n  unknown:\n    provider: local\n",
+            "Unknown OpenSAC configuration backend: backends.unknown",
+        ),
+        (
+            "capabilities:\n  unknown:\n    value: 1\n",
+            "Unknown OpenSAC configuration capability: capabilities.unknown",
+        ),
+        (
+            "capabilities:\n  search:\n    unknown: 1\n",
+            "Unknown OpenSAC configuration field: capabilities.search.unknown",
+        ),
         ("api:\n  host: one\n  host: two\n", "Duplicate YAML key"),
         ("api:\n  port: invalid\n", "Invalid OpenSAC configuration"),
     ],
@@ -178,7 +213,10 @@ def test_missing_yaml_fails_with_path() -> None:
     ("yaml_text", "environment_name"),
     [
         ("api:\n  key: secret\n", "OPENSAC_API_KEY"),
-        ("model:\n  api_key: secret\n", "OPENSAC_MODEL_API_KEY"),
+        ("backends:\n  llm:\n    api_key: secret\n", "OPENSAC_MODEL_API_KEY"),
+        ("backends:\n  search:\n    api_key: secret\n", "OPENSAC_SERPER_API_KEY"),
+        ("backends:\n  document:\n    api_key: secret\n", "OPENSAC_JINA_API_KEY"),
+        ("backends:\n  rerank:\n    api_key: secret\n", "OPENSAC_JINA_API_KEY"),
         ("providers:\n  serper_api_key: secret\n", "OPENSAC_SERPER_API_KEY"),
         ("providers:\n  jina_api_key: secret\n", "OPENSAC_JINA_API_KEY"),
     ],
@@ -196,6 +234,148 @@ def test_legacy_non_secret_environment_setting_fails(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(ConfigurationError, match="move these settings to YAML: OPENSAC_API_HOST"):
         load_settings()
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "message"),
+    [
+        ("model:\n  name: pipeline-model\n", "Unknown OpenSAC configuration section"),
+        ("search:\n  max_top_k: 10\n", "Unknown OpenSAC configuration section"),
+        ("content:\n  passage_ranker: lexical\n", "Unknown OpenSAC configuration section"),
+        ("extraction:\n  max_items: 10\n", "Unknown OpenSAC configuration section"),
+    ],
+)
+def test_legacy_yaml_backend_schema_is_rejected(yaml_text: str, message: str) -> None:
+    config = Path("opensac.yaml")
+    config.write_text(yaml_text, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match=message):
+        load_settings(config)
+
+
+def test_backend_provider_pair_is_validated() -> None:
+    with pytest.raises(ValueError, match=r"local \+ local or serper \+ jina"):
+        Settings(
+            backends={
+                "search": {"provider": "serper"},
+                "document": {"provider": "local"},
+            }
+        )
+
+
+def test_llm_backend_requires_an_explicit_model() -> None:
+    with pytest.raises(ValueError, match="backends.llm.model is required"):
+        Settings(backends={"llm": {"provider": "openai_compatible"}})
+
+
+def test_rerank_backend_requires_a_model_only_for_jina() -> None:
+    with pytest.raises(ValueError, match="backends.rerank.model is required"):
+        Settings(backends={"rerank": {"provider": "jina"}})
+    with pytest.raises(ValueError, match="supported only by the jina provider"):
+        Settings(backends={"rerank": {"provider": "lexical", "model": "rerank-model"}})
+    with pytest.raises(ValueError, match="literal_error"):
+        Settings(backends={"rerank": {"provider": "none"}})
+
+    settings = Settings(backends={"rerank": {"provider": "jina", "model": "rerank-model"}})
+    assert settings.backends.rerank.provider == "jina"
+    assert settings.backends.rerank.model == "rerank-model"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "operation_concurrency",
+        "operation_requests_per_second",
+        "operation_burst",
+        "operation_attempt_timeout_seconds",
+        "operation_logical_deadline_seconds",
+    ],
+)
+def test_old_provider_operation_yaml_fields_are_rejected(field: str, tmp_path: Path) -> None:
+    config = tmp_path / "opensac.yaml"
+    config.write_text(f"providers:\n  {field}: {{}}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match=f"providers.{field}"):
+        load_settings(config)
+
+
+def test_provider_services_reject_unknown_service_names() -> None:
+    with pytest.raises(ValueError, match="extra_forbidden"):
+        Settings(provider_services={"custom": {"concurrency": 1}})
+
+
+def test_rerank_service_policy_applies_to_the_default_lexical_backend() -> None:
+    settings = Settings(provider_services={"rerank": {"concurrency": 1}})
+
+    assert settings.provider_services.rerank.concurrency == 1
+
+
+def test_llm_service_policy_requires_an_enabled_backend() -> None:
+    with pytest.raises(ValueError, match="requires an enabled LLM provider"):
+        Settings(provider_services={"llm": {"concurrency": 1}})
+
+    settings = Settings(
+        backends={"llm": {"provider": "openai_compatible", "model": "pipeline-model"}},
+        provider_services={"llm": {"concurrency": 1}},
+    )
+    assert settings.provider_services.llm.concurrency == 1
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["passage_ranker", "passage_reranker_model", "passage_ranking"],
+)
+def test_old_passage_reranker_yaml_fields_are_rejected(field: str, tmp_path: Path) -> None:
+    config = tmp_path / "opensac.yaml"
+    config.write_text(
+        f"capabilities:\n  content:\n    {field}: legacy\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match=f"capabilities.content.{field}"):
+        load_settings(config)
+
+
+def test_llm_backend_yaml_loads_non_secret_connection_settings(tmp_path: Path) -> None:
+    config = tmp_path / "opensac.yaml"
+    config.write_text(
+        """
+backends:
+  llm:
+    provider: openai_compatible
+    model: pipeline-model
+    base_url: https://llm.example.test/v1
+""",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config)
+
+    assert settings.backends.llm.provider == "openai_compatible"
+    assert settings.backends.llm.model == "pipeline-model"
+    assert settings.backends.llm.base_url == "https://llm.example.test/v1"
+
+
+def test_capability_yaml_loads_nested_policy_settings(tmp_path: Path) -> None:
+    config = tmp_path / "opensac.yaml"
+    config.write_text(
+        """
+capabilities:
+  search:
+    max_queries_per_request: 7
+  content:
+    url_admission: searched_only
+  extraction:
+    max_items: 11
+""",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config)
+
+    assert settings.capabilities.search.max_queries_per_request == 7
+    assert settings.capabilities.content.url_admission == "searched_only"
+    assert settings.capabilities.extraction.max_items == 11
 
 
 def test_dotenv_rejects_non_secret_settings() -> None:

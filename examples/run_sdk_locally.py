@@ -6,7 +6,7 @@ can iterate on SDK code directly.
 
     python examples/run_sdk_locally.py examples/research_pipeline.py
     python examples/run_sdk_locally.py my_program.py --docker
-    OPENSAC_SEARCH_BACKEND=web python examples/run_sdk_locally.py my_program.py
+    python examples/run_sdk_locally.py my_program.py --config configs/web.yaml
 
 Host mode is fast but runs the program in this process, so the sandbox code
 validator and the container isolation do not apply. Use --docker to exercise the
@@ -24,10 +24,12 @@ import secrets
 import tempfile
 from pathlib import Path
 
+from opensac.backends.document.jina import JinaReaderBackend
+from opensac.backends.document.local_http import LocalDocumentBackend
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
 from opensac.broker import BrokerRuntime, BrokerService
-from opensac.config import Settings
+from opensac.config import Settings, load_settings
 from opensac.models import Session
 from opensac.sandbox import DockerSandbox, UnsafeCodeError
 from opensac.sandbox.base import SandboxRequest
@@ -38,29 +40,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("program", type=Path, help="Python file that imports opensac_sdk")
     parser.add_argument("--docker", action="store_true", help="run inside the real sandbox image")
     parser.add_argument("--workspace", type=Path, default=None, help="reuse a workspace directory")
+    parser.add_argument("--config", type=Path, default=None, help="OpenSAC YAML configuration")
     return parser.parse_args()
 
 
 async def main() -> int:
     args = parse_args()
-    settings = Settings()
-    backend = settings.search_backend
+    settings = load_settings(args.config)
+    backend = settings.backend_name
     workspace = args.workspace or Path(tempfile.mkdtemp(prefix="opensac-sdk-"))
     workspace.mkdir(parents=True, exist_ok=True)
     token = secrets.token_urlsafe(16)
 
-    search_backend = (
-        LocalSearchBackend(settings.local_search_base_url)
-        if backend == "local"
-        else SerperBackend(
-            settings.serper_api_key,
-            jina_api_key=settings.jina_api_key,
-        )
-    )
+    if backend == "local":
+        search_base_url = settings.backends.search.base_url
+        document_base_url = settings.backends.document.base_url
+        assert search_base_url is not None
+        assert document_base_url is not None
+        search_backend = LocalSearchBackend(search_base_url)
+        document_backend = LocalDocumentBackend(document_base_url)
+    else:
+        search_backend = SerperBackend(settings.serper_api_key)
+        document_backend = JinaReaderBackend(settings.jina_api_key)
     service = BrokerService(
         {backend: search_backend},
-        model_client=None,
-        extraction_model="",
+        document_backends={backend: document_backend},
+        llm_backend=None,
         max_concurrency=settings.max_concurrency,
     )
     service.register_session(
@@ -147,8 +152,10 @@ async def run_in_docker(
     print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="")
-    print(f"\nexit_code {result.exit_code} timed_out={result.timed_out} "
-          f"duration={result.duration_seconds:.1f}s")
+    print(
+        f"\nexit_code {result.exit_code} timed_out={result.timed_out} "
+        f"duration={result.duration_seconds:.1f}s"
+    )
     return result.exit_code
 
 

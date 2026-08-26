@@ -2,23 +2,40 @@
 
 from __future__ import annotations
 
-import math
-import re
 from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass, replace
+from typing import Self
 
-from opensac._contracts import PassageCoordinates, SearchHit
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-_TERM_PATTERN = re.compile(
-    r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)*|[\u3400-\u9fff]|[^\W\d_]+",
-    flags=re.UNICODE,
-)
+from opensac.backends.document import DocumentHandle
+from opensac.backends.rerank import bm25_scores
+
+
+class PassageCoordinates(BaseModel):
+    """Exact half-open coordinates of a passage in normalized document text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_line: int = Field(ge=1)
+    start_character: int = Field(ge=0)
+    end_line: int = Field(ge=1)
+    end_character: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        start = (self.start_line, self.start_character)
+        end = (self.end_line, self.end_character)
+        if end <= start:
+            raise ValueError("passage coordinates must describe a non-empty range")
+        return self
 
 
 @dataclass(frozen=True)
 class PassageCandidate:
-    hit: SearchHit
+    route: str
+    handle: DocumentHandle
     input_index: int
     title: str
     url: str | None
@@ -27,7 +44,7 @@ class PassageCandidate:
     start: int
     end: int
     coordinates: PassageCoordinates
-    lexical_score: float = 0.0
+    prefilter_score: float = 0.0
 
 
 def normalize_document_text(text: str) -> str:
@@ -89,11 +106,7 @@ def segment_passages(
     return windows
 
 
-def _terms(text: str) -> list[str]:
-    return [match.group(0).lower() for match in _TERM_PATTERN.finditer(text)]
-
-
-def score_passage_candidates(
+def score_passage_prefilter(
     query: str,
     candidates: list[PassageCandidate],
 ) -> list[PassageCandidate]:
@@ -101,35 +114,11 @@ def score_passage_candidates(
 
     if not candidates:
         return []
-    query_terms = list(dict.fromkeys(_terms(query)))
-    tokenized = [_terms(candidate.text) for candidate in candidates]
-    if not query_terms:
-        return candidates
-    document_frequency: Counter[str] = Counter()
-    for terms in tokenized:
-        document_frequency.update(set(terms))
-    document_count = len(candidates)
-    average_length = sum(len(terms) for terms in tokenized) / max(document_count, 1)
-    scored: list[PassageCandidate] = []
-    for candidate, terms in zip(candidates, tokenized, strict=True):
-        counts = Counter(terms)
-        document_length = len(terms)
-        score = 0.0
-        for term in query_terms:
-            frequency = counts.get(term, 0)
-            if not frequency:
-                continue
-            frequency_in_documents = document_frequency[term]
-            inverse_document_frequency = math.log(
-                1.0
-                + (document_count - frequency_in_documents + 0.5) / (frequency_in_documents + 0.5)
-            )
-            denominator = frequency + 1.5 * (
-                1.0 - 0.75 + 0.75 * document_length / max(average_length, 1.0)
-            )
-            score += inverse_document_frequency * frequency * 2.5 / denominator
-        scored.append(replace(candidate, lexical_score=score))
-    return scored
+    scores = bm25_scores(query, [candidate.text for candidate in candidates])
+    return [
+        replace(candidate, prefilter_score=score)
+        for candidate, score in zip(candidates, scores, strict=True)
+    ]
 
 
 def prefilter_passage_candidates(
@@ -140,7 +129,7 @@ def prefilter_passage_candidates(
 ) -> list[PassageCandidate]:
     grouped: dict[str, list[PassageCandidate]] = {}
     for candidate in candidates:
-        grouped.setdefault(candidate.hit.source, []).append(candidate)
+        grouped.setdefault(candidate.handle.source, []).append(candidate)
 
     retained: list[PassageCandidate] = []
     for rows in grouped.values():
@@ -148,7 +137,7 @@ def prefilter_passage_candidates(
             sorted(
                 rows,
                 key=lambda candidate: (
-                    -candidate.lexical_score,
+                    -candidate.prefilter_score,
                     candidate.start,
                     candidate.end,
                 ),
@@ -156,7 +145,7 @@ def prefilter_passage_candidates(
         )
     retained.sort(
         key=lambda candidate: (
-            -candidate.lexical_score,
+            -candidate.prefilter_score,
             candidate.input_index,
             candidate.start,
             candidate.end,
@@ -183,9 +172,9 @@ def select_passage_candidates(
     selected: list[tuple[PassageCandidate, float]] = []
     per_source: Counter[str] = Counter()
     for candidate, score in ordered:
-        if per_source[candidate.hit.source] >= max_per_source:
+        if per_source[candidate.handle.source] >= max_per_source:
             continue
-        per_source[candidate.hit.source] += 1
+        per_source[candidate.handle.source] += 1
         selected.append((candidate, score))
         if len(selected) >= limit:
             break

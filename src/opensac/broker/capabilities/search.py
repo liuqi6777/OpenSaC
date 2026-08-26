@@ -3,18 +3,76 @@ from __future__ import annotations
 import asyncio
 import copy
 import uuid
-from typing import Any
+from typing import Any, Self
 
-from opensac._contracts import CapabilityFailure, SearchBatch, SearchHit
-from opensac.backends.search.base import BatchSearchBackend, SearchBackend
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from opensac.backends.search import RetrievalMetadata, SearchBatch, SearchBatchFailure, SearchHit
 from opensac.broker.call_context import current_call
+from opensac.broker.failures import CapabilityFailure
+from opensac.broker.services import SearchService
 from opensac.broker.session import BrokerSession, FlightGroup
+from opensac.broker.sources import document_handle_for_hit, document_identity, source_for
 from opensac.broker.validation import integer, optional_string_list, string
-from opensac.models import HitRecord, ProviderAttemptRecord
 from opensac.provider import ProviderRequestError
+from opensac.tracing import HitRecord, ProviderAttemptRecord
 
-from ..providers.execution import CapabilityProviderError, ProviderExecutor
-from .documents import document_identity, source_for
+from ..providers.execution import CapabilityProviderError
+
+
+class SearchResultHit(BaseModel):
+    """Public search hit without provider locator fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    backend: str
+    title: str = ""
+    domain: str | None = None
+    date: str | None = None
+    snippet: str = ""
+    score: float | None = None
+    rank: int
+    retrieval: RetrievalMetadata | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchResult(BaseModel):
+    """One successful query in a multi-query search report."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_index: int = Field(ge=0)
+    query: str
+    hits: list[SearchResultHit] = Field(default_factory=list)
+
+
+class SearchFailure(CapabilityFailure):
+    """One failed query in a multi-query search report."""
+
+    input_index: int = Field(ge=0)
+    query: str
+
+
+class SearchReport(BaseModel):
+    """Successful and failed query outcomes, partitioned by input index."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    results: list[SearchResult] = Field(default_factory=list)
+    failures: list[SearchFailure] = Field(default_factory=list)
+    input_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_partition(self) -> Self:
+        indexes = [row.input_index for row in self.results]
+        indexes.extend(row.input_index for row in self.failures)
+        if sorted(indexes) != list(range(self.input_count)):
+            raise ValueError("search results and failures must partition the input indexes")
+        return self
+
+
+type _SearchOutcome = SearchBatch | CapabilityFailure
 
 
 def _provider_attempts() -> list[ProviderAttemptRecord]:
@@ -27,24 +85,22 @@ class SearchCapabilities:
 
     def __init__(
         self,
-        backends: dict[str, SearchBackend],
-        providers: ProviderExecutor,
+        services: dict[str, SearchService],
         *,
-        backend_revision: str,
         max_queries_per_request: int,
         max_query_chars: int,
         max_top_k: int,
     ) -> None:
-        self.backends = backends
-        self.providers = providers
-        self.backend_revision = backend_revision
+        if not services:
+            raise ValueError("at least one search service must be configured")
+        self.services = services
         self.max_search_queries_per_request = max_queries_per_request
         self.max_search_query_chars = max_query_chars
         self.max_search_top_k = max_top_k
-        self.inflight_coalescing = providers.flights.enabled
+        self.inflight_coalescing = next(iter(services.values())).inflight_coalescing
 
-    def _search_backend(self, state: BrokerSession) -> tuple[str, SearchBackend]:
-        """The one backend this session searches.
+    def _search_service(self, state: BrokerSession) -> tuple[str, SearchService]:
+        """The one service this session searches.
 
         Resolved from the session rather than from the method name, which is
         what makes `search.query` backend-neutral. The deployment records its
@@ -52,13 +108,13 @@ class SearchCapabilities:
         between here; a session that somehow holds two is a bug worth stopping
         on rather than a tie to break arbitrarily.
         """
-        names = sorted(state.policy.allowed_backends & set(self.backends))
+        names = sorted(state.policy.allowed_backends & set(self.services))
         if len(names) != 1:
             raise RuntimeError(
                 "A session must have exactly one configured search backend, "
                 f"this one has {names or sorted(state.policy.allowed_backends)}."
             )
-        return names[0], self.backends[names[0]]
+        return names[0], self.services[names[0]]
 
     async def query(self, state: BrokerSession, params: dict[str, Any]) -> list[dict[str, Any]]:
         return await self._search(state, params)
@@ -67,9 +123,9 @@ class SearchCapabilities:
         self,
         state: BrokerSession,
         params: dict[str, Any],
-    ) -> tuple[str, SearchBackend, str, list[str] | None, int, int]:
+    ) -> tuple[str, SearchService, str, list[str] | None, int, int]:
         """Validate one query without executing it or charging usage."""
-        backend_name, backend = self._search_backend(state)
+        backend_name, service = self._search_service(state)
         state.policy.require_backend(backend_name)
         query = string(
             params.get("query", ""),
@@ -82,7 +138,7 @@ class SearchCapabilities:
         # honest if a parameter it cannot honour fails loudly: a program that
         # asked for one site and silently got the whole web draws exactly the
         # wrong conclusion from an empty result.
-        if domains and not backend.supports_domains:
+        if domains and not service.supports_domains:
             raise ValueError(
                 f"The '{backend_name}' backend has no domain filter, so "
                 f"domains={list(domains)!r} cannot be honoured. Drop the argument "
@@ -93,13 +149,13 @@ class SearchCapabilities:
         # Clipping would let a program believe it read rank 150 and conclude the
         # document is absent, when nothing ever looked past the ceiling.
         depth = offset + limit
-        if backend.max_depth is not None and depth > backend.max_depth:
+        if service.max_depth is not None and depth > service.max_depth:
             raise ValueError(
-                f"The '{backend_name}' backend reaches rank {backend.max_depth} at "
+                f"The '{backend_name}' backend reaches rank {service.max_depth} at "
                 f"most, and offset={offset} with limit={limit} asks for {depth}. "
                 "Narrow the window, or find the document with a different query."
             )
-        return backend_name, backend, query, domains, limit, offset
+        return backend_name, service, query, domains, limit, offset
 
     def _search_window(
         self,
@@ -128,14 +184,19 @@ class SearchCapabilities:
     ) -> list[dict[str, Any]]:
         context = current_call()
         recorded = context.hits if context is not None else None
+        wire_hits: list[dict[str, Any]] = []
         for hit in hits:
             candidate_source = source_for(hit)
-            identity = document_identity(hit)
-            hit.source = state.remember(
-                hit,
+            handle = document_handle_for_hit(hit, source=candidate_source)
+            identity = document_identity(hit.backend, handle)
+            source = state.remember(
+                hit.backend,
+                handle,
                 identity=identity,
-                candidate_source=candidate_source,
+                rank=hit.rank,
+                score=hit.score,
             )
+            admitted_hit = hit.model_copy(update={"source": source})
             if recorded is not None:
                 recorded.append(
                     HitRecord(
@@ -147,7 +208,8 @@ class SearchCapabilities:
                         admission="search",
                     )
                 )
-        return [self._search_hit_wire(hit) for hit in hits]
+            wire_hits.append(self._search_hit_wire(admitted_hit))
+        return wire_hits
 
     @staticmethod
     def _search_hit_wire(hit: SearchHit) -> dict[str, Any]:
@@ -176,44 +238,26 @@ class SearchCapabilities:
         *,
         request_index: int = 0,
         record_usage: bool = True,
-        operation_id: str | None = None,
+        request_id: str | None = None,
         track_execution: bool = True,
     ) -> list[SearchHit]:
         """Execute one search without mutating the session reference table."""
-        backend_name, backend = self._search_backend(state)
+        backend_name, service = self._search_service(state)
         state.policy.require_backend(backend_name)
-        _, prepared_backend, query, domains, limit, offset = self._prepare_search(state, params)
-        if prepared_backend is not backend:
-            raise RuntimeError("Session search backend changed during request preparation.")
+        _, prepared_service, query, domains, limit, offset = self._prepare_search(state, params)
+        if prepared_service is not service:
+            raise RuntimeError("Session search service changed during request preparation.")
         if record_usage:
             await state.policy.record_search()
 
-        async def request() -> list[SearchHit]:
-            return await backend.search(
-                query,
-                limit=limit,
-                offset=offset,
-                domains=domains,
-            )
-
-        preflight = getattr(backend, "preflight_search", None)
-
-        return await self.providers.run(
+        return await service.search(
             state,
-            backend=backend,
-            operation=f"{backend_name}.search",
-            request_indexes=[request_index],
-            request_value={
-                "backend": backend_name,
-                "revision": self.backend_revision,
-                "query": query,
-                "limit": limit,
-                "offset": offset,
-                "domains": domains,
-            },
-            request=request,
-            preflight=preflight if callable(preflight) else None,
-            operation_id=operation_id,
+            query,
+            limit=limit,
+            offset=offset,
+            domains=domains,
+            request_index=request_index,
+            request_id=request_id,
             track_execution=track_execution,
         )
 
@@ -232,24 +276,17 @@ class SearchCapabilities:
         state: BrokerSession,
         params: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        backend_name, _backend, query, domains, limit, offset = self._prepare_search(state, params)
+        backend_name, service, query, domains, limit, offset = self._prepare_search(state, params)
         await state.policy.record_search()
-        normalized_domains = (
-            sorted(set(domains))
-            if domains
-            else None
+        normalized_domains = sorted(set(domains)) if domains else None
+        fingerprint = service.request_fingerprint(
+            query,
+            limit=limit,
+            offset=offset,
+            domains=normalized_domains,
         )
-        request = {"limit": limit, "offset": offset, "domains": normalized_domains}
-        fingerprint = self.providers.fingerprint(
-            {
-                "backend": backend_name,
-                "revision": self.backend_revision,
-                "query": query,
-                **request,
-            }
-        )
-        key = self.providers.flights.key(f"{backend_name}.search", fingerprint)
-        admission = await self.providers.flights.admit(
+        key = service.flight_key(fingerprint)
+        admission = await service.flights.admit(
             state,
             {key: (fingerprint, [0])},
             group_new=False,
@@ -258,7 +295,7 @@ class SearchCapabilities:
 
             async def execute(
                 group: FlightGroup = group,
-            ) -> dict[str, SearchBatch]:
+            ) -> dict[str, _SearchOutcome]:
                 try:
                     hits = await self._retrieve_search(
                         state,
@@ -269,40 +306,37 @@ class SearchCapabilities:
                             "domains": normalized_domains,
                         },
                         record_usage=False,
-                        operation_id=group.operation_id,
+                        request_id=group.request_id,
                         track_execution=False,
                     )
                 except ProviderRequestError as exc:
-                    batch = SearchBatch(
-                        query=query,
-                        failure=self.providers.provider_failure(exc),
+                    outcome: _SearchOutcome = CapabilityFailure.model_validate(
+                        service.provider_failure(exc)
                     )
                 else:
-                    batch = SearchBatch(query=query, hits=hits)
-                return {key: batch}
+                    outcome = SearchBatch(query=query, hits=hits)
+                return {key: outcome}
 
-            self.providers.flights.start(state, group, execute)
+            service.flights.start(state, group, execute)
 
-        batch = SearchBatch.model_validate(
-            await self.providers.flights.wait(state, admission.waiters[key])
-        )
-        if batch.failure is not None:
+        outcome = await service.flights.wait(state, admission.waiters[key])
+        if isinstance(outcome, CapabilityFailure):
             raise CapabilityProviderError.from_failure(
-                batch.failure.model_dump(mode="json"),
+                outcome.model_dump(mode="json"),
                 attempts=len(_provider_attempts()),
             )
-        return self._record_search_hits(state, list(batch.hits))
+        if not isinstance(outcome, SearchBatch):
+            raise RuntimeError("Search flight returned an invalid outcome.")
+        return self._record_search_hits(state, list(outcome.hits))
 
-    async def query_many(
-        self, state: BrokerSession, params: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    async def query_many(self, state: BrokerSession, params: dict[str, Any]) -> dict[str, Any]:
         return await self._search_many(state, params)
 
     async def _search_many(
         self,
         state: BrokerSession,
         params: dict[str, Any],
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         raw_queries = params.get("queries", [])
         if not isinstance(raw_queries, list):
             raise ValueError("queries must be a list")
@@ -323,7 +357,7 @@ class SearchCapabilities:
             minimum=1,
             maximum=20,
         )
-        backend_name, backend = self._search_backend(state)
+        backend_name, service = self._search_service(state)
         state.policy.require_backend(backend_name)
         # Options are global to the batch. Validate them once before charging
         # usage or admitting any provider side effect.
@@ -338,36 +372,27 @@ class SearchCapabilities:
         )
         await state.policy.record_search(len(queries))
 
-        request = {
-            "limit": limit,
-            "offset": offset,
-            "domains": domains,
-        }
-        batches: list[SearchBatch | None] = [None] * len(queries)
+        outcomes: list[_SearchOutcome | None] = [None] * len(queries)
         leaders: list[int] = []
         leader_for_key: dict[str, int] = {}
         fingerprints: dict[int, str] = {}
         for index, original_query in enumerate(queries):
             query = original_query.strip()
             if not query:
-                batches[index] = SearchBatch(
-                    query=original_query,
-                    failure=self.providers.contextualize_failure(
+                outcomes[index] = CapabilityFailure.model_validate(
+                    service.contextualize_failure(
                         {
                             "code": "invalid_request",
                             "message": "query must not be empty",
                             "retryable": False,
                             "attempts": 0,
                         },
-                        backend=backend,
-                        operation=f"{backend_name}.search",
-                    ),
+                    )
                 )
                 continue
             if len(query) > self.max_search_query_chars:
-                batches[index] = SearchBatch(
-                    query=original_query,
-                    failure=self.providers.contextualize_failure(
+                outcomes[index] = CapabilityFailure.model_validate(
+                    service.contextualize_failure(
                         {
                             "code": "invalid_request",
                             "message": (
@@ -377,18 +402,14 @@ class SearchCapabilities:
                             "retryable": False,
                             "attempts": 0,
                         },
-                        backend=backend,
-                        operation=f"{backend_name}.search",
-                    ),
+                    )
                 )
                 continue
-            fingerprint = self.providers.fingerprint(
-                {
-                    "backend": backend_name,
-                    "revision": self.backend_revision,
-                    "query": query,
-                    **request,
-                }
+            fingerprint = service.request_fingerprint(
+                query,
+                limit=limit,
+                offset=offset,
+                domains=domains,
             )
             fingerprints[index] = fingerprint
             leader = leader_for_key.get(fingerprint)
@@ -396,7 +417,7 @@ class SearchCapabilities:
                 leader_for_key[fingerprint] = index
                 leaders.append(index)
                 continue
-            self.providers.record_deduplicated_request(
+            service.record_deduplicated_request(
                 request_index=index,
                 leader_index=leader,
                 request_fingerprint=fingerprint,
@@ -409,32 +430,29 @@ class SearchCapabilities:
         if self.inflight_coalescing:
             leader_rows = await self._search_many_coalesced(
                 state,
-                backend_name,
-                backend,
+                service,
                 queries,
                 leaders,
                 fingerprints,
                 limit=limit,
                 offset=offset,
                 domains=domains,
-                request=request,
                 concurrency=concurrency,
             )
-        elif leaders and backend_name == "local" and isinstance(backend, BatchSearchBackend):
-            leader_rows = await self._search_many_batched(
+        elif leaders and service.supports_batch:
+            leader_rows = await self._search_many_transport_batch(
                 state,
-                backend,
+                service,
                 queries,
                 leaders,
                 limit=limit,
                 offset=offset,
                 domains=domains,
-                request=request,
             )
         else:
             gate = asyncio.Semaphore(concurrency)
 
-            async def one(index: int) -> SearchBatch:
+            async def one(index: int) -> _SearchOutcome:
                 async with gate:
                     try:
                         hits = await self._retrieve_search(
@@ -449,10 +467,7 @@ class SearchCapabilities:
                             record_usage=False,
                         )
                     except ProviderRequestError as exc:
-                        return SearchBatch(
-                            query=queries[index],
-                            failure=self.providers.provider_failure(exc),
-                        )
+                        return CapabilityFailure.model_validate(service.provider_failure(exc))
                     return SearchBatch(
                         query=queries[index],
                         hits=hits,
@@ -462,36 +477,49 @@ class SearchCapabilities:
             leader_rows = dict(zip(leaders, returned, strict=True))
 
         for index in leaders:
-            batches[index] = leader_rows[index]
+            outcomes[index] = leader_rows[index]
         for index, fingerprint in fingerprints.items():
             if index in leader_rows:
                 continue
             leader = leader_for_key[fingerprint]
-            duplicate = copy.deepcopy(leader_rows[leader])
-            duplicate.query = queries[index]
-            batches[index] = duplicate
+            outcomes[index] = copy.deepcopy(leader_rows[leader])
 
-        assert all(batch is not None for batch in batches)
-        finalized = [batch for batch in batches if batch is not None]
-        for index, batch in enumerate(finalized):
-            if batch.failure is None:
-                self._record_search_hits(
-                    state,
-                    list(batch.hits),
-                    query_index=index,
+        assert all(outcome is not None for outcome in outcomes)
+        results: list[SearchResult] = []
+        failures: list[SearchFailure] = []
+        for input_index, outcome in enumerate(outcomes):
+            assert outcome is not None
+            if isinstance(outcome, CapabilityFailure):
+                failures.append(
+                    SearchFailure(
+                        input_index=input_index,
+                        query=queries[input_index],
+                        **outcome.model_dump(mode="json"),
+                    )
                 )
-
-        payloads = [batch.model_dump(mode="json") for batch in finalized]
-        for payload, batch in zip(payloads, finalized, strict=True):
-            if batch.failure is None:
-                payload["hits"] = [self._search_hit_wire(hit) for hit in batch.hits]
-        return payloads
+                continue
+            hits = self._record_search_hits(
+                state,
+                list(outcome.hits),
+                query_index=input_index,
+            )
+            results.append(
+                SearchResult(
+                    input_index=input_index,
+                    query=queries[input_index],
+                    hits=hits,
+                )
+            )
+        return SearchReport(
+            results=results,
+            failures=failures,
+            input_count=len(queries),
+        ).model_dump(mode="json")
 
     async def _search_many_coalesced(
         self,
         state: BrokerSession,
-        backend_name: str,
-        backend: SearchBackend,
+        service: SearchService,
         queries: list[str],
         leaders: list[int],
         fingerprints: dict[int, str],
@@ -499,46 +527,41 @@ class SearchCapabilities:
         limit: int,
         offset: int,
         domains: list[str] | None,
-        request: dict[str, Any],
         concurrency: int,
-    ) -> dict[int, SearchBatch]:
-        """Attach active keys and send the remaining local keys as one batch."""
+    ) -> dict[int, _SearchOutcome]:
+        """Attach active keys and send the remaining batch-capable keys together."""
 
-        operation = f"{backend_name}.search"
-        key_for_index = {
-            index: self.providers.flights.key(operation, fingerprints[index]) for index in leaders
-        }
-        admission = await self.providers.flights.admit(
+        key_for_index = {index: service.flight_key(fingerprints[index]) for index in leaders}
+        admission = await service.flights.admit(
             state,
             {key_for_index[index]: (fingerprints[index], [index]) for index in leaders},
-            group_new=backend_name == "local" and isinstance(backend, BatchSearchBackend),
+            group_new=service.supports_batch,
         )
         index_for_key = {key: index for index, key in key_for_index.items()}
         gate = asyncio.Semaphore(concurrency)
         for group in admission.new_groups:
             group_indexes = [index_for_key[key] for key in group.keys]
             group_indexes.sort()
-            if backend_name == "local" and isinstance(backend, BatchSearchBackend):
+            if service.supports_batch:
 
-                async def execute_local(
+                async def execute_batch(
                     group: FlightGroup = group,
                     group_indexes: list[int] = group_indexes,
-                ) -> dict[str, SearchBatch]:
-                    rows = await self._search_many_batched(
+                ) -> dict[str, _SearchOutcome]:
+                    rows = await self._search_many_transport_batch(
                         state,
-                        backend,
+                        service,
                         queries,
                         group_indexes,
                         limit=limit,
                         offset=offset,
                         domains=domains,
-                        request=request,
-                        operation_id=group.operation_id,
+                        request_id=group.request_id,
                         track_execution=False,
                     )
                     return {key_for_index[index]: row for index, row in rows.items()}
 
-                self.providers.flights.start(state, group, execute_local)
+                service.flights.start(state, group, execute_batch)
                 continue
 
             if len(group_indexes) != 1:
@@ -550,7 +573,7 @@ class SearchCapabilities:
                 group: FlightGroup = group,
                 index: int = index,
                 key: str = key,
-            ) -> dict[str, SearchBatch]:
+            ) -> dict[str, _SearchOutcome]:
                 async with gate:
                     try:
                         hits = await self._retrieve_search(
@@ -563,129 +586,96 @@ class SearchCapabilities:
                             },
                             request_index=index,
                             record_usage=False,
-                            operation_id=group.operation_id,
+                            request_id=group.request_id,
                             track_execution=False,
                         )
                     except ProviderRequestError as exc:
-                        row = SearchBatch(
-                            query=queries[index],
-                            failure=self.providers.provider_failure(exc),
+                        outcome: _SearchOutcome = CapabilityFailure.model_validate(
+                            service.provider_failure(exc)
                         )
                     else:
-                        row = SearchBatch(
+                        outcome = SearchBatch(
                             query=queries[index],
                             hits=hits,
                         )
-                return {key: row}
+                return {key: outcome}
 
-            self.providers.flights.start(state, group, execute_one)
+            service.flights.start(state, group, execute_one)
 
         returned = await asyncio.gather(
             *(
-                self.providers.flights.wait(state, admission.waiters[key_for_index[index]])
+                service.flights.wait(state, admission.waiters[key_for_index[index]])
                 for index in leaders
             )
         )
-        rows: dict[int, SearchBatch] = {}
+        rows: dict[int, _SearchOutcome] = {}
         for index, result in zip(leaders, returned, strict=True):
-            row = SearchBatch.model_validate(result)
-            # Whitespace-equivalent calls share one provider request but retain
-            # the exact query string at each caller's public boundary.
-            row.query = queries[index]
-            rows[index] = row
+            if not isinstance(result, (SearchBatch, CapabilityFailure)):
+                raise RuntimeError("Search flight returned an invalid outcome.")
+            rows[index] = result
         return rows
 
-    async def _search_many_batched(
+    async def _search_many_transport_batch(
         self,
         state: BrokerSession,
-        backend: BatchSearchBackend,
+        service: SearchService,
         queries: list[str],
         leaders: list[int],
         *,
         limit: int,
         offset: int,
         domains: list[str] | None,
-        request: dict[str, Any],
-        operation_id: str | None = None,
+        request_id: str | None = None,
         track_execution: bool = True,
-    ) -> dict[int, SearchBatch]:
-        """Execute unique local queries as one real provider microbatch."""
+    ) -> dict[int, _SearchOutcome]:
+        """Execute unique queries as one real provider transport batch."""
 
-        backend_name, resolved = self._search_backend(state)
-        if resolved is not backend:
-            raise RuntimeError("Session search backend changed during batch execution.")
+        _backend_name, resolved = self._search_service(state)
+        if resolved is not service:
+            raise RuntimeError("Session search service changed during batch execution.")
         unique_queries = [queries[index].strip() for index in leaders]
-        operation_id = operation_id or f"op_{uuid.uuid4().hex}"
+        request_id = request_id or f"req_{uuid.uuid4().hex}"
 
-        async def execute() -> list[SearchBatch]:
-            return await backend.search_many(
+        try:
+            returned = await service.search_many(
+                state,
                 unique_queries,
+                request_indexes=leaders,
                 limit=limit,
                 offset=offset,
                 domains=domains,
-            )
-
-        preflight = getattr(backend, "preflight_search", None)
-
-        try:
-            returned = await self.providers.run(
-                state,
-                backend=resolved,
-                operation=f"{backend_name}.search",
-                request_indexes=leaders,
-                request_value={
-                    "backend": backend_name,
-                    "revision": self.backend_revision,
-                    "queries": unique_queries,
-                    **request,
-                },
-                request=execute,
-                preflight=preflight if callable(preflight) else None,
-                operation_id=operation_id,
+                request_id=request_id,
                 track_execution=track_execution,
             )
         except ProviderRequestError as exc:
-            failure = self.providers.provider_failure(exc)
-            return {
-                index: SearchBatch(
-                    query=queries[index],
-                    failure=failure,
-                )
-                for index in leaders
-            }
+            failure = CapabilityFailure.model_validate(service.provider_failure(exc))
+            return {index: failure for index in leaders}
         if len(returned) != len(leaders):
             raise RuntimeError("Provider runtime accepted an invalid batch result count.")
         attempts = max(
-            (
-                record.attempt
-                for record in _provider_attempts()
-                if record.operation_id == operation_id
-            ),
+            (record.attempt for record in _provider_attempts() if record.request_id == request_id),
             default=1,
         )
-        rows: dict[int, SearchBatch] = {}
-        for index, batch in zip(leaders, returned, strict=True):
-            failure = batch.failure
-            if failure is not None:
+        rows: dict[int, _SearchOutcome] = {}
+        for index, outcome in zip(leaders, returned, strict=True):
+            if isinstance(outcome, SearchBatchFailure):
                 failure = CapabilityFailure.model_validate(
-                    self.providers.contextualize_failure(
-                        failure.model_dump(mode="json") | {"attempts": attempts},
-                        backend=resolved,
-                        operation=f"{backend_name}.search",
+                    service.contextualize_failure(
+                        outcome.model_dump(mode="json") | {"attempts": attempts},
                     )
                 )
                 if failure.code == "provider_rejected":
                     failure = failure.model_copy(
                         update={"message": "Provider rejected one search item."}
                     )
-            rows[index] = SearchBatch(
-                query=queries[index],
-                hits=list(batch.hits) if failure is None else [],
-                failure=failure,
-            )
-        if any(row.failure is not None for row in rows.values()):
+                rows[index] = failure
+            elif isinstance(outcome, SearchBatch):
+                rows[index] = outcome
+            else:
+                raise RuntimeError("Search backend returned an invalid batch outcome.")
+        if any(isinstance(row, CapabilityFailure) for row in rows.values()):
             for record in reversed(_provider_attempts()):
-                if record.operation_id == operation_id and record.status == "success":
+                if record.request_id == request_id and record.status == "success":
                     record.status = "partial"
                     break
         return rows

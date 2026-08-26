@@ -1,21 +1,17 @@
 # Search-as-Code patterns
 
-Use this reference when a weaker model needs a small program to adapt. Pick one stage; do not
-concatenate every example into one call. These examples intentionally avoid the workspace. Use
-them when the useful result fits one observation; load the stateful reference when later programs
-must recover a growing candidate or evidence ledger.
+These programs are independent, adaptable examples, not a required pipeline. Combine, split, skip,
+or reorder them when the task calls for a different strategy. They intentionally avoid the
+workspace; use the stateful reference only when durable artifacts are useful across calls.
 
-## Choose the stage
+## Example building blocks
 
-- **Explore** when the next query, source, or matching rule depends on understanding search results.
-  Show a bounded shortlist and stop for model judgment.
-- **Rank passages** when a fused shortlist is available but the relevant document sections are
-  not. Search, fuse, and passage ranking can stay in one deterministic stage.
-- **Verify** when sources and checks are already concrete. Let Python grep, read, validate, and submit
-  without an unnecessary model round trip.
+- **Explore candidates** demonstrates bounded multi-query search and reusable source output.
+- **Rank passages** demonstrates semantic ranking over a fused candidate set.
+- **Verify and submit** demonstrates exact checks, context expansion, and final submission.
 
-The test is simple: if Python can choose the next input by an explicit rule, keep going; if the
-choice requires interpreting language, end the stage with `NEXT:`.
+Each block illustrates capability mechanics. Its query count, bounds, call grouping, and stopping
+point are examples for the agent to adapt.
 
 ## Explore candidates
 
@@ -36,11 +32,11 @@ queries = list(
 )
 
 try:
-    batches = sdk.search.many(queries, limit_per_query=10, concurrency=4)
+    report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
 except BrokerError as error:
     print(f"ERROR: search code={error.code} retryable={error.retryable}")
 else:
-    candidates = sdk.search.fuse_rrf(batches, k=60)[:8]
+    candidates = sdk.search.fuse_rrf(report, k=60)[:8]
     for item in candidates:
         snippet = " ".join((item.snippet or "").split())[:240]
         print(
@@ -48,7 +44,7 @@ else:
             f"domain={item.domain or '-'} title={item.title or '(untitled)'} "
             f"snippet={snippet!r}"
         )
-    failed = sum(batch.failure is not None for batch in batches)
+    failed = len(report.failures)
     if candidates:
         print(
             f"NEXT: inspect {len(candidates)} candidates and choose sources/checks; "
@@ -74,8 +70,8 @@ queries = [
 ]
 
 try:
-    batches = sdk.search.many(queries, limit_per_query=10, concurrency=4)
-    fused = sdk.search.fuse_rrf(batches, k=60, limit=12)
+    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
+    fused = sdk.search.fuse_rrf(search_report, k=60, limit=12)
     report = sdk.content.passages(
         goal,
         [item.source for item in fused],
@@ -92,7 +88,7 @@ else:
             f"coordinates={dict(item.coordinates)!r} "
             f"text={excerpt!r}"
         )
-    failures = [item.failure.code for item in report.failures]
+    failures = [item.code for item in report.failures]
     print(
         "NEXT: inspect source quality and passage entailment; use grep/read for exact "
         f"checks or context, then submit source URLs; failures={failures[:4]}"
@@ -124,11 +120,7 @@ for name, pattern in checks.items():
     except BrokerError as error:
         problems.append(f"{name}:grep:{error.code}")
         continue
-    problems.extend(
-        f"{name}:fetch:{item.failure.code}"
-        for item in report.source_results
-        if item.failure is not None
-    )
+    problems.extend(f"{name}:fetch:{item.code}" for item in report.failures)
 
     seen = set()
     for match in report.matches:
@@ -144,7 +136,7 @@ for name, pattern in checks.items():
         except BrokerError as error:
             problems.append(f"{name}:read:{error.code}")
             continue
-        if passage.failure is not None or not passage.text.strip():
+        if not passage.text.strip():
             problems.append(f"{name}:unreadable")
             continue
         if re.search(pattern, passage.text, re.IGNORECASE) is None:

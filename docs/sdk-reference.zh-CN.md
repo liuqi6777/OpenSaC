@@ -1,6 +1,6 @@
 # OpenSAC SDK API 参考
 
-本文档对应仓库当前捆绑的 `opensac_sdk` 0.7.0，覆盖
+本文档对应仓库当前捆绑的 `opensac_sdk` 0.8.0，覆盖
 `SDK_SURFACE` 声明的全部 22 个公共操作。SDK 是同步接口，供 OpenSAC sandbox
 中的生成程序调用；宿主与 sandbox 镜像会提供版本匹配的 SDK。
 
@@ -38,14 +38,15 @@ except BrokerError as error:
         error.provider_status,
         error.retry_after_seconds,
         error.provider,
-        error.operation,
+        error.component,
         error.scope,
     )
 ```
 
-本地参数错误通常抛出 `ValueError`，state 文件不存在会抛出 `FileNotFoundError`。具有 failure
-返回结构的方法会为局部失败和全部外部 item 失败保留输入对齐结果；typed failure 继续位于结果中，
-`sac_run` 会在 stdout 之前自动展示有界 warning。合法空结果没有 typed failure，也不会产生 warning。
+本地参数错误通常抛出 `ValueError`，state 文件不存在会抛出 `FileNotFoundError`。支持局部失败的
+批量方法会分别返回 `results` 和 `failures`，两者的 `input_index` 共同覆盖原始输入；`sac_run`
+会在 stdout 之前自动展示有界 warning。单项调用失败会抛出 `BrokerError`；合法空结果没有 typed
+failure，也不会产生 warning。
 
 参数校验不会进行隐式转换：例如，需要整数时不接受 `"10"`，也不会把 `True` 当作整数。写入
 state 或 output 的值必须是严格 JSON；不支持的对象、NaN 和 Infinity 会在已有 artifact 被改动前
@@ -75,8 +76,6 @@ state 或 output 的值必须是严格 JSON；不支持的对象、NaN 和 Infin
     "source": str,       # 后续 content 操作使用的唯一公开地址
     "backend": str,
     "title": str,
-    "url": str | None,
-    "docid": str | None,
     "domain": str | None,
     "date": str | None,  # provider 原样给出的日期，未统一格式
     "snippet": str,
@@ -104,7 +103,7 @@ state 或 output 的值必须是严格 JSON；不支持的对象、NaN 和 Infin
     "provider_status": int | None,       # 可缺省
     "retry_after_seconds": float | None, # 可缺省
     "provider": str | None,              # 不含密钥的上游名称
-    "operation": str | None,             # 例如 web.scrape
+    "component": str | None,             # 仅供诊断，例如 document
     "scope": "request" | "resource" | "provider" | "unknown" | None,
 }
 ```
@@ -119,15 +118,14 @@ query/document 问题，`provider` 是共享服务、凭据或容量问题。状
 {
     "source": str,
     "text": str,
-    "url": str | None,
     "title": str,
     "date": str | None,
-    "failure": CapabilityFailure | None,
     "metadata": dict,
 }
 ```
 
-抓取失败的行保持输入对齐，`text` 为空，具体原因在 `failure` 中。
+该形态只表示抓取成功。单 source 读取失败抛出 `BrokerError`；批量失败使用
+`ContentFailure`。
 
 ### `ContentFailure`
 
@@ -135,7 +133,7 @@ query/document 问题，`provider` 是共享服务、凭据或容量问题。状
 {
     "input_index": int,
     "source": str,
-    "failure": CapabilityFailure,
+    # ...CapabilityFailure fields
 }
 ```
 
@@ -209,14 +207,14 @@ sdk.search.many(
     offset: int = 0,
     concurrency: int = 5,
     domains: list[str] | None = None,
-) -> list[Record]
+) -> Record
 ```
 
 **参数**
 
 | 名称 | 默认值 | 说明 |
 | --- | --- | --- |
-| `queries` | 必填 | 待执行的 query；结果保持输入顺序。 |
+| `queries` | 必填 | 待执行的 query；report outcome 保留原始输入位置。 |
 | `limit_per_query` | `10` | 每个 query 的排名窗口大小。 |
 | `offset` | `0` | 应用于所有 query 的排名深度。 |
 | `concurrency` | `5` | 请求的 broker 侧最大并发数。 |
@@ -224,37 +222,39 @@ sdk.search.many(
 
 **返回值**
 
-`list[Record]`：每个输入 query 对应一个 batch row：
+`Record`：按输入位置分区的 report：
 
 ```python
 {
-    "query": str,
-    "hits": list[SearchHit],
-    "failure": CapabilityFailure | None,
+    "results": [
+        {"input_index": int, "query": str, "hits": list[SearchHit]}
+    ],
+    "failures": [
+        {"input_index": int, "query": str, ...CapabilityFailure fields}
+    ],
+    "input_count": int,
 }
 ```
 
 **行为与异常**
 
-- 单个 query 失败时该行 `hits == []` 且 `failure` 非空；空 hits 且 `failure is None` 表示成功
-  但未命中。
+- `results` 中的空 `hits` 表示 query 成功但未命中；失败 query 只出现在 `failures` 中。
 - `concurrency` 实际限制在 1 到 20。
 - 默认部署单次最多接受 64 个 query；该限制可由宿主配置。
-- 外部 query 失败（包括成功数为 0/N）会保留输入对齐行并自动产生 execution warning；无法构造
-  任何对齐结果的失败才抛出 `BrokerError`。
+- 外部 query 失败（包括成功数为 0/N）会保留 `input_index` 并自动产生 execution warning；无法
+  构造安全 report 的失败才抛出 `BrokerError`。
 
 **示例**
 
 ```python
-batches = sdk.search.many(
+report = sdk.search.many(
     ["ReAct paper", "ReAct prompting authors"],
     limit_per_query=10,
     concurrency=2,
 )
 
-for batch in batches:
-    if batch.failure is not None:
-        print(batch.query, batch.failure.code)
+for failure in report.failures:
+    print(failure.query, failure.code)
 ```
 
 ### `sdk.search.fuse_rrf(...)`
@@ -265,7 +265,7 @@ for batch in batches:
 
 ```python
 sdk.search.fuse_rrf(
-    batches: list[Record | dict],
+    report: Record | dict,
     *,
     weights: list[float] | None = None,
     k: int = 60,
@@ -280,8 +280,8 @@ sdk.search.fuse_rrf(
 
 | 名称 | 默认值 | 说明 |
 | --- | --- | --- |
-| `batches` | 必填 | 待融合的 search batch record。 |
-| `weights` | `None` | 与 `batches` 对齐的非负权重。 |
+| `report` | 必填 | `search.many` 返回的 report。 |
+| `weights` | `None` | 与 report 原始输入对齐的非负权重。 |
 | `k` | `60` | 非负的 RRF 排名平滑常量。 |
 | `limit` | `None` | 可选的最终候选数量。 |
 | `exclude_domains` | `None` | 需要排除的 hostname 及其子域。 |
@@ -314,8 +314,8 @@ sdk.search.fuse_rrf(
 **行为与异常**
 
 - 这是确定性的本地 helper，不调用 broker，也不产生 provider 工作。
-- 失败 batch 会被跳过并产生 execution warning；原 batch 的 `failure` 不会复制到融合候选上。
-  如果 `search.many` 已产生相同 warning，则会自动去重。
+- 只有 `report.results` 参与融合。`search.many` 已经记录 report 中的失败，因此这个本地 helper
+  不会再次解释或产生失败 warning。
 - 域名策略匹配指定 hostname 及其子域；非 Web source 不受影响。
 - 域名策略在最终 `limit` 之前应用。
 - 非法权重、rank、limit 或域名策略会抛出 `ValueError`。
@@ -324,7 +324,7 @@ sdk.search.fuse_rrf(
 
 ```python
 fused = sdk.search.fuse_rrf(
-    batches,
+    report,
     weights=[1.0, 1.5],
     exclude_domains=["social.example"],
     domain_weights={"docs.example.com": 2.0},
@@ -350,7 +350,7 @@ search 返回。`get_many`、`read_many` 和 `grep` 会保留重复 source 的�
 **签名**
 
 ```python
-sdk.content.get_many(sources: list[str]) -> list[Record]
+sdk.content.get_many(sources: list[str]) -> Record
 ```
 
 **参数**
@@ -361,22 +361,21 @@ sdk.content.get_many(sources: list[str]) -> list[Record]
 
 **返回值**
 
-`list[Record]`：每个 source 对应一个输入对齐的 `ContentRow`，包含完整标准化文档或结构化
-抓取失败。
+`Record`：`results` 包含成功的完整文档，`failures` 包含扁平 `ContentFailure`，并提供
+`input_count`。两类 outcome 都带 `input_index`。
 
 **行为与异常**
 
 - 重复输入保留独立结果位置，但抓取工作可以复用。
 - 证据发现优先使用 `passages`，有界行窗口优先使用 `read`。
-- 外部抓取失败（包括成功数为 0/N）会保留输入对齐行并自动产生 execution warning。
+- 外部抓取失败（包括成功数为 0/N）会保留 `input_index` 并自动产生 execution warning。
 
 **示例**
 
 ```python
-rows = sdk.content.get_many([hit.source for hit in hits])
-for row in rows:
-    if row.failure is None:
-        process(row.text)
+report = sdk.content.get_many([hit.source for hit in hits])
+for row in report.results:
+    process(row.text)
 ```
 
 ### `sdk.content.read(...)`
@@ -424,7 +423,7 @@ sdk.content.read(
 
 - 有效值会被约束到 `offset >= 1`、`1 <= limit <= 5000`、`1 <= max_chars <= 400000`。
 - `next_offset is None` 表示已经到达文档末尾。
-- 外部抓取失败会返回 `text` 为空且 `failure` 非空的行，并自动产生 execution warning。
+- 外部抓取失败会抛出 `BrokerError`，不会伪造空文本成功行。
 
 **示例**
 
@@ -432,8 +431,6 @@ sdk.content.read(
 offset = 1
 while offset is not None:
     row = sdk.content.read(source, offset=offset, limit=200)
-    if row.failure is not None:
-        break
     consume(row.text)
     offset = row.metadata.next_offset
 ```
@@ -445,7 +442,7 @@ while offset is not None:
 **签名**
 
 ```python
-sdk.content.read_many(windows: list[ContentReadWindow]) -> list[Record]
+sdk.content.read_many(windows: list[ContentReadWindow]) -> Record
 ```
 
 **参数**
@@ -456,19 +453,20 @@ sdk.content.read_many(windows: list[ContentReadWindow]) -> list[Record]
 
 **返回值**
 
-`list[Record]`：每个 window 对应一个输入对齐的 `ContentRow`。每行都包含 `input_index`；每个
-window 独立使用自己的 `offset`、`limit` 和 `max_chars`。
+`Record`：`results` 包含成功的 `ContentRow`，`failures` 包含扁平 `ContentFailure`，并提供
+`input_count`。两类 outcome 都带 `input_index`；每个 window 独立使用自己的 `offset`、`limit`
+和 `max_chars`。
 
 **行为与异常**
 
 - 重复 source 保留独立结果位置和切片，broker 可以复用抓取工作。
 - 缺省的 window 参数使用与 `read` 相同的默认值和边界。
-- window 非法时抛出 `ValueError`；外部抓取失败会保留输入对齐行并自动产生 execution warning。
+- window 非法时抛出 `ValueError`；外部抓取失败会保留 `input_index` 并自动产生 execution warning。
 
 **示例**
 
 ```python
-rows = sdk.content.read_many(
+report = sdk.content.read_many(
     [
         {"source": first_source, "offset": 1, "limit": 80},
         {"source": second_source, "offset": 120, "limit": 40, "max_chars": 16_000},
@@ -534,9 +532,9 @@ sdk.content.grep(
             "title": str,
             "match_count": int,
             "scan_complete": bool,
-            "failure": CapabilityFailure | None,
         }
     ],
+    "failures": [ContentFailure],
     "input_count": int,
 }
 ```
@@ -545,10 +543,11 @@ sdk.content.grep(
 
 - 按行执行匹配。regex 模式下非法正则会抛出 `ValueError`；literal 模式不会解释正则元字符。
 - `context` 实际限制在 0 到 20；`max_matches_per_source` 实际限制在 1 到 200。
-- `source_results` 与输入一一对齐。`scan_complete=True` 且 `match_count=0` 表示成功的零匹配；
-  失败会令 `scan_complete=False`，达到上限的扫描也会标记为不完整，但没有 `failure`。
+- `source_results` 只包含成功扫描。`scan_complete=True` 且 `match_count=0` 表示成功的零匹配；
+  达到上限的成功扫描会标记为 `scan_complete=False`，抓取失败则单独位于 `failures`。
 - 重复 source 可通过 `input_index` 区分。
-- 外部抓取失败（包括成功 scan 数为 0/N）保留在 `source_results` 中并自动产生 execution warning。
+- 外部抓取失败（包括成功 scan 数为 0/N）按 `input_index` 保留在 `failures` 中并自动产生
+  execution warning。
 
 **示例**
 
@@ -747,7 +746,7 @@ sdk.llm.extract_many(
     concurrency: int = 4,
     max_tokens: int | None = None,
     repair_attempts: int = 0,
-) -> list[Record]
+) -> Record
 ```
 
 **参数**
@@ -763,36 +762,35 @@ sdk.llm.extract_many(
 
 **返回值**
 
-`list[Record]`：每个输入 item 对应一个以下形态的提取结果：
+`Record`：按输入位置分区的提取 report：
 
 ```python
 {
-    "index": int,
-    "data": dict | None,
-    "failure": {
-        "code": str,
-        "message": str,
-        "retryable": bool,
-    } | None,
-    "attempts": int,
+    "results": [
+        {"input_index": int, "data": dict, "attempts": int}
+    ],
+    "failures": [
+        {"input_index": int, "attempts": int, ...CapabilityFailure fields}
+    ],
+    "input_count": int,
 }
 ```
 
 **行为与异常**
 
-- 成功行的 `data` 非空且 `failure is None`；失败行形态相反。
+- 成功与失败行彼此分离；两者的 `input_index` 共同覆盖输入。
 - `repair_attempts=1` 会为可修复的格式或 schema 错误追加一次修复。
 - `items` 和 `schema` 不接受 NaN 或 Infinity；schema 根节点必须声明 `{"type": "object"}`。
 - 支持的 schema 关键词为 `$schema`、`type`、`properties`、`required`、
   `additionalProperties`、`items`、`enum` 和 `description`。
 - 默认部署最多处理 256 个 item；大小与嵌套深度限制可由宿主配置。
-- 单项 provider 失败可与成功行并存；如果所有项都失败，仍返回全部输入对齐行，`sac_run` 会展示
-  0/N execution warning。
+- 单项 provider 失败可与成功行并存；如果所有项都失败，report 仍返回全部 failure，`sac_run`
+  会展示 0/N execution warning。
 
 **示例**
 
 ```python
-rows = sdk.llm.extract_many(
+report = sdk.llm.extract_many(
     passages,
     instruction="Extract whether the passage names an author.",
     schema={
@@ -861,8 +859,7 @@ sdk.session.usage() -> dict[str, Any]
         "max_workspace_bytes": int | None,
     },
     "provider": {
-        "search_attempts": int,
-        "content_attempts": int,
+        "attempts_by_capability": dict[str, int],
         "retries": int,
         "intra_call_deduplicated_items": int,
         "coalesced_requests": int,
@@ -877,6 +874,8 @@ sdk.session.usage() -> dict[str, Any]
 **行为与异常**
 
 - `budget_remaining` 中的 `None` 表示该资源未设置硬上限。
+- `provider.attempts_by_capability` 按调用方 Capability family（如 `search`、`content`、
+  `llm`）归属 backend attempt；未出现的 family 表示没有发起 backend 调用。
 - broker 读取失败时抛出 `BrokerError`。
 
 **示例**

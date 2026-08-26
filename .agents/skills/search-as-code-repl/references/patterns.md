@@ -1,8 +1,8 @@
 # Persistent Search-as-Code patterns
 
-Use one cell at a time. These examples intentionally share semantic Python variables across cells;
-do not concatenate them or repeat a completed capability call. Every `NEXT:` line names the live
-variables that the following cell should reuse.
+These cells show one possible use of a live Python namespace, not a required research pipeline.
+Combine, split, reorder, or skip them when their data dependencies allow it. Variable names, bounds,
+and `NEXT:` lines are examples for the agent to adapt; avoid repeating completed external calls.
 
 ## Explore candidates
 
@@ -20,21 +20,21 @@ queries = [
 ]
 
 try:
-    search_batches = sdk.search.many(queries, limit_per_query=10, concurrency=4)
+    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
 except BrokerError as error:
     print(f"ERROR: search code={error.code} retryable={error.retryable}")
 else:
-    candidate_pool = sdk.search.fuse_rrf(search_batches, k=60, limit=16)
+    candidate_pool = sdk.search.fuse_rrf(search_report, k=60, limit=16)
     for item in candidate_pool[:8]:
         snippet = " ".join((item.snippet or "").split())[:240]
         print(
             f"CANDIDATE source={item.source!r} domain={item.domain or '-'} "
             f"title={item.title or '(untitled)'} snippet={snippet!r}"
         )
-    failed_queries = sum(batch.failure is not None for batch in search_batches)
+    failed_queries = len(search_report.failures)
     print(
         "NEXT: inspect candidates and rank evidence; "
-        "reuse research_goal, candidate_pool, search_batches; "
+        "reuse research_goal, candidate_pool, search_report; "
         f"failed_queries={failed_queries}"
     )
 ```
@@ -100,7 +100,7 @@ for name, pattern in checks.items():
         passage = sdk.content.read(
             match.source, offset=max(match.line - 10, 1), limit=40, max_chars=16_000
         )
-        if passage.failure is None and re.search(pattern, passage.text, re.IGNORECASE):
+        if re.search(pattern, passage.text, re.IGNORECASE):
             verified_evidence[name] = {
                 "source": passage.source,
                 "text": passage.text,
@@ -126,5 +126,5 @@ else:
     )
 ```
 
-Delete superseded pools or reports once a strategy changes substantially. A relation-specific
-claim still needs a relation-specific check; keyword presence alone is not proof.
+Overwrite or delete superseded values when namespace size or ambiguity makes cleanup useful. A
+relation-specific claim still needs a relation-specific check; keyword presence alone is not proof.

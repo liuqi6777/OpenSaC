@@ -1,8 +1,8 @@
 # Python orchestration recipes
 
-Use these fragments when deterministic Python can replace control-model turns. Pick only the
-recipes needed by the current stage, keep every generated collection bounded, and preserve the
-stage-ending `NEXT:` or `submit` protocol from `SKILL.md`.
+These fragments demonstrate deterministic Python mechanics, not a required stage protocol. Use any
+subset or sequence that helps, and adapt their variables and bounds. Keep generated collections
+bounded; use `sdk.output.submit(...)` when the final research result is complete.
 
 ## Contents
 
@@ -26,21 +26,22 @@ queries = [f'"{entity}" {year} {clue}' for entity in entities for year in years 
 queries = list(dict.fromkeys(queries))[:MAX_QUERIES]
 ```
 
-Prefer one query per year when backend query syntax is unknown. Use `itertools.product` only when
-the combination tuples themselves will be reused; a comprehension is usually easier to adapt.
+Separate queries per year can be easier to inspect when backend query syntax is unknown.
+`itertools.product` is useful when the combination tuples themselves will be reused; a comprehension
+is often simpler.
 
 ## Filter and aggregate candidates
 
-Filtering search metadata is triage, not evidence. Use a named predicate when the rule has several
-parts or will be reused; otherwise prefer a comprehension. Decide whether an empty filtered set
+Filtering search metadata is triage, not evidence. A named predicate can clarify a reusable rule;
+a comprehension can keep a small rule compact. Decide from the task whether an empty filtered set
 means “broaden the heuristic” or “the hard constraint is unsupported.”
 
 ```python
 from opensac_sdk import sdk
 
-batches = sdk.search.many(queries, limit_per_query=12, concurrency=4)
+search_report = sdk.search.many(queries, limit_per_query=12, concurrency=4)
 candidates = sdk.search.fuse_rrf(
-    batches,
+    search_report,
     k=60,
     exclude_domains=["example.social"],
     domain_weights={"example.gov": 1.5, "example.edu": 1.25},
@@ -86,7 +87,7 @@ relation; for several constraints, add a constraint key and require set coverage
 ```python
 from opensac_sdk import BrokerError, sdk
 
-usable = [passage for passage in passages if passage.failure is None and passage.text.strip()][:12]
+usable = [passage for passage in passages if passage.text.strip()][:12]
 items = [{"source": passage.source, "text": passage.text} for passage in usable]
 schema = {
     "type": "object",
@@ -104,7 +105,7 @@ schema = {
 }
 
 try:
-    results = sdk.llm.extract_many(
+    extraction_report = sdk.llm.extract_many(
         items,
         instruction=(
             "Accept only when the passage explicitly states the requested relation. "
@@ -116,15 +117,19 @@ try:
     )
 except BrokerError as error:
     extraction_error = f"{error.code}:{error.retryable}"
-    results = []
+    extraction_report = None
 else:
     extraction_error = None
 
 accepted = []
 suggested_queries = []
 if extraction_error is None:
-    for passage, item, result in zip(usable, items, results, strict=True):
-        if result.failure is not None:
+    results_by_index = {
+        result.input_index: result for result in extraction_report.results
+    }
+    for input_index, (passage, item) in enumerate(zip(usable, items, strict=True)):
+        result = results_by_index.get(input_index)
+        if result is None:
             continue
         data = result.data or {}
         quote = data.get("evidence_quote")
@@ -140,13 +145,14 @@ if extraction_error is None:
             suggested_queries.extend(data.get("followup_queries", []))
 ```
 
-If the pipeline model is unavailable or inconclusive, return to deterministic checks or end with
-`NEXT:`. A schema-valid object is still unsupported until its quote passes the membership check.
+If the pipeline model is unavailable or inconclusive, use deterministic checks or print a bounded
+intermediate result. A schema-valid object is still unsupported until its quote passes the
+membership check.
 
-## Turn extraction into one bounded action
+## Example: turn extraction into one bounded action
 
-Python—not the extraction model—decides whether to submit or make one follow-up search. Clean,
-deduplicate, and cap model-proposed strings. Do not build an unbounded semantic-action loop.
+This example lets Python decide whether to submit or make one follow-up search. It cleans,
+deduplicates, and caps model-proposed strings rather than building an unbounded semantic-action loop.
 
 ```python
 MAX_FOLLOWUPS = 6
@@ -170,12 +176,12 @@ if accepted:
     )
 elif followup_queries:
     try:
-        batches = sdk.search.many(followup_queries, limit_per_query=8, concurrency=4)
+        search_report = sdk.search.many(followup_queries, limit_per_query=8, concurrency=4)
     except BrokerError as error:
         print(f"ERROR: follow-up search code={error.code} retryable={error.retryable}")
         print("NEXT: change the source or query strategy")
     else:
-        candidates = sdk.search.fuse_rrf(batches, k=60)[:8]
+        candidates = sdk.search.fuse_rrf(search_report, k=60)[:8]
         for item in candidates:
             print(f"CANDIDATE source={item.source!r} title={item.title!r}")
         print("NEXT: inspect follow-up candidates and choose sources/checks")

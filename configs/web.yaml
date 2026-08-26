@@ -5,10 +5,14 @@ storage:
   data_dir: ../.opensac
   broker_socket: ../.opensac/broker.sock
 
-search:
-  backend: web
-  passage_ranker: lexical
+backends:
+  search:
+    provider: serper
+  document:
+    provider: jina
+  rerank:
+    provider: lexical
 
 sandbox:
-  image: ghcr.io/liuqi6777/opensac-sandbox:0.7.0
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.0
   mode: cold

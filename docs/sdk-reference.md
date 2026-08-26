@@ -1,7 +1,7 @@
 # OpenSAC SDK API Reference
 
 This document covers all 22 public operations declared by `SDK_SURFACE` in the bundled
-`opensac_sdk` 0.7.0. The SDK is a synchronous interface for generated programs running inside an
+`opensac_sdk` 0.8.0. The SDK is a synchronous interface for generated programs running inside an
 OpenSAC sandbox. Host and sandbox images provide a version-matched SDK.
 
 ## 1. Entry point, return values, and errors
@@ -39,15 +39,16 @@ except BrokerError as error:
         error.provider_status,
         error.retry_after_seconds,
         error.provider,
-        error.operation,
+        error.component,
         error.scope,
     )
 ```
 
 Local argument errors normally raise `ValueError`. Reading a missing state file raises
-`FileNotFoundError`. Failure-aware operations preserve aligned results for both partial and complete
-external item failure. The typed failure remains in the result, and `sac_run` automatically renders
-a bounded warning before stdout. A legitimate empty result has no typed failure and no warning.
+`FileNotFoundError`. Failure-aware batch operations return separate `results` and `failures` lists;
+their `input_index` values partition the original inputs. `sac_run` automatically renders bounded
+failure warnings before stdout. A failed single-item call raises `BrokerError`, while a legitimate
+empty result has no typed failure and no warning.
 
 Arguments are validated without coercion: for example, `"10"` is not accepted where an integer is
 required and `True` is not accepted as an integer. Values written to state or output must be strict
@@ -79,8 +80,6 @@ The following JSON shapes are reused throughout this document. `None` marks a nu
     "source": str,       # The one public address accepted by content operations
     "backend": str,
     "title": str,
-    "url": str | None,
-    "docid": str | None,
     "domain": str | None,
     "date": str | None,  # Provider value; not normalized to one date format
     "snippet": str,
@@ -108,7 +107,7 @@ The following JSON shapes are reused throughout this document. `None` marks a nu
     "provider_status": int | None,       # May be absent
     "retry_after_seconds": float | None, # May be absent
     "provider": str | None,              # Secret-free upstream name
-    "operation": str | None,             # For example web.scrape
+    "component": str | None,             # Diagnostic label, for example document
     "scope": "request" | "resource" | "provider" | "unknown" | None,
 }
 ```
@@ -124,16 +123,14 @@ Jina Reader 403. Provider response bodies and credential-bearing details are nev
 {
     "source": str,
     "text": str,
-    "url": str | None,
     "title": str,
     "date": str | None,
-    "failure": CapabilityFailure | None,
     "metadata": dict,
 }
 ```
 
-An unfetchable row remains aligned with its input, has empty `text`, and reports the reason in
-`failure`.
+This shape represents only a successful fetch. A failed single-source read raises `BrokerError`;
+batch failures use `ContentFailure`.
 
 ### `ContentFailure`
 
@@ -141,7 +138,7 @@ An unfetchable row remains aligned with its input, has empty `text`, and reports
 {
     "input_index": int,
     "source": str,
-    "failure": CapabilityFailure,
+    # ...CapabilityFailure fields
 }
 ```
 
@@ -217,14 +214,14 @@ sdk.search.many(
     offset: int = 0,
     concurrency: int = 5,
     domains: list[str] | None = None,
-) -> list[Record]
+) -> Record
 ```
 
 **Parameters**
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `queries` | required | Queries to execute; result rows preserve this order. |
+| `queries` | required | Queries to execute; report outcomes preserve their input positions. |
 | `limit_per_query` | `10` | Number of hits in each query's ranking window. |
 | `offset` | `0` | Ranking depth applied to every query. |
 | `concurrency` | `5` | Maximum requested broker-side concurrency. |
@@ -232,37 +229,40 @@ sdk.search.many(
 
 **Returns**
 
-`list[Record]`: one input-aligned batch row per query:
+`Record`: an input-partitioned report:
 
 ```python
 {
-    "query": str,
-    "hits": list[SearchHit],
-    "failure": CapabilityFailure | None,
+    "results": [
+        {"input_index": int, "query": str, "hits": list[SearchHit]}
+    ],
+    "failures": [
+        {"input_index": int, "query": str, ...CapabilityFailure fields}
+    ],
+    "input_count": int,
 }
 ```
 
 **Behavior and errors**
 
-- A failed query has `hits == []` and a populated `failure`; empty hits with `failure is None` mean
-  success without matches.
+- An empty `hits` list in `results` means a successful query without matches. Failed queries appear
+  only in `failures`.
 - `concurrency` is effectively bounded from 1 through 20.
 - A default deployment accepts at most 64 queries per request; the host can configure this limit.
-- External query failures, including 0/N successful queries, remain aligned rows and produce an
-  automatic execution warning. A failure that prevents any aligned result raises `BrokerError`.
+- External query failures, including 0/N successful queries, remain input-indexed and produce an
+  automatic execution warning. A failure that prevents a safe report raises `BrokerError`.
 
 **Example**
 
 ```python
-batches = sdk.search.many(
+report = sdk.search.many(
     ["ReAct paper", "ReAct prompting authors"],
     limit_per_query=10,
     concurrency=2,
 )
 
-for batch in batches:
-    if batch.failure is not None:
-        print(batch.query, batch.failure.code)
+for failure in report.failures:
+    print(failure.query, failure.code)
 ```
 
 ### `sdk.search.fuse_rrf(...)`
@@ -273,7 +273,7 @@ for batch in batches:
 
 ```python
 sdk.search.fuse_rrf(
-    batches: list[Record | dict],
+    report: Record | dict,
     *,
     weights: list[float] | None = None,
     k: int = 60,
@@ -288,8 +288,8 @@ sdk.search.fuse_rrf(
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `batches` | required | Search batch records to fuse. |
-| `weights` | `None` | Per-batch non-negative weights aligned with `batches`. |
+| `report` | required | The report returned by `search.many`. |
+| `weights` | `None` | Non-negative weights aligned with the report's original inputs. |
 | `k` | `60` | Non-negative RRF rank-smoothing constant. |
 | `limit` | `None` | Optional final candidate count. |
 | `exclude_domains` | `None` | Hostnames and subdomains to remove. |
@@ -322,8 +322,8 @@ sdk.search.fuse_rrf(
 **Behavior and errors**
 
 - This helper is deterministic and local: it makes no broker call and incurs no provider work.
-- Failed batches are skipped and produce an execution warning; their original `failure` values are
-  not copied to fused candidates. An identical warning already emitted by `search.many` is deduplicated.
+- Only `report.results` participate in fusion. `search.many` has already recorded any report
+  failures, so this local helper neither interprets nor emits them again.
 - Domain policies match an exact hostname and its subdomains. Non-Web sources are unaffected.
 - Domain policy is applied before the final `limit`.
 - Invalid weights, ranks, limits, or domain policies raise `ValueError`.
@@ -332,7 +332,7 @@ sdk.search.fuse_rrf(
 
 ```python
 fused = sdk.search.fuse_rrf(
-    batches,
+    report,
     weights=[1.0, 1.5],
     exclude_domains=["social.example"],
     domain_weights={"docs.example.com": 2.0},
@@ -360,7 +360,7 @@ deduplicates by first appearance.
 **Signature**
 
 ```python
-sdk.content.get_many(sources: list[str]) -> list[Record]
+sdk.content.get_many(sources: list[str]) -> Record
 ```
 
 **Parameters**
@@ -371,23 +371,22 @@ sdk.content.get_many(sources: list[str]) -> list[Record]
 
 **Returns**
 
-`list[Record]`: one input-aligned `ContentRow` per source, containing the complete normalized
-document or a structured fetch failure.
+`Record`: a report with successful full-document rows in `results`, flat `ContentFailure` rows in
+`failures`, and `input_count`. Both outcome lists carry `input_index`.
 
 **Behavior and errors**
 
 - Duplicate inputs keep separate result positions while fetch work may be reused.
 - Prefer `passages` for evidence discovery and `read` for bounded line windows.
-- External fetch failures, including 0/N successful sources, remain aligned rows and produce an
+- External fetch failures, including 0/N successful sources, remain input-indexed and produce an
   automatic execution warning.
 
 **Example**
 
 ```python
-rows = sdk.content.get_many([hit.source for hit in hits])
-for row in rows:
-    if row.failure is None:
-        process(row.text)
+report = sdk.content.get_many([hit.source for hit in hits])
+for row in report.results:
+    process(row.text)
 ```
 
 ### `sdk.content.read(...)`
@@ -436,8 +435,7 @@ sdk.content.read(
 - Values are effectively constrained to `offset >= 1`, `1 <= limit <= 5000`, and
   `1 <= max_chars <= 400000`.
 - `next_offset is None` means the end of the document has been reached.
-- An external fetch failure returns a row with empty `text` and populated `failure`, and produces
-  an automatic execution warning.
+- An external fetch failure raises `BrokerError`; no synthetic empty success row is returned.
 
 **Example**
 
@@ -445,8 +443,6 @@ sdk.content.read(
 offset = 1
 while offset is not None:
     row = sdk.content.read(source, offset=offset, limit=200)
-    if row.failure is not None:
-        break
     consume(row.text)
     offset = row.metadata.next_offset
 ```
@@ -458,7 +454,7 @@ while offset is not None:
 **Signature**
 
 ```python
-sdk.content.read_many(windows: list[ContentReadWindow]) -> list[Record]
+sdk.content.read_many(windows: list[ContentReadWindow]) -> Record
 ```
 
 **Parameters**
@@ -469,21 +465,22 @@ sdk.content.read_many(windows: list[ContentReadWindow]) -> list[Record]
 
 **Returns**
 
-`list[Record]`: one input-aligned `ContentRow` per window. Every row includes `input_index`; each
-window applies its own `offset`, `limit`, and `max_chars`.
+`Record`: a report with successful `ContentRow` values in `results`, flat `ContentFailure` values
+in `failures`, and `input_count`. Both outcome lists carry `input_index`; each window applies its
+own `offset`, `limit`, and `max_chars`.
 
 **Behavior and errors**
 
 - Duplicate sources keep separate result positions and independent slices while broker fetch work
   may be reused.
 - Missing window options use the same defaults and bounds as `read`.
-- Invalid windows raise `ValueError`; external fetch failures remain aligned rows and produce an
+- Invalid windows raise `ValueError`; external fetch failures remain input-indexed and produce an
   automatic execution warning.
 
 **Example**
 
 ```python
-rows = sdk.content.read_many(
+report = sdk.content.read_many(
     [
         {"source": first_source, "offset": 1, "limit": 80},
         {"source": second_source, "offset": 120, "limit": 40, "max_chars": 16_000},
@@ -549,9 +546,9 @@ sdk.content.grep(
             "title": str,
             "match_count": int,
             "scan_complete": bool,
-            "failure": CapabilityFailure | None,
         }
     ],
+    "failures": [ContentFailure],
     "input_count": int,
 }
 ```
@@ -562,11 +559,11 @@ sdk.content.grep(
   mode never interprets regular-expression metacharacters.
 - `context` is effectively bounded from 0 through 20; `max_matches_per_source` is bounded from 1
   through 200.
-- `source_results` aligns one-to-one with inputs. `scan_complete=True` with `match_count=0` is a
-  successful zero-match scan; a failure sets `scan_complete=False`, and a capped scan is also
-  incomplete without being a failure.
+- `source_results` contains successful scans. `scan_complete=True` with `match_count=0` is a
+  successful zero-match scan; a capped successful scan has `scan_complete=False`. Fetch failures
+  appear separately in `failures`.
 - Duplicate sources remain distinguishable through `input_index`.
-- External fetch failures, including 0/N successful scans, remain in `source_results` and produce
+- External fetch failures, including 0/N successful scans, remain input-indexed in `failures` and produce
   an automatic execution warning.
 
 **Example**
@@ -769,7 +766,7 @@ sdk.llm.extract_many(
     concurrency: int = 4,
     max_tokens: int | None = None,
     repair_attempts: int = 0,
-) -> list[Record]
+) -> Record
 ```
 
 **Parameters**
@@ -785,37 +782,36 @@ sdk.llm.extract_many(
 
 **Returns**
 
-`list[Record]`: one input-aligned extraction row with this shape:
+`Record`: an input-partitioned extraction report:
 
 ```python
 {
-    "index": int,
-    "data": dict | None,
-    "failure": {
-        "code": str,
-        "message": str,
-        "retryable": bool,
-    } | None,
-    "attempts": int,
+    "results": [
+        {"input_index": int, "data": dict, "attempts": int}
+    ],
+    "failures": [
+        {"input_index": int, "attempts": int, ...CapabilityFailure fields}
+    ],
+    "input_count": int,
 }
 ```
 
 **Behavior and errors**
 
-- Success rows have non-null `data` and `failure is None`; failed rows have the opposite shape.
+- Successful and failed rows are separate; together their `input_index` values partition the input.
 - `repair_attempts=1` adds one repair pass for repairable formatting or schema errors.
 - `items` and `schema` cannot contain NaN or Infinity. The schema root must declare
   `{"type": "object"}`.
 - Supported schema keywords are `$schema`, `type`, `properties`, `required`,
   `additionalProperties`, `items`, `enum`, and `description`.
 - A default deployment accepts at most 256 items; the host can configure size and nesting limits.
-- Per-item provider failures may coexist with success. If every item fails, all aligned rows are
-  still returned and `sac_run` renders a 0/N execution warning.
+- Per-item provider failures may coexist with success. If every item fails, the report still
+  returns every failure and `sac_run` renders a 0/N execution warning.
 
 **Example**
 
 ```python
-rows = sdk.llm.extract_many(
+report = sdk.llm.extract_many(
     passages,
     instruction="Extract whether the passage names an author.",
     schema={
@@ -884,8 +880,7 @@ None.
         "max_workspace_bytes": int | None,
     },
     "provider": {
-        "search_attempts": int,
-        "content_attempts": int,
+        "attempts_by_capability": dict[str, int],
         "retries": int,
         "intra_call_deduplicated_items": int,
         "coalesced_requests": int,
@@ -900,6 +895,8 @@ None.
 **Behavior and errors**
 
 - `None` in `budget_remaining` means the resource has no hard ceiling.
+- `provider.attempts_by_capability` attributes backend attempts to the calling capability family,
+  such as `search`, `content`, or `llm`; absent families made no backend attempt.
 - A broker read failure raises `BrokerError`.
 
 **Example**

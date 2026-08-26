@@ -1,23 +1,22 @@
 # Workspace-backed Search-as-Code research
 
-Read this reference only when research must continue across multiple OpenSAC program calls. The
-workspace is the program's durable notebook; stdout is only the control model's bounded view. Each
-code block is one stage, not one program to paste in full. Run only the next useful stage and adapt
-every placeholder. Searching first and choosing a verification strategy after inspecting candidates
-is valid.
+This reference shows one workspace-backed design for research across multiple OpenSAC program calls.
+It is an adaptable example, not a required workspace schema or stage sequence. The workspace is the
+program's durable notebook; stdout is only the control model's bounded view. Use, combine, or replace
+the blocks and artifacts according to the task.
 
 ## Contents
 
-- [Workspace contract](#workspace-contract)
+- [Example workspace layout](#example-workspace-layout)
 - [1. Search or extend the candidate pool](#1-search-or-extend-the-candidate-pool)
 - [2. Verify one missing constraint](#2-verify-one-missing-constraint)
 - [3. Inspect workspace after an uncertain failure](#3-inspect-workspace-after-an-uncertain-failure)
 - [4. Submit a complete ledger](#4-submit-a-complete-ledger)
 
-## Workspace contract
+## Example workspace layout
 
-Keep one task-derived `runs/<research_id>/` namespace. Observations show artifact paths, not file
-contents; every later program must explicitly load the files it needs.
+This example uses one task-derived `runs/<research_id>/` namespace. Observations show artifact paths,
+not file contents; every later program must explicitly load the files it needs.
 
 | Artifact | Durable decision | Update rule |
 | --- | --- | --- |
@@ -26,12 +25,12 @@ contents; every later program must explicitly load the files it needs.
 | `evidence.json` | Verified passages and source URLs | Keep matching fingerprints |
 | `attempts.json` | Sources tried for each matching rule | Save before capability calls |
 
-For every stage:
+When adapting this example, preserve the platform semantics while choosing the state shape freely:
 
-- Derive the ID from the exact task, stable requirements, and source policy—not queries or regexes.
+- Use a namespace that does not collide with other research in the conversation.
 - Start with `sdk.state.list(f"{root}/")`, then read the artifacts the stage needs.
-- Save progress before printing `NEXT:` or exiting. Python variables do not survive calls.
-- Keep pools bounded and skip attempted `(constraint, source)` pairs.
+- Save useful progress before the call ends because Python variables do not survive calls.
+- Bound artifacts and repeated work to fit the task's execution budget.
 - Public web URLs remain reusable across sessions; re-search local IDs after session loss.
 - Use bounded `print` output for progress; use `sdk.output.submit` for the final result.
 
@@ -64,8 +63,8 @@ if manifest_path not in artifacts:
     sdk.state.write_json(manifest_path, manifest)
 
 queries = ['"exact phrase" entity', "entity alternate wording", "rare clue organization"]
-batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
-fusion = sdk.search.fuse_rrf(batches, k=60)
+search_report = sdk.search.many(queries, limit_per_query=10, concurrency=6)
+fusion = sdk.search.fuse_rrf(search_report, k=60)
 rank_now = {candidate.source: candidate.fused_rank for candidate in fusion}
 new_rows = [
     {
@@ -137,7 +136,7 @@ if sources:
         passage = sdk.content.read(
             match.source, offset=max(match.line - 10, 1), limit=40, max_chars=16_000
         )
-        if passage.failure is None and re.search(pattern, passage.text, re.IGNORECASE):
+        if re.search(pattern, passage.text, re.IGNORECASE):
             evidence[name] = {
                 "fingerprint": fingerprint,
                 "requirement": requirement,

@@ -36,11 +36,11 @@ def test_base_runtime_does_not_require_pipeline_llm_dependencies(
         Settings(
             data_dir=tmp_path / "data",
             broker_socket=tmp_path / "broker.sock",
-            model_name="",
         )
     )
 
-    assert runtime.broker.llm.model_client is None
+    assert runtime.broker.llm.service is None
+    assert runtime.broker.llm_service is None
 
 
 def test_configured_pipeline_model_requires_llm_extra(
@@ -53,7 +53,12 @@ def test_configured_pipeline_model_requires_llm_extra(
             Settings(
                 data_dir=tmp_path / "data",
                 broker_socket=tmp_path / "broker.sock",
-                model_name="pipeline-model",
+                backends={
+                    "llm": {
+                        "provider": "openai_compatible",
+                        "model": "pipeline-model",
+                    }
+                },
             )
         )
 

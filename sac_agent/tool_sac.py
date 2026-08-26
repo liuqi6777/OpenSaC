@@ -42,7 +42,7 @@ from opensac_sdk import BrokerError, sdk
 
 Core SDK surface:
 
-- Search with `sdk.search.many(...)`; combine batches with `sdk.search.fuse_rrf(...)`.
+- Search with `sdk.search.many(...)`; combine its report with `sdk.search.fuse_rrf(...)`.
 - Inspect documents with `sdk.content.grep(...)` and `sdk.content.read(...)`; read offsets
   are 1-indexed.
 - Use `sdk.llm.extract_many(...)` only for bounded semantic mapping.
@@ -67,8 +67,8 @@ When search results need interpretation, stop after a bounded preview:
 
 ```python
 queries = ['"exact phrase" entity', "entity alternate wording"]
-batches = sdk.search.many(queries, limit_per_query=5)
-for item in sdk.search.fuse_rrf(batches)[:5]:
+search_report = sdk.search.many(queries, limit_per_query=5)
+for item in sdk.search.fuse_rrf(search_report)[:5]:
     print(f"CANDIDATE source={item.source!r} title={item.title!r}")
 print("NEXT: choose sources and checks")
 ```
@@ -83,10 +83,13 @@ pattern = r"target phrase"
 report = sdk.content.grep(sources, pattern, context=2)
 passage = None
 for match in report.matches[:4]:
-    item = sdk.content.read(
-        match.source, offset=max(match.line - 8, 1), limit=30, max_chars=12_000
-    )
-    if item.failure is None and re.search(pattern, item.text, re.IGNORECASE):
+    try:
+        item = sdk.content.read(
+            match.source, offset=max(match.line - 8, 1), limit=30, max_chars=12_000
+        )
+    except BrokerError:
+        continue
+    if re.search(pattern, item.text, re.IGNORECASE):
         passage = item
         break
 

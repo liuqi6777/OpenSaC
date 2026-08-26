@@ -5,11 +5,24 @@ import json
 import httpx
 import pytest
 
-from opensac._contracts import ContentSnippet, SearchHit
-from opensac.backends.rerank.jina import JinaPassageReranker
+from opensac.backends.document import DocumentContent, DocumentHandle
+from opensac.backends.rerank import JinaReranker, LexicalReranker, RerankScore
+from opensac.backends.search import SearchHit
+from opensac.broker.call_context import call_scope
 from opensac.broker.service import BrokerService
+from opensac.broker.services import RerankItem
 from opensac.models import ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
+
+
+def _broker_service(search_backends, *, document_backends=None, **kwargs):
+    if document_backends is None:
+        document_backends = search_backends
+    return BrokerService(
+        search_backends,
+        document_backends=document_backends,
+        **kwargs,
+    )
 
 
 def _session() -> Session:
@@ -24,6 +37,7 @@ def _session() -> Session:
 
 class _TwoPageBackend:
     name = "web"
+    source_kind = "public_url"
     supports_domains = True
     max_depth = 100
 
@@ -43,12 +57,16 @@ class _TwoPageBackend:
 
     async def fetch(self, hit, *, query=None):
         del query
-        return ContentSnippet(
+        return DocumentContent(
             source=hit.source,
             title=hit.title,
             url=hit.url,
             text=f"rankable private passage from {hit.title}",
         )
+
+    @staticmethod
+    def fetch_candidates(hit: DocumentHandle) -> list[DocumentHandle]:
+        return [hit]
 
 
 def _mocked_reranker(
@@ -56,8 +74,8 @@ def _mocked_reranker(
     *,
     api_key: str = "jina-secret",
     model: str = "jina-reranker-v3",
-) -> JinaPassageReranker:
-    reranker = JinaPassageReranker(api_key=api_key, model=model)
+) -> JinaReranker:
+    reranker = JinaReranker(api_key=api_key, model=model)
     reranker._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return reranker
 
@@ -99,6 +117,24 @@ async def test_jina_adapter_sends_indexed_documents_and_accepts_unordered_result
         (0, 0.9),
         (1, 0.8),
     ]
+
+
+async def test_lexical_reranker_implements_the_generic_indexed_contract() -> None:
+    reranker = LexicalReranker()
+
+    reranker.preflight()
+    results = await reranker.rerank(
+        "Singapore revenue",
+        [
+            "The audited report states that Singapore revenue increased.",
+            "An unrelated document about weather.",
+        ],
+    )
+
+    assert reranker.name == "lexical:bm25"
+    assert reranker.provider_identity == "lexical:bm25:v1"
+    assert [result.index for result in results] == [0, 1]
+    assert results[0].score > results[1].score == 0.0
 
 
 @pytest.mark.parametrize(
@@ -148,7 +184,7 @@ def test_jina_adapter_preflight_requires_credentials_and_explicit_model(
     model: str,
     expected: str,
 ) -> None:
-    reranker = JinaPassageReranker(api_key=api_key, model=model)
+    reranker = JinaReranker(api_key=api_key, model=model)
 
     with pytest.raises(ProviderRequestError) as raised:
         reranker.preflight()
@@ -157,6 +193,99 @@ def test_jina_adapter_preflight_requires_credentials_and_explicit_model(
     assert raised.value.attempts == 0
     assert expected in str(raised.value)
     assert reranker._client is None
+
+
+def test_broker_defaults_to_lexical_reranker_and_accepts_its_runtime() -> None:
+    runtime = ProviderRuntime()
+    broker = _broker_service(
+        {"web": _TwoPageBackend()},
+        rerank_runtime=runtime,
+    )
+
+    assert isinstance(broker.reranker, LexicalReranker)
+    assert broker.rerank_runtime is runtime
+    assert broker.rerank_service.backend is broker.reranker
+
+
+async def test_shared_rerank_service_attributes_usage_to_the_calling_capability() -> None:
+    class GenericReranker:
+        name = "test:generic"
+        provider_identity = "test:generic"
+
+        @staticmethod
+        def preflight() -> None:
+            return None
+
+        async def rerank(self, query: str, documents: list[str]) -> list[RerankScore]:
+            del query
+            return [
+                RerankScore(index=index, score=float(len(document)))
+                for index, document in enumerate(documents)
+            ]
+
+    runtime = ProviderRuntime(ProviderPolicy(concurrency=1))
+    broker = _broker_service(
+        {"web": _TwoPageBackend()},
+        reranker=GenericReranker(),
+        rerank_runtime=runtime,
+    )
+    state = broker.register_session(_session())
+    service = broker.rerank_service
+
+    with call_scope("token", None, capability_family="search") as search_context:
+        search_scores = await service.score(
+            state,
+            "query",
+            [RerankItem(id="hit", text="search result")],
+        )
+    with call_scope("token", None, capability_family="content"):
+        passage_scores = await service.score(
+            state,
+            "query",
+            [RerankItem(id="passage", text="content passage")],
+        )
+
+    assert search_scores == {"hit": 13.0}
+    assert passage_scores == {"passage": 15.0}
+    assert state.policy.usage.provider_attempts_by_capability == {
+        "content": 1,
+        "search": 1,
+    }
+    assert {attempt.component for attempt in search_context.provider_attempts} == {"rerank"}
+    assert len(runtime._governors) == 1
+
+
+async def test_rerank_service_rejects_invalid_backend_output() -> None:
+    class InvalidReranker:
+        name = "test:invalid"
+        provider_identity = "test:invalid"
+
+        @staticmethod
+        def preflight() -> None:
+            return None
+
+        async def rerank(self, query: str, documents: list[str]):
+            del query, documents
+            return [{"index": True, "score": 1.0}]
+
+    broker = _broker_service(
+        {"web": _TwoPageBackend()},
+        reranker=InvalidReranker(),
+    )
+    state = broker.register_session(_session())
+
+    with (
+        call_scope("token", None, capability_family="content"),
+        pytest.raises(ProviderRequestError) as failed,
+    ):
+        await broker.rerank_service.score(
+            state,
+            "query",
+            [RerankItem(id="passage", text="content passage")],
+        )
+
+    assert failed.value.code == "provider_invalid_response"
+    assert failed.value.attempts == 1
 
 
 async def test_jina_reranking_uses_provider_retries_and_body_free_trace() -> None:
@@ -183,19 +312,17 @@ async def test_jina_reranking_uses_provider_retries_and_body_free_trace() -> Non
 
     reranker = _mocked_reranker(handler)
     runtime = ProviderRuntime(
-        {
-            "web.rerank": ProviderPolicy(
-                retry_profile="safe",
-                max_attempts=3,
-                base_backoff_seconds=0,
-                max_backoff_seconds=0,
-            )
-        }
+        ProviderPolicy(
+            retry_profile="safe",
+            max_attempts=3,
+            base_backoff_seconds=0,
+            max_backoff_seconds=0,
+        )
     )
-    service = BrokerService(
+    service = _broker_service(
         {"web": _TwoPageBackend()},
-        passage_reranker=reranker,
-        provider_runtime=runtime,
+        reranker=reranker,
+        rerank_runtime=runtime,
     )
     service.register_session(_session())
     try:
@@ -218,7 +345,7 @@ async def test_jina_reranking_uses_provider_retries_and_body_free_trace() -> Non
     assert calls == 3
     assert [row["source"] for row in report["passages"]] == [hits[1]["source"], hits[0]["source"]]
     rerank_attempts = [
-        attempt for attempt in trace.provider_attempts if attempt.operation == "web.rerank"
+        attempt for attempt in trace.provider_attempts if attempt.component == "rerank"
     ]
     assert [attempt.status for attempt in rerank_attempts] == [
         "error",
@@ -242,9 +369,9 @@ async def test_jina_final_http_error_is_typed_and_does_not_expose_response_body(
         return httpx.Response(503, request=request, text=secret_body)
 
     reranker = _mocked_reranker(handler)
-    service = BrokerService(
+    service = _broker_service(
         {"web": _TwoPageBackend()},
-        passage_reranker=reranker,
+        reranker=reranker,
     )
     service.register_session(_session())
     try:

@@ -28,8 +28,6 @@ class _ProviderCacheFlight:
 class ProviderResultCache:
     """A bounded process-local cache with per-key miss serialization."""
 
-    cacheable_operations = frozenset({"web.search", "web.scrape"})
-
     def __init__(
         self,
         *,
@@ -58,12 +56,9 @@ class ProviderResultCache:
     def enabled(self) -> bool:
         return self.ttl_seconds > 0
 
-    def enabled_for(self, operation: str) -> bool:
-        return self.enabled and operation in self.cacheable_operations
-
     @staticmethod
-    def key(provider_identity: str, operation: str, request_fingerprint: str) -> str:
-        return f"{provider_identity}:{operation}:{request_fingerprint}"
+    def key(namespace: str, provider_identity: str, request_fingerprint: str) -> str:
+        return f"{namespace}:{provider_identity}:{request_fingerprint}"
 
     @staticmethod
     def _encoded_size(value: Any) -> int:

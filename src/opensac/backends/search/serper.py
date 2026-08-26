@@ -1,4 +1,4 @@
-"""Adapters for Serper search and its currently coupled Jina reader."""
+"""Serper web search adapter."""
 
 from __future__ import annotations
 
@@ -7,15 +7,16 @@ from urllib.parse import urlparse
 
 import httpx
 
-from opensac._contracts import ContentSnippet, RetrievalMetadata, SearchHit
 from opensac.backends._response import json_object
+from opensac.backends.search.base import RetrievalMetadata, SearchHit
 from opensac.provider import ProviderRequestError, invalid_provider_response
 
 
 class SerperBackend:
     name = "web"
+    result_cacheable = True
+    provider_name = "serper"
     search_url = "https://google.serper.dev/search"
-    reader_url = "https://r.jina.ai"
     # Pushed down into the query as `site:` rather than filtered afterwards,
     # which is the point: the ranking is recomputed under the constraint instead
     # of being thinned after the fact.
@@ -26,20 +27,12 @@ class SerperBackend:
     # 100 draws exactly the wrong conclusion about why it found nothing.
     max_depth = 100
 
-    @staticmethod
-    def provider_for_operation(operation: str) -> str:
-        """Name the actual upstream behind the shared web backend."""
-
-        return "jina_reader" if operation == "web.scrape" else "serper"
-
     def __init__(
         self,
         api_key: str = "",
         timeout: float = 30.0,
-        jina_api_key: str = "",
     ) -> None:
         self.api_key = api_key
-        self.jina_api_key = jina_api_key
         self.timeout = timeout
         self._client: httpx.AsyncClient | None = None
 
@@ -47,9 +40,9 @@ class SerperBackend:
     def provider_identity(self) -> str:
         """Opaque limiter key for the endpoint and configured credential."""
 
-        material = "\0".join((self.search_url, self.reader_url, self.api_key, self.jina_api_key))
+        material = "\0".join((self.search_url, self.api_key))
         digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
-        return f"web:{digest}"
+        return f"serper:{digest}"
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -74,22 +67,6 @@ class SerperBackend:
         """Validate deployment-owned search configuration before admission."""
 
         self._headers()
-
-    def preflight_fetch(self, hit: SearchHit) -> None:
-        """Validate a Reader request before it enters provider governors."""
-
-        parsed_url = urlparse(str(hit.url or ""))
-        if parsed_url.scheme.lower() not in {"http", "https"} or not parsed_url.netloc:
-            raise ProviderRequestError(
-                "invalid_request",
-                "Search result cannot be fetched because it has no absolute HTTP URL.",
-                retryable=False,
-            )
-
-    def _reader_headers(self) -> dict[str, str]:
-        if not self.jina_api_key:
-            return {}
-        return {"Authorization": f"Bearer {self.jina_api_key}"}
 
     async def search(
         self,
@@ -144,33 +121,4 @@ class SerperBackend:
                 comparable_across_queries=False,
             ),
             metadata={k: v for k, v in hit.items() if k not in {"title", "link", "snippet"}},
-        )
-
-    async def fetch(
-        self,
-        hit: SearchHit,
-        *,
-        query: str | None = None,
-    ) -> ContentSnippet:
-        del query
-        self.preflight_fetch(hit)
-        response = await self._http().get(
-            f"{self.reader_url}/{hit.url}",
-            headers=self._reader_headers(),
-        )
-        response.raise_for_status()
-        text = response.text
-        if not isinstance(text, str) or not text.strip():
-            raise ProviderRequestError(
-                "provider_invalid_response",
-                "Reader returned empty document text.",
-                retryable=False,
-                scope="resource",
-            )
-        return ContentSnippet(
-            source=hit.source,
-            text=text,
-            url=hit.url,
-            title=hit.title,
-            metadata={"backend": self.name},
         )

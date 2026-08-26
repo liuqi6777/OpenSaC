@@ -128,7 +128,7 @@ def test_lazy_sdk_exposes_resource_and_method_docs_without_a_broker_call() -> No
             search_doc = opensac_sdk.sdk.search.__doc__ or ""
             assert "sdk.search(query" in search_doc
             assert "canonical web URL" in search_doc
-            assert "input query" in (opensac_sdk.sdk.search.many.__doc__ or "")
+            assert "input_index" in (opensac_sdk.sdk.search.many.__doc__ or "")
     finally:
         opensac_sdk.sdk.close()
 
@@ -201,7 +201,7 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
                 "provider_status": 503,
                 "retry_after_seconds": 1.5,
                 "provider": "jina_reader",
-                "operation": "web.scrape",
+                "component": "document",
                 "scope": "provider",
             },
         },
@@ -222,7 +222,7 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
     assert raised.value.provider_status == 503
     assert raised.value.retry_after_seconds == 1.5
     assert raised.value.provider == "jina_reader"
-    assert raised.value.operation == "web.scrape"
+    assert raised.value.component == "document"
     assert raised.value.scope == "provider"
 
 
@@ -255,23 +255,55 @@ def test_search_resource_returns_typed_hits() -> None:
     ]
 
 
+def _search_report(
+    results: list[Record | dict[str, object]],
+    *,
+    failures: list[Record | dict[str, object]] | None = None,
+    input_count: int | None = None,
+) -> Record:
+    normalized_results = []
+    for default_index, result in enumerate(results):
+        row = dict(result)
+        row.setdefault("input_index", default_index)
+        normalized_results.append(row)
+    normalized_failures = [dict(failure) for failure in failures or []]
+    if input_count is None:
+        indexes = [row["input_index"] for row in normalized_results]
+        indexes.extend(row["input_index"] for row in normalized_failures)
+        input_count = max(indexes, default=-1) + 1
+    return record(
+        {
+            "results": normalized_results,
+            "failures": normalized_failures,
+            "input_count": input_count,
+        }
+    )
+
+
 def test_search_many_returns_only_result_semantics() -> None:
     class ManyTransport:
         def call(self, method, params):
             assert method == "search.query_many"
-            return wrap([{"query": query, "hits": []} for query in params["queries"]])
+            return _search_report(
+                [
+                    {"input_index": index, "query": query, "hits": []}
+                    for index, query in enumerate(params["queries"])
+                ]
+            )
 
-    batches = SearchResource(ManyTransport()).many(
+    report = SearchResource(ManyTransport()).many(
         ["one", "two"],
         limit_per_query=12,
         offset=4,
         domains=["example.com"],
     )
 
-    assert [dict(batch) for batch in batches] == [
-        {"query": "one", "hits": []},
-        {"query": "two", "hits": []},
+    assert [dict(result) for result in report.results] == [
+        {"input_index": 0, "query": "one", "hits": []},
+        {"input_index": 1, "query": "two", "hits": []},
     ]
+    assert report.failures == []
+    assert report.input_count == 2
 
 
 def test_search_many_records_all_failed_warning_without_raising(tmp_path, monkeypatch) -> None:
@@ -281,31 +313,30 @@ def test_search_many_records_all_failed_warning_without_raising(tmp_path, monkey
     class FailedManyTransport:
         def call(self, method, params):
             assert method == "search.query_many"
-            return wrap(
-                [
+            return _search_report(
+                [],
+                failures=[
                     {
+                        "input_index": input_index,
                         "query": query,
-                        "hits": [],
-                        "failure": {
-                            "code": "provider_timeout",
-                            "message": "Search provider timed out.",
-                            "retryable": True,
-                            "attempts": 3,
-                            "provider": "serper",
-                            "operation": "web.search",
-                            "scope": "provider",
-                        },
+                        "code": "provider_timeout",
+                        "message": "Search provider timed out.",
+                        "retryable": True,
+                        "attempts": 3,
+                        "provider": "serper",
+                        "component": "search",
+                        "scope": "provider",
                     }
-                    for query in params["queries"]
-                ]
+                    for input_index, query in enumerate(params["queries"])
+                ],
             )
 
     search = SearchResource(FailedManyTransport())
-    batches = search.many(["one", "two"])
-    assert search.fuse_rrf(batches) == []
+    report = search.many(["one", "two"])
+    assert search.fuse_rrf(report) == []
 
-    assert len(batches) == 2
-    assert all(batch.failure.code == "provider_timeout" for batch in batches)
+    assert report.results == []
+    assert all(failure.code == "provider_timeout" for failure in report.failures)
     warnings = json.loads(output_path.read_text(encoding="utf-8"))["warnings"]
     assert len(warnings) == 1
     warning = warnings[0]
@@ -323,20 +354,19 @@ def test_sdk_failure_warnings_are_strictly_bounded(tmp_path, monkeypatch) -> Non
     class FailedManyTransport:
         def call(self, method, params):
             assert method == "search.query_many"
-            return wrap(
-                [
+            return _search_report(
+                [],
+                failures=[
                     {
+                        "input_index": input_index,
                         "query": query,
-                        "hits": [],
-                        "failure": {
-                            "code": "provider_timeout",
-                            "message": "x" * 10_000,
-                            "retryable": True,
-                            "attempts": 3,
-                        },
+                        "code": "provider_timeout",
+                        "message": "x" * 10_000,
+                        "retryable": True,
+                        "attempts": 3,
                     }
-                    for query in params["queries"]
-                ]
+                    for input_index, query in enumerate(params["queries"])
+                ],
             )
 
     SearchResource(FailedManyTransport()).many([f"query-{index}" for index in range(64)])
@@ -356,21 +386,20 @@ def test_warning_budget_keeps_later_failure_summaries(tmp_path, monkeypatch) -> 
 
     class FailedManyTransport:
         def call(self, method, params):
-            return wrap(
-                [
+            return _search_report(
+                [],
+                failures=[
                     {
+                        "input_index": 0,
                         "query": params["queries"][0],
-                        "hits": [],
-                        "failure": {
-                            "code": "provider_invalid_response" + "x" * 480,
-                            "message": "x" * 1_024,
-                            "retryable": False,
-                            "attempts": 1,
-                            "provider": "p" * 512,
-                            "operation": "o" * 512,
-                        },
+                        "code": "provider_invalid_response" + "x" * 480,
+                        "message": "x" * 1_024,
+                        "retryable": False,
+                        "attempts": 1,
+                        "provider": "p" * 512,
+                        "component": "o" * 512,
                     }
-                ]
+                ],
             )
 
     search = SearchResource(FailedManyTransport())
@@ -409,35 +438,35 @@ def _hit(source: str, rank: int, *, backend: str = "local", score: float | None 
 def test_search_rrf_fuses_sources_locally_and_preserves_provenance() -> None:
     transport = FakeTransport()
     search = SearchResource(transport)
-    batches = [
-        record(
+    report = _search_report(
+        [
+            record(
+                {
+                    "query": "alpha",
+                    "hits": [_hit("a", 1, score=0.9), _hit("a", 3), _hit("b", 2)],
+                }
+            ),
+            record({"query": "beta", "hits": [_hit("b", 1), _hit("a", 2)]}),
+        ],
+        failures=[
             {
-                "query": "alpha",
-                "hits": [_hit("a", 1, score=0.9), _hit("a", 3), _hit("b", 2)],
-                "failure": None,
-            }
-        ),
-        record({"query": "beta", "hits": [_hit("b", 1), _hit("a", 2)], "failure": None}),
-        record(
-            {
+                "input_index": 2,
                 "query": "failed",
-                "hits": [],
-                "failure": {
-                    "code": "provider_timeout",
-                    "message": "Provider request timed out",
-                    "retryable": True,
-                    "attempts": 1,
-                },
+                "code": "provider_timeout",
+                "message": "Provider request timed out",
+                "retryable": True,
+                "attempts": 1,
             }
-        ),
-    ]
+        ],
+        input_count=3,
+    )
 
-    result = search.fuse_rrf(batches, weights=[1, 2, 1])
+    result = search.fuse_rrf(report, weights=[1, 2, 1])
 
     assert transport.calls == []
     assert [candidate.source for candidate in result] == ["b", "a"]
     assert [candidate.fused_rank for candidate in result] == [1, 2]
-    assert batches[2].failure is not None
+    assert report.failures[0].input_index == 2
 
     candidate_a = result[1]
     assert isinstance(candidate_a, Record)
@@ -457,19 +486,21 @@ def test_search_rrf_fuses_sources_locally_and_preserves_provenance() -> None:
 def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
     search = SearchResource(FakeTransport())
     tied = search.fuse_rrf(
-        [
-            record({"query": "first", "hits": [_hit("z", 1)], "failure": None}),
-            record({"query": "second", "hits": [_hit("a", 1)], "failure": None}),
-        ],
+        _search_report(
+            [
+                record({"query": "first", "hits": [_hit("z", 1)]}),
+                record({"query": "second", "hits": [_hit("a", 1)]}),
+            ]
+        ),
         limit=1,
     )
     assert [candidate.source for candidate in tied] == ["z"]
 
-    empty = search.fuse_rrf([])
+    empty = search.fuse_rrf(_search_report([]))
     assert empty == []
 
     zero_limit = search.fuse_rrf(
-        [record({"query": "one", "hits": [_hit("a", 1)], "failure": None})],
+        _search_report([record({"query": "one", "hits": [_hit("a", 1)]})]),
         limit=0,
     )
     assert zero_limit == []
@@ -487,41 +518,44 @@ def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
     ],
 )
 def test_search_rrf_rejects_invalid_options(kwargs, message) -> None:
-    batches = [
-        record({"query": "one", "hits": [_hit("a", 1)], "failure": None}),
-        record({"query": "two", "hits": [_hit("b", 1)], "failure": None}),
-    ]
+    report = _search_report(
+        [
+            record({"query": "one", "hits": [_hit("a", 1)]}),
+            record({"query": "two", "hits": [_hit("b", 1)]}),
+        ]
+    )
     with pytest.raises(ValueError, match=message):
-        SearchResource(FakeTransport()).fuse_rrf(batches, **kwargs)
+        SearchResource(FakeTransport()).fuse_rrf(report, **kwargs)
 
 
 def test_search_rrf_refuses_non_positive_source_rank() -> None:
     with pytest.raises(ValueError, match="rank"):
         SearchResource(FakeTransport()).fuse_rrf(
-            [record({"query": "bad", "hits": [_hit("a", 0)], "failure": None})]
+            _search_report([record({"query": "bad", "hits": [_hit("a", 0)]})])
         )
 
 
 def test_search_rrf_applies_domain_policy_before_limit() -> None:
     search = SearchResource(FakeTransport())
-    batches = [
-        record(
-            {
-                "query": "one",
-                "hits": [
-                    _hit("https://www.instagram.com/a", 1, backend="web"),
-                    _hit("https://noise.example/a", 2, backend="web"),
-                    _hit("https://noise.example/b", 3, backend="web"),
-                    _hit("https://useful.example/a", 4, backend="web"),
-                    _hit("local-document", 5),
-                ],
-                "failure": None,
-            }
-        )
-    ]
+    report = _search_report(
+        [
+            record(
+                {
+                    "query": "one",
+                    "hits": [
+                        _hit("https://www.instagram.com/a", 1, backend="web"),
+                        _hit("https://noise.example/a", 2, backend="web"),
+                        _hit("https://noise.example/b", 3, backend="web"),
+                        _hit("https://useful.example/a", 4, backend="web"),
+                        _hit("local-document", 5),
+                    ],
+                }
+            )
+        ]
+    )
 
     result = search.fuse_rrf(
-        batches,
+        report,
         exclude_domains=["Instagram.COM."],
         domain_weights={"noise.example": 0.1},
         max_per_domain=1,
@@ -541,18 +575,19 @@ def test_search_rrf_applies_domain_policy_before_limit() -> None:
 
 def test_search_rrf_uses_most_specific_domain_weight() -> None:
     result = SearchResource(FakeTransport()).fuse_rrf(
-        [
-            record(
-                {
-                    "query": "one",
-                    "hits": [
-                        _hit("https://docs.example.com/a", 1, backend="web"),
-                        _hit("https://blog.example.com/a", 2, backend="web"),
-                    ],
-                    "failure": None,
-                }
-            )
-        ],
+        _search_report(
+            [
+                record(
+                    {
+                        "query": "one",
+                        "hits": [
+                            _hit("https://docs.example.com/a", 1, backend="web"),
+                            _hit("https://blog.example.com/a", 2, backend="web"),
+                        ],
+                    }
+                )
+            ]
+        ),
         domain_weights={"example.com": 0.25, "docs.example.com": 2.0},
     )
 
@@ -565,15 +600,16 @@ def test_search_rrf_uses_most_specific_domain_weight() -> None:
 
 def test_search_rrf_domain_policy_ignores_non_web_and_malformed_sources() -> None:
     result = SearchResource(FakeTransport()).fuse_rrf(
-        [
-            record(
-                {
-                    "query": "one",
-                    "hits": [_hit("local-document", 1), _hit("https://[invalid", 2)],
-                    "failure": None,
-                }
-            )
-        ],
+        _search_report(
+            [
+                record(
+                    {
+                        "query": "one",
+                        "hits": [_hit("local-document", 1), _hit("https://[invalid", 2)],
+                    }
+                )
+            ]
+        ),
         exclude_domains=["example.com"],
         max_per_domain=1,
     )
@@ -594,18 +630,16 @@ def test_search_rrf_domain_policy_ignores_non_web_and_malformed_sources() -> Non
     ],
 )
 def test_search_rrf_rejects_invalid_domain_policy(kwargs, message) -> None:
-    batches = [record({"query": "one", "hits": [_hit("a", 1)], "failure": None})]
+    report = _search_report([record({"query": "one", "hits": [_hit("a", 1)]})])
     with pytest.raises(ValueError, match=message):
-        SearchResource(FakeTransport()).fuse_rrf(batches, **kwargs)
+        SearchResource(FakeTransport()).fuse_rrf(report, **kwargs)
 
 
-def test_search_rrf_skips_failed_batches_and_records_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    output_path = tmp_path / "output.json"
-    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+def test_search_rrf_ignores_separate_failures() -> None:
     failure = record(
         {
+            "input_index": 0,
+            "query": "limited",
             "code": "provider_rate_limited",
             "message": "Provider rate limit was exhausted",
             "retryable": True,
@@ -614,16 +648,12 @@ def test_search_rrf_skips_failed_batches_and_records_warning(
             "retry_after_seconds": 2.0,
         }
     )
-    batch = record({"query": "limited", "hits": [], "failure": failure})
+    report = _search_report([], failures=[failure], input_count=1)
 
-    result = SearchResource(FakeTransport()).fuse_rrf([batch])
+    result = SearchResource(FakeTransport()).fuse_rrf(report)
 
     assert result == []
-    assert batch.failure == failure
-    warning = json.loads(output_path.read_text(encoding="utf-8"))["warnings"][0]
-    assert warning["method"] == "search.fuse_rrf"
-    assert warning["success_count"] == 0
-    assert warning["failures"][0]["query"] == "limited"
+    assert report.failures == [failure]
 
 
 def test_content_grep_returns_matches_and_source_aligned_status() -> None:
@@ -655,21 +685,17 @@ def test_content_grep_returns_matches_and_source_aligned_status() -> None:
                             "title": "One",
                             "match_count": 1,
                             "scan_complete": True,
-                            "failure": None,
-                        },
+                        }
+                    ],
+                    "failures": [
                         {
                             "input_index": 1,
                             "source": "source_2",
-                            "title": "Two",
-                            "match_count": 0,
-                            "scan_complete": False,
-                            "failure": {
-                                "code": "provider_not_found",
-                                "message": "Document was not found",
-                                "retryable": False,
-                                "attempts": 1,
-                                "provider_status": 404,
-                            },
+                            "code": "provider_not_found",
+                            "message": "Document was not found",
+                            "retryable": False,
+                            "attempts": 1,
+                            "provider_status": 404,
                         }
                     ],
                     "input_count": 2,
@@ -690,9 +716,9 @@ def test_content_grep_returns_matches_and_source_aligned_status() -> None:
     assert report.matches[0].source == "source_1"
     assert report.matches[0].line == 3
     assert report.source_results[0].scan_complete is True
-    assert report.source_results[1].input_index == 1
-    assert report.source_results[1].failure.code == "provider_not_found"
-    assert report.source_results[1].failure.provider_status == 404
+    assert report.failures[0].input_index == 1
+    assert report.failures[0].code == "provider_not_found"
+    assert report.failures[0].provider_status == 404
     assert report.input_count == 2
     assert transport.calls == [
         (
@@ -710,15 +736,37 @@ def test_content_grep_returns_matches_and_source_aligned_status() -> None:
 
 
 def test_content_read_many_validates_and_forwards_windows() -> None:
-    transport = FakeTransport()
-    rows = ContentResource(transport).read_many(
+    class ReadManyTransport:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def call(self, method, params):
+            self.calls.append((method, params))
+            return record(
+                {
+                    "results": [
+                        {
+                            "input_index": index,
+                            "source": window["source"],
+                            "text": "body",
+                        }
+                        for index, window in enumerate(params["windows"])
+                    ],
+                    "failures": [],
+                    "input_count": len(params["windows"]),
+                }
+            )
+
+    transport = ReadManyTransport()
+    report = ContentResource(transport).read_many(
         [
             {"source": "source_1", "offset": 4, "limit": 7},
             {"source": "source_1", "max_chars": 50},
         ]
     )
 
-    assert rows[0].source == "source_1"
+    assert report.results[0].source == "source_1"
+    assert report.failures == []
     assert transport.calls == [
         (
             "content.read_many",
@@ -767,37 +815,25 @@ def test_content_read_accepts_one_source_and_returns_one_record() -> None:
     ]
 
 
-def test_content_read_returns_failed_row_and_records_warning(tmp_path, monkeypatch) -> None:
-    output_path = tmp_path / "output.json"
-    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
-
+def test_content_read_raises_top_level_failure() -> None:
     class FailedReadTransport:
         def call(self, method, params):
             assert method == "content.read"
-            return record(
-                {
-                    "source": params["source"],
-                    "text": "",
-                    "failure": {
-                        "code": "provider_not_found",
-                        "message": "Document could not be fetched.",
-                        "retryable": False,
-                        "attempts": 1,
-                        "provider": "jina",
-                        "operation": "web.scrape",
-                        "scope": "resource",
-                    },
-                }
+            raise BrokerError(
+                "Document could not be fetched.",
+                code="provider_not_found",
+                retryable=False,
+                attempts=1,
+                provider="jina",
+                component="document",
+                scope="resource",
             )
 
-    row = ContentResource(FailedReadTransport()).read("https://example.com/missing")
+    with pytest.raises(BrokerError) as raised:
+        ContentResource(FailedReadTransport()).read("https://example.com/missing")
 
-    assert row.text == ""
-    assert row.failure.code == "provider_not_found"
-    warning = json.loads(output_path.read_text(encoding="utf-8"))["warnings"][0]
-    assert warning["success_count"] == 0
-    assert warning["failure_count"] == 1
-    assert warning["failures"][0]["source"] == "https://example.com/missing"
+    assert raised.value.code == "provider_not_found"
+    assert raised.value.provider == "jina"
 
 
 def test_content_passages_returns_nested_records() -> None:
@@ -898,13 +934,13 @@ def test_session_capabilities_is_a_broker_operation() -> None:
 
         def call(self, method, params):
             self.calls.append((method, params))
-            return record({"contracts": {"sandbox": 12, "capability": 11}})
+            return record({"contracts": {"sandbox": 13, "capability": 12}})
 
     transport = SessionTransport()
     capabilities = SessionResource(transport).capabilities()
 
-    assert capabilities.contracts.sandbox == 12
-    assert capabilities.contracts.capability == 11
+    assert capabilities.contracts.sandbox == 13
+    assert capabilities.contracts.capability == 12
     assert transport.calls == [("session.capabilities", {})]
 
 
@@ -920,22 +956,28 @@ class ExtractionTransport:
 
 def test_extract_many_returns_aligned_records_and_forwards_repair() -> None:
     transport = ExtractionTransport(
-        [
-            {"index": 0, "data": {"matches": True}, "failure": None, "attempts": 1},
-            {
-                "index": 1,
-                "data": None,
-                "failure": {
+        {
+            "results": [
+                {
+                    "input_index": 0,
+                    "data": {"matches": True},
+                    "attempts": 1,
+                }
+            ],
+            "failures": [
+                {
+                    "input_index": 1,
                     "code": "schema_mismatch",
                     "message": "matches is required",
                     "retryable": False,
-                },
-                "attempts": 2,
-            },
-        ]
+                    "attempts": 2,
+                }
+            ],
+            "input_count": 2,
+        }
     )
 
-    results = LLMResource(transport).extract_many(
+    report = LLMResource(transport).extract_many(
         [{"text": "yes"}, {"text": "unknown"}],
         instruction="Classify each item",
         schema={
@@ -947,10 +989,10 @@ def test_extract_many_returns_aligned_records_and_forwards_repair() -> None:
         repair_attempts=1,
     )
 
-    assert isinstance(results[0], Record)
-    assert results[0].data.matches is True
-    assert results[1].failure.code == "schema_mismatch"
-    assert results[1].failure.message == "matches is required"
+    assert isinstance(report.results[0], Record)
+    assert report.results[0].data.matches is True
+    assert report.failures[0].code == "schema_mismatch"
+    assert report.failures[0].message == "matches is required"
     assert transport.calls[0] == (
         "llm.extract_many",
         {
@@ -1182,18 +1224,20 @@ def test_output_submission_preserves_sdk_warnings(tmp_path, monkeypatch) -> None
         def call(self, method, params):
             assert method == "content.get_many"
             return wrap(
-                [
-                    {
-                        "source": params["sources"][0],
-                        "text": "",
-                        "failure": {
+                {
+                    "results": [],
+                    "failures": [
+                        {
+                            "input_index": 0,
+                            "source": params["sources"][0],
                             "code": "provider_not_found",
                             "message": "Document was not found.",
                             "retryable": False,
                             "attempts": 1,
-                        },
-                    }
-                ]
+                        }
+                    ],
+                    "input_count": 1,
+                }
             )
 
     ContentResource(FailedContentTransport()).get_many(["https://example.com/missing"])

@@ -90,8 +90,9 @@ def test_built_image_exposes_contract_13_and_compact_sdk(sandbox_image: str) -> 
         "from opensac_sdk import __version__; "
         "from opensac_sdk._resources import SearchResource; "
         "hit = {'source': 'doc_a', 'backend': 'local', 'rank': 1}; "
-        "batch = {'query': 'q', 'hits': [hit], 'failure': None}; "
-        "result = SearchResource(None).fuse_rrf([batch]); "
+        "batch = {'input_index': 0, 'query': 'q', 'hits': [hit]}; "
+        "report = {'results': [batch], 'failures': [], 'input_count': 1}; "
+        "result = SearchResource(None).fuse_rrf(report); "
         "print(json.dumps({'version': __version__, "
         "'fusion': result, "
         "'types_module': importlib.util.find_spec('opensac_sdk.types') is not None, "
@@ -139,8 +140,11 @@ api:
 storage:
   data_dir: {data_dir}
   broker_socket: {data_dir}/broker.sock
-search:
-  backend: web
+backends:
+  search:
+    provider: serper
+  document:
+    provider: jina
 sandbox:
   image: {sandbox_image}
   docker_host_platform: {docker_host_platform}

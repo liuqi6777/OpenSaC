@@ -6,12 +6,12 @@ import math
 import httpx
 
 from opensac.backends._response import json_object
-from opensac.backends.rerank.base import PassageRerankResult
+from opensac.backends.rerank.base import RerankScore
 from opensac.provider import ProviderRequestError, invalid_provider_response
 
 
-class JinaPassageReranker:
-    """Strict adapter for Jina's index-addressed reranker response."""
+class JinaReranker:
+    """Strict adapter for Jina's index-addressed text reranker response."""
 
     endpoint = "https://api.jina.ai/v1/rerank"
     provider_name = "jina_reranker"
@@ -58,7 +58,7 @@ class JinaPassageReranker:
             verb = "is" if len(missing) == 1 else "are"
             raise ProviderRequestError(
                 "provider_not_configured",
-                f"Passage reranker {' and '.join(missing)} {verb} not configured.",
+                f"Reranker {' and '.join(missing)} {verb} not configured.",
                 retryable=False,
             )
 
@@ -66,7 +66,7 @@ class JinaPassageReranker:
         self,
         query: str,
         documents: list[str],
-    ) -> list[PassageRerankResult]:
+    ) -> list[RerankScore]:
         self.preflight()
         if not documents:
             return []
@@ -90,7 +90,7 @@ class JinaPassageReranker:
         if not isinstance(rows, list) or len(rows) != len(documents):
             raise invalid_provider_response()
 
-        results: list[PassageRerankResult] = []
+        results: list[RerankScore] = []
         indexes: set[int] = set()
         for row in rows:
             if not isinstance(row, dict):
@@ -109,7 +109,7 @@ class JinaPassageReranker:
             ):
                 raise invalid_provider_response()
             indexes.add(index)
-            results.append(PassageRerankResult(index=index, score=float(score)))
+            results.append(RerankScore(index=index, score=float(score)))
         if indexes != set(range(len(documents))):
             raise invalid_provider_response()
         return results

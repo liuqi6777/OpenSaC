@@ -16,15 +16,16 @@ from opensac.api.errors import (
     SessionClosingError,
     SessionExpiredError,
 )
+from opensac.backends.llm import OpenAICompatibleBackend
 from opensac.config import Settings, load_settings
 from opensac.models import (
-    CapabilityEvent,
     ExecCreate,
     ExecRecord,
     ExecRecordStatus,
     SessionCreate,
 )
 from opensac.sandbox import SandboxRequest, SandboxResult, UnsafeCodeError, WarmDockerSandbox
+from opensac.tracing import CapabilityEvent
 
 
 def test_public_session_api_hides_capability_token(tmp_path) -> None:
@@ -33,9 +34,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         broker_socket=tmp_path / "broker.sock",
         api_key="public-secret",
         backend_metadata_hash="sha256:index-manifest",
-        extract_max_items=12,
-        search_backend="local",
-        model_name="",
+        capabilities={"extraction": {"max_items": 12}},
     )
     with TestClient(create_app(settings)) as client:
         unauthorized = client.post("/v1/sessions", json={})
@@ -53,7 +52,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v11",
+            "capability_contract_v12",
             "external_failure_warnings_v1",
             "content_passages_v1",
             "provider_reliability_v1",
@@ -78,9 +77,9 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
         assert payload["environment"]["sandbox_contract"] == 13
-        assert payload["environment"]["capability_contract"] == 11
+        assert payload["environment"]["capability_contract"] == 12
         sdk_capabilities = payload["environment"]["sdk_capabilities"]
-        assert sdk_capabilities["contracts"] == {"sandbox": 13, "capability": 11}
+        assert sdk_capabilities["contracts"] == {"sandbox": 13, "capability": 12}
         assert sdk_capabilities["search"]["backend"] == "local"
         assert sdk_capabilities["search"]["supports_domains"] is False
         assert sdk_capabilities["llm"]["available"] is False
@@ -92,11 +91,15 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert capability_limits["content"]["passage_limit"] == 100
         assert capability_limits["content"]["passage_max_per_source"] == 10
         assert capability_limits["content"]["passage_chunk_chars"] == 2_000
+        assert capability_limits["provider_result_cache"]["services"] == []
         assert payload["environment"]["passage_ranker"] == "lexical"
-        assert (
-            payload["environment"]["provider_policies"]["local.search"]["retry_profile"] == "none"
-        )
-        assert payload["environment"]["provider_policies"]["local.search"]["max_attempts"] == 1
+        assert set(payload["environment"]["service_policies"]) == {
+            "search",
+            "document",
+            "rerank",
+        }
+        assert payload["environment"]["service_policies"]["search"]["retry_profile"] == "none"
+        assert payload["environment"]["service_policies"]["search"]["max_attempts"] == 1
         assert not any(method.startswith("llm.") for method in payload["capabilities"])
 
 
@@ -114,16 +117,23 @@ def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
     settings = Settings(
         data_dir=tmp_path / "data",
         broker_socket=tmp_path / "broker.sock",
+        backends={
+            "search": {"provider": "serper"},
+            "document": {"provider": "jina"},
+        },
         provider_retry_profile="safe",
         provider_inflight_coalescing=True,
         provider_result_cache_ttl_seconds=300,
         provider_result_cache_max_bytes=2048,
-        provider_operation_concurrency={"local.search": 3},
-        provider_operation_requests_per_second={"local.search": 2.5},
-        provider_operation_burst={"local.search": 2},
-        provider_operation_attempt_timeout_seconds={"local.search": 7.0},
-        provider_operation_logical_deadline_seconds={"local.search": 11.0},
-        search_backend="local",
+        provider_services={
+            "search": {
+                "concurrency": 3,
+                "requests_per_second": 2.5,
+                "burst": 2,
+                "attempt_timeout_seconds": 7.0,
+                "logical_deadline_seconds": 11.0,
+            }
+        },
     )
 
     with TestClient(create_app(settings)) as client:
@@ -140,24 +150,24 @@ def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
         "enabled": True,
         "ttl_seconds": 300.0,
         "max_bytes": 2048,
-        "operations": ["web.search", "web.scrape"],
+        "services": ["search", "document"],
     }
-    local_policy = payload["environment"]["provider_policies"]["local.search"]
-    assert local_policy["retry_profile"] == "safe"
-    assert local_policy["concurrency"] == 3
-    assert local_policy["requests_per_second"] == 2.5
-    assert local_policy["burst"] == 2
-    assert local_policy["attempt_timeout_seconds"] == 7.0
-    assert local_policy["logical_deadline_seconds"] == 11.0
+    search_policy = payload["environment"]["service_policies"]["search"]
+    assert search_policy["retry_profile"] == "safe"
+    assert search_policy["concurrency"] == 3
+    assert search_policy["requests_per_second"] == 2.5
+    assert search_policy["burst"] == 2
+    assert search_policy["attempt_timeout_seconds"] == 7.0
+    assert search_policy["logical_deadline_seconds"] == 11.0
 
 
-def test_provider_policy_config_rejects_unknown_operations_and_orphan_bursts() -> None:
-    with pytest.raises(ValueError, match="unknown operations"):
-        Settings(provider_operation_concurrency={"other.search": 1})
+def test_provider_policy_config_rejects_unknown_services_and_orphan_bursts() -> None:
+    with pytest.raises(ValueError, match="extra_forbidden"):
+        Settings(provider_services={"other": {"concurrency": 1}})
     with pytest.raises(ValueError, match="requires requests_per_second"):
-        Settings(provider_operation_burst={"local.search": 1})
-    with pytest.raises(ValueError, match="values must be positive"):
-        Settings(provider_operation_attempt_timeout_seconds={"local.search": 0})
+        Settings(provider_services={"search": {"burst": 1}})
+    with pytest.raises(ValueError, match="greater than 0"):
+        Settings(provider_services={"search": {"attempt_timeout_seconds": 0}})
 
 
 def test_settings_load_jina_api_key_from_environment(monkeypatch, tmp_path: Path) -> None:
@@ -165,37 +175,43 @@ def test_settings_load_jina_api_key_from_environment(monkeypatch, tmp_path: Path
     monkeypatch.setenv("OPENSAC_JINA_API_KEY", "jina-secret")
     config = tmp_path / "opensac.yaml"
     config.write_text(
-        "search:\n  passage_ranker: jina\n  passage_reranker_model: jina-reranker-v3\n",
+        "backends:\n  rerank:\n    provider: jina\n    model: jina-reranker-v3\n",
         encoding="utf-8",
     )
 
     settings = load_settings(config)
 
     assert settings.jina_api_key == "jina-secret"
-    assert settings.passage_ranker == "jina"
-    assert settings.passage_reranker_model == "jina-reranker-v3"
+    assert settings.backends.rerank.provider == "jina"
+    assert settings.backends.rerank.model == "jina-reranker-v3"
 
 
-def test_jina_passage_ranker_is_opt_in_and_uses_provider_policy(tmp_path) -> None:
+def test_jina_reranker_is_opt_in_and_uses_service_policy(tmp_path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         broker_socket=tmp_path / "broker.sock",
-        search_backend="web",
-        passage_ranker="jina",
+        backends={
+            "search": {"provider": "serper"},
+            "document": {"provider": "jina"},
+            "rerank": {"provider": "jina", "model": "jina-reranker-v3"},
+        },
         jina_api_key="jina-secret",
-        passage_reranker_model="jina-reranker-v3",
-        provider_operation_concurrency={"web.rerank": 1},
-        provider_operation_requests_per_second={"web.rerank": 2.0},
-        provider_operation_burst={"web.rerank": 1},
+        provider_services={
+            "rerank": {
+                "concurrency": 1,
+                "requests_per_second": 2.0,
+                "burst": 1,
+            }
+        },
     )
 
     with TestClient(create_app(settings)) as client:
         payload = client.post("/v1/sessions", json={}).json()
-        reranker = client.app.state.runtime.broker.passage_reranker
+        reranker = client.app.state.runtime.broker.reranker
 
         assert reranker is not None
         assert reranker.name == "jina:jina-reranker-v3"
-        policy = payload["environment"]["provider_policies"]["web.rerank"]
+        policy = payload["environment"]["service_policies"]["rerank"]
         assert policy["concurrency"] == 1
         assert policy["requests_per_second"] == 2.0
         assert policy["burst"] == 1
@@ -208,7 +224,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.7.0"
+    assert schema["info"]["version"] == "0.8.0"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
@@ -217,19 +233,49 @@ def test_sessions_inherit_the_service_search_backend(tmp_path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         broker_socket=tmp_path / "broker.sock",
-        search_backend="web",
+        backends={
+            "search": {"provider": "serper"},
+            "document": {"provider": "jina"},
+        },
         serper_api_key="serper-secret",
         jina_api_key="jina-secret",
+        provider_services={
+            "search": {"attempt_timeout_seconds": 7.0},
+            "document": {"attempt_timeout_seconds": 11.0},
+        },
     )
     with TestClient(create_app(settings)) as client:
         response = client.post("/v1/sessions", json={})
         assert response.status_code == 200
         assert response.json()["backends"] == ["web"]
-        assert set(client.app.state.runtime.broker.backends) == {"web"}
-        backend = client.app.state.runtime.broker.backends["web"]
-        assert backend.api_key == "serper-secret"
-        assert backend.jina_api_key == "jina-secret"
+        broker = client.app.state.runtime.broker
+        assert set(broker.search_backends) == {"web"}
+        assert set(broker.document_backends) == {"web"}
+        assert broker.search_backends["web"].api_key == "serper-secret"
+        assert broker.document_backends["web"].api_key == "jina-secret"
+        assert broker.search_backends["web"].timeout == 7.0
+        assert broker.document_backends["web"].timeout == 11.0
         assert client.get("/healthz").json()["build"]["search_backend"] == "web"
+
+
+def test_local_search_and_document_endpoints_are_configured_independently(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        broker_socket=tmp_path / "broker.sock",
+        backends={
+            "search": {"provider": "local", "base_url": "http://search.internal:8081"},
+            "document": {"provider": "local", "base_url": "http://docs.internal:8082"},
+        },
+    )
+
+    with TestClient(create_app(settings)) as client:
+        broker = client.app.state.runtime.broker
+        environment = client.post("/v1/sessions", json={}).json()["environment"]
+
+        assert broker.search_backends["local"].base_url == "http://search.internal:8081/"
+        assert broker.document_backends["local"].base_url == "http://docs.internal:8082/"
+        assert environment["search_backend"] == "local"
+        assert environment["local_search_base_url"] == "http://search.internal:8081"
 
 
 def test_session_create_is_idempotent_and_capacity_is_admitted_up_front(tmp_path) -> None:
@@ -280,7 +326,7 @@ async def test_concurrent_session_create_request_id_produces_one_directory(tmp_p
         assert sum(created for _, created in results) == 1
         assert len(runtime.store.sessions()) == 1
     finally:
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 def test_heartbeat_renews_lease_and_drain_rejects_only_new_sessions(tmp_path) -> None:
@@ -636,7 +682,7 @@ async def test_sandbox_termination_drains_provider_work_before_trace_and_is_pers
         assert program.output_limit_exceeded is expected_output_limit
         assert program.error_category == error_category
     finally:
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 def test_health_reports_capacity_and_warm_mode_is_selectable(
@@ -663,7 +709,30 @@ def test_health_reports_capacity_and_warm_mode_is_selectable(
         "waiting": 0,
         "admitted": 0,
     }
-    assert payload["broker"]["capacity"] == settings.max_concurrency
+    assert payload["provider_services"] == {
+        "search": {
+            "local": {
+                "capacity": settings.max_concurrency,
+                "active": 0,
+                "waiting": 0,
+                "admitted": 0,
+            }
+        },
+        "document": {
+            "local": {
+                "capacity": settings.backend_fetch_concurrency,
+                "active": 0,
+                "waiting": 0,
+                "admitted": 0,
+            }
+        },
+        "rerank": {
+            "capacity": 2,
+            "active": 0,
+            "waiting": 0,
+            "admitted": 0,
+        },
+    }
     assert payload["provider_cache"] == {
         "enabled": False,
         "ttl_seconds": 0.0,
@@ -819,7 +888,7 @@ async def test_concurrent_identical_exec_ids_run_the_sandbox_once(tmp_path) -> N
         assert len(sandbox.requests) == 1
         assert len(runtime.store.programs(session)) == 1
     finally:
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -833,7 +902,7 @@ async def test_completed_exec_id_survives_an_application_restart(tmp_path) -> No
     try:
         original = await first_runtime.execute_code(session.id, request)
     finally:
-        await first_runtime.model_client.close()
+        await first_runtime.broker.aclose()
 
     restarted = ApplicationRuntime(settings)
     restarted_sandbox = RecordingSandbox()
@@ -843,7 +912,7 @@ async def test_completed_exec_id_survives_an_application_restart(tmp_path) -> No
         assert replay == original
         assert restarted_sandbox.requests == []
     finally:
-        await restarted.model_client.close()
+        await restarted.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -880,7 +949,7 @@ async def test_cancelled_waiter_does_not_cancel_idempotent_execution(tmp_path) -
     finally:
         sandbox.release.set()
         await asyncio.gather(*tuple(runtime.exec_tasks), return_exceptions=True)
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -906,7 +975,7 @@ async def test_restart_refuses_to_reexecute_a_pending_exec_record(tmp_path) -> N
             await runtime.execute_code(session.id, request)
         assert sandbox.requests == []
     finally:
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 def test_workspace_can_be_read_back_before_the_session_is_deleted(tmp_path) -> None:
@@ -997,7 +1066,7 @@ async def test_delete_marks_closing_waits_for_inflight_exec_and_rejects_new_work
         with pytest.raises(KeyError):
             runtime.store.get_session(session.id)
     finally:
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -1032,7 +1101,7 @@ async def test_abort_cancels_inflight_exec_and_is_idempotent(tmp_path) -> None:
     finally:
         sandbox.release.set()
         await asyncio.gather(running, return_exceptions=True)
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -1087,7 +1156,7 @@ async def test_concurrent_delete_and_abort_share_one_lifecycle_transition(tmp_pa
     finally:
         sandbox.release.set()
         await asyncio.gather(deleting, return_exceptions=True)
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -1114,7 +1183,7 @@ async def test_abort_preempts_graceful_delete_waiting_for_exec(tmp_path) -> None
     finally:
         sandbox.release.set()
         await asyncio.gather(running, deleting, return_exceptions=True)
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -1140,7 +1209,7 @@ async def test_cleanup_failure_revokes_token_but_keeps_durable_closing_session(
         with pytest.raises(KeyError):
             runtime.store.get_session(session.id)
     finally:
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 def test_delete_cleanup_failure_returns_503_and_preserves_session(tmp_path) -> None:
@@ -1166,7 +1235,7 @@ async def test_startup_cleanup_failure_keeps_closing_session_for_next_start(
     seed = ApplicationRuntime(settings)
     session = seed.store.create_session(SessionCreate(), backend="local")
     seed.store.mark_session_closing(session.id)
-    await seed.model_client.close()
+    await seed.broker.aclose()
 
     failed = ApplicationRuntime(settings)
     failed.sandbox = RetryingCloseSandbox()
@@ -1216,7 +1285,7 @@ async def test_immediate_delete_waits_for_an_admitted_exec_before_its_task_start
     finally:
         sandbox.release.set()
         await asyncio.gather(running, deleting, return_exceptions=True)
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -1249,7 +1318,7 @@ async def test_ttl_reaper_removes_only_idle_sessions_and_cleans_broker_state(tmp
         with pytest.raises(KeyError):
             runtime.store.get_session(stale.id)
     finally:
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -1265,7 +1334,7 @@ async def test_per_session_lease_expires_without_global_ttl(tmp_path) -> None:
         with pytest.raises(SessionExpiredError):
             runtime.get_session(session.id)
     finally:
-        await runtime.model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -1298,37 +1367,7 @@ async def test_ttl_reaper_backs_off_for_an_admitted_exec_before_its_task_starts(
     finally:
         sandbox.release.set()
         await asyncio.gather(running, reaping, return_exceptions=True)
-        await runtime.model_client.close()
-
-
-@pytest.mark.asyncio
-async def test_stop_closes_model_client_when_broker_shutdown_fails(tmp_path) -> None:
-    runtime = ApplicationRuntime(
-        Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
-    )
-    original_model_client = runtime.model_client
-
-    class FailingBrokerRuntime:
-        async def stop(self) -> None:
-            await runtime.broker.aclose()
-            raise RuntimeError("broker stop failed")
-
-    class RecordingModelClient:
-        def __init__(self) -> None:
-            self.closed = False
-
-        async def close(self) -> None:
-            self.closed = True
-
-    model_client = RecordingModelClient()
-    runtime.broker_runtime = FailingBrokerRuntime()
-    runtime.model_client = model_client
-    try:
-        with pytest.raises(RuntimeError, match="broker stop failed"):
-            await runtime.stop()
-        assert model_client.closed is True
-    finally:
-        await original_model_client.close()
+        await runtime.broker.aclose()
 
 
 @pytest.mark.asyncio
@@ -1596,12 +1635,20 @@ def test_session_advertises_llm_capabilities_only_when_model_is_configured(tmp_p
     settings = Settings(
         data_dir=tmp_path / "data",
         broker_socket=tmp_path / "broker.sock",
-        model_name="pipeline-model",
+        backends={
+            "llm": {"provider": "openai_compatible", "model": "pipeline-model"},
+        },
+        provider_services={"llm": {"concurrency": 2}},
     )
     with TestClient(create_app(settings)) as client:
         payload = client.post("/v1/sessions", json={}).json()
+        backend = client.app.state.runtime.broker.llm_backend
+        assert isinstance(backend, OpenAICompatibleBackend)
+        assert backend.model == "pipeline-model"
+        assert client.app.state.runtime.broker.llm_service is not None
 
     assert "llm.extract_many" in payload["capabilities"]
+    assert payload["environment"]["service_policies"]["llm"]["concurrency"] == 2
 
 
 def test_omitted_mechanisms_default_to_the_unablated_session(tmp_path) -> None:

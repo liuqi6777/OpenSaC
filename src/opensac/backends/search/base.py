@@ -2,13 +2,71 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
-from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class RetrievalMetadata(BaseModel):
+    """Retrieval and scoring semantics reported by a search backend."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    mode: str | None = None
+    result_mode: str | None = None
+    score_name: str | None = None
+    higher_is_better: bool | None = None
+    comparable_across_queries: bool | None = None
+
+
+class SearchHit(BaseModel):
+    """One provider search hit before or after broker source admission."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    source: str = ""
+    backend: str
+    title: str = ""
+    url: str | None = None
+    docid: str | None = None
+    domain: str | None = None
+    date: str | None = None
+    snippet: str = ""
+    score: float | None = None
+    rank: int
+    retrieval: RetrievalMetadata | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchBatch(BaseModel):
+    """One successful item returned by a batch-capable search backend."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    query: str
+    hits: list[SearchHit] = Field(default_factory=list)
+
+
+class SearchBatchFailure(BaseModel):
+    """One provider-declared item failure in an otherwise valid batch response."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    code: str
+    message: str
+    retryable: bool
+    provider_status: int | None = None
+    retry_after_seconds: float | None = None
+
+
+type SearchBatchOutcome = SearchBatch | SearchBatchFailure
 
 
 class SearchBackend(Protocol):
+    """Search I/O adapter; its service binds execution policy outside the adapter."""
+
     name: str
+    result_cacheable: bool
     # Opaque process-wide governor identity. It incorporates the effective
     # endpoint and credential without exposing either in trace records.
     provider_identity: str
@@ -37,21 +95,6 @@ class SearchBackend(Protocol):
         domains: list[str] | None = None,
     ) -> list[SearchHit]: ...
 
-    async def fetch(
-        self,
-        hit: SearchHit,
-        *,
-        query: str | None = None,
-    ) -> ContentSnippet:
-        """Fetch and normalize one document with exactly one transport call.
-
-        Batch alignment and partial-failure rows belong to the broker. Keeping
-        this operation atomic lets the provider runtime account, retry and
-        cancel each real document request without a hidden adapter semaphore or
-        exception-swallowing gather.
-        """
-        ...
-
 
 @runtime_checkable
 class BatchSearchBackend(Protocol):
@@ -70,7 +113,7 @@ class BatchSearchBackend(Protocol):
         limit: int,
         offset: int = 0,
         domains: list[str] | None = None,
-    ) -> list[SearchBatch]: ...
+    ) -> list[SearchBatchOutcome]: ...
 
 
 @runtime_checkable

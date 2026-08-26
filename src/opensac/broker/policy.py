@@ -156,27 +156,28 @@ class CapabilityPolicy:
     def record_provider_attempt(
         self,
         *,
-        kind: str,
+        capability: str,
         attempt: int,
     ) -> None:
-        """Record one transport attempt without charging a logical quota.
+        """Record one backend attempt without charging a logical quota.
 
         Provider callbacks run on the broker event loop and this method has no
         await point, so each update is one atomic event-loop critical section.
         """
 
-        field = (
-            "search_provider_attempts" if kind == "search" else "content_provider_attempts"
-        )
-        setattr(self.usage, field, getattr(self.usage, field) + 1)
+        family = capability.strip()
+        if not family:
+            raise ValueError("provider attempt capability cannot be empty")
+        attempts = self.usage.provider_attempts_by_capability
+        attempts[family] = attempts.get(family, 0) + 1
         if attempt > 1:
             self.usage.provider_retries += 1
 
     def record_provider_timing(self, *, phase: str, duration_seconds: float) -> None:
-        """Record actual policy wait independently from transport attempts.
+        """Record actual policy wait independently from backend attempts.
 
         A request may be cancelled while queued, rate limited, or backing off,
-        before another transport attempt exists to carry the elapsed time.
+        before another backend attempt exists to carry the elapsed time.
         """
 
         field = {
