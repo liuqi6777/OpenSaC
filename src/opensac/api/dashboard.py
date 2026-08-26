@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse, StreamingResponse
 
-from opensac.models import CapabilityEvent
+from opensac.tracing import CapabilityEvent
 
 if TYPE_CHECKING:
     from opensac.api.runtime import ApplicationRuntime

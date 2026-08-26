@@ -1,37 +1,64 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Header, HTTPException
+from typing import Any, Self
 
-from opensac._contracts import RpcError, RpcRequest, RpcResponse
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel, Field, model_validator
+
+from opensac.broker.failures import CapabilityFailure
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
 from opensac.broker.service import BrokerService
 
 
-def _rpc_error(exc: Exception) -> RpcError:
+class RpcRequest(BaseModel):
+    method: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class RpcResponse(BaseModel):
+    """Transport envelope separating top-level errors from successful results."""
+
+    ok: bool
+    result: Any = None
+    error: CapabilityFailure | None = None
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> Self:
+        if self.ok:
+            if self.error is not None:
+                raise ValueError("successful RPC responses cannot contain an error")
+        elif self.error is None:
+            raise ValueError("failed RPC responses must contain an error")
+        elif self.result is not None:
+            raise ValueError("failed RPC responses cannot contain a result")
+        return self
+
+
+def _rpc_error(exc: Exception) -> CapabilityFailure:
     """Translate broker exceptions into the typed capability wire shape."""
     code = getattr(exc, "code", None)
     retryable = getattr(exc, "retryable", None)
     if isinstance(code, str) and isinstance(retryable, bool):
-        return RpcError(
+        return CapabilityFailure(
             code=code,
             message=str(exc),
             retryable=retryable,
-            attempts=getattr(exc, "attempts", None),
+            attempts=getattr(exc, "attempts", None) or 0,
             provider_status=getattr(exc, "provider_status", None),
             retry_after_seconds=getattr(exc, "retry_after_seconds", None),
             provider=getattr(exc, "provider", None),
-            operation=getattr(exc, "operation", None),
+            component=getattr(exc, "component", None),
             scope=getattr(exc, "scope", None),
         )
     if isinstance(exc, BudgetExceeded):
-        return RpcError(code="budget_exhausted", message=str(exc), retryable=False)
+        return CapabilityFailure(code="budget_exhausted", message=str(exc), retryable=False)
     if isinstance(exc, MechanismDisabled):
-        return RpcError(code="capability_disabled", message=str(exc), retryable=False)
+        return CapabilityFailure(code="capability_disabled", message=str(exc), retryable=False)
     if isinstance(exc, ValueError):
-        return RpcError(code="invalid_request", message=str(exc), retryable=False)
+        return CapabilityFailure(code="invalid_request", message=str(exc), retryable=False)
     if isinstance(exc, RuntimeError):
-        return RpcError(code="capability_error", message=str(exc), retryable=False)
-    return RpcError(
+        return CapabilityFailure(code="capability_error", message=str(exc), retryable=False)
+    return CapabilityFailure(
         code="internal_error",
         message="The capability broker failed unexpectedly.",
         retryable=True,
@@ -65,7 +92,7 @@ def create_broker_app(service: BrokerService) -> FastAPI:
         except PermissionError as exc:
             return RpcResponse(
                 ok=False,
-                error=RpcError(
+                error=CapabilityFailure(
                     code="permission_denied",
                     message=str(exc),
                     retryable=False,

@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
-from opensac._contracts import SearchHit
 from opensac.backends._response import json_object
-from opensac.backends.search import local_http
+from opensac.backends.document import DocumentContent, DocumentHandle
+from opensac.backends.document import jina as jina_module
+from opensac.backends.document import local_http as local_document_module
+from opensac.backends.document.jina import JinaReaderBackend
+from opensac.backends.document.local_http import (
+    LocalDocumentBackend,
+    parse_document_frontmatter,
+)
+from opensac.backends.llm import LLMResponse, OpenAICompatibleBackend
+from opensac.backends.rerank import RerankScore
+from opensac.backends.search import local_http as local_search_module
 from opensac.backends.search import serper as serper_module
-from opensac.backends.search.local_http import LocalSearchBackend, parse_document_frontmatter
+from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
 from opensac.provider import ProviderRequestError
 
@@ -23,6 +34,24 @@ DOCUMENT_TEXT = (
     "Royal Rumble (2020) - Wikipedia\n"
     "The 2020 Royal Rumble was the 33rd Royal Rumble.\n"
 )
+
+
+def test_backend_output_models_are_strict_and_immutable() -> None:
+    with pytest.raises(ValidationError):
+        LLMResponse(content="answer", tokens=True)
+    with pytest.raises(ValidationError):
+        RerankScore(index=True, score=1.0)
+    with pytest.raises(ValidationError):
+        DocumentContent(source="source", text=1)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        DocumentHandle(source=1)  # type: ignore[arg-type]
+
+    response = LLMResponse(content="answer", tokens=1)
+    with pytest.raises(ValidationError, match="frozen"):
+        response.tokens = 2
+    handle = DocumentHandle(source="source")
+    with pytest.raises(ValidationError, match="frozen"):
+        handle.source = "other"
 
 
 class FakeResponse:
@@ -114,7 +143,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> type[FakeClient]:
     FakeClient.retrieval_backend = "dense"
     FakeClient.result_mode = "query_aware"
     FakeClient.instances = []
-    monkeypatch.setattr(local_http.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(local_search_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(local_document_module.httpx, "AsyncClient", FakeClient)
     return FakeClient
 
 
@@ -214,24 +244,26 @@ async def test_local_search_many_uses_one_request_and_preserves_order(client) ->
     }
 
 
-async def test_local_backend_reuses_and_closes_one_http_client(client) -> None:
+async def test_local_backends_use_independent_reusable_http_clients(client) -> None:
     client.search_hits = [{"docid": "1", "snippet": "body", "rank": 1}]
     client.document_text = "body"
-    backend = LocalSearchBackend("http://localhost:8081")
+    search_backend = LocalSearchBackend("http://localhost:8081")
+    document_backend = LocalDocumentBackend("http://localhost:8081")
 
-    hits = await backend.search("q", limit=1)
-    await backend.fetch(hits[0])
+    hits = await search_backend.search("q", limit=1)
+    await document_backend.fetch(DocumentHandle(source="1", docid=hits[0].docid))
 
-    assert len(client.instances) == 1
-    await backend.aclose()
-    assert client.instances[0].closed is True
+    assert len(client.instances) == 2
+    await search_backend.aclose()
+    await document_backend.aclose()
+    assert all(instance.closed for instance in client.instances)
 
 
 async def test_content_keeps_the_header_in_the_text(client) -> None:
     """`content.read` addresses lines, so nothing may silently delete one."""
     client.document_text = DOCUMENT_TEXT
-    hit = SearchHit(source="doc_x", backend="local", docid="1", title="", rank=1)
-    row = await LocalSearchBackend("http://localhost:8081").fetch(hit)
+    hit = DocumentHandle(source="doc_x", docid="1")
+    row = await LocalDocumentBackend("http://localhost:8081").fetch(hit)
 
     assert row.text == DOCUMENT_TEXT
     # A hit whose own title was empty still renders one, recovered from the body.
@@ -248,9 +280,9 @@ async def test_local_fetch_is_one_atomic_transport_operation(monkeypatch) -> Non
                 raise httpx.ConnectError("boom")
             return FakeResponse({"text": "body"})
 
-    monkeypatch.setattr(local_http.httpx, "AsyncClient", Failing)
-    hits = [SearchHit(source=f"doc_{n}", backend="local", docid=str(n), rank=n) for n in (1, 2, 3)]
-    backend = LocalSearchBackend("http://localhost:8081")
+    monkeypatch.setattr(local_document_module.httpx, "AsyncClient", Failing)
+    hits = [DocumentHandle(source=f"doc_{n}", docid=str(n)) for n in (1, 2, 3)]
+    backend = LocalDocumentBackend("http://localhost:8081")
 
     assert (await backend.fetch(hits[0])).text == "body"
     with pytest.raises(httpx.ConnectError, match="boom"):
@@ -265,16 +297,18 @@ async def test_local_adapter_rejects_invalid_success_payload(monkeypatch) -> Non
                 return FakeResponse({"results": []})
             return FakeResponse({"unexpected": "shape"})
 
-    monkeypatch.setattr(local_http.httpx, "AsyncClient", Invalid)
-    backend = LocalSearchBackend("http://localhost:8081")
+    monkeypatch.setattr(local_search_module.httpx, "AsyncClient", Invalid)
+    monkeypatch.setattr(local_document_module.httpx, "AsyncClient", Invalid)
+    search_backend = LocalSearchBackend("http://localhost:8081")
+    document_backend = LocalDocumentBackend("http://localhost:8081")
 
     with pytest.raises(ProviderRequestError) as search_error:
-        await backend.search("q", limit=1)
+        await search_backend.search("q", limit=1)
     assert search_error.value.code == "provider_invalid_response"
 
-    hit = SearchHit(source="doc_1", backend="local", docid="1", rank=1)
+    hit = DocumentHandle(source="doc_1", docid="1")
     with pytest.raises(ProviderRequestError) as fetch_error:
-        await backend.fetch(hit)
+        await document_backend.fetch(hit)
     assert fetch_error.value.code == "provider_invalid_response"
 
 
@@ -288,10 +322,32 @@ def test_backends_declare_what_they_can_and_cannot_do() -> None:
     """
     assert SerperBackend("key").max_depth == 100
     assert SerperBackend("key").supports_domains is True
+    assert SerperBackend("key").result_cacheable is True
+    assert not hasattr(SerperBackend("key"), "fetch")
     # A dense index over a fixed corpus: bounded by the corpus, not by a
     # service policy, and with no notion of a site to filter on.
     assert LocalSearchBackend("http://localhost").max_depth is None
     assert LocalSearchBackend("http://localhost").supports_domains is False
+    assert LocalSearchBackend("http://localhost").result_cacheable is False
+    assert not hasattr(LocalSearchBackend("http://localhost"), "fetch")
+
+    local_document = LocalDocumentBackend("http://localhost")
+    local_hit = DocumentHandle(source="doc", docid="doc")
+    assert local_document.source_kind == "opaque"
+    assert local_document.result_cacheable is False
+    assert local_document.fetch_candidates(local_hit) == [local_hit]
+
+    reader = JinaReaderBackend("key")
+    archive_hit = DocumentHandle(
+        source="https://archive.org/details/book",
+        url="https://archive.org/details/book",
+    )
+    assert reader.source_kind == "public_url"
+    assert reader.result_cacheable is True
+    assert [candidate.url for candidate in reader.fetch_candidates(archive_hit)] == [
+        "https://archive.org/details/book",
+        "https://archive.org/download/book/book_djvu.txt",
+    ]
 
 
 async def test_web_fetch_exposes_transport_and_typed_input_failures(monkeypatch) -> None:
@@ -310,12 +366,12 @@ async def test_web_fetch_exposes_transport_and_typed_input_failures(monkeypatch)
         async def get(self, url, *, headers):
             raise httpx.HTTPError("403 Forbidden")
 
-    monkeypatch.setattr(serper_module.httpx, "AsyncClient", Blocked)
+    monkeypatch.setattr(jina_module.httpx, "AsyncClient", Blocked)
     hits = [
-        SearchHit(source="doc_1", backend="web", url="https://example.com/a", rank=1),
-        SearchHit(source="doc_2", backend="web", url=None, rank=2),
+        DocumentHandle(source="doc_1", url="https://example.com/a"),
+        DocumentHandle(source="doc_2", url=None),
     ]
-    backend = SerperBackend("key")
+    backend = JinaReaderBackend("key")
 
     with pytest.raises(httpx.HTTPError, match="403"):
         await backend.fetch(hits[0])
@@ -325,32 +381,28 @@ async def test_web_fetch_exposes_transport_and_typed_input_failures(monkeypatch)
 
 
 def test_bundled_fetch_preflight_validates_handles_and_credentials() -> None:
-    local_hit = SearchHit(source="doc_local", backend="local", docid=None, rank=1)
+    local_hit = DocumentHandle(source="doc_local", docid=None)
     with pytest.raises(ProviderRequestError) as local_error:
-        LocalSearchBackend("http://localhost:8081").preflight_fetch(local_hit)
+        LocalDocumentBackend("http://localhost:8081").preflight_fetch(local_hit)
     assert local_error.value.code == "invalid_request"
 
     for invalid_url in (None, "example.com/page", "javascript:alert(1)"):
-        web_hit = SearchHit(
+        web_hit = DocumentHandle(
             source="doc_web",
-            backend="web",
             url=invalid_url,
-            rank=1,
         )
         with pytest.raises(ProviderRequestError) as web_error:
-            SerperBackend("key").preflight_fetch(web_hit)
+            JinaReaderBackend("key").preflight_fetch(web_hit)
         assert web_error.value.code == "invalid_request"
 
-    configured_hit = SearchHit(
+    configured_hit = DocumentHandle(
         source="doc_web",
-        backend="web",
         url="https://example.com/page",
-        rank=1,
     )
-    SerperBackend("").preflight_fetch(configured_hit)
+    JinaReaderBackend("").preflight_fetch(configured_hit)
 
 
-async def test_serper_reuses_and_closes_one_http_client(monkeypatch) -> None:
+async def test_web_backends_use_independent_reusable_http_clients(monkeypatch) -> None:
     class RecordingClient:
         instances = []
 
@@ -380,19 +432,24 @@ async def test_serper_reuses_and_closes_one_http_client(monkeypatch) -> None:
             self.closed = True
 
     monkeypatch.setattr(serper_module.httpx, "AsyncClient", RecordingClient)
-    backend = SerperBackend("key", jina_api_key="jina-secret")
+    monkeypatch.setattr(jina_module.httpx, "AsyncClient", RecordingClient)
+    search_backend = SerperBackend("key")
+    document_backend = JinaReaderBackend("jina-secret")
 
-    hits = await backend.search("query", limit=1)
+    hits = await search_backend.search("query", limit=1)
     assert hits[0].retrieval is not None
     assert hits[0].retrieval.mode == "organic"
-    await backend.fetch(hits[0])
+    await document_backend.fetch(
+        DocumentHandle(source=hits[0].url or "", url=hits[0].url, title=hits[0].title)
+    )
 
-    assert len(RecordingClient.instances) == 1
-    await backend.aclose()
-    assert RecordingClient.instances[0].closed is True
+    assert len(RecordingClient.instances) == 2
+    await search_backend.aclose()
+    await document_backend.aclose()
+    assert all(instance.closed for instance in RecordingClient.instances)
 
 
-async def test_serper_reader_rejects_blank_success_text(monkeypatch) -> None:
+async def test_jina_reader_rejects_blank_success_text(monkeypatch) -> None:
     class BlankReader:
         def __init__(self, *args, **kwargs) -> None:
             pass
@@ -400,13 +457,11 @@ async def test_serper_reader_rejects_blank_success_text(monkeypatch) -> None:
         async def get(self, url, *, headers):
             return FakeResponse({}, text=" \n\t")
 
-    monkeypatch.setattr(serper_module.httpx, "AsyncClient", BlankReader)
-    backend = SerperBackend("key")
-    hit = SearchHit(
+    monkeypatch.setattr(jina_module.httpx, "AsyncClient", BlankReader)
+    backend = JinaReaderBackend("key")
+    hit = DocumentHandle(
         source="https://example.com/blank",
-        backend="web",
         url="https://example.com/blank",
-        rank=1,
     )
 
     with pytest.raises(ProviderRequestError, match="empty document text") as caught:
@@ -414,8 +469,7 @@ async def test_serper_reader_rejects_blank_success_text(monkeypatch) -> None:
 
     assert caught.value.code == "provider_invalid_response"
     assert caught.value.scope == "resource"
-    assert backend.provider_for_operation("web.search") == "serper"
-    assert backend.provider_for_operation("web.scrape") == "jina_reader"
+    assert backend.provider_name == "jina_reader"
 
 
 async def test_serper_missing_credentials_is_a_zero_attempt_preflight_failure() -> None:
@@ -433,14 +487,87 @@ async def test_serper_missing_credentials_is_a_zero_attempt_preflight_failure() 
 
 
 def test_provider_identity_is_stable_and_does_not_expose_credentials() -> None:
-    first = SerperBackend("top-secret", jina_api_key="jina-secret")
-    second = SerperBackend("top-secret", jina_api_key="jina-secret")
-    other = SerperBackend("different-secret", jina_api_key="jina-secret")
-    other_reader = SerperBackend("top-secret", jina_api_key="different-jina-secret")
+    first = SerperBackend("top-secret")
+    second = SerperBackend("top-secret")
+    other = SerperBackend("different-secret")
+    reader = JinaReaderBackend("jina-secret")
+    same_reader = JinaReaderBackend("jina-secret")
+    other_reader = JinaReaderBackend("different-jina-secret")
 
     assert first.provider_identity == second.provider_identity
     assert first.provider_identity != other.provider_identity
-    assert first.provider_identity != other_reader.provider_identity
+    assert reader.provider_identity == same_reader.provider_identity
+    assert reader.provider_identity != other_reader.provider_identity
     assert "top-secret" not in first.provider_identity
-    assert "jina-secret" not in first.provider_identity
-    assert LocalSearchBackend("http://localhost:8081").provider_identity.startswith("local:")
+    assert "jina-secret" not in reader.provider_identity
+    assert LocalSearchBackend("http://localhost:8081").provider_identity.startswith("local-search:")
+    assert LocalDocumentBackend("http://localhost:8081").provider_identity.startswith(
+        "local-document:"
+    )
+
+
+async def test_openai_compatible_backend_normalizes_requests_usage_and_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.closed = False
+            parent = self
+
+            class Completions:
+                async def create(self, **kwargs):
+                    parent.calls.append(kwargs)
+                    return SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content="answer"))],
+                        usage=SimpleNamespace(total_tokens=17),
+                    )
+
+            self.chat = SimpleNamespace(completions=Completions())
+
+        async def close(self) -> None:
+            self.closed = True
+
+    client = RecordingClient()
+    clients_created = 0
+
+    def new_client(_backend: OpenAICompatibleBackend) -> RecordingClient:
+        nonlocal clients_created
+        clients_created += 1
+        return client
+
+    monkeypatch.setattr(OpenAICompatibleBackend, "_new_client", new_client)
+    backend = OpenAICompatibleBackend(
+        model="test-model",
+        api_key="model-secret",
+        base_url="https://models.example/v1",
+    )
+    assert backend._client is None
+
+    response = await backend.complete(
+        "prompt",
+        system="system",
+        temperature=0.4,
+        max_tokens=50,
+        json_object=True,
+    )
+
+    assert response.content == "answer"
+    assert response.tokens == 17
+    assert clients_created == 1
+    assert client.calls == [
+        {
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "prompt"},
+            ],
+            "temperature": 0.4,
+            "max_completion_tokens": 50,
+            "response_format": {"type": "json_object"},
+        }
+    ]
+    assert backend.provider_name == "openai_compatible"
+    assert "model-secret" not in backend.provider_identity
+    await backend.aclose()
+    assert client.closed is True

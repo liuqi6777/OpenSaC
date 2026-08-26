@@ -23,32 +23,37 @@ sessions:
   tombstone_ttl_seconds: 86400
   content_cache_bytes: 32000000
 
-model:
-  base_url: null
-  name: ""
+backends:
+  search:
+    provider: local
+    base_url: http://127.0.0.1:8081
+  document:
+    provider: local
+    base_url: http://127.0.0.1:8081
+  rerank:
+    provider: lexical
+  llm:
+    provider: none
+    model: ""
+    base_url: null
 
-search:
-  backend: local
-  local_base_url: http://127.0.0.1:8081
-  passage_ranker: lexical
-  passage_reranker_model: ""
-  max_queries_per_request: 64
-  max_query_chars: 4096
-  max_top_k: 600
-
-extraction:
-  max_items: 256
-  max_instruction_bytes: 16384
-  max_schema_bytes: 65536
-  max_item_bytes: 65536
-  max_total_item_bytes: 2097152
-  max_schema_depth: 8
-  max_repair_attempts: 1
-
-content:
-  max_sources_per_request: 256
-  url_admission: searched_or_public_web
-  batch_deadline_seconds: 60
+capabilities:
+  search:
+    max_queries_per_request: 64
+    max_query_chars: 4096
+    max_top_k: 600
+  content:
+    max_sources_per_request: 256
+    url_admission: searched_or_public_web
+    batch_deadline_seconds: 60
+  extraction:
+    max_items: 256
+    max_instruction_bytes: 16384
+    max_schema_bytes: 65536
+    max_item_bytes: 65536
+    max_total_item_bytes: 2097152
+    max_schema_depth: 8
+    max_repair_attempts: 1
 
 providers:
   fetch_concurrency: 6
@@ -60,12 +65,8 @@ providers:
   max_backoff_seconds: 4
   max_total_backoff_seconds: 15
   max_retry_after_seconds: 15
-  # Maps are keyed by local.search, local.document, web.search, web.scrape, or web.rerank.
-  operation_concurrency: {}
-  operation_requests_per_second: {}
-  operation_burst: {}
-  operation_attempt_timeout_seconds: {}
-  operation_logical_deadline_seconds: {}
+  # Optional per-service overrides for search, document, rerank, and LLM.
+  services: {}
   inflight_coalescing: false
   max_inflight_keys: 256
   max_waiters_per_key: 64
@@ -73,7 +74,7 @@ providers:
   result_cache_max_bytes: 128000000
 
 sandbox:
-  image: ghcr.io/liuqi6777/opensac-sandbox:0.7.0
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.0
   mode: cold
   experimental_persistent_interpreter: false
   warm_idle_seconds: 300

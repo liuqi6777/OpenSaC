@@ -1,20 +1,24 @@
-"""Provider boundary for optional semantic passage rerank backends."""
+"""Provider boundary for generic text rerank backends."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-
-@dataclass(frozen=True, slots=True)
-class PassageRerankResult:
-    """Provider score for one candidate, addressed by its request index."""
-
-    index: int
-    score: float
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class PassageReranker(Protocol):
+class RerankScore(BaseModel):
+    """Provider score for one text candidate, addressed by request index."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    index: int = Field(ge=0)
+    score: float = Field(allow_inf_nan=False)
+
+
+class TextReranker(Protocol):
+    """Backend adapter for scoring arbitrary text candidates against a query."""
+
     name: str
     provider_identity: str
 
@@ -24,9 +28,9 @@ class PassageReranker(Protocol):
         self,
         query: str,
         documents: list[str],
-    ) -> list[PassageRerankResult]: ...
+    ) -> list[RerankScore]: ...
 
 
 @runtime_checkable
-class ClosablePassageReranker(Protocol):
+class ClosableTextReranker(Protocol):
     async def aclose(self) -> None: ...

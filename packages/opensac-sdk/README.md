@@ -15,11 +15,11 @@ can inspect one exact interface without calling the broker, for example:
 print(sdk.content.passages.__doc__)
 ```
 
-The v0.6.5 content surface separates one-source and batch reads:
+The content surface separates one-source reads from input-partitioned batch reports:
 
 ```python
 row = sdk.content.read(source, offset=1, limit=200)
-rows = sdk.content.read_many([{"source": source, "offset": 201, "limit": 200}])
+read_report = sdk.content.read_many([{"source": source, "offset": 201, "limit": 200}])
 report = sdk.content.grep(sources, pattern, mode="regex", context=2)
 ```
 

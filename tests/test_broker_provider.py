@@ -7,16 +7,29 @@ import json
 import httpx
 import pytest
 
-from opensac._contracts import ContentSnippet, SearchBatch, SearchHit
+from opensac.backends.document import DocumentContent, DocumentHandle, document_fetch_candidates
+from opensac.backends.document.local_http import LocalDocumentBackend
+from opensac.backends.search import SearchBatch, SearchHit
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
-from opensac.broker.capabilities.documents import document_identity
 from opensac.broker.providers import ProviderExecutionConfig, ProviderExecutor
 from opensac.broker.providers.cache import ProviderResultCache
+from opensac.broker.providers.execution import CapabilityProviderError
 from opensac.broker.providers.serialization import canonical_json_bytes
 from opensac.broker.service import BrokerService
+from opensac.broker.sources import document_identity
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
+
+
+def _broker_service(search_backends, *, document_backends=None, **kwargs):
+    if document_backends is None:
+        document_backends = search_backends
+    return BrokerService(
+        search_backends,
+        document_backends=document_backends,
+        **kwargs,
+    )
 
 
 def make_session(
@@ -37,6 +50,7 @@ def make_session(
 
 class LocalBackend:
     name = "local"
+    source_kind = "opaque"
     supports_domains = False
     max_depth = None
     provider_identity = "local:test"
@@ -80,18 +94,31 @@ class LocalBackend:
         self.fetches.append(docid)
         if failure := self.failures.get(docid):
             raise failure
-        return ContentSnippet(
+        return DocumentContent(
             source=hit.source,
             text=self.documents[docid],
             title=hit.title,
             metadata={"backend": "local", "docid": docid},
         )
 
+    @staticmethod
+    def fetch_candidates(hit: DocumentHandle) -> list[DocumentHandle]:
+        return [hit]
 
-class WebCacheBackend:
+
+class _WebBackendTraits:
     name = "web"
+    source_kind = "public_url"
+    result_cacheable = True
     supports_domains = True
     max_depth = 100
+
+    @staticmethod
+    def fetch_candidates(hit: DocumentHandle) -> list[DocumentHandle]:
+        return [hit]
+
+
+class WebCacheBackend(_WebBackendTraits):
     provider_identity = "web:cache-test"
 
     def __init__(self) -> None:
@@ -127,7 +154,7 @@ class WebCacheBackend:
     async def fetch(self, hit, *, query=None):
         del query
         self.fetch_calls += 1
-        return ContentSnippet(
+        return DocumentContent(
             source=hit.source,
             text=f"body for {hit.source}",
             url=hit.url,
@@ -138,30 +165,33 @@ class WebCacheBackend:
 async def test_broker_runs_bundled_search_preflight_before_provider_usage() -> None:
     backend = SerperBackend("")
     runtime = ProviderRuntime(
-        {
-            "web.search": ProviderPolicy(
-                requests_per_second=1.0,
-                burst=1,
-            )
-        }
+        ProviderPolicy(
+            requests_per_second=1.0,
+            burst=1,
+        )
     )
-    service = BrokerService({"web": backend}, provider_runtime=runtime)
+    service = _broker_service(
+        {"web": backend},
+        document_backends={"web": WebCacheBackend()},
+        search_runtime=runtime,
+    )
     state = service.register_session(make_session(backend="web"))
 
-    rows = await service.call(
+    report = await service.call(
         "token",
         "search.query_many",
         {"queries": ["alpha", "beta"]},
         execution_id="search-preflight",
     )
 
-    assert [row["failure"]["code"] for row in rows] == [
+    assert report["results"] == []
+    assert [row["code"] for row in report["failures"]] == [
         "provider_not_configured",
         "provider_not_configured",
     ]
-    assert all(row["failure"]["attempts"] == 0 for row in rows)
+    assert all(row["attempts"] == 0 for row in report["failures"])
     assert state.policy.usage.search_calls == 2
-    assert state.policy.usage.search_provider_attempts == 0
+    assert state.policy.usage.provider_attempts_by_capability.get("search", 0) == 0
     assert state.policy.usage.provider_retries == 0
     assert state.policy.usage.provider_queue_seconds == 0
     assert state.policy.usage.provider_rate_limit_wait_seconds == 0
@@ -172,7 +202,7 @@ async def test_broker_runs_bundled_search_preflight_before_provider_usage() -> N
 
 
 async def test_broker_runs_bundled_content_preflight_before_transport() -> None:
-    class RejectingLocalBackend(LocalSearchBackend):
+    class RejectingLocalDocumentBackend(LocalDocumentBackend):
         @staticmethod
         def preflight_fetch(hit: SearchHit) -> None:
             del hit
@@ -182,35 +212,35 @@ async def test_broker_runs_bundled_content_preflight_before_transport() -> None:
                 retryable=False,
             )
 
-    backend = RejectingLocalBackend("http://provider.invalid")
-    service = BrokerService({"local": backend})
+    search_backend = LocalSearchBackend("http://provider.invalid")
+    document_backend = RejectingLocalDocumentBackend("http://provider.invalid")
+    service = _broker_service(
+        {"local": search_backend},
+        document_backends={"local": document_backend},
+    )
     state = service.register_session(make_session())
-    hit = SearchHit(
-        source="1",
-        backend="local",
-        docid="1",
+    handle = DocumentHandle(source="1", docid="1")
+    state.remember(
+        "local",
+        handle,
+        identity=document_identity("local", handle),
         rank=1,
     )
-    state.remember(
-        hit,
-        identity=document_identity(hit),
-        candidate_source="1",
-    )
 
-    rows = await service.call(
+    report = await service.call(
         "token",
         "content.get_many",
         {"sources": ["1"]},
         execution_id="content-preflight",
     )
 
-    assert rows[0]["failure"]["code"] == "invalid_request"
-    assert rows[0]["failure"]["attempts"] == 0
-    assert rows[0]["text"] == ""
+    assert report["results"] == []
+    assert report["failures"][0]["code"] == "invalid_request"
+    assert report["failures"][0]["attempts"] == 0
     assert state.policy.usage.content_fetches == 1
     assert state.policy.usage.content_backend_fetches == 0
-    assert state.policy.usage.content_provider_attempts == 0
-    assert backend._client is None
+    assert state.policy.usage.provider_attempts_by_capability.get("content", 0) == 0
+    assert document_backend._client is None
     assert service.take_trace("token", "content-preflight")[0].provider_attempts == []
 
 
@@ -252,18 +282,20 @@ async def test_fake_http_provider_retries_one_real_local_microbatch() -> None:
     backend = LocalSearchBackend("http://fake-provider.invalid")
     backend._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     runtime = ProviderRuntime(
-        {
-            "local.search": ProviderPolicy(
-                retry_profile="safe",
-                max_attempts=2,
-                base_backoff_seconds=0,
-            )
-        }
+        ProviderPolicy(
+            retry_profile="safe",
+            max_attempts=2,
+            base_backoff_seconds=0,
+        )
     )
-    service = BrokerService({"local": backend}, provider_runtime=runtime)
+    service = _broker_service(
+        {"local": backend},
+        document_backends={"local": LocalBackend()},
+        search_runtime=runtime,
+    )
     state = service.register_session(make_session())
     try:
-        rows = await service.call(
+        report = await service.call(
             "token",
             "search.query_many",
             {"queries": ["alpha", "alpha", "beta"]},
@@ -276,11 +308,11 @@ async def test_fake_http_provider_retries_one_real_local_microbatch() -> None:
         {"queries": ["alpha", "beta"], "top_k": 10},
         {"queries": ["alpha", "beta"], "top_k": 10},
     ]
-    assert [row["query"] for row in rows] == ["alpha", "alpha", "beta"]
-    assert [row["hits"][0]["source"] for row in rows] == ["1", "1", "2"]
-    assert all("docid" not in row["hits"][0] for row in rows)
+    assert [row["query"] for row in report["results"]] == ["alpha", "alpha", "beta"]
+    assert [row["hits"][0]["source"] for row in report["results"]] == ["1", "1", "2"]
+    assert all("docid" not in row["hits"][0] for row in report["results"])
     assert state.policy.usage.search_calls == 3
-    assert state.policy.usage.search_provider_attempts == 2
+    assert state.policy.usage.provider_attempts_by_capability["search"] == 2
     assert state.policy.usage.provider_retries == 1
     trace = service.take_trace("token", "fake-http-provider")[0]
     assert [attempt.status for attempt in trace.provider_attempts] == [
@@ -337,24 +369,24 @@ def test_provider_canonical_serialization_preserves_normalization_rules() -> Non
 
 async def test_local_query_many_deduplicates_before_one_transport_microbatch() -> None:
     backend = LocalBackend()
-    service = BrokerService(
+    service = _broker_service(
         {"local": backend},
         max_search_queries_per_request=128,
     )
     state = service.register_session(make_session())
 
-    rows = await service.call(
+    report = await service.call(
         "token",
         "search.query_many",
         {"queries": ["same"] * 100},
         execution_id="dedupe-search",
     )
 
-    assert len(rows) == 100
-    assert all(row["query"] == "same" and len(row["hits"]) == 1 for row in rows)
+    assert len(report["results"]) == 100
+    assert all(row["query"] == "same" and len(row["hits"]) == 1 for row in report["results"])
     assert backend.search_many_calls == [["same"]]
     assert state.policy.usage.search_calls == 100
-    assert state.policy.usage.search_provider_attempts == 1
+    assert state.policy.usage.provider_attempts_by_capability["search"] == 1
     assert state.policy.usage.intra_call_deduplicated_items == 99
     trace = service.take_trace("token", "dedupe-search")[0]
     assert trace.provider_attempts[0].request_indexes == [0]
@@ -363,10 +395,7 @@ async def test_local_query_many_deduplicates_before_one_transport_microbatch() -
 
 
 async def test_safe_retry_changes_attempt_usage_not_logical_search_usage() -> None:
-    class FlakyWeb:
-        name = "web"
-        supports_domains = True
-        max_depth = 100
+    class FlakyWeb(_WebBackendTraits):
         provider_identity = "web:test"
 
         def __init__(self) -> None:
@@ -392,15 +421,13 @@ async def test_safe_retry_changes_attempt_usage_not_logical_search_usage() -> No
 
     backend = FlakyWeb()
     runtime = ProviderRuntime(
-        {
-            "web.search": ProviderPolicy(
-                retry_profile="safe",
-                max_attempts=2,
-                base_backoff_seconds=0,
-            )
-        }
+        ProviderPolicy(
+            retry_profile="safe",
+            max_attempts=2,
+            base_backoff_seconds=0,
+        )
     )
-    service = BrokerService({"web": backend}, provider_runtime=runtime)
+    service = _broker_service({"web": backend}, search_runtime=runtime)
     state = service.register_session(make_session(backend="web"))
 
     hits = await service.call(
@@ -413,7 +440,7 @@ async def test_safe_retry_changes_attempt_usage_not_logical_search_usage() -> No
     assert len(hits) == 1
     assert backend.calls == 2
     assert state.policy.usage.search_calls == 1
-    assert state.policy.usage.search_provider_attempts == 2
+    assert state.policy.usage.provider_attempts_by_capability["search"] == 2
     assert state.policy.usage.provider_retries == 1
     attempts = service.take_trace("token", "retry-search")[0].provider_attempts
     assert [attempt.status for attempt in attempts] == ["error", "success"]
@@ -422,10 +449,7 @@ async def test_safe_retry_changes_attempt_usage_not_logical_search_usage() -> No
 
 
 async def test_all_failed_batch_preserves_each_failure_and_attempt_count() -> None:
-    class MixedWeb:
-        name = "web"
-        supports_domains = True
-        max_depth = 100
+    class MixedWeb(_WebBackendTraits):
         provider_identity = "web:mixed-failures"
 
         async def search(self, query, *, limit, offset=0, domains=None):
@@ -445,21 +469,21 @@ async def test_all_failed_batch_preserves_each_failure_and_attempt_count() -> No
         async def fetch(self, hit, *, query=None):
             raise AssertionError((hit, query))
 
-    service = BrokerService({"web": MixedWeb()})
+    service = _broker_service({"web": MixedWeb()})
     service.register_session(make_session(backend="web"))
 
-    rows = await service.call(
+    report = await service.call(
         "token",
         "search.query_many",
         {"queries": ["temporary", "permanent"]},
     )
 
-    assert [row["failure"]["code"] for row in rows] == [
+    assert [row["code"] for row in report["failures"]] == [
         "provider_timeout",
         "provider_auth_failed",
     ]
-    assert [row["failure"]["retryable"] for row in rows] == [True, False]
-    assert [row["failure"]["attempts"] for row in rows] == [1, 1]
+    assert [row["retryable"] for row in report["failures"]] == [True, False]
+    assert [row["attempts"] for row in report["failures"]] == [1, 1]
 
 
 async def test_content_provider_timeout_retries_real_fetch_attempts() -> None:
@@ -471,29 +495,27 @@ async def test_content_provider_timeout_retries_real_fetch_attempts() -> None:
 
     backend = TimeoutContentWeb()
     runtime = ProviderRuntime(
-        {
-            "web.scrape": ProviderPolicy(
-                retry_profile="safe",
-                max_attempts=3,
-                base_backoff_seconds=0,
-            )
-        }
+        ProviderPolicy(
+            retry_profile="safe",
+            max_attempts=3,
+            base_backoff_seconds=0,
+        )
     )
-    service = BrokerService({"web": backend}, provider_runtime=runtime)
+    service = _broker_service({"web": backend}, document_runtime=runtime)
     state = service.register_session(make_session(backend="web"))
     source = (await service.call("token", "search.query", {"query": "timeout"}))[0]["source"]
 
-    rows = await service.call(
+    report = await service.call(
         "token",
         "content.get_many",
         {"sources": [source]},
         execution_id="content-timeout-retry",
     )
 
-    assert rows[0]["failure"]["code"] == "provider_timeout"
-    assert rows[0]["failure"]["attempts"] == 3
+    assert report["failures"][0]["code"] == "provider_timeout"
+    assert report["failures"][0]["attempts"] == 3
     assert backend.fetch_calls == 3
-    assert state.policy.usage.content_provider_attempts == 3
+    assert state.policy.usage.provider_attempts_by_capability["content"] == 3
     assert state.policy.usage.provider_retries == 2
     attempts = service.take_trace("token", "content-timeout-retry")[0].provider_attempts
     assert [attempt.attempt for attempt in attempts] == [1, 2, 3]
@@ -507,10 +529,7 @@ async def test_cancelled_provider_backoff_is_counted_without_a_retry_attempt() -
         waiting.set()
         await asyncio.Event().wait()
 
-    class UnavailableWeb:
-        name = "web"
-        supports_domains = True
-        max_depth = 100
+    class UnavailableWeb(_WebBackendTraits):
         provider_identity = "web:cancelled-backoff"
 
         async def search(self, query, *, limit, offset=0, domains=None):
@@ -521,17 +540,15 @@ async def test_cancelled_provider_backoff_is_counted_without_a_retry_attempt() -
             raise AssertionError((hit, query))
 
     runtime = ProviderRuntime(
-        {
-            "web.search": ProviderPolicy(
-                retry_profile="safe",
-                max_attempts=2,
-                base_backoff_seconds=1,
-            )
-        },
+        ProviderPolicy(
+            retry_profile="safe",
+            max_attempts=2,
+            base_backoff_seconds=1,
+        ),
         sleep=blocking_sleep,
         rng=lambda: 1.0,
     )
-    service = BrokerService({"web": UnavailableWeb()}, provider_runtime=runtime)
+    service = _broker_service({"web": UnavailableWeb()}, search_runtime=runtime)
     state = service.register_session(make_session(backend="web"))
     task = asyncio.create_task(
         service.call(
@@ -548,7 +565,7 @@ async def test_cancelled_provider_backoff_is_counted_without_a_retry_attempt() -
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert state.policy.usage.search_provider_attempts == 1
+    assert state.policy.usage.provider_attempts_by_capability["search"] == 1
     assert state.policy.usage.provider_retries == 0
     assert state.policy.usage.provider_backoff_seconds > 0
     trace = service.take_trace("token", "cancelled-backoff")[0]
@@ -563,7 +580,7 @@ async def test_content_dedupes_sources_and_grep_keeps_failure_indexes() -> None:
         "Provider resource was not found.",
         retryable=False,
     )
-    service = BrokerService({"local": backend})
+    service = _broker_service({"local": backend})
     state = service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
     sources = [hit["source"] for hit in hits]
@@ -577,12 +594,9 @@ async def test_content_dedupes_sources_and_grep_keeps_failure_indexes() -> None:
 
     assert report["input_count"] == 3
     assert report["matches"][0]["input_index"] == 0
-    assert [row["input_index"] for row in report["source_results"]] == [0, 1, 2]
-    assert report["source_results"][0]["failure"] is None
-    assert all(
-        row["failure"]["code"] == "provider_not_found"
-        for row in report["source_results"][1:]
-    )
+    assert [row["input_index"] for row in report["source_results"]] == [0]
+    assert [row["input_index"] for row in report["failures"]] == [1, 2]
+    assert all(row["code"] == "provider_not_found" for row in report["failures"])
     assert backend.fetches == ["1", "2"]
     assert state.policy.usage.content_fetches == 3
     assert state.policy.usage.content_backend_fetches == 2
@@ -596,7 +610,8 @@ async def test_content_dedupes_sources_and_grep_keeps_failure_indexes() -> None:
         {"sources": [sources[1]], "pattern": "target"},
     )
     assert only_failure["matches"] == []
-    assert only_failure["source_results"][0]["failure"]["code"] == "provider_not_found"
+    assert only_failure["source_results"] == []
+    assert only_failure["failures"][0]["code"] == "provider_not_found"
 
 
 async def test_systemic_content_failure_stays_aligned_and_is_never_cached() -> None:
@@ -606,27 +621,44 @@ async def test_systemic_content_failure_stays_aligned_and_is_never_cached() -> N
         "Provider is temporarily unavailable.",
         retryable=True,
     )
-    service = BrokerService({"local": backend})
+    service = _broker_service({"local": backend})
     state = service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    rows = await service.call("token", "content.get_many", {"sources": [source]})
-    assert rows[0]["failure"]["code"] == "provider_unavailable"
-    assert rows[0]["failure"]["attempts"] == 1
+    report = await service.call("token", "content.get_many", {"sources": [source]})
+    assert report["failures"][0]["code"] == "provider_unavailable"
+    assert report["failures"][0]["attempts"] == 1
     assert state.content_cache == {}
 
     repeated = await service.call("token", "content.get_many", {"sources": [source]})
-    assert repeated[0]["failure"]["code"] == "provider_unavailable"
+    assert repeated["failures"][0]["code"] == "provider_unavailable"
     assert backend.fetches == ["1", "1"]
+
+
+async def test_single_content_read_promotes_failure_to_rpc_error() -> None:
+    backend = LocalBackend(documents={"1": "body"})
+    backend.failures["1"] = ProviderRequestError(
+        "provider_unavailable",
+        "Provider is temporarily unavailable.",
+        retryable=True,
+    )
+    service = _broker_service({"local": backend})
+    service.register_session(make_session())
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
+
+    with pytest.raises(CapabilityProviderError) as raised:
+        await service.call("token", "content.read", {"source": source})
+
+    assert raised.value.code == "provider_unavailable"
+    assert raised.value.retryable is True
+    assert raised.value.component == "document"
 
 
 async def test_ambiguous_reader_403_stays_source_aligned() -> None:
     class ForbiddenReaderBackend(LocalBackend):
         name = "web"
-
-        @staticmethod
-        def provider_for_operation(operation: str) -> str:
-            return "jina_reader" if operation == "web.scrape" else "serper"
+        source_kind = "public_url"
+        provider_name = "jina_reader"
 
         async def search(self, query, *, limit, offset=0, domains=None):
             return [
@@ -646,15 +678,16 @@ async def test_ambiguous_reader_403_stays_source_aligned() -> None:
             )
 
     backend = ForbiddenReaderBackend()
-    service = BrokerService({"web": backend})
+    service = _broker_service({"web": backend})
     service.register_session(make_session(backend="web"))
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    rows = await service.call("token", "content.get_many", {"sources": [source]})
+    report = await service.call("token", "content.get_many", {"sources": [source]})
 
-    assert rows[0]["source"] == source
-    assert rows[0]["text"] == ""
-    assert rows[0]["failure"] == {
+    assert report["results"] == []
+    assert report["failures"][0] == {
+        "input_index": 0,
+        "source": source,
         "code": "provider_auth_failed",
         "message": "Provider rejected its configured credentials or permissions.",
         "retryable": False,
@@ -662,7 +695,7 @@ async def test_ambiguous_reader_403_stays_source_aligned() -> None:
         "provider_status": 403,
         "retry_after_seconds": None,
         "provider": "jina_reader",
-        "operation": "web.scrape",
+        "component": "document",
         "scope": "unknown",
     }
 
@@ -684,27 +717,28 @@ async def test_permanent_content_failures_remain_aligned_rows(
     backend.failures = {
         docid: ProviderRequestError(
             code,
-            "Provider document operation could not be completed.",
+            "Provider document request could not be completed.",
             retryable=False,
         )
         for docid in backend.documents
     }
-    service = BrokerService({"local": backend})
+    service = _broker_service({"local": backend})
     service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
     sources = [hit["source"] for hit in hits]
 
     failed = await service.call("token", "content.get_many", {"sources": sources})
 
-    assert [row["failure"]["code"] for row in failed] == [code, code]
-    assert [row["failure"]["attempts"] for row in failed] == [attempts, attempts]
-    assert all(row["text"] == "" for row in failed)
+    assert failed["results"] == []
+    assert [row["code"] for row in failed["failures"]] == [code, code]
+    assert [row["attempts"] for row in failed["failures"]] == [attempts, attempts]
 
     backend.failures.pop("1")
     partial = await service.call("token", "content.get_many", {"sources": sources})
-    assert partial[0]["text"] == "one"
-    assert partial[0].get("failure") is None
-    assert partial[1]["failure"]["code"] == code
+    assert partial["results"][0]["input_index"] == 0
+    assert partial["results"][0]["text"] == "one"
+    assert partial["failures"][0]["input_index"] == 1
+    assert partial["failures"][0]["code"] == code
 
 
 async def test_content_batch_deadline_returns_an_aligned_timeout_row() -> None:
@@ -714,16 +748,18 @@ async def test_content_batch_deadline_returns_an_aligned_timeout_row() -> None:
             await asyncio.Event().wait()
 
     backend = HangingBackend(documents={"1": "one"})
-    service = BrokerService(
+    service = _broker_service(
         {"local": backend},
         content_batch_deadline_seconds=0.01,
     )
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    rows = await service.call("token", "content.get_many", {"sources": [source]})
+    report = await service.call("token", "content.get_many", {"sources": [source]})
 
-    assert rows[0]["failure"] == {
+    assert report["failures"][0] == {
+        "input_index": 0,
+        "source": source,
         "code": "content_deadline_exceeded",
         "message": "The content batch deadline was exceeded.",
         "retryable": True,
@@ -731,17 +767,15 @@ async def test_content_batch_deadline_returns_an_aligned_timeout_row() -> None:
         "provider_status": None,
         "retry_after_seconds": None,
         "provider": "local",
-        "operation": "local.document",
+        "component": "document",
         "scope": "unknown",
     }
     assert backend.fetches == ["1"]
 
 
 async def test_internet_archive_text_fallback_is_separately_accounted() -> None:
-    class ArchiveBackend:
-        name = "web"
+    class ArchiveBackend(_WebBackendTraits):
         provider_identity = "archive-test"
-        supports_domains = True
         max_depth = 10
 
         def __init__(self) -> None:
@@ -768,23 +802,27 @@ async def test_internet_archive_text_fallback_is_separately_accounted() -> None:
                     retryable=False,
                     provider_status=422,
                 )
-            return ContentSnippet(source=hit.source, text="archive text", url=hit.url)
+            return DocumentContent(source=hit.source, text="archive text", url=hit.url)
+
+        @staticmethod
+        def fetch_candidates(hit: DocumentHandle) -> list[DocumentHandle]:
+            return document_fetch_candidates(hit)
 
     backend = ArchiveBackend()
-    service = BrokerService({"web": backend})
+    service = _broker_service({"web": backend})
     state = service.register_session(make_session(backend="web"))
     source = (await service.call("token", "search.query", {"query": "book"}))[0]["source"]
 
-    rows = await service.call(
+    report = await service.call(
         "token",
         "content.get_many",
         {"sources": [source]},
         execution_id="archive-fallback",
     )
 
-    assert rows[0]["text"] == "archive text"
-    assert rows[0]["source"] == source
-    assert rows[0]["metadata"]["representation"] == "internet_archive_djvu_text"
+    assert report["results"][0]["text"] == "archive text"
+    assert report["results"][0]["source"] == source
+    assert report["results"][0]["metadata"]["representation"] == "internet_archive_djvu_text"
     assert backend.fetches == [
         "https://archive.org/details/example_book",
         "https://archive.org/download/example_book/example_book_djvu.txt",
@@ -796,7 +834,7 @@ async def test_internet_archive_text_fallback_is_separately_accounted() -> None:
 
 async def test_content_source_limit_rejects_before_usage_or_provider_side_effect() -> None:
     backend = LocalBackend()
-    service = BrokerService({"local": backend}, max_content_sources_per_request=2)
+    service = _broker_service({"local": backend}, max_content_sources_per_request=2)
     state = service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
@@ -814,7 +852,7 @@ async def test_content_source_limit_rejects_before_usage_or_provider_side_effect
 
 async def test_content_cache_budget_counts_utf8_bytes() -> None:
     backend = LocalBackend(documents={"1": "é"})
-    service = BrokerService({"local": backend}, session_content_cache_bytes=1)
+    service = _broker_service({"local": backend}, session_content_cache_bytes=1)
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
@@ -848,14 +886,14 @@ async def test_provider_result_cache_is_bounded_lru_ttl_and_returns_copies() -> 
     now[0] = 2.0
     assert (await cache.get("second"))[0] is False
     assert cache.snapshot()["evictions"] == 2
-    assert cache.key("provider-a", "web.search", "request") != cache.key(
-        "provider-b", "web.search", "request"
+    assert cache.key("provider-a", "search", "request") != cache.key(
+        "provider-b", "search", "request"
     )
 
 
 async def test_web_provider_cache_reuses_search_and_scrape_across_sessions() -> None:
     backend = WebCacheBackend()
-    service = BrokerService(
+    service = _broker_service(
         {"web": backend},
         provider_execution_config=ProviderExecutionConfig(
             result_cache_ttl_seconds=300,
@@ -891,7 +929,7 @@ async def test_web_provider_cache_reuses_search_and_scrape_across_sessions() -> 
             {"sources": [first_source]},
             execution_id="first-content",
         )
-        rows = await service.call(
+        report = await service.call(
             "second-token",
             "content.get_many",
             {"sources": [second_source]},
@@ -900,12 +938,12 @@ async def test_web_provider_cache_reuses_search_and_scrape_across_sessions() -> 
     finally:
         await service.aclose()
 
-    assert rows[0]["text"] == f"body for {first_source}"
+    assert report["results"][0]["text"] == f"body for {first_source}"
     assert backend.search_calls == 1
     assert backend.fetch_calls == 1
-    assert first.policy.usage.search_provider_attempts == 1
+    assert first.policy.usage.provider_attempts_by_capability["search"] == 1
     assert first.policy.usage.content_backend_fetches == 1
-    assert second.policy.usage.search_provider_attempts == 0
+    assert second.policy.usage.provider_attempts_by_capability.get("search", 0) == 0
     assert second.policy.usage.content_backend_fetches == 0
     assert second.policy.usage.provider_cache_hits == 2
     search_trace = service.take_trace("second-token", "second-search")[0]
@@ -918,7 +956,7 @@ async def test_web_provider_cache_reuses_search_and_scrape_across_sessions() -> 
 
 async def test_provider_cache_key_includes_backend_revision() -> None:
     backend = WebCacheBackend()
-    service = BrokerService(
+    service = _broker_service(
         {"web": backend},
         backend_revision="revision-a",
         provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
@@ -927,7 +965,7 @@ async def test_provider_cache_key_includes_backend_revision() -> None:
     service.register_session(make_session(backend="web", session_id="b", token="b"))
     try:
         await service.call("a", "search.query", {"query": "revision"})
-        service.search.backend_revision = "revision-b"
+        service.search_services["web"].backend_revision = "revision-b"
         await service.call("b", "search.query", {"query": "revision"})
     finally:
         await service.aclose()
@@ -938,7 +976,7 @@ async def test_provider_cache_key_includes_backend_revision() -> None:
 async def test_provider_cache_coalesces_concurrent_cross_session_misses() -> None:
     backend = WebCacheBackend()
     backend.block_first = True
-    service = BrokerService(
+    service = _broker_service(
         {"web": backend},
         provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
     )
@@ -965,7 +1003,10 @@ async def test_provider_cache_coalesces_concurrent_cross_session_misses() -> Non
     assert backend.search_calls == 1
     assert first.policy.usage.provider_cache_misses == 1
     assert second.policy.usage.provider_cache_misses == 1
-    attempts = sum(state.policy.usage.search_provider_attempts for state in (first, second))
+    attempts = sum(
+        state.policy.usage.provider_attempts_by_capability.get("search", 0)
+        for state in (first, second)
+    )
     coalesced = (
         first.policy.usage.provider_coalesced_requests
         + second.policy.usage.provider_coalesced_requests
@@ -985,7 +1026,7 @@ async def test_provider_cache_coalesces_concurrent_cross_session_misses() -> Non
 async def test_provider_cache_does_not_store_failures_and_recovers_from_cancellation() -> None:
     backend = WebCacheBackend()
     backend.failures_remaining = 1
-    service = BrokerService(
+    service = _broker_service(
         {"web": backend},
         provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
     )
@@ -1003,7 +1044,7 @@ async def test_provider_cache_does_not_store_failures_and_recovers_from_cancella
 
     cancelling_backend = WebCacheBackend()
     cancelling_backend.block_first = True
-    cancelling_service = BrokerService(
+    cancelling_service = _broker_service(
         {"web": cancelling_backend},
         provider_execution_config=ProviderExecutionConfig(result_cache_ttl_seconds=300),
     )

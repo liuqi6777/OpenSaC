@@ -22,9 +22,9 @@ Search:
 sdk.search(query, limit=10, offset=0, domains=None) -> list[record]
 sdk.search.many(
     queries, limit_per_query=10, offset=0, concurrency=5, domains=None
-) -> list[record]
+) -> record
 sdk.search.fuse_rrf(
-    batches,
+    report,
     weights=None,
     k=60,
     limit=None,
@@ -52,7 +52,7 @@ sdk.content.read(
 ) -> record
 sdk.content.read_many(
     [{"source": source, "offset": 1, "limit": 200, "max_chars": 100_000}]
-) -> list[record]
+) -> record
 ```
 
 Session, state, and output:
@@ -81,7 +81,7 @@ sdk.llm.extract_many(
     concurrency=4,
     max_tokens=None,
     repair_attempts=0,
-) -> list[record]
+) -> record
 ```
 
 The `extract_many` schema must be a JSON-serializable object whose root type is `object`.
@@ -92,48 +92,52 @@ error; keep a deterministic fallback.
 
 - Search hit: `source`, `backend`, `title`, `domain`, `date`, `snippet`, `score`,
   `rank`, `retrieval`, `metadata`.
-- Search batch: `query`, `hits`, `failure`.
+- Search report: `results`, `failures`, `input_count`. A successful result has `input_index`,
+  `query`, and `hits`; a failure has `input_index`, `query`, and the failure fields below.
 - Fused candidate: the search-hit fields plus `provenance`, `raw_fused_score`, `domain_weight`,
   `fused_score`, and `fused_rank`.
-- Content row: `source`, `text`, `title`, `date`, `failure`, `metadata`.
+- Content row: `source`, `text`, `title`, `date`, and `metadata`.
+- Content batch report: `results`, `failures`, `input_count`. Both outcome lists carry
+  `input_index`; failures also carry `source`.
 - Grep report: `pattern`, `mode`, `case_sensitive`, `context`, `max_matches_per_source`, `matches`,
-  `source_results`, and `input_count`. A match includes `source`, `title`, `line`, `text`, `before`,
-  `after`, and `input_index`. Each input-aligned source result includes `input_index`, `source`,
-  `title`, `match_count`, `scan_complete`, and `failure`.
+  `source_results`, `failures`, and `input_count`. A match includes `source`, `title`, `line`,
+  `text`, `before`, `after`, and `input_index`. Each successful source result includes
+  `input_index`, `source`, `title`, `match_count`, and `scan_complete`.
 - Passage report: `query`, `passages`, `failures`, `warnings`, `input_count`,
   `unique_source_count`. A passage includes `source`, source metadata, exact `text`, `coordinates`,
   `rank`, `score`, and `ranker`.
 - Coordinates: `start_line`, `start_character`, `end_line`, `end_character`. Lines are 1-indexed;
   characters are 0-indexed and the end position is exclusive.
 - Failure: `code`, `message`, `retryable`, `attempts`, `provider_status`,
-  `retry_after_seconds`, `provider`, `operation`, and `scope`. Scope is `request`, `resource`,
+  `retry_after_seconds`, `provider`, `component`, and `scope`. Scope is `request`, `resource`,
   `provider`, or `unknown`; content failures also carry `input_index` and `source`.
-- Extraction row: `index`, `data`, `failure`, `attempts`; a failure has `code`, `message`, and
-  `retryable`.
+- Extraction report: `results`, `failures`, `input_count`. Successful rows have `input_index`,
+  `data`, and `attempts`; failed rows have `input_index`, `attempts`, and the failure fields.
 
 There is no public SDK model hierarchy or `types` module. Join capability results by `source`.
 
 ## Failure and alignment semantics
 
 - `sac_run` automatically renders external item-failure warnings before stdout. Partial and
-  complete item failures preserve aligned SDK results; inspect their typed fields only when code
-  must branch on them.
+  complete item failures preserve input identity through `input_index`; inspect report failures
+  only when code must branch on them.
 - Catch `BrokerError` for a request/infrastructure failure that cannot return a safe documented
   result shape. Inspect `code`,
-  `retryable`, `attempts`, `provider`, `operation`, and `scope`; nullable fields may be absent for
+  `retryable`, `attempts`, `provider`, `component`, and `scope`; nullable fields may be absent for
   a broker transport failure. Treat `unknown` as deliberately unclassified, not provider-wide.
-- Inspect `batch.failure` for per-query failure. A failed batch has no hits.
-- Inspect `row.failure` for a single-source `read` failure. `read_many` returns one row per input
-  window in the same order and includes `input_index`.
+- Multi-item operations keep successful rows in `report.results` and failed rows in
+  `report.failures`; together their `input_index` values partition the original inputs.
+- A failed single-source `read` raises `BrokerError`. `read_many` returns a partitioned report so
+  one unreadable source does not hide successful windows.
 - `content.passages` exactly deduplicates sources in first-seen order, ranks successful documents
   together, and reports failed fetches in `report.failures`. A failed configured reranker falls
   back to `lexical:bm25` and appears in `report.warnings`. Empty sources and zero passages without
   typed failures are successful reports.
-- Use `grep` when coverage matters. Its `source_results` align by `input_index`; inspect each
-  row's `failure` and `scan_complete` to distinguish failed, capped, and complete scans.
+- Use `grep` when coverage matters. Inspect successful `source_results` and separate `failures` by
+  `input_index`; `scan_complete` distinguishes capped and complete successful scans.
 - Treat empty search hits and zero grep matches without a typed failure as success, not failure.
-- Inspect each extraction row's `.data` or `.failure`; exactly one is present. The result list
-  aligns with the input items.
+- Inspect `extract_many` results and failures separately; their `input_index` values partition the
+  input items.
 - Let host policy own retries, rate limits, deduplication, and in-flight coalescing. A returned
   failure is final for that call.
 

@@ -14,7 +14,7 @@ from opensac.broker.session import (
     FlightGroup,
     FlightWaiter,
 )
-from opensac.models import CoalescedRequestRecord
+from opensac.tracing import CoalescedRequestRecord
 
 from .config import ProviderExecutionConfig
 
@@ -41,8 +41,8 @@ class ProviderFlightCoordinator:
         self.max_waiters_per_key = config.max_waiters_per_flight
 
     @staticmethod
-    def key(operation: str, request_fingerprint: str) -> str:
-        return f"{operation}:{request_fingerprint}"
+    def key(namespace: str, request_fingerprint: str) -> str:
+        return f"{namespace}:{request_fingerprint}"
 
     async def admit(
         self,
@@ -90,17 +90,17 @@ class ProviderFlightCoordinator:
             new_groups: list[FlightGroup] = []
             shared_group: FlightGroup | None = None
             if new_keys and group_new:
-                shared_group = FlightGroup(operation_id=f"op_{uuid.uuid4().hex}")
+                shared_group = FlightGroup(request_id=f"req_{uuid.uuid4().hex}")
                 new_groups.append(shared_group)
             for key in new_keys:
                 fingerprint, request_indexes = requests[key]
                 group = shared_group
                 if group is None:
-                    group = FlightGroup(operation_id=f"op_{uuid.uuid4().hex}")
+                    group = FlightGroup(request_id=f"req_{uuid.uuid4().hex}")
                     new_groups.append(group)
                 entry = FlightEntry(
                     future=asyncio.get_running_loop().create_future(),
-                    operation_id=group.operation_id,
+                    request_id=group.request_id,
                     request_fingerprint=fingerprint,
                     group=group,
                 )
@@ -127,7 +127,7 @@ class ProviderFlightCoordinator:
             if context is not None:
                 context.coalesced_requests.extend(
                     CoalescedRequestRecord(
-                        operation_id=entry.operation_id,
+                        request_id=entry.request_id,
                         request_indexes=list(request_indexes),
                         request_fingerprint=fingerprint,
                     )
@@ -244,7 +244,7 @@ class ProviderFlightCoordinator:
 
     async def cancel_all(self, state: BrokerSession) -> int:
         async with state.flight_lock:
-            groups = {entry.group.operation_id: entry.group for entry in state.flights.values()}
+            groups = {entry.group.request_id: entry.group for entry in state.flights.values()}
             for group in groups.values():
                 for entry in group.entries.values():
                     entry.waiters = 0

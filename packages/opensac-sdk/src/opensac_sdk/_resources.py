@@ -75,7 +75,7 @@ class SearchResource:
         offset: int = 0,
         concurrency: int = 5,
         domains: list[str] | None = None,
-    ) -> list[Record]:
+    ) -> Record:
         """Search several queries with bounded broker-side concurrency.
 
         ``limit_per_query`` and ``offset`` define each ranked window.
@@ -83,10 +83,9 @@ class SearchResource:
         same backend-dependent semantics as single-query search.
 
         Returns:
-            One batch per input query, in input order. A batch contains ``query``,
-            ``hits``, and ``failure``. A per-query failure has no hits; inspect its
-            ``code``, ``message``, ``retryable``, and attempt metadata. Empty hits
-            with ``failure is None`` are successful.
+            A report with successful ``results``, flat ``failures``, and
+            ``input_count``. Both outcome lists carry ``input_index``; empty hits
+            are a successful result.
 
         Raises:
             BrokerError: The complete batch call failed before aligned results
@@ -105,7 +104,7 @@ class SearchResource:
         )
         concurrency = integer(concurrency, "concurrency", minimum=1, maximum=20)
         domains = optional_string_list(domains, "domains")
-        batches = self._transport.call(
+        report = self._transport.call(
             "search.query_many",
             {
                 "queries": queries,
@@ -116,20 +115,15 @@ class SearchResource:
             },
         )
         failures = [
-            failure_detail(
-                batch["failure"],
-                input_index=input_index,
-                query=batch.query,
-            )
-            for input_index, batch in enumerate(batches)
-            if batch.get("failure") is not None
+            failure_detail(failure, input_index=failure.input_index, query=failure.query)
+            for failure in report.failures
         ]
         record_external_failures(
             "search.many",
-            success_count=len(batches) - len(failures),
+            success_count=len(report.results),
             failures=failures,
         )
-        return batches
+        return report
 
     @staticmethod
     def _search_window(limit: Any, offset: Any, *, limit_name: str) -> tuple[int, int]:
@@ -144,7 +138,7 @@ class SearchResource:
 
     def fuse_rrf(
         self,
-        batches: list[Record | dict[str, Any]],
+        report: Record | dict[str, Any],
         *,
         weights: list[float] | None = None,
         k: int = 60,
@@ -153,13 +147,12 @@ class SearchResource:
         domain_weights: dict[str, float] | None = None,
         max_per_domain: int | None = None,
     ) -> list[Record]:
-        """Fuse successful search batches locally with domain-aware RRF.
+        """Fuse a multi-query search report locally with domain-aware RRF.
 
-        This deterministic helper makes no broker call. Failed batches are skipped,
-        recorded as an execution warning, and remain available to the caller through
-        their original ``failure`` fields. ``weights`` must align one-to-one with
-        ``batches``; ``k`` controls rank smoothing and ``limit`` truncates the fused
-        list. Domain policies match an exact hostname or any of its subdomains.
+        This deterministic helper makes no broker call. ``weights`` aligns with the
+        report's original inputs, including failed ones; successful results retain
+        their ``input_index``. ``k`` controls rank smoothing and ``limit`` truncates
+        the fused list. Domain policies match an exact hostname or any subdomain.
         ``exclude_domains`` removes candidates, ``domain_weights`` multiplies their
         RRF scores, and ``max_per_domain`` caps candidates sharing one exact hostname
         before the final limit is applied. Sources that are not web URLs are
@@ -173,36 +166,23 @@ class SearchResource:
         Raises:
             ValueError: Weights, domains, ranks, ``k``, or limits are invalid.
         """
-        parsed_batches = [record(batch) for batch in batches]
+        parsed_report = record(report)
+        parsed_batches = [record(batch) for batch in parsed_report.results]
         normalized_weights = self._validate_fusion_options(
-            len(parsed_batches), weights=weights, k=k, limit=limit
+            parsed_report.input_count, weights=weights, k=k, limit=limit
         )
         normalized_exclusions = self._normalize_domain_list(
             exclude_domains, option="exclude_domains"
         )
         normalized_domain_weights = self._normalize_domain_weights(domain_weights)
         self._validate_max_per_domain(max_per_domain)
-        failures = [
-            failure_detail(
-                batch["failure"],
-                input_index=input_index,
-                query=batch.query,
-            )
-            for input_index, batch in enumerate(parsed_batches)
-            if batch.get("failure") is not None
-        ]
-        record_external_failures(
-            "search.fuse_rrf",
-            success_count=len(parsed_batches) - len(failures),
-            failures=failures,
-        )
         candidates: dict[str, dict[str, Any]] = {}
 
-        for batch_index, (batch, weight) in enumerate(
-            zip(parsed_batches, normalized_weights, strict=True)
-        ):
-            if batch.get("failure") is not None:
-                continue
+        for batch in parsed_batches:
+            batch_index = batch.input_index
+            if batch_index < 0 or batch_index >= parsed_report.input_count:
+                raise ValueError("Every search result input_index must be in range")
+            weight = normalized_weights[batch_index]
             best_in_batch: dict[str, tuple[int, Record]] = {}
             for hit_index, hit in enumerate(batch.hits):
                 if hit.rank < 1:
@@ -471,20 +451,19 @@ class ContentResource:
             message = str(exc).replace("source at input index 0", "source")
             raise ValueError(message) from None
 
-    def get_many(self, sources: list[str]) -> list[Record]:
+    def get_many(self, sources: list[str]) -> Record:
         """Fetch complete normalized documents for advanced local processing.
 
         Returns:
-            One content row per input source, in input order. A successful row contains
-            ``text`` and source metadata; an unreadable row has empty text and a
-            structured ``failure``. Prefer narrower content operations when possible.
+            A report with successful ``results``, flat ``failures``, and
+            ``input_count``. Prefer narrower content operations when possible.
 
         Raises:
             BrokerError: The broker could not return input-aligned content rows.
         """
-        rows = self._transport.call("content.get_many", {"sources": self._sources(sources)})
-        self._record_row_failures("content.get_many", rows)
-        return rows
+        report = self._transport.call("content.get_many", {"sources": self._sources(sources)})
+        self._record_report_failures("content.get_many", report)
+        return report
 
     def read(
         self,
@@ -501,8 +480,8 @@ class ContentResource:
 
         Returns:
             One content record. ``metadata`` includes ``start_line``,
-            ``end_line``, ``total_lines``, and ``next_offset``. Inspect ``failure``
-            on unreadable rows.
+            ``end_line``, ``total_lines``, and ``next_offset``. An unreadable source
+            raises ``BrokerError``.
 
         Raises:
             BrokerError: The broker could not return a typed content row.
@@ -519,13 +498,12 @@ class ContentResource:
                 "max_chars": max_chars,
             },
         )
-        self._record_row_failures("content.read", [row])
         return row
 
-    def read_many(self, windows: list[dict[str, Any]]) -> list[Record]:
+    def read_many(self, windows: list[dict[str, Any]]) -> Record:
         """Read a different 1-indexed line window for each source.
 
-        Rows align one-to-one with ``windows`` and include ``input_index``.
+        Successful ``results`` and flat ``failures`` carry ``input_index``.
         Repeated sources are fetched once by the broker and sliced independently.
 
         Raises:
@@ -571,9 +549,9 @@ class ContentResource:
                     ),
                 }
             )
-        rows = self._transport.call("content.read_many", {"windows": validated})
-        self._record_row_failures("content.read_many", rows)
-        return rows
+        report = self._transport.call("content.read_many", {"windows": validated})
+        self._record_report_failures("content.read_many", report)
+        return report
 
     def grep(
         self,
@@ -593,9 +571,9 @@ class ContentResource:
         numbers are 1-indexed and can be passed directly to ``read``.
 
         Returns:
-            A report with flat ``matches`` and one input-aligned ``source_results``
-            row per source. ``scan_complete`` distinguishes complete zero-match
-            scans from capped scans and failures.
+            A report with flat ``matches``, successful ``source_results``, and flat
+            ``failures``. ``scan_complete`` distinguishes complete zero-match scans
+            from capped scans.
 
         Raises:
             BrokerError: The report could not be produced.
@@ -623,13 +601,8 @@ class ContentResource:
             },
         )
         failures = [
-            failure_detail(
-                row["failure"],
-                input_index=row.input_index,
-                source=row.source,
-            )
-            for row in report.source_results
-            if row.get("failure") is not None
+            failure_detail(row, input_index=row.input_index, source=row.source)
+            for row in report.failures
         ]
         record_external_failures(
             "content.grep",
@@ -678,11 +651,7 @@ class ContentResource:
             },
         )
         failures = [
-            failure_detail(
-                row["failure"],
-                input_index=row.input_index,
-                source=row.source,
-            )
+            failure_detail(row, input_index=row.input_index, source=row.source)
             for row in report.failures
         ]
         record_external_failures(
@@ -699,19 +668,14 @@ class ContentResource:
         return report
 
     @staticmethod
-    def _record_row_failures(method: str, rows: list[Record]) -> None:
+    def _record_report_failures(method: str, report: Record) -> None:
         failures = [
-            failure_detail(
-                row["failure"],
-                input_index=row.get("input_index", input_index),
-                source=row.source,
-            )
-            for input_index, row in enumerate(rows)
-            if row.get("failure") is not None
+            failure_detail(row, input_index=row.input_index, source=row.source)
+            for row in report.failures
         ]
         record_external_failures(
             method,
-            success_count=len(rows) - len(failures),
+            success_count=len(report.results),
             failures=failures,
         )
 
@@ -825,7 +789,7 @@ class LLMResource:
         concurrency: int = 4,
         max_tokens: int | None = None,
         repair_attempts: int = 0,
-    ) -> list[Record]:
+    ) -> Record:
         """Map items to a caller-defined JSON object schema.
 
         ``schema`` and every item must be JSON serializable. The schema root must be
@@ -834,8 +798,8 @@ class LLMResource:
         apply to every item, while ``concurrency`` and ``max_tokens`` bound execution.
 
         Returns:
-            Rows containing ``index``, ``data``, ``failure``, and ``attempts``.
-            Exactly one of ``data`` or ``failure`` is present for each row.
+            A report with successful ``results``, flat ``failures``, and
+            ``input_count``. Every outcome carries ``input_index`` and ``attempts``.
 
         Raises:
             ValueError: Local arguments are not JSON serializable or valid.
@@ -872,21 +836,14 @@ class LLMResource:
         }
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
-        rows = self._transport.call("llm.extract_many", params)
-        failures = [
-            failure_detail(
-                {**row["failure"], "attempts": row.attempts},
-                input_index=row.index,
-            )
-            for row in rows
-            if row.get("failure") is not None
-        ]
+        report = self._transport.call("llm.extract_many", params)
+        failures = [failure_detail(row, input_index=row.input_index) for row in report.failures]
         record_external_failures(
             "llm.extract_many",
-            success_count=len(rows) - len(failures),
+            success_count=len(report.results),
             failures=failures,
         )
-        return rows
+        return report
 
     @staticmethod
     def _ensure_json_serializable(value: Any, field: str) -> None:

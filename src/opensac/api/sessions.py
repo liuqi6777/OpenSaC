@@ -42,10 +42,10 @@ class SessionRoutes:
 
     def public(self, session: Session) -> PublicSession:
         capabilities = session.mechanisms.capabilities()
-        if not self.runtime.settings.model_name:
+        if self.runtime.settings.backends.llm.provider == "none":
             capabilities = [method for method in capabilities if not method.startswith("llm.")]
         features = [
-            "capability_contract_v11",
+            "capability_contract_v12",
             "external_failure_warnings_v1",
             "content_passages_v1",
             "provider_reliability_v1",

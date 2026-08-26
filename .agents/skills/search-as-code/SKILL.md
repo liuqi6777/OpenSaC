@@ -1,100 +1,94 @@
 ---
 name: search-as-code
-description: Compose evidence-grounded OpenSAC research programs through the sac_run MCP tool. Use for programmable multi-query search, document inspection, fact checking, structured extraction, workspace-backed research state, or URL-cited results when sac_run is available.
+description: Run evidence-grounded research with OpenSAC through the sac_run MCP tool. Use when sac_run is available and Codex needs programmable web or local search, source discovery, document inspection, fact checking, structured extraction, stateful multi-call research, or URL-cited structured results.
 ---
 
 # Search as Code
 
-Invoke the model-visible MCP tool `sac_run(code)` and pass only a complete Python research
-program. Never create, resume, or delete REST sessions. The MCP host binds the current agent
-conversation through request metadata.
-
-Begin programs with:
+Invoke the model-visible MCP tool `sac_run(code)` with one complete Python program. Never create,
+resume, or delete REST sessions; the MCP host binds the current agent conversation through request
+metadata. Import the SDK namespace and request-level error type when needed:
 
 ```python
 from opensac_sdk import BrokerError, sdk
 ```
 
-## Keep the evidence boundary intact
+Treat OpenSAC as a capability surface, not a prescribed research workflow. Choose the research
+strategy from the task and observations. No fixed query count, capability sequence, stage split, or
+workspace schema is required. Combine, repeat, skip, or separate capabilities as useful.
+
+Each call runs in program mode, so Python variables do not survive it. Use ordinary Python for query
+construction, filtering, joins, validation, and aggregation. Persist JSON or JSONL through
+`sdk.state` only when later programs need durable memory.
+
+## Use the SDK surface
+
+- Use `sdk.search(...)` for one query and `sdk.search.many(...)` for several queries. Use
+  `sdk.search.fuse_rrf(...)` when local fusion, domain policy, or result diversity is useful.
+- Use `sdk.content.passages(...)` to rank relevant passages across sources, `sdk.content.grep(...)`
+  for literal or regex matching, and `sdk.content.read(...)` or `sdk.content.read_many(...)` for
+  deliberate context windows.
+- Use optional `sdk.llm.extract_many(...)` for schema-constrained semantic extraction. Treat its
+  output as a transformation of supplied text, not as new evidence. Validate returned quotes against
+  the input text.
+- Use `sdk.session.usage()` and `sdk.session.capabilities()` for the active deployment, `sdk.state`
+  for workspace artifacts, and `sdk.output.submit(...)` for the final structured result.
+
+Read [references/sdk-contract.md](references/sdk-contract.md) before using unfamiliar methods,
+fields, failures, limits, or citation behavior. To inspect the installed version, print one exact
+method's `__doc__`; do not dump all runtime docs into the shared observation budget.
+
+## Keep evidence boundaries intact
 
 - Sources are URL or local-ID strings. Web content accepts bounded public HTTP(S) URLs directly;
   local IDs still require search admission. Pass strings, never result records, to content.
 - Use search snippets to triage sources, not to support claims about document content. Search
   metadata is sufficient only when the requested result is a discovery list.
-- Prefer `search.many` -> `search.fuse_rrf` -> `content.passages` for semantic discovery. Inspect
-  returned text; use `grep` and `read` for exact strings and deliberate context expansion.
-- Apply task-specific domain policy in `fuse_rrf` before its final limit.
-- Read the text used for each material claim. Output citations are optional, unverified URL/source
-  labels; prefer primary sources and corroborate disputed claims.
-- `sac_run` renders bounded external-failure warnings before stdout while preserving successful
-  rows. Inspect item failure records only when code must branch on them. Empty hits and zero matches
-  without a warning are successful results.
-- Keep stdout small. Warnings, stdout, stderr, and submitted output share one observation budget,
-  and noisy progress can hide the final submitted result.
+- Inspect the document text used for each material claim. Choose source quality and corroboration
+  rules for the task; RRF agreement across queries is not independent-source corroboration.
+- Treat output citations as optional, unverified source labels. Pass the inspected URL or local-ID
+  strings; submission does not validate them against the answer.
 
-## End stages deliberately
+## Return observations and results
 
-- **Review needed:** print bounded results and end with `NEXT:`, naming the model decision and
-  likely next operation. Include bounded URL/domain/title candidates so the next call can reuse URLs.
-- **Research complete:** call `sdk.output.submit(...)` once with compact evidence and citations;
-  do not print them first. After `submitted output` appears, stop calling `sac_run` and answer.
+- Use stdout for intermediate observations. Keep it bounded because warnings, stdout, stderr, and
+  submitted output share one observation budget. Print reusable sources and enough text or metadata
+  for the next judgment.
+- Call `sdk.output.submit(...)` once when the research result is complete. Submit compact evidence
+  and source labels without printing the same final payload first. After `submitted output` appears,
+  stop calling `sac_run` and answer.
 
 A final research result must use `submit`; stdout is not a substitute.
 
-## Split on model judgment
+## Handle state and failures
 
-Keep each `sac_run` call short. Pause when titles, snippets, or passages must be understood before
-choosing the next query, source, pattern, or rule. An exploratory search-only stage is valid; do not
-append grep merely for completeness. Continue when an explicit rule determines the next inputs:
-search can fuse/filter, while known sources and patterns can grep/read in one program.
+Use the session workspace as program-to-program memory through `sdk.state`; no `sdk.workspace` API
+exists. Choose a namespace and artifact shape only when persistence helps. Later programs must list
+and read their artifacts; observations show artifact paths, not their contents.
 
-Frame constraints and source policy first. Use 2-4 queries for a known entity and 6-12 only for
-ambiguous discovery. Fuse a bounded shortlist, rank passages across its sources, inspect the original
-passage text, and submit only after every material claim is supported by inspected text. Use bounded grep/read calls
-when verification depends on an exact spelling or more surrounding lines.
-
-## Orchestrate with Python
-
-Prefer deterministic Python for query construction, filtering, joins, ranking, and coverage.
-Treat `sdk.llm.extract_many` as a semantic map, not an inner tool-calling agent: validate its
-quotes, then make at most a bounded follow-up capability call.
-
-## Use the workspace as program memory
-
-The session workspace is program-to-program memory through `sdk.state`; no `sdk.workspace` API
-exists. Stdout guides the control model, while workspace contents guide the next program.
-Observations show artifact paths, not their contents.
-
-For multi-call work, derive `runs/<research_id>/` from the task, requirements, and source policy.
-At each stage start, list and load its manifest, bounded candidate pool, verified evidence, and
-attempted `(constraint, source)` pairs. Before ending with `NEXT:`, persist every useful update and
-confirm the expected artifact paths appear in the observation. Submit from the evidence ledger
-only after coverage is complete. Python variables do not survive a call.
+`sac_run` renders bounded external-failure warnings before stdout while preserving successful rows.
+Inspect typed item failures when code must branch on them. Empty hits or zero matches without a
+failure are successful results, not transport failures. Catch `BrokerError` when a request failure
+needs a different path; do not add blind retries around host-managed capability calls.
 
 Public web URLs remain reusable across calls and sessions; local IDs remain session-bound. If
 `sac_run` returns `state_lost`, the submitted program was not replayed; rebuild workspace state and
-local-source admission, then resume only missing work.
+local-source admission before deciding what work remains.
 
 Adapter failures and tool timeouts occur outside the sandbox, so their execution outcome may be
-unknown. Do not replay the same program blindly. Inspect the task namespace and usage in one small
-recovery stage, then resume only missing work. If inspection repeatedly fails, report OpenSAC as
+unknown. Do not replay the same program blindly. Inspect relevant workspace state and session usage
+before choosing whether and how to continue. If inspection repeatedly fails, report OpenSAC as
 unavailable.
 
-## Load details only when needed
+## Load examples only when useful
 
-For installed-version details, print one method's `__doc__`; it makes no broker call. Never dump
-all runtime docs because they share the stdout observation budget.
-
-- Read [references/sdk-contract.md](references/sdk-contract.md) before using unfamiliar SDK
-  core/helper methods, fields, failure types, limits, or citation behavior.
 - Read [references/advanced.md](references/advanced.md) only when a core workflow is insufficient.
-- Read [references/patterns.md](references/patterns.md) when a weaker model needs separate compact
-  examples for exploration and verification/submission.
+- Read [references/patterns.md](references/patterns.md) for small, adaptable program examples.
 - Read [references/python-recipes.md](references/python-recipes.md) when query variants should be
   generated systematically, search results filtered locally, coverage aggregated, or extraction
-  output used to drive a bounded follow-up action.
-- Read [references/stateful-research.md](references/stateful-research.md) only when a task must
-  continue across multiple `sac_run` calls and needs a workspace-backed candidate/evidence ledger.
+  output should inform another capability call.
+- Read [references/stateful-research.md](references/stateful-research.md) for one adaptable example
+  of workspace-backed multi-call research.
 
-Avoid printing raw result objects, unbounded source lists, or whole pages, stopping after one
-constraint, or treating RRF agreement as independent-source corroboration.
+Treat every example as a starting point rather than a required pipeline. Adapt or ignore its query
+count, ordering, boundaries, source policy, and artifact schema.

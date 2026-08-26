@@ -6,10 +6,10 @@ Read this reference only when the core workflow cannot express the task. Import 
 ## Whole-document content
 
 Use a whole-document fetch only when deliberate local processing needs the complete normalized
-text. It returns one record per input source, with a `failure` record on unreadable rows:
+text. It returns a report with separate input-indexed successes and failures:
 
 ```python
-sdk.content.get_many(sources) -> list[record]
+sdk.content.get_many(sources) -> record
 ```
 
 ## Free-form pipeline model

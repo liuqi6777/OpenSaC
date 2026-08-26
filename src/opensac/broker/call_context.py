@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
-from opensac.models import (
+from opensac.tracing import (
     CapabilityEvent,
     CoalescedRequestRecord,
     DeduplicatedRequestRecord,
@@ -38,6 +38,7 @@ class CallContext:
 
     session_token: str
     execution_id: str | None
+    capability_family: str
     model_tokens: int = 0
     hits: list[HitRecord] = field(default_factory=list)
     model_attempts: list[ModelAttemptRecord] = field(default_factory=list)
@@ -60,8 +61,17 @@ _CURRENT_CALL: ContextVar[CallContext | None] = ContextVar(
 
 
 @contextmanager
-def call_scope(session_token: str, execution_id: str | None) -> Iterator[CallContext]:
-    context = CallContext(session_token=session_token, execution_id=execution_id)
+def call_scope(
+    session_token: str,
+    execution_id: str | None,
+    *,
+    capability_family: str,
+) -> Iterator[CallContext]:
+    context = CallContext(
+        session_token=session_token,
+        execution_id=execution_id,
+        capability_family=capability_family,
+    )
     token = _CURRENT_CALL.set(context)
     try:
         yield context

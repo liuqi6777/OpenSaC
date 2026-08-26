@@ -6,17 +6,16 @@ queries = [
     "approximate nearest neighbor search",
 ]
 
-batches = sdk.search.many(queries, limit_per_query=5, concurrency=3)
+search_report = sdk.search.many(queries, limit_per_query=5, concurrency=3)
 
-failed = [batch for batch in batches if batch.failure]
-if len(failed) == len(batches):
-    raise RuntimeError(f"Every local search failed: {failed[0].failure}")
-for batch in failed:
-    print(f"warning: '{batch.query}' failed: {batch.failure}")
+if len(search_report.failures) == search_report.input_count:
+    raise RuntimeError(f"Every local search failed: {search_report.failures[0]}")
+for failure in search_report.failures:
+    print(f"warning: '{failure.query}' failed: {failure}")
 
 # A local source is its document ID. Keep the highest-scoring hit per source.
 best: dict[str, object] = {}
-for batch in batches:
+for batch in search_report.results:
     for hit in batch.hits:
         current = best.get(hit.source)
         if current is None or (hit.score or 0) > (current.score or 0):

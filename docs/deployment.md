@@ -1,6 +1,6 @@
 # Deployment
 
-OpenSAC `v0.7.0` is publicly available as version-matched service and sandbox images on GHCR.
+OpenSAC `v0.8.0` is publicly available as version-matched service and sandbox images on GHCR.
 The Docker CLI provides a no-checkout quick start with one YAML profile. Docker Compose remains
 available for declarative deployments. Both run the API and capability broker from the service
 image and start an isolated sandbox container for each execution. Neither builds nor runs the
@@ -57,7 +57,7 @@ for macOS:
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.0/configs/docker.yaml
 ```
 
 Export the provider credentials and host-specific runtime values in the current shell:
@@ -101,7 +101,7 @@ docker run --detach \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:0.7.0 \
+  ghcr.io/liuqi6777/opensac:0.8.0 \
   opensac serve --config /etc/opensac/opensac.yaml
 ```
 
@@ -130,14 +130,14 @@ source repository, build an image, or install Python packages:
 mkdir opensac-deploy
 cd opensac-deploy
 curl -fsSLo compose.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/compose.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.0/compose.yaml
 curl -fsSLo .env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.0/.env.example
 curl -fsSLo compose.env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/compose.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.0/compose.env.example
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.7.0/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.0/configs/docker.yaml
 mkdir -p "$PWD/.opensac"
 ```
 
@@ -213,9 +213,13 @@ Pin `INDEX_COMMIT_SHA` for reproducibility. Start from `configs/local.yaml` and 
 ```yaml
 deployment:
   backend_revision: replace-with-index-revision
-search:
-  backend: local
-  local_base_url: http://127.0.0.1:8081
+backends:
+  search:
+    provider: local
+    base_url: http://127.0.0.1:8081
+  document:
+    provider: local
+    base_url: http://127.0.0.1:8081
 ```
 
 The first start downloads and loads `Qwen/Qwen3-Embedding-8B`. Device and index options are in
@@ -232,6 +236,78 @@ OPENSAC_JINA_API_KEY=replace-with-jina-key
 
 They remain in the host broker and are not passed to sandbox programs.
 
+Search and document providers are configured independently but must currently use one supported
+source-family pair: `local` + `local`, or `serper` + `jina`. The public session contract continues
+to identify those source families as `local` and `web`.
+
+### Rerank service
+
+Rerank is a generic text service that can be shared by Search and Content orchestration. The default
+`lexical` backend runs BM25 in process. To replace it with Jina reranking, configure the backend
+model and keep the credential in `OPENSAC_JINA_API_KEY`:
+
+```yaml
+backends:
+  rerank:
+    provider: jina
+    model: jina-reranker-v3
+```
+
+`provider: jina` requires a non-empty model; `provider: lexical` rejects a model. There is no
+disabled rerank state. The public session environment reports the selected backend as `lexical` or
+`jina`.
+
+### Provider service policies
+
+Search, document fetch, rerank, and LLM completion each bind one execution policy. Global
+reliability values under `providers` remain the defaults; override only the service-specific
+limits that differ:
+
+```yaml
+providers:
+  retry_profile: safe
+  services:
+    search:
+      concurrency: 6
+      requests_per_second: 2.5
+      burst: 2
+    document:
+      concurrency: 6
+      attempt_timeout_seconds: 30
+    rerank:
+      concurrency: 2
+    llm:
+      concurrency: 12
+      logical_deadline_seconds: 120
+```
+
+The fixed service names are `search`, `document`, `rerank`, and `llm`. Provider names and public
+backend routes are not policy keys. Rerank policy applies to either lexical or Jina; an LLM policy
+override requires its optional backend to be enabled. Older `operation_*` maps are rejected rather
+than translated.
+
+### Optional pipeline LLM
+
+Enable the OpenAI-compatible structured extraction backend in YAML, while keeping its credential
+in `OPENSAC_MODEL_API_KEY`:
+
+```yaml
+backends:
+  llm:
+    provider: openai_compatible
+    model: replace-with-model-name
+    base_url: null  # Set for another OpenAI-compatible endpoint.
+```
+
+Leave `backends.llm.provider` as `none` when the pipeline LLM capability is not needed. Backend
+selection and connection fields live under `backends`; capability policy and admission limits live
+under `capabilities.search`, `capabilities.content`, and `capabilities.extraction`.
+
+LLM completion uses the same provider execution path as search, document fetch, and rerank. Its
+service policy controls transport retries, timeout, deadline, concurrency, and rate limiting;
+pipeline call/output-token budgets and extraction repair remain Capability responsibilities. A
+configured `providers.services.llm` override is rejected while the LLM backend is disabled.
+
 ### Eight-core Web performance profile
 
 For an eight-core Docker host with at least 8 GB assigned to Docker, start with the following
@@ -242,9 +318,10 @@ process for every execution. Eight 512 MB sandbox limits leave room for the serv
 Use the ready-to-run `configs/web-performance.yaml` profile, or copy its `providers`, `sandbox`,
 and `limits` sections into a deployment-specific YAML file.
 
-The provider result cache is process-local and only stores successful `web.search` and `web.scrape`
-results. It never caches failures, reranker responses, or LLM output. Keep the TTL at zero when
-cross-session freshness must take precedence over latency and provider cost.
+The provider result cache is process-local. Built-in Serper search and Jina document backends opt
+successful results into it; local backends do not. It never caches failures, reranker responses,
+or LLM output. Keep the TTL at zero when cross-session freshness must take precedence over latency
+and provider cost.
 
 The experimental persistent interpreter is a separate opt-in lifecycle and does not use the warm
 LRU. Set `sandbox.experimental_persistent_interpreter: true` only for treatment deployments, then
@@ -348,6 +425,7 @@ curl -fsS http://127.0.0.1:8081/healthz  # local backend only
 
 OpenSAC `/healthz` does not execute a sandbox or call the provider. Run the Search-as-Code example
 in the main README once to verify the complete API, sandbox, broker, and backend path.
+The `provider_services` section reports live capacity state for each configured service and route.
 
 The built-in runtime dashboard is available at `http://127.0.0.1:8000/dashboard` when the API is
 bound to a loopback address. It shows process and capacity snapshots plus live execution and

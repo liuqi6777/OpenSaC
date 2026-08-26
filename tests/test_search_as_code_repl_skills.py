@@ -36,22 +36,33 @@ def test_repl_skills_are_explicit_and_use_separate_adapter_surfaces() -> None:
     assert "name: search-as-code-repl" in mcp_skill.split("---", 2)[1]
     assert "$search-as-code-repl" in mcp_skill.split("---", 2)[1]
     assert "sac_run(code)" in mcp_skill
+    assert "outer adapter tool, not a Python API" in mcp_skill
+    assert "never call `sac_run` from inside that cell" in mcp_skill
     assert "agent-run" not in mcp_skill
 
     assert "name: search-as-code-repl-cli" in cli_skill.split("---", 2)[1]
     assert "$search-as-code-repl-cli" in cli_skill.split("---", 2)[1]
     assert "opensac agent-run <<'OPENSAC_PY'" in cli_skill
+    assert "outer adapter command" in cli_skill
+    assert "Keep the heredoc body as plain Python" in cli_skill
     assert "sac_run(code)" not in cli_skill
 
     for skill in (mcp_skill, cli_skill):
-        assert "execution_mode=persistent_interpreter" in skill
-        assert "interpreter_state=ready" in skill
-        assert "sdk.session.usage()" in skill
-        assert "sdk.output.submit(...)" in skill
-        assert "NEXT:" in skill
-        assert "checkpoint" in skill
-        assert "never" in skill.lower() and "replay" in skill.lower()
-        assert "/v1/sessions" not in skill
+        flat_skill = " ".join(skill.split())
+        assert "execution_mode=persistent_interpreter" in flat_skill
+        assert "interpreter_state=ready" in flat_skill
+        assert "sdk.session.usage()" in flat_skill
+        assert "sdk.output.submit(...)" in flat_skill
+        assert "not a prescribed research workflow" in flat_skill
+        assert "Choose the query count, capability sequence, cell split" in flat_skill
+        assert "no variable naming or cleanup convention is required" in flat_skill
+        assert "optional recovery checkpoints" in flat_skill
+        assert "no stage marker is required" in flat_skill
+        assert "starting point, not a required cell sequence" in flat_skill
+        assert "Prefer `search.many` ->" not in flat_skill
+        assert "NEXT:" not in flat_skill
+        assert "never" in flat_skill.lower() and "replay" in flat_skill.lower()
+        assert "/v1/sessions" not in flat_skill
 
 
 def test_repl_skill_metadata_disables_implicit_invocation() -> None:
@@ -82,6 +93,14 @@ def test_repl_references_are_self_contained_and_synchronized() -> None:
     assert "sdk.output.submit" in combined
     assert "interpreter_lost" in combined
     assert "Python variables do not survive calls" not in combined
+
+    flat_combined = " ".join(combined.split())
+    assert "not a required research pipeline" in flat_combined
+    assert "not a required stage protocol" in flat_combined
+    assert "not a required state layout or cell sequence" in flat_combined
+    assert "namespace shape is application state, not an SDK requirement" in flat_combined
+    assert "Persist a constraint fingerprint" not in flat_combined
+    assert "Use one task-derived namespace" not in flat_combined
 
 
 def test_repl_examples_compile_and_pass_sandbox_validation() -> None:

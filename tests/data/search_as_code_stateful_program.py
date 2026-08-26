@@ -56,20 +56,19 @@ queries = list(
     )
 )
 try:
-    batches = sdk.search.many(queries, limit_per_query=10, concurrency=6)
+    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=6)
 except BrokerError as error:
     print(f"search failed: code={error.code} retryable={error.retryable} attempts={error.attempts}")
-    batches = []
+    search_report = None
 
-fusion = sdk.search.fuse_rrf(batches, k=60)
-for batch in batches:
-    if batch.failure is not None:
-        print(f"query failed: {batch.query} code={batch.failure.code}")
+fusion = sdk.search.fuse_rrf(search_report, k=60) if search_report is not None else []
+search_results = search_report.results if search_report is not None else []
+search_failures = search_report.failures if search_report is not None else []
+for failure in search_failures:
+    print(f"query failed: {failure.query} code={failure.code}")
 
 leader_sources = []
-for batch in batches:
-    if batch.failure is not None:
-        continue
+for batch in search_results:
     for hit in batch.hits[:2]:
         if hit.source not in leader_sources:
             leader_sources.append(hit.source)
@@ -168,12 +167,10 @@ for name, spec in constraints.items():
             print(f"grep failed: {name} code={error.code} retryable={error.retryable}")
             break
 
-        for failed in report.source_results:
-            if failed.failure is None:
-                continue
+        for failed in report.failures:
             print(
                 f"fetch failed: {name} input={failed.input_index} "
-                f"code={failed.failure.code} attempts={failed.failure.attempts}"
+                f"code={failed.code} attempts={failed.attempts}"
             )
 
         seen_matches = set()
@@ -193,9 +190,6 @@ for name, spec in constraints.items():
                 )
             except BrokerError as error:
                 print(f"read failed: {name} code={error.code}")
-                continue
-            if passage.failure is not None:
-                print(f"read failed: {name} code={passage.failure.code}")
                 continue
             if not passage.text.strip() or not compiled.search(passage.text):
                 continue

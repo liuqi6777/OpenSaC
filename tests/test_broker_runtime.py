@@ -7,14 +7,27 @@ import pytest
 from opensac_sdk._resources import LLMResource
 from opensac_sdk.transport import BrokerError, UnixSocketTransport
 
-from opensac._contracts import ContentSnippet, SearchHit
+from opensac.backends.document import DocumentContent, DocumentHandle
+from opensac.backends.llm import OpenAICompatibleBackend
+from opensac.backends.search import SearchHit
 from opensac.broker import BrokerAlreadyRunning, BrokerRuntime, BrokerService
 from opensac.models import Session
 from opensac.provider import ProviderRequestError
 
 
+def _broker_service(search_backends, *, document_backends=None, **kwargs):
+    if document_backends is None:
+        document_backends = search_backends
+    return BrokerService(
+        search_backends,
+        document_backends=document_backends,
+        **kwargs,
+    )
+
+
 class SocketBackend:
     name = "local"
+    source_kind = "opaque"
     supports_domains = False
     max_depth = None
 
@@ -30,11 +43,15 @@ class SocketBackend:
         ]
 
     async def fetch(self, hit, *, query=None):
-        return ContentSnippet(source=hit.source, text="full document")
+        return DocumentContent(source=hit.source, text="full document")
+
+    @staticmethod
+    def fetch_candidates(hit: DocumentHandle) -> list[DocumentHandle]:
+        return [hit]
 
 
 async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
-    service = BrokerService({"local": SocketBackend()})
+    service = _broker_service({"local": SocketBackend()})
     service.register_session(
         Session(
             id="session",
@@ -60,7 +77,7 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
 
 
 async def test_broker_round_trip_returns_contract_v2_errors(tmp_path) -> None:
-    service = BrokerService({"local": SocketBackend()})
+    service = _broker_service({"local": SocketBackend()})
     service.register_session(
         Session(
             id="session",
@@ -81,12 +98,14 @@ async def test_broker_round_trip_returns_contract_v2_errors(tmp_path) -> None:
             )
         assert raised.value.code == "invalid_request"
         assert raised.value.retryable is False
+        assert raised.value.attempts == 0
 
         denied = UnixSocketTransport(str(runtime.socket_path), "unknown-token")
         with pytest.raises(BrokerError, match="Unknown or expired") as raised:
             await asyncio.to_thread(denied.call, "session.usage", {})
         assert raised.value.code == "permission_denied"
         assert raised.value.retryable is False
+        assert raised.value.attempts == 0
     finally:
         await runtime.stop()
 
@@ -102,7 +121,7 @@ async def test_provider_error_details_round_trip_over_real_unix_socket(tmp_path)
                 retry_after_seconds=2.5,
             )
 
-    service = BrokerService({"local": LimitedBackend()})
+    service = _broker_service({"local": LimitedBackend()})
     service.register_session(
         Session(
             id="session",
@@ -127,7 +146,7 @@ async def test_provider_error_details_round_trip_over_real_unix_socket(tmp_path)
         assert raised.value.provider_status == 429
         assert raised.value.retry_after_seconds == 2.5
         assert raised.value.provider == "local"
-        assert raised.value.operation == "local.search"
+        assert raised.value.component == "search"
         assert raised.value.scope == "provider"
     finally:
         await runtime.stop()
@@ -144,6 +163,9 @@ class EchoModelClient:
 
         self.chat = SimpleNamespace(completions=Completions())
 
+    async def close(self) -> None:
+        return None
+
 
 class FailingModelClient:
     def __init__(self) -> None:
@@ -153,12 +175,14 @@ class FailingModelClient:
 
         self.chat = SimpleNamespace(completions=Completions())
 
+    async def close(self) -> None:
+        return None
+
 
 async def test_extraction_provider_failure_stays_aligned_and_sanitized(tmp_path) -> None:
-    service = BrokerService(
+    service = _broker_service(
         {"local": SocketBackend()},
-        model_client=FailingModelClient(),
-        extraction_model="test-model",
+        llm_backend=OpenAICompatibleBackend(model="test-model", client=FailingModelClient()),
     )
     service.register_session(
         Session(
@@ -172,7 +196,7 @@ async def test_extraction_provider_failure_stays_aligned_and_sanitized(tmp_path)
     await runtime.start()
     try:
         resource = LLMResource(UnixSocketTransport(str(runtime.socket_path), "secret"))
-        rows = await asyncio.to_thread(
+        report = await asyncio.to_thread(
             resource.extract_many,
             [{"value": 1}],
             instruction="Copy the value.",
@@ -183,11 +207,11 @@ async def test_extraction_provider_failure_stays_aligned_and_sanitized(tmp_path)
                 "additionalProperties": False,
             },
         )
-        assert len(rows) == 1
-        assert rows[0].data is None
-        assert rows[0].failure.code == "provider_error"
-        assert rows[0].failure.retryable is True
-        assert "provider response" not in rows[0].failure.message
+        assert report.results == []
+        assert len(report.failures) == 1
+        assert report.failures[0].code == "provider_error"
+        assert report.failures[0].retryable is True
+        assert "provider response" not in report.failures[0].message
     finally:
         await runtime.stop()
 
@@ -198,10 +222,9 @@ async def test_llm_resource_round_trips_over_real_unix_socket(tmp_path) -> None:
     The unit tests call BrokerService directly, which would not catch an SDK
     method whose params do not match what the handler reads.
     """
-    service = BrokerService(
+    service = _broker_service(
         {"local": SocketBackend()},
-        model_client=EchoModelClient(),
-        extraction_model="test-model",
+        llm_backend=OpenAICompatibleBackend(model="test-model", client=EchoModelClient()),
     )
     service.register_session(
         Session(
@@ -231,7 +254,7 @@ async def test_second_broker_refuses_to_evict_a_live_socket(tmp_path) -> None:
     no hint that a stray `serve` was the cause.
     """
     socket_path = tmp_path / "broker.sock"
-    service = BrokerService({"local": SocketBackend()})
+    service = _broker_service({"local": SocketBackend()})
     service.register_session(
         Session(
             id="session",
@@ -243,7 +266,7 @@ async def test_second_broker_refuses_to_evict_a_live_socket(tmp_path) -> None:
     first = BrokerRuntime(service, socket_path)
     await first.start()
     try:
-        second = BrokerRuntime(BrokerService({"local": SocketBackend()}), socket_path)
+        second = BrokerRuntime(_broker_service({"local": SocketBackend()}), socket_path)
         with pytest.raises(BrokerAlreadyRunning):
             await second.start()
 
@@ -266,7 +289,7 @@ async def test_broker_replaces_a_stale_socket_file(tmp_path) -> None:
     # on it, so bind() would fail with EADDRINUSE unless it is removed first.
     socket_path = tmp_path / "broker.sock"
     socket_path.write_bytes(b"")
-    runtime = BrokerRuntime(BrokerService({"local": SocketBackend()}), socket_path)
+    runtime = BrokerRuntime(_broker_service({"local": SocketBackend()}), socket_path)
     await runtime.start()
     try:
         assert runtime.socket_path.is_socket()

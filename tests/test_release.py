@@ -58,4 +58,4 @@ def test_release_publishes_service_and_sandbox_images() -> None:
     assert "  local_search:" not in compose
     assert "  local-search:" not in compose
     assert configuration_profiles
-    assert all("ghcr.io/liuqi6777/opensac-sandbox:0.7.0" in text for text in configuration_profiles)
+    assert all("ghcr.io/liuqi6777/opensac-sandbox:0.8.0" in text for text in configuration_profiles)

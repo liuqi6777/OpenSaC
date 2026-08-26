@@ -8,15 +8,18 @@ from typing import Any
 
 from opensac.broker.call_context import current_call
 from opensac.broker.session import BrokerSession
-from opensac.models import CoalescedRequestRecord, DeduplicatedRequestRecord, ProviderAttemptRecord
 from opensac.provider import (
     ProviderAttempt,
-    ProviderOperation,
     ProviderRequestError,
     ProviderRuntime,
     ProviderWait,
     contextualize_provider_error,
     infer_failure_scope,
+)
+from opensac.tracing import (
+    CoalescedRequestRecord,
+    DeduplicatedRequestRecord,
+    ProviderAttemptRecord,
 )
 
 from .cache import ProviderResultCache
@@ -26,7 +29,7 @@ from .serialization import canonical_json_bytes
 
 
 class CapabilityProviderError(RuntimeError):
-    """A provider failure promoted from item rows to the capability RPC."""
+    """A provider failure promoted to a top-level capability RPC error."""
 
     def __init__(
         self,
@@ -38,7 +41,7 @@ class CapabilityProviderError(RuntimeError):
         provider_status: int | None = None,
         retry_after_seconds: float | None = None,
         provider: str | None = None,
-        operation: str | None = None,
+        component: str | None = None,
         scope: str | None = None,
     ) -> None:
         super().__init__(message)
@@ -48,7 +51,7 @@ class CapabilityProviderError(RuntimeError):
         self.provider_status = provider_status
         self.retry_after_seconds = retry_after_seconds
         self.provider = provider
-        self.operation = operation
+        self.component = component
         self.scope = scope
 
     @classmethod
@@ -60,29 +63,27 @@ class CapabilityProviderError(RuntimeError):
     ) -> CapabilityProviderError:
         return cls(
             code=str(failure.get("code") or "provider_invalid_response"),
-            message=str(failure.get("message") or "Provider operation failed."),
+            message=str(failure.get("message") or "Provider request failed."),
             retryable=bool(failure.get("retryable")),
             attempts=(int(failure.get("attempts") or 0) if attempts is None else attempts),
             provider_status=failure.get("provider_status"),
             retry_after_seconds=failure.get("retry_after_seconds"),
             provider=failure.get("provider"),
-            operation=failure.get("operation"),
+            component=failure.get("component"),
             scope=failure.get("scope"),
         )
 
 
 class ProviderExecutor:
-    """Run, coalesce, trace, and cancel backend provider operations."""
+    """Coordinate provider execution shared by reusable broker services."""
 
     def __init__(
         self,
         sessions: dict[str, BrokerSession],
-        provider_runtime: ProviderRuntime,
         *,
         config: ProviderExecutionConfig,
     ) -> None:
         self.sessions = sessions
-        self.provider_runtime = provider_runtime
         self.flights = ProviderFlightCoordinator(config)
         self.execution_tasks: dict[tuple[str, str], set[asyncio.Task[Any]]] = {}
         self.result_cache = ProviderResultCache(
@@ -190,7 +191,7 @@ class ProviderExecutor:
             "retryable": error.retryable,
             "attempts": error.attempts,
             "provider": error.provider,
-            "operation": error.operation,
+            "component": error.component,
             "scope": error.scope,
         }
         if error.provider_status is not None:
@@ -200,38 +201,38 @@ class ProviderExecutor:
         return failure
 
     @staticmethod
-    def provider_name(backend: Any, operation: str) -> str:
+    def provider_name(backend: Any) -> str:
         """Return a stable, secret-free provider label for public failures."""
 
-        resolver = getattr(backend, "provider_for_operation", None)
-        if callable(resolver):
-            resolved = str(resolver(operation) or "").strip()
-            if resolved:
-                return resolved
         configured = str(getattr(backend, "provider_name", "") or "").strip()
         if configured:
             return configured
-        return str(getattr(backend, "name", "") or operation.partition(".")[0] or "unknown")
+        return str(getattr(backend, "name", "") or "unknown")
+
+    @staticmethod
+    def provider_identity(backend: Any) -> str:
+        return str(getattr(backend, "provider_identity", "") or f"backend:{id(backend)}")
 
     def contextualize_failure(
         self,
         failure: dict[str, Any],
         *,
         backend: Any,
-        operation: ProviderOperation,
+        component: str,
+        resource_failures: bool = False,
     ) -> dict[str, Any]:
         """Fill stable diagnostic fields on broker-created failure rows."""
 
         contextualized = dict(failure)
         if not contextualized.get("provider"):
-            contextualized["provider"] = self.provider_name(backend, operation)
-        if not contextualized.get("operation"):
-            contextualized["operation"] = operation
+            contextualized["provider"] = self.provider_name(backend)
+        if not contextualized.get("component"):
+            contextualized["component"] = component
         if not contextualized.get("scope"):
             contextualized["scope"] = infer_failure_scope(
                 contextualized.get("code") or "provider_invalid_response",
-                operation,
                 provider_status=contextualized.get("provider_status"),
+                resource_failures=resource_failures,
             )
         return contextualized
 
@@ -239,35 +240,40 @@ class ProviderExecutor:
         self,
         state: BrokerSession,
         *,
+        runtime: ProviderRuntime,
         backend: Any,
-        operation: ProviderOperation,
+        component: str,
+        namespace: str,
+        resource_failures: bool = False,
         request_indexes: list[int],
         request_value: Any,
         request: Callable[[], Awaitable[Any]],
         preflight: Callable[[], None] | None = None,
-        operation_id: str | None = None,
+        request_id: str | None = None,
         track_execution: bool = True,
     ) -> Any:
-        """Execute, account and trace one real provider transport operation."""
+        """Execute, account and trace one backend request."""
 
-        operation_id = operation_id or f"op_{uuid.uuid4().hex}"
+        request_id = request_id or f"req_{uuid.uuid4().hex}"
         request_fingerprint = self.fingerprint(request_value)
         context = current_call()
-        records = context.provider_attempts if context is not None else None
-        trace_buffer = context.provider_trace if context is not None else None
+        if context is None:
+            raise RuntimeError("provider services require a capability call context")
+        records = context.provider_attempts
+        trace_buffer = context.provider_trace
+        provider_name = self.provider_name(backend)
+        trace_provider = str(getattr(backend, "name", "") or provider_name)
 
         def observe(attempt: ProviderAttempt) -> None:
             state.policy.record_provider_attempt(
-                kind="search" if operation.endswith(".search") else "content",
+                capability=context.capability_family,
                 attempt=attempt.attempt,
             )
-            if records is None:
-                return
             record = ProviderAttemptRecord(
-                operation_id=operation_id,
-                attempt_id=f"{operation_id}:{attempt.attempt}",
-                provider=operation.partition(".")[0],
-                operation=operation,
+                request_id=request_id,
+                attempt_id=f"{request_id}:{attempt.attempt}",
+                provider=trace_provider,
+                component=component,
                 request_indexes=list(attempt.request_indexes),
                 attempt=attempt.attempt,
                 status=attempt.status,
@@ -279,10 +285,7 @@ class ProviderExecutor:
                 provider_status=attempt.provider_status,
                 request_fingerprint=request_fingerprint,
             )
-            if trace_buffer is not None:
-                trace_buffer.append(record)
-            else:
-                records.append(record)
+            trace_buffer.append(record)
 
         def observe_wait(wait: ProviderWait) -> None:
             state.policy.record_provider_timing(
@@ -290,29 +293,22 @@ class ProviderExecutor:
                 duration_seconds=wait.duration_seconds,
             )
 
-        provider_identity = str(
-            getattr(backend, "provider_identity", "") or f"{operation}:{id(backend)}"
-        )
+        provider_identity = self.provider_identity(backend)
         cache = self.result_cache
-        cache_enabled = cache.enabled_for(operation)
-        cache_key = cache.key(provider_identity, operation, request_fingerprint)
+        cache_enabled = cache.enabled and bool(getattr(backend, "result_cacheable", False))
+        cache_key = cache.key(namespace, provider_identity, request_fingerprint)
         if cache_enabled:
             hit, cached = await cache.get(cache_key)
             if hit:
                 state.policy.record_provider_cache(hit=True)
-                if context is not None:
-                    context.provider_cache_hits += 1
+                context.provider_cache_hits += 1
                 return cached
             state.policy.record_provider_cache(hit=False)
-            if context is not None:
-                context.provider_cache_misses += 1
-
-        provider_name = self.provider_name(backend, operation)
+            context.provider_cache_misses += 1
 
         async def execute_provider() -> Any:
             task = asyncio.create_task(
-                self.provider_runtime.run(
-                    operation,
+                runtime.run(
                     request,
                     provider_identity=provider_identity,
                     request_indexes=request_indexes,
@@ -321,7 +317,7 @@ class ProviderExecutor:
                     wait_observer=observe_wait,
                 )
             )
-            session_token = context.session_token if context is not None else None
+            session_token = context.session_token
             if session_token and track_execution:
                 self.track_execution_task(
                     session_token,
@@ -334,7 +330,8 @@ class ProviderExecutor:
                 raise contextualize_provider_error(
                     exc,
                     provider=provider_name,
-                    operation=operation,
+                    component=component,
+                    resource_failures=resource_failures,
                 ) from exc
 
         if cache_enabled:
@@ -343,23 +340,21 @@ class ProviderExecutor:
                 if hit:
                     if waited:
                         state.policy.record_coalesced(1)
-                        if context is not None:
-                            context.coalesced_requests.append(
-                                CoalescedRequestRecord(
-                                    operation_id=f"cache:{request_fingerprint}",
-                                    request_indexes=list(request_indexes),
-                                    request_fingerprint=request_fingerprint,
-                                )
+                        context.coalesced_requests.append(
+                            CoalescedRequestRecord(
+                                request_id=f"cache:{request_fingerprint}",
+                                request_indexes=list(request_indexes),
+                                request_fingerprint=request_fingerprint,
                             )
+                        )
                     return cached
                 result = await execute_provider()
                 await cache.put(cache_key, result)
         else:
             result = await execute_provider()
         response_fingerprint = self.fingerprint(result)
-        if records is not None:
-            for record in reversed(records):
-                if record.operation_id == operation_id and record.status == "success":
-                    record.response_fingerprint = response_fingerprint
-                    break
+        for record in reversed(records):
+            if record.request_id == request_id and record.status == "success":
+                record.response_fingerprint = response_fingerprint
+                break
         return result

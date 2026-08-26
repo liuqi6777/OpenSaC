@@ -8,25 +8,23 @@ class BrokerError(RuntimeError):
     provider_status: int | None
     retry_after_seconds: float | None
     provider: str | None
-    operation: str | None
+    component: str | None
     scope: Literal["request", "resource", "provider", "unknown"] | None
 
-class _OperationFailureRecord(Protocol):
+class _FailureRecord(Protocol):
     code: str
     message: str
     retryable: bool
-    @overload
-    def __getitem__(self, key: Literal["code", "message"]) -> str: ...
-    @overload
-    def __getitem__(self, key: Literal["retryable"]) -> bool: ...
-
-class _FailureRecord(_OperationFailureRecord, Protocol):
     attempts: int
     provider_status: int | None
     retry_after_seconds: float | None
     provider: str | None
-    operation: str | None
+    component: str | None
     scope: Literal["request", "resource", "provider", "unknown"] | None
+    @overload
+    def __getitem__(self, key: Literal["code", "message"]) -> str: ...
+    @overload
+    def __getitem__(self, key: Literal["retryable"]) -> bool: ...
     @overload
     def __getitem__(self, key: Literal["attempts"]) -> int: ...
     @overload
@@ -40,7 +38,7 @@ class _FailureRecord(_OperationFailureRecord, Protocol):
         key: Literal["retry_after_seconds"],
     ) -> float | None: ...
     @overload
-    def __getitem__(self, key: Literal["provider", "operation"]) -> str | None: ...
+    def __getitem__(self, key: Literal["provider", "component"]) -> str | None: ...
     @overload
     def __getitem__(
         self,
@@ -70,16 +68,29 @@ class _SearchHitRecord(Protocol):
     @overload
     def __getitem__(self, key: Literal["metadata"]) -> Mapping[str, Any]: ...
 
-class _SearchBatchRecord(Protocol):
+class _SearchResultRecord(Protocol):
+    input_index: int
     query: str
     hits: list[_SearchHitRecord]
-    failure: _FailureRecord | None
+    @overload
+    def __getitem__(self, key: Literal["input_index"]) -> int: ...
     @overload
     def __getitem__(self, key: Literal["query"]) -> str: ...
     @overload
     def __getitem__(self, key: Literal["hits"]) -> list[_SearchHitRecord]: ...
+
+class _SearchFailureRecord(_FailureRecord, Protocol):
+    input_index: int
+    query: str
     @overload
-    def __getitem__(self, key: Literal["failure"]) -> _FailureRecord | None: ...
+    def __getitem__(self, key: Literal["input_index"]) -> int: ...
+    @overload
+    def __getitem__(self, key: Literal["query"]) -> str: ...
+
+class _SearchReportRecord(Protocol):
+    results: list[_SearchResultRecord]
+    failures: list[_SearchFailureRecord]
+    input_count: int
 
 class _ContentMetadataRecord(Protocol):
     start_line: int
@@ -95,14 +106,11 @@ class _ContentRowRecord(Protocol):
     text: str
     title: str
     date: str | None
-    failure: _FailureRecord | None
     metadata: _ContentMetadataRecord
     @overload
     def __getitem__(self, key: Literal["source", "text", "title"]) -> str: ...
     @overload
     def __getitem__(self, key: Literal["date"]) -> str | None: ...
-    @overload
-    def __getitem__(self, key: Literal["failure"]) -> _FailureRecord | None: ...
     @overload
     def __getitem__(self, key: Literal["metadata"]) -> _ContentMetadataRecord: ...
 
@@ -115,14 +123,16 @@ class _ContentBatchRowRecord(_ContentRowRecord, Protocol):
     @overload
     def __getitem__(self, key: Literal["date"]) -> str | None: ...
     @overload
-    def __getitem__(self, key: Literal["failure"]) -> _FailureRecord | None: ...
-    @overload
     def __getitem__(self, key: Literal["metadata"]) -> _ContentMetadataRecord: ...
 
-class _ContentFailureRecord(Protocol):
+class _ContentFailureRecord(_FailureRecord, Protocol):
     input_index: int
     source: str
-    failure: _FailureRecord
+
+class _ContentReportRecord(Protocol):
+    results: list[_ContentBatchRowRecord]
+    failures: list[_ContentFailureRecord]
+    input_count: int
 
 class _ContentMatchRecord(Protocol):
     source: str
@@ -139,7 +149,6 @@ class _GrepSourceResultRecord(Protocol):
     title: str
     match_count: int
     scan_complete: bool
-    failure: _FailureRecord | None
 
 class _GrepReportRecord(Protocol):
     pattern: str
@@ -149,6 +158,7 @@ class _GrepReportRecord(Protocol):
     max_matches_per_source: int
     matches: list[_ContentMatchRecord]
     source_results: list[_GrepSourceResultRecord]
+    failures: list[_ContentFailureRecord]
     input_count: int
 
 class _PassageCoordinatesRecord(Protocol):
@@ -175,11 +185,18 @@ class _PassageReportRecord(Protocol):
     input_count: int
     unique_source_count: int
 
-class _ExtractionRowRecord(Protocol):
-    index: int
-    data: dict[str, Any] | None
-    failure: _OperationFailureRecord | None
+class _ExtractionResultRecord(Protocol):
+    input_index: int
+    data: dict[str, Any]
     attempts: int
+
+class _ExtractionFailureRecord(_FailureRecord, Protocol):
+    input_index: int
+
+class _ExtractionReportRecord(Protocol):
+    results: list[_ExtractionResultRecord]
+    failures: list[_ExtractionFailureRecord]
+    input_count: int
 
 class _ContractsRecord(Protocol):
     sandbox: int
@@ -251,10 +268,10 @@ class _SearchResource(Protocol):
         offset: int = ...,
         concurrency: int = ...,
         domains: list[str] | None = ...,
-    ) -> list[_SearchBatchRecord]: ...
+    ) -> _SearchReportRecord: ...
     def fuse_rrf(
         self,
-        batches: list[Any],
+        report: _SearchReportRecord,
         *,
         weights: list[float] | None = ...,
         k: int = ...,
@@ -265,7 +282,7 @@ class _SearchResource(Protocol):
     ) -> list[_SearchHitRecord]: ...
 
 class _ContentResource(Protocol):
-    def get_many(self, sources: list[str]) -> list[_ContentRowRecord]: ...
+    def get_many(self, sources: list[str]) -> _ContentReportRecord: ...
     def read(
         self,
         source: str,
@@ -274,7 +291,7 @@ class _ContentResource(Protocol):
         limit: int = ...,
         max_chars: int = ...,
     ) -> _ContentRowRecord: ...
-    def read_many(self, windows: list[_ReadWindow]) -> list[_ContentBatchRowRecord]: ...
+    def read_many(self, windows: list[_ReadWindow]) -> _ContentReportRecord: ...
     def grep(
         self,
         sources: list[str],
@@ -321,7 +338,7 @@ class _LLMResource(Protocol):
         concurrency: int = ...,
         max_tokens: int | None = ...,
         repair_attempts: int = ...,
-    ) -> list[_ExtractionRowRecord]: ...
+    ) -> _ExtractionReportRecord: ...
 
 class _SessionResource(Protocol):
     def usage(self) -> _SessionUsageRecord: ...

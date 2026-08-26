@@ -43,9 +43,9 @@ means “broaden the heuristic” or “the hard constraint is unsupported.”
 ```python
 from opensac_sdk import sdk
 
-batches = sdk.search.many(queries, limit_per_query=12, concurrency=4)
+search_report = sdk.search.many(queries, limit_per_query=12, concurrency=4)
 candidates = sdk.search.fuse_rrf(
-    batches,
+    search_report,
     k=60,
     exclude_domains=["example.social"],
     domain_weights={"example.gov": 1.5, "example.edu": 1.25},
@@ -94,7 +94,7 @@ from opensac_sdk import BrokerError, sdk
 usable = [
     passage
     for passage in passages
-    if passage.failure is None and passage.text.strip()
+    if passage.text.strip()
 ][:12]
 items = [{"source": passage.source, "text": passage.text} for passage in usable]
 schema = {
@@ -113,7 +113,7 @@ schema = {
 }
 
 try:
-    results = sdk.llm.extract_many(
+    extraction_report = sdk.llm.extract_many(
         items,
         instruction=(
             "Accept only when the passage explicitly states the requested relation. "
@@ -125,15 +125,19 @@ try:
     )
 except BrokerError as error:
     extraction_error = f"{error.code}:{error.retryable}"
-    results = []
+    extraction_report = None
 else:
     extraction_error = None
 
 accepted = []
 suggested_queries = []
 if extraction_error is None:
-    for passage, item, result in zip(usable, items, results, strict=True):
-        if result.failure is not None:
+    results_by_index = {
+        result.input_index: result for result in extraction_report.results
+    }
+    for input_index, (passage, item) in enumerate(zip(usable, items, strict=True)):
+        result = results_by_index.get(input_index)
+        if result is None:
             continue
         data = result.data or {}
         quote = data.get("evidence_quote")
@@ -179,12 +183,12 @@ if accepted:
     )
 elif followup_queries:
     try:
-        batches = sdk.search.many(followup_queries, limit_per_query=8, concurrency=4)
+        search_report = sdk.search.many(followup_queries, limit_per_query=8, concurrency=4)
     except BrokerError as error:
         print(f"ERROR: follow-up search code={error.code} retryable={error.retryable}")
         print("NEXT: change the source or query strategy")
     else:
-        candidates = sdk.search.fuse_rrf(batches, k=60)[:8]
+        candidates = sdk.search.fuse_rrf(search_report, k=60)[:8]
         for item in candidates:
             print(f"CANDIDATE source={item.source!r} title={item.title!r}")
         print("NEXT: inspect follow-up candidates and choose sources/checks")

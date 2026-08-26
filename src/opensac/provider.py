@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -27,22 +27,8 @@ ProviderErrorCode = Literal[
 AttemptStatus = Literal["success", "error", "cancelled"]
 WaitPhase = Literal["concurrency_queue", "rate_limit", "backoff"]
 RetryProfile = Literal["none", "safe"]
-ProviderOperation = Literal[
-    "web.search",
-    "web.scrape",
-    "web.rerank",
-    "local.search",
-    "local.document",
-]
 FailureScope = Literal["request", "resource", "provider", "unknown"]
 
-_PROVIDER_OPERATIONS = {
-    "web.search",
-    "web.scrape",
-    "web.rerank",
-    "local.search",
-    "local.document",
-}
 _NO_TRANSPORT_ERROR_CODES = {"invalid_request", "provider_not_configured"}
 _SAFE_RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
 
@@ -65,7 +51,7 @@ class ProviderRequestError(Exception):
         retry_after_seconds: float | None = None,
         attempts: int = 0,
         provider: str | None = None,
-        operation: ProviderOperation | None = None,
+        component: str | None = None,
         scope: FailureScope | None = None,
     ) -> None:
         super().__init__(message)
@@ -78,13 +64,13 @@ class ProviderRequestError(Exception):
         self.retry_after_seconds = retry_after_seconds
         self.attempts = attempts
         self.provider = provider
-        self.operation = operation
+        self.component = component
         self.scope = scope
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderPolicy:
-    """Host-owned execution policy for one provider operation."""
+    """Host-owned execution policy bound to one reusable provider service."""
 
     retry_profile: RetryProfile = "none"
     max_attempts: int = 3
@@ -133,7 +119,6 @@ class ProviderPolicy:
 class ProviderAttempt:
     """One real adapter invocation, without request or response bodies."""
 
-    operation: ProviderOperation
     attempt: int
     status: AttemptStatus
     duration_seconds: float
@@ -149,7 +134,6 @@ class ProviderAttempt:
 class ProviderWait:
     """Actual host-policy wait, including time spent before cancellation."""
 
-    operation: ProviderOperation
     phase: WaitPhase
     duration_seconds: float
     status: Literal["completed", "cancelled", "deadline"]
@@ -206,7 +190,7 @@ def classify_provider_error(
             retry_after_seconds=retry_after,
             attempts=error.attempts,
             provider=error.provider,
-            operation=error.operation,
+            component=error.component,
             scope=error.scope,
         )
 
@@ -309,9 +293,9 @@ def classify_provider_error(
 
 def infer_failure_scope(
     code: ProviderErrorCode,
-    operation: ProviderOperation,
     *,
     provider_status: int | None = None,
+    resource_failures: bool = False,
 ) -> FailureScope:
     """Classify the safest actionable layer without inspecting provider bodies."""
 
@@ -324,14 +308,14 @@ def infer_failure_scope(
     }:
         return "provider"
     if code == "provider_auth_failed":
-        # Reader 403 responses cannot reliably distinguish provider credentials
-        # from a target-site restriction. Do not tell a program to rotate a key
-        # when the transport status alone does not support that conclusion.
-        if operation == "web.scrape" and provider_status == 403:
+        # A 403 alone cannot distinguish account permissions from a restriction
+        # on the requested resource. Do not tell a program to rotate a key when
+        # the transport status does not support that conclusion.
+        if provider_status == 403:
             return "unknown"
         return "provider"
     if code in {"provider_not_found", "provider_rejected"}:
-        return "resource" if operation in {"web.scrape", "local.document"} else "provider"
+        return "resource" if resource_failures else "provider"
     if code == "provider_invalid_response":
         return "provider"
     return "unknown"
@@ -341,9 +325,10 @@ def contextualize_provider_error(
     error: ProviderRequestError,
     *,
     provider: str,
-    operation: ProviderOperation,
+    component: str,
+    resource_failures: bool = False,
 ) -> ProviderRequestError:
-    """Attach secret-free provider identity, operation, and actionable scope."""
+    """Attach secret-free provider identity, service label, and actionable scope."""
 
     return ProviderRequestError(
         error.code,
@@ -353,12 +338,12 @@ def contextualize_provider_error(
         retry_after_seconds=error.retry_after_seconds,
         attempts=error.attempts,
         provider=error.provider or provider,
-        operation=error.operation or operation,
+        component=error.component or component,
         scope=error.scope
         or infer_failure_scope(
             error.code,
-            operation,
             provider_status=error.provider_status,
+            resource_failures=resource_failures,
         ),
     )
 
@@ -407,51 +392,67 @@ class _FifoRateLimiter:
 
 
 @dataclass(slots=True)
-class _OperationGovernor:
-    policy: ProviderPolicy
+class _ProviderGovernor:
     concurrency: asyncio.Semaphore
     rate_limiter: _FifoRateLimiter | None
+    active: int = 0
+    waiting: int = 0
+    admitted: int = 0
+
+    async def acquire(self, *, timeout: float) -> None:
+        self.waiting += 1
+        try:
+            await asyncio.wait_for(self.concurrency.acquire(), timeout=timeout)
+        finally:
+            self.waiting -= 1
+        self.active += 1
+        self.admitted += 1
+
+    def release(self) -> None:
+        if self.active < 1:
+            raise RuntimeError("provider governor released without an active request")
+        self.active -= 1
+        self.concurrency.release()
 
 
 class ProviderRuntime:
-    """Execute atomic provider operations under one host-owned policy."""
+    """Execute one reusable provider service under a bound host-owned policy."""
 
     def __init__(
         self,
-        policies: Mapping[ProviderOperation, ProviderPolicy] | None = None,
+        policy: ProviderPolicy | None = None,
         *,
-        default_policy: ProviderPolicy | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: Callable[[], float] | None = None,
         wall_clock: Callable[[], datetime] | None = None,
     ) -> None:
-        self._policies = dict(policies or {})
-        self._default_policy = default_policy or ProviderPolicy()
+        self.policy = policy or ProviderPolicy()
         self._clock = clock
         self._sleep = sleep
         self._rng = rng or random.random
         self._wall_clock = wall_clock or (lambda: datetime.now(UTC))
-        unknown_operations = set(self._policies) - _PROVIDER_OPERATIONS
-        if unknown_operations:
-            raise ValueError(
-                f"unknown provider operations: {', '.join(sorted(unknown_operations))}"
-            )
-        self._governors: dict[tuple[str, ProviderOperation], _OperationGovernor] = {}
+        self._governors: dict[str, _ProviderGovernor] = {}
 
-    def policy_for(self, operation: ProviderOperation) -> ProviderPolicy:
-        return self._policies.get(operation, self._default_policy)
+    def snapshot(self, provider_identity: str) -> dict[str, int]:
+        """Return live capacity state for one backend bound to this runtime."""
+
+        governor = self._governors.get(provider_identity)
+        return {
+            "capacity": self.policy.concurrency,
+            "active": governor.active if governor is not None else 0,
+            "waiting": governor.waiting if governor is not None else 0,
+            "admitted": governor.admitted if governor is not None else 0,
+        }
 
     def _governor(
         self,
-        operation: ProviderOperation,
         provider_identity: str,
-    ) -> _OperationGovernor:
-        key = (provider_identity, operation)
-        governor = self._governors.get(key)
+    ) -> _ProviderGovernor:
+        governor = self._governors.get(provider_identity)
         if governor is not None:
             return governor
-        policy = self.policy_for(operation)
+        policy = self.policy
         limiter = None
         if policy.requests_per_second is not None:
             limiter = _FifoRateLimiter(
@@ -460,17 +461,15 @@ class ProviderRuntime:
                 clock=self._clock,
                 sleep=self._sleep,
             )
-        governor = _OperationGovernor(
-            policy=policy,
+        governor = _ProviderGovernor(
             concurrency=asyncio.Semaphore(policy.concurrency),
             rate_limiter=limiter,
         )
-        self._governors[key] = governor
+        self._governors[provider_identity] = governor
         return governor
 
     async def run(
         self,
-        operation: ProviderOperation,
         request: Callable[[], Awaitable[T]],
         *,
         provider_identity: str = "default",
@@ -481,11 +480,9 @@ class ProviderRuntime:
     ) -> T:
         """Run a fresh request coroutine per attempt and return its normalized result."""
 
-        if operation not in _PROVIDER_OPERATIONS:
-            raise ValueError(f"unknown provider operation: {operation!r}")
         if not provider_identity:
             raise ValueError("provider_identity cannot be empty")
-        policy = self.policy_for(operation)
+        policy = self.policy
         if preflight is not None:
             try:
                 preflight()
@@ -500,8 +497,8 @@ class ProviderRuntime:
         # Do not even instantiate a governor until synchronous adapter
         # validation succeeds. Besides avoiding needless queueing, this keeps a
         # bad request or missing deployment credential from consuming an RPS
-        # token that belongs to a real transport attempt.
-        governor = self._governor(operation, provider_identity)
+        # token that belongs to a real backend attempt.
+        governor = self._governor(provider_identity)
         logical_started = self._clock()
         total_backoff = 0.0
         backoff_before = 0.0
@@ -515,15 +512,11 @@ class ProviderRuntime:
 
             queue_started = self._clock()
             try:
-                await asyncio.wait_for(
-                    governor.concurrency.acquire(),
-                    timeout=remaining,
-                )
+                await governor.acquire(timeout=remaining)
             except asyncio.CancelledError:
                 self._observe_wait(
                     wait_observer,
                     ProviderWait(
-                        operation=operation,
                         phase="concurrency_queue",
                         duration_seconds=max(0.0, self._clock() - queue_started),
                         status="cancelled",
@@ -535,7 +528,6 @@ class ProviderRuntime:
                 self._observe_wait(
                     wait_observer,
                     ProviderWait(
-                        operation=operation,
                         phase="concurrency_queue",
                         duration_seconds=max(0.0, self._clock() - queue_started),
                         status="deadline",
@@ -543,113 +535,102 @@ class ProviderRuntime:
                     ),
                 )
                 raise _logical_deadline_error(attempts=attempts_started) from exc
-            queue_seconds = max(0.0, self._clock() - queue_started)
-            self._observe_wait(
-                wait_observer,
-                ProviderWait(
-                    operation=operation,
-                    phase="concurrency_queue",
-                    duration_seconds=queue_seconds,
-                    status="completed",
-                    request_indexes=indexes,
-                ),
-            )
-
-            remaining = self._remaining(policy, logical_started)
-            if remaining <= 0:
-                governor.concurrency.release()
-                raise _logical_deadline_error(attempts=attempts_started)
-
-            rate_limit_wait = 0.0
-            if governor.rate_limiter is not None:
-                rate_limit_started = self._clock()
-                try:
-                    rate_limit_wait = await governor.rate_limiter.acquire(max_wait=remaining)
-                except ProviderRequestError as exc:
-                    self._observe_wait(
-                        wait_observer,
-                        ProviderWait(
-                            operation=operation,
-                            phase="rate_limit",
-                            duration_seconds=max(
-                                0.0,
-                                self._clock() - rate_limit_started,
-                            ),
-                            status="deadline",
-                            request_indexes=indexes,
-                        ),
-                    )
-                    governor.concurrency.release()
-                    raise _with_attempts(exc, attempts_started) from exc
-                except asyncio.CancelledError:
-                    self._observe_wait(
-                        wait_observer,
-                        ProviderWait(
-                            operation=operation,
-                            phase="rate_limit",
-                            duration_seconds=max(
-                                0.0,
-                                self._clock() - rate_limit_started,
-                            ),
-                            status="cancelled",
-                            request_indexes=indexes,
-                        ),
-                    )
-                    governor.concurrency.release()
-                    raise
-                except BaseException:
-                    governor.concurrency.release()
-                    raise
+            try:
+                queue_seconds = max(0.0, self._clock() - queue_started)
                 self._observe_wait(
                     wait_observer,
                     ProviderWait(
-                        operation=operation,
-                        phase="rate_limit",
-                        duration_seconds=rate_limit_wait,
+                        phase="concurrency_queue",
+                        duration_seconds=queue_seconds,
                         status="completed",
                         request_indexes=indexes,
                     ),
                 )
+
                 remaining = self._remaining(policy, logical_started)
                 if remaining <= 0:
-                    governor.concurrency.release()
                     raise _logical_deadline_error(attempts=attempts_started)
 
-            call_started = self._clock()
-            status: AttemptStatus = "success"
-            provider_error: ProviderRequestError | None = None
-            try:
-                timeout = min(policy.attempt_timeout_seconds, remaining)
-                result = await asyncio.wait_for(request(), timeout=timeout)
-            except asyncio.CancelledError:
-                attempts_started += 1
-                status = "cancelled"
-                self._observe(
-                    observer,
-                    ProviderAttempt(
-                        operation=operation,
-                        attempt=attempts_started,
-                        status=status,
-                        duration_seconds=max(0.0, self._clock() - call_started),
-                        queue_seconds=queue_seconds,
-                        rate_limit_wait_seconds=rate_limit_wait,
-                        backoff_before_seconds=backoff_before,
-                        request_indexes=indexes,
-                        error_code="provider_cancelled",
-                    ),
-                )
-                raise
-            except Exception as exc:
-                status = "error"
-                provider_error = classify_provider_error(
-                    exc,
-                    now=self._wall_clock(),
-                    max_retry_after_seconds=policy.max_retry_after_seconds,
-                )
-                if provider_error.code not in _NO_TRANSPORT_ERROR_CODES:
+                rate_limit_wait = 0.0
+                if governor.rate_limiter is not None:
+                    rate_limit_started = self._clock()
+                    try:
+                        rate_limit_wait = await governor.rate_limiter.acquire(max_wait=remaining)
+                    except ProviderRequestError as exc:
+                        self._observe_wait(
+                            wait_observer,
+                            ProviderWait(
+                                phase="rate_limit",
+                                duration_seconds=max(
+                                    0.0,
+                                    self._clock() - rate_limit_started,
+                                ),
+                                status="deadline",
+                                request_indexes=indexes,
+                            ),
+                        )
+                        raise _with_attempts(exc, attempts_started) from exc
+                    except asyncio.CancelledError:
+                        self._observe_wait(
+                            wait_observer,
+                            ProviderWait(
+                                phase="rate_limit",
+                                duration_seconds=max(
+                                    0.0,
+                                    self._clock() - rate_limit_started,
+                                ),
+                                status="cancelled",
+                                request_indexes=indexes,
+                            ),
+                        )
+                        raise
+                    self._observe_wait(
+                        wait_observer,
+                        ProviderWait(
+                            phase="rate_limit",
+                            duration_seconds=rate_limit_wait,
+                            status="completed",
+                            request_indexes=indexes,
+                        ),
+                    )
+                    remaining = self._remaining(policy, logical_started)
+                    if remaining <= 0:
+                        raise _logical_deadline_error(attempts=attempts_started)
+
+                call_started = self._clock()
+                status: AttemptStatus = "success"
+                provider_error: ProviderRequestError | None = None
+                try:
+                    timeout = min(policy.attempt_timeout_seconds, remaining)
+                    result = await asyncio.wait_for(request(), timeout=timeout)
+                except asyncio.CancelledError:
                     attempts_started += 1
+                    status = "cancelled"
+                    self._observe(
+                        observer,
+                        ProviderAttempt(
+                            attempt=attempts_started,
+                            status=status,
+                            duration_seconds=max(0.0, self._clock() - call_started),
+                            queue_seconds=queue_seconds,
+                            rate_limit_wait_seconds=rate_limit_wait,
+                            backoff_before_seconds=backoff_before,
+                            request_indexes=indexes,
+                            error_code="provider_cancelled",
+                        ),
+                    )
+                    raise
+                except Exception as exc:
+                    status = "error"
+                    provider_error = classify_provider_error(
+                        exc,
+                        now=self._wall_clock(),
+                        max_retry_after_seconds=policy.max_retry_after_seconds,
+                    )
+                    if provider_error.code not in _NO_TRANSPORT_ERROR_CODES:
+                        attempts_started += 1
             finally:
-                governor.concurrency.release()
+                governor.release()
 
             duration = max(0.0, self._clock() - call_started)
             if provider_error is None:
@@ -657,7 +638,6 @@ class ProviderRuntime:
                 self._observe(
                     observer,
                     ProviderAttempt(
-                        operation=operation,
                         attempt=attempts_started,
                         status=status,
                         duration_seconds=duration,
@@ -673,7 +653,6 @@ class ProviderRuntime:
                 self._observe(
                     observer,
                     ProviderAttempt(
-                        operation=operation,
                         attempt=attempts_started,
                         status=status,
                         duration_seconds=duration,
@@ -703,7 +682,6 @@ class ProviderRuntime:
                     self._observe_wait(
                         wait_observer,
                         ProviderWait(
-                            operation=operation,
                             phase="backoff",
                             duration_seconds=max(
                                 0.0,
@@ -718,7 +696,6 @@ class ProviderRuntime:
                 self._observe_wait(
                     wait_observer,
                     ProviderWait(
-                        operation=operation,
                         phase="backoff",
                         duration_seconds=actual_backoff,
                         status="completed",
@@ -784,7 +761,7 @@ def _with_attempts(
         retry_after_seconds=error.retry_after_seconds,
         attempts=attempts,
         provider=error.provider,
-        operation=error.operation,
+        component=error.component,
         scope=error.scope,
     )
 

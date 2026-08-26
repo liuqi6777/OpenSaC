@@ -5,12 +5,11 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
-if TYPE_CHECKING:
-    from openai import AsyncOpenAI
-
-from opensac.backends.rerank.base import ClosablePassageReranker, PassageReranker
+from opensac.backends.document import ClosableDocumentBackend, DocumentBackend
+from opensac.backends.llm import ClosableLLMBackend, LLMBackend
+from opensac.backends.rerank import ClosableTextReranker, LexicalReranker, TextReranker
 from opensac.backends.search.base import ClosableSearchBackend, SearchBackend
 from opensac.broker.call_context import CallContext, call_scope, trace_error_message
 from opensac.broker.capabilities.content import ContentCapabilities
@@ -18,18 +17,18 @@ from opensac.broker.capabilities.llm import LLMCapabilities
 from opensac.broker.capabilities.search import SearchCapabilities
 from opensac.broker.policy import CapabilityPolicy, MechanismDisabled
 from opensac.broker.providers import ProviderExecutionConfig, ProviderExecutor
+from opensac.broker.services import DocumentService, LLMService, RerankService, SearchService
 from opensac.broker.session import BrokerSession
-from opensac.metrics import CapacityGate
 from opensac.models import (
     CAPABILITY_CONTRACT,
     CAPABILITY_METHODS,
-    CapabilityEvent,
     Mechanisms,
     Session,
     budget_consumed,
 )
 from opensac.provider import ProviderPolicy, ProviderRuntime
 from opensac.sandbox import SANDBOX_CONTRACT
+from opensac.tracing import CapabilityEvent
 
 CapabilityHandler = Callable[[BrokerSession, dict[str, Any]], Awaitable[Any]]
 logger = logging.getLogger(__name__)
@@ -58,11 +57,11 @@ class BrokerService:
 
     def __init__(
         self,
-        backends: dict[str, SearchBackend],
+        search_backends: dict[str, SearchBackend],
         *,
-        model_client: AsyncOpenAI | None = None,
-        extraction_model: str = "",
-        passage_reranker: PassageReranker | None = None,
+        document_backends: dict[str, DocumentBackend],
+        llm_backend: LLMBackend | None = None,
+        reranker: TextReranker | None = None,
         passage_chunk_chars: int = 2_000,
         passage_chunk_overlap_chars: int = 200,
         passage_prefilter_limit: int = 100,
@@ -83,14 +82,29 @@ class BrokerService:
         content_url_admission: str = "searched_or_public_web",
         content_batch_deadline_seconds: float = 60.0,
         provider_execution_config: ProviderExecutionConfig | None = None,
-        provider_runtime: ProviderRuntime | None = None,
+        search_runtime: ProviderRuntime | None = None,
+        document_runtime: ProviderRuntime | None = None,
+        rerank_runtime: ProviderRuntime | None = None,
+        llm_runtime: ProviderRuntime | None = None,
         backend_revision: str = "",
         capability_observer: CapabilityObserver | None = None,
     ) -> None:
-        self.backends = backends
-        self.passage_reranker = passage_reranker
+        search_backend_names = set(search_backends)
+        document_backend_names = set(document_backends)
+        if search_backend_names != document_backend_names:
+            missing = sorted(search_backend_names - document_backend_names)
+            unexpected = sorted(document_backend_names - search_backend_names)
+            raise ValueError(
+                "Search and document backend names must match exactly; "
+                f"missing document backends: {missing}; "
+                f"unexpected document backends: {unexpected}"
+            )
+        self.search_backends = search_backends
+        self.document_backends = document_backends
+        self.llm_backend = llm_backend
+        self.reranker = reranker if reranker is not None else LexicalReranker()
         self.sessions: dict[str, BrokerSession] = {}
-        self.capacity_gate = CapacityGate(max_concurrency)
+        self.default_provider_concurrency = max_concurrency
         self.max_context_payload_bytes = max_context_payload_bytes
         self.capability_observer = capability_observer
 
@@ -134,32 +148,69 @@ class BrokerService:
         if int(max_extract_repair_attempts) not in {0, 1}:
             raise ValueError("max_extract_repair_attempts must be 0 or 1")
 
-        self.provider_runtime = provider_runtime or ProviderRuntime(
-            {
-                "local.search": ProviderPolicy(concurrency=max_concurrency),
-                "web.search": ProviderPolicy(concurrency=max_concurrency),
-                "local.document": ProviderPolicy(concurrency=6),
-                "web.scrape": ProviderPolicy(concurrency=6),
-                "web.rerank": ProviderPolicy(concurrency=2),
-            }
+        self.search_runtime = search_runtime or ProviderRuntime(
+            ProviderPolicy(concurrency=max_concurrency)
         )
+        self.document_runtime = document_runtime or ProviderRuntime(ProviderPolicy(concurrency=6))
+        self.rerank_runtime = rerank_runtime or ProviderRuntime(ProviderPolicy(concurrency=2))
+        if llm_backend is None and llm_runtime is not None:
+            raise ValueError("llm_runtime requires a configured LLM backend")
+        self.llm_runtime: ProviderRuntime | None = None
+        if llm_backend is not None:
+            self.llm_runtime = llm_runtime or ProviderRuntime(
+                ProviderPolicy(concurrency=max_concurrency)
+            )
+        self.service_runtimes = {
+            "search": self.search_runtime,
+            "document": self.document_runtime,
+            "rerank": self.rerank_runtime,
+        }
+        if self.llm_runtime is not None:
+            self.service_runtimes["llm"] = self.llm_runtime
+        self._validate_document_backends()
         self.providers = ProviderExecutor(
             self.sessions,
-            self.provider_runtime,
             config=provider_execution_config or ProviderExecutionConfig(),
         )
-        self.search = SearchCapabilities(
-            backends,
+        self.search_services = {
+            route: SearchService(
+                route,
+                backend,
+                self.providers,
+                self.search_runtime,
+                backend_revision=backend_revision,
+            )
+            for route, backend in search_backends.items()
+        }
+        self.document_services = {
+            route: DocumentService(
+                route,
+                backend,
+                self.providers,
+                self.document_runtime,
+                backend_revision=backend_revision,
+            )
+            for route, backend in document_backends.items()
+        }
+        self.rerank_service = RerankService(
+            self.reranker,
             self.providers,
-            backend_revision=backend_revision,
+            self.rerank_runtime,
+        )
+        self.llm_service = (
+            LLMService(llm_backend, self.providers, self.llm_runtime)
+            if llm_backend is not None and self.llm_runtime is not None
+            else None
+        )
+        self.search = SearchCapabilities(
+            self.search_services,
             max_queries_per_request=self.max_search_queries_per_request,
             max_query_chars=self.max_search_query_chars,
             max_top_k=self.max_search_top_k,
         )
         self.content = ContentCapabilities(
-            backends,
-            self.providers,
-            passage_reranker=passage_reranker,
+            self.document_services,
+            rerank_service=self.rerank_service,
             passage_chunk_chars=self.passage_chunk_chars,
             passage_chunk_overlap_chars=self.passage_chunk_overlap_chars,
             passage_prefilter_limit=self.passage_prefilter_limit,
@@ -168,12 +219,9 @@ class BrokerService:
             session_content_cache_bytes=int(session_content_cache_bytes),
             content_url_admission=content_url_admission,
             content_batch_deadline_seconds=content_batch_deadline_seconds,
-            backend_revision=backend_revision,
         )
         self.llm = LLMCapabilities(
-            model_client,
-            extraction_model,
-            self.capacity_gate,
+            self.llm_service,
             max_extract_items=component_limits["max_extract_items"],
             max_instruction_bytes=component_limits["max_extract_instruction_bytes"],
             max_schema_bytes=component_limits["max_extract_schema_bytes"],
@@ -215,20 +263,51 @@ class BrokerService:
             validated[name] = int(value)
         return validated
 
+    def _validate_document_backends(self) -> None:
+        for route, backend in self.document_backends.items():
+            source_kind = getattr(backend, "source_kind", None)
+            if source_kind not in {"opaque", "public_url"}:
+                raise ValueError(
+                    f"document backend {route!r} declares invalid source kind {source_kind!r}"
+                )
+            if not callable(getattr(backend, "fetch_candidates", None)):
+                raise ValueError(f"document backend {route!r} must declare fetch_candidates")
+
     async def aclose(self) -> None:
         """Close provider work and backend-owned connection pools."""
 
         await self.providers.aclose()
-        closable: list[ClosableSearchBackend] = []
+        closable: list[
+            ClosableSearchBackend
+            | ClosableDocumentBackend
+            | ClosableTextReranker
+            | ClosableLLMBackend
+        ] = []
         seen: set[int] = set()
-        for backend in self.backends.values():
-            if id(backend) in seen or not isinstance(backend, ClosableSearchBackend):
+        all_backends = (
+            *self.search_backends.values(),
+            *self.document_backends.values(),
+            self.reranker,
+            self.llm_backend,
+        )
+        for backend in all_backends:
+            if (
+                backend is None
+                or id(backend) in seen
+                or not isinstance(
+                    backend,
+                    (
+                        ClosableSearchBackend,
+                        ClosableDocumentBackend,
+                        ClosableTextReranker,
+                        ClosableLLMBackend,
+                    ),
+                )
+            ):
                 continue
             seen.add(id(backend))
             closable.append(backend)
         await asyncio.gather(*(backend.aclose() for backend in closable))
-        if isinstance(self.passage_reranker, ClosablePassageReranker):
-            await self.passage_reranker.aclose()
 
     def register_session(self, session: Session, *, token: str | None = None) -> BrokerSession:
         state = BrokerSession(
@@ -252,7 +331,7 @@ class BrokerService:
         backend_name: str,
         mechanisms: Mechanisms,
     ) -> dict[str, Any]:
-        backend = self.backends.get(backend_name)
+        backend = self.search_backends.get(backend_name)
         if backend is None:
             raise ValueError(f"Backend '{backend_name}' is not configured")
         return {
@@ -276,9 +355,7 @@ class BrokerService:
             "content": {
                 "url_admission": self.content.content_url_admission,
                 "limits": {
-                    "max_sources_per_request": (
-                        self.content.max_content_sources_per_request
-                    ),
+                    "max_sources_per_request": (self.content.max_content_sources_per_request),
                     "read_max_lines": 5_000,
                     "read_max_chars": 400_000,
                     "grep_max_context": 20,
@@ -288,9 +365,13 @@ class BrokerService:
                 },
             },
             "llm": {
-                "available": bool(self.llm.model_client and self.llm.extraction_model),
+                "available": self.llm_service is not None,
                 "limits": {
-                    "max_concurrency": 12,
+                    "max_concurrency": (
+                        self.llm_runtime.policy.concurrency
+                        if self.llm_runtime is not None
+                        else self.default_provider_concurrency
+                    ),
                     "max_completion_tokens": 32_000,
                     "extract_max_items": self.llm.max_extract_items,
                     "extract_max_instruction_bytes": self.llm.max_extract_instruction_bytes,
@@ -303,6 +384,24 @@ class BrokerService:
             },
             "mechanisms": mechanisms.model_dump(mode="json"),
         }
+
+    def provider_service_snapshot(self) -> dict[str, Any]:
+        """Expose live capacity state for each configured provider service."""
+
+        snapshot: dict[str, Any] = {
+            "search": {
+                route: service.capacity_snapshot()
+                for route, service in self.search_services.items()
+            },
+            "document": {
+                route: service.capacity_snapshot()
+                for route, service in self.document_services.items()
+            },
+        }
+        snapshot["rerank"] = self.rerank_service.capacity_snapshot()
+        if self.llm_service is not None:
+            snapshot["llm"] = self.llm_service.capacity_snapshot()
+        return snapshot
 
     async def cancel_execution(
         self,
@@ -356,7 +455,12 @@ class BrokerService:
         sequence = state.next_trace_sequence()
         started = time.monotonic()
         self._observe_capability_started(execution_id, sequence, method, params)
-        with call_scope(token, execution_id) as context:
+        capability_family = method.partition(".")[0]
+        with call_scope(
+            token,
+            execution_id,
+            capability_family=capability_family,
+        ) as context:
             try:
                 blocked = state.mechanisms.blocked_reason(method) or state.mechanisms.fanout_reason(
                     method, params
@@ -554,14 +658,18 @@ class BrokerService:
 
     @staticmethod
     def _trace_result_count(method: str, result: Any) -> int:
-        if method.startswith("search.") and method.endswith("_many"):
-            return sum(len(batch.get("hits", [])) for batch in result)
+        if method == "search.query_many" and isinstance(result, dict):
+            return sum(len(batch.get("hits", [])) for batch in result.get("results", []))
         if isinstance(result, list):
             return len(result)
         if method == "content.grep" and isinstance(result, dict):
             return len(result.get("matches", []))
         if method == "content.passages" and isinstance(result, dict):
             return len(result.get("passages", []))
+        if method in {"content.get_many", "content.read_many", "llm.extract_many"} and isinstance(
+            result, dict
+        ):
+            return len(result.get("results", []))
         return 1 if result is not None else 0
 
     @staticmethod
@@ -588,12 +696,11 @@ class BrokerService:
             "budget_consumed": budget_consumed(usage),
             "budget_remaining": state.policy.remaining(),
             "provider": {
-                "search_attempts": usage.search_provider_attempts,
-                "content_attempts": usage.content_provider_attempts,
-                "retries": usage.provider_retries,
-                "intra_call_deduplicated_items": (
-                    usage.intra_call_deduplicated_items
+                "attempts_by_capability": dict(
+                    sorted(usage.provider_attempts_by_capability.items())
                 ),
+                "retries": usage.provider_retries,
+                "intra_call_deduplicated_items": (usage.intra_call_deduplicated_items),
                 "coalesced_requests": usage.provider_coalesced_requests,
                 "queue_seconds": usage.provider_queue_seconds,
                 "rate_limit_wait_seconds": usage.provider_rate_limit_wait_seconds,
@@ -609,7 +716,7 @@ class BrokerService:
     ) -> dict[str, Any]:
         if params:
             raise ValueError("session.capabilities does not accept parameters")
-        backend_names = sorted(state.policy.allowed_backends & set(self.backends))
+        backend_names = sorted(state.policy.allowed_backends & set(self.search_backends))
         if len(backend_names) != 1:
             raise RuntimeError("A session must have exactly one configured search backend")
         return self.capability_manifest(

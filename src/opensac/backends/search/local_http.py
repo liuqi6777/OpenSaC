@@ -1,62 +1,26 @@
-"""HTTP adapter for the local search and document service."""
+"""HTTP adapter for the local search service."""
 
 from __future__ import annotations
 
 import hashlib
-import re
 from urllib.parse import urljoin
 
 import httpx
 
-from opensac._contracts import (
-    CapabilityFailure,
-    ContentSnippet,
+from opensac.backends._response import json_object
+from opensac.backends.search.base import (
     RetrievalMetadata,
     SearchBatch,
+    SearchBatchFailure,
+    SearchBatchOutcome,
     SearchHit,
 )
-from opensac.backends._response import json_object
-from opensac.provider import ProviderRequestError, invalid_provider_response
-
-# Full documents in the local corpus carry a YAML frontmatter header ahead of
-# the body, and the body then repeats the title as its own first line:
-#
-#     ---
-#     title: Royal Rumble (2020) - Wikipedia
-#     date: 2018-11-19
-#     ---
-#     Royal Rumble (2020) - Wikipedia
-#     The 2020 Royal Rumble was ...
-#
-# Deliberately not a YAML parser: the header is a flat `key: value` block, and
-# taking a dependency to read a `/get_document` response would let a malformed
-# document raise where an unparsed line should just be skipped. Search results
-# are already shaped by the search server and never pass through this parser.
-_FRONTMATTER_PATTERN = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*\n?", re.DOTALL)
-
-
-def parse_document_frontmatter(text: str) -> tuple[dict[str, str], str]:
-    """Split ``text`` into its frontmatter fields and the body below them.
-
-    A full document should render with the same title and date as its search hit.
-    Returns ``({}, text)`` unchanged when there is no header.
-    """
-    match = _FRONTMATTER_PATTERN.match(text)
-    if match is None:
-        return {}, text
-    fields: dict[str, str] = {}
-    for line in match.group(1).splitlines():
-        key, separator, value = line.partition(":")
-        key = key.strip().lower()
-        # First occurrence wins, and a line without a colon is skipped rather
-        # than treated as a key with an empty value.
-        if separator and key and key not in fields:
-            fields[key] = value.strip()
-    return fields, text[match.end() :]
+from opensac.provider import invalid_provider_response
 
 
 class LocalSearchBackend:
     name = "local"
+    result_cacheable = False
     provider_name = "local_search"
     # The corpus has no notion of a site, and a filter that cannot be honoured
     # is refused by the broker rather than ignored here. It used to be silently
@@ -81,7 +45,7 @@ class LocalSearchBackend:
         """Opaque limiter key that changes with the effective endpoint."""
 
         digest = hashlib.sha256(self.base_url.encode("utf-8")).hexdigest()
-        return f"local:{digest}"
+        return f"local-search:{digest}"
 
     def _http(self) -> httpx.AsyncClient:
         # Construct lazily so importing/configuring the service does not open a
@@ -149,7 +113,7 @@ class LocalSearchBackend:
         limit: int,
         offset: int = 0,
         domains: list[str] | None = None,
-    ) -> list[SearchBatch]:
+    ) -> list[SearchBatchOutcome]:
         """Search all queries in one retriever request, preserving their order."""
         del domains
         if not queries:
@@ -166,7 +130,7 @@ class LocalSearchBackend:
         if not isinstance(rows, list) or len(rows) != len(queries):
             raise invalid_provider_response()
 
-        batches: list[SearchBatch] = []
+        batches: list[SearchBatchOutcome] = []
         for query, row in zip(queries, rows, strict=True):
             if not isinstance(row, dict):
                 raise invalid_provider_response()
@@ -189,20 +153,13 @@ class LocalSearchBackend:
                 raise invalid_provider_response()
             try:
                 batches.append(
-                    SearchBatch(
-                        query=query,
-                        hits=[] if error else hits,
-                        failure=(
-                            CapabilityFailure(
-                                code="provider_rejected",
-                                message="Provider rejected one search item.",
-                                retryable=False,
-                                attempts=1,
-                            )
-                            if error
-                            else None
-                        ),
+                    SearchBatchFailure(
+                        code="provider_rejected",
+                        message="Provider rejected one search item.",
+                        retryable=False,
                     )
+                    if error
+                    else SearchBatch(query=query, hits=hits)
                 )
             except (TypeError, ValueError) as exc:
                 raise invalid_provider_response() from exc
@@ -246,45 +203,3 @@ class LocalSearchBackend:
             retrieval=retrieval,
             metadata={key: value for key, value in hit.items() if key not in known_fields},
         )
-
-    async def fetch(
-        self,
-        hit: SearchHit,
-        *,
-        query: str | None = None,
-    ) -> ContentSnippet:
-        del query
-        self.preflight_fetch(hit)
-        response = await self._http().post(
-            urljoin(self.base_url, "get_document"),
-            json={"docid": hit.docid},
-        )
-        response.raise_for_status()
-        payload = json_object(response)
-        raw_text = payload.get("text")
-        if not isinstance(raw_text, str):
-            raise invalid_provider_response()
-        fields, _ = parse_document_frontmatter(raw_text)
-        metadata: dict[str, object] = {"backend": self.name}
-        if date := hit.date or fields.get("date"):
-            metadata["date"] = date
-        return ContentSnippet(
-            source=hit.source,
-            # The header is left in the text on purpose: it is part of the
-            # document, and `content.read` addresses documents by line number,
-            # so deleting it here would shift offsets computed from a `grep`.
-            text=raw_text,
-            title=hit.title or fields.get("title", ""),
-            metadata=metadata,
-        )
-
-    @staticmethod
-    def preflight_fetch(hit: SearchHit) -> None:
-        """Validate a local document handle before provider admission."""
-
-        if not hit.docid:
-            raise ProviderRequestError(
-                "invalid_request",
-                "Local search result has no document identifier.",
-                retryable=False,
-            )

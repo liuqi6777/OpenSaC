@@ -5,8 +5,13 @@ storage:
   data_dir: ../.opensac
   broker_socket: ../.opensac/broker.sock
 
-search:
-  backend: web
+backends:
+  search:
+    provider: serper
+  document:
+    provider: jina
+  rerank:
+    provider: lexical
 
 providers:
   fetch_concurrency: 6
@@ -14,7 +19,7 @@ providers:
   result_cache_max_bytes: 128000000
 
 sandbox:
-  image: ghcr.io/liuqi6777/opensac-sandbox:0.7.0
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.0
   mode: warm
   warm_idle_seconds: 300
   max_warm_containers: 8
