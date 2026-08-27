@@ -45,19 +45,15 @@ def _explore_pattern() -> str:
 
 
 def _verify_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Verify selected sources and submit")
+    return _code_block(PATTERNS_PATH, "## Verify selected sources and return evidence")
 
 
 def _rank_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Rank passages across fused candidates")
+    return _code_block(PATTERNS_PATH, "## Compose retrieval and focused inspection")
 
 
 def _stateful_pattern() -> str:
     return STATEFUL_PROGRAM_PATH.read_text(encoding="utf-8")
-
-
-def _workspace_probe() -> str:
-    return _python_blocks(STATEFUL_PATH)[2]
 
 
 def _python_blocks(path: Path) -> list[str]:
@@ -76,8 +72,10 @@ class FakeSearch:
         self.vary_by_turn = vary_by_turn
         self.hits_per_query = hits_per_query
         self.turn = 1
+        self.many_calls: list[tuple[str, ...]] = []
 
     def many(self, queries: list[str], **_kwargs: object) -> Record:
+        self.many_calls.append(tuple(queries))
         prefix = f"turn_{self.turn}_" if self.vary_by_turn else ""
         if self.hits_per_query == 2:
             batches = [
@@ -172,6 +170,7 @@ class FakeContent:
         self.grep_error = grep_error
         self.turn = 1
         self.grep_calls: list[tuple[str, tuple[str, ...]]] = []
+        self.passage_calls: list[tuple[str, tuple[str, ...]]] = []
         self.read_sources: list[str] = []
 
     @property
@@ -252,6 +251,79 @@ class FakeContent:
             text=text,
         )
 
+    def passages(
+        self,
+        query: str,
+        sources: list[str],
+        *,
+        limit: int = 10,
+        max_per_source: int = 2,
+        **_kwargs: object,
+    ) -> Record:
+        self.passage_calls.append((query, tuple(sources)))
+        rows = []
+        bounded_sources = sources if max_per_source > 0 else []
+        for index, source in enumerate(bounded_sources):
+            if len(rows) >= limit:
+                break
+            text = f"target phrase 1998 evidence for {source}"
+            rows.append(
+                {
+                    "source": source,
+                    "title": source,
+                    "date": "1998",
+                    "text": text,
+                    "coordinates": {
+                        "start_line": 10 + index,
+                        "start_character": 0,
+                        "end_line": 10 + index,
+                        "end_character": len(text),
+                    },
+                    "rank": index + 1,
+                    "score": 1.0 / (index + 1),
+                    "ranker": "lexical:bm25",
+                }
+            )
+        return record(
+            {
+                "query": query,
+                "passages": rows,
+                "failures": [],
+                "warnings": [],
+                "input_count": len(sources),
+                "unique_source_count": len(set(sources)),
+            }
+        )
+
+    def read_many(self, requests: list[dict[str, object]]) -> Record:
+        results = []
+        for index, request in enumerate(requests):
+            source = str(request["source"])
+            offset = int(request.get("offset", 1))
+            self.read_sources.append(source)
+            results.append(
+                {
+                    "input_index": index,
+                    "source": source,
+                    "title": source,
+                    "date": "1998",
+                    "text": f"target phrase 1998 evidence for {source}",
+                    "metadata": {
+                        "start_line": offset,
+                        "end_line": offset + int(request.get("limit", 50)) - 1,
+                        "total_lines": 200,
+                        "next_offset": None,
+                    },
+                }
+            )
+        return record(
+            {
+                "results": results,
+                "failures": [],
+                "input_count": len(requests),
+            }
+        )
+
 
 class FakeOutput:
     def __init__(self) -> None:
@@ -318,10 +390,11 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     skill = SKILL_PATH.read_text(encoding="utf-8")
     flat_skill = " ".join(skill.split())
 
-    assert len(skill) < 6_000
+    assert len(skill) < 10_000
     assert "MCP tool `sac_run(code)`" in flat_skill
-    assert "Never create, resume, or delete REST sessions" in flat_skill
-    assert "request metadata" in flat_skill
+    assert "REST sessions" not in flat_skill
+    assert "request metadata" not in flat_skill
+    assert "Read usage or deployment capabilities with `sdk.session`" in flat_skill
     assert "state_lost" in flat_skill
     assert "submitted program was not replayed" in flat_skill
     assert "execution outcome may be" in flat_skill
@@ -332,10 +405,22 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "references/patterns.md" in flat_skill
     assert "references/python-recipes.md" in flat_skill
     assert "references/stateful-research.md" in flat_skill
-    assert "Choose the research strategy from the task and observations" in flat_skill
+    assert "Choose the strategy yourself" in flat_skill
+    assert "teaches how to encode it as OpenSAC code" in flat_skill
     assert "No fixed query count, capability" in flat_skill
     assert "stage split, or workspace schema is required" in flat_skill
-    assert "A final research result must use `submit`" in flat_skill
+    assert "Issue another search batch only" not in flat_skill
+    assert "Once useful authoritative candidates exist" not in flat_skill
+    assert "Agent completion is the final response to the user" in flat_skill
+    assert "`submit` is optional" in flat_skill
+    assert "Material claims, evidence, status, and citations" in flat_skill
+    assert "Prefer a small data cache over a workflow state machine" in flat_skill
+    assert "filter repeated queries or sources" in flat_skill
+    assert "Keep each cache cumulative" in flat_skill
+    assert "the same pool and content artifacts" in flat_skill
+    assert "Do not print raw result lists, full passages, or the ledger" in flat_skill
+    assert "Runtime metrics alone" in flat_skill
+    assert "A final research result must use `submit`" not in flat_skill
     assert "not as new evidence" in flat_skill
     assert "program-to-program memory" in flat_skill
     assert "observations show artifact paths, not their" in flat_skill
@@ -360,8 +445,8 @@ def test_example_references_are_explicitly_non_prescriptive() -> None:
 
     assert "not a required pipeline" in flat_patterns
     assert "query count, bounds, call grouping, and stopping point are examples" in flat_patterns
-    assert "not a required workspace schema or stage sequence" in flat_stateful
-    assert "choosing the state shape freely" in flat_stateful
+    assert "Multiple `sac_run` calls alone do not require state" in flat_stateful
+    assert "Adapt its inputs and bounds; they are not a required strategy" in flat_stateful
 
 
 def test_skill_has_codex_catalog_metadata() -> None:
@@ -384,6 +469,8 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
     assert "Execution observations show artifact paths, not their contents" in contract
     assert "not a separate database" in contract
     assert "`sdk.workspace` resource" in contract
+    assert "`before` / `after` context as `list[str]`" in contract
+    assert "select a focused `read` window" in contract
 
 
 def test_surface_tiers_route_exact_signatures_to_the_right_reference() -> None:
@@ -426,7 +513,6 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     verify = _verify_pattern()
     stateful = _stateful_pattern()
     stateful_stages = _python_blocks(STATEFUL_PATH)
-    workspace_probe = _workspace_probe()
     recipes = _python_blocks(RECIPES_PATH)
 
     for name, program in (
@@ -434,8 +520,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
         ("rank", rank),
         ("verify", verify),
         ("stateful-fixture", stateful),
-        ("workspace-probe", workspace_probe),
-        *((f"stateful-stage-{index}", program) for index, program in enumerate(stateful_stages, 1)),
+        *((f"stateful-cache-{index}", program) for index, program in enumerate(stateful_stages, 1)),
         *((f"recipe-{index}", program) for index, program in enumerate(recipes, 1)),
     ):
         compile(program, f"<search-as-code-{name}-pattern>", "exec")
@@ -452,16 +537,21 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.search.many(" in rank
     assert "sdk.search.fuse_rrf(" in rank
     assert "sdk.content.passages(" in rank
+    assert "sdk.content.read_many(" in rank
     assert "sdk.output.submit(" not in rank
     assert "NEXT:" in rank
+    assert "(read_report.results if read_report else [])[:4]" in rank
+    assert "[:600]" in rank
 
-    assert len(verify.splitlines()) <= 75
+    assert len(verify.splitlines()) <= 90
     assert "sdk.search.many(" not in verify
     assert "NEXT:" in verify
     assert '"source": passage.source' in verify
     assert verify.index("sdk.content.grep(") < verify.index("sdk.content.read(")
     assert verify.index("sdk.content.read(") < verify.index("sdk.output.submit(")
     assert verify.count("sdk.output.submit(") == 1
+    assert "structured_output_requested = False" in verify
+    assert "NEXT: synthesize the user-facing answer" in verify
 
     assert "sdk.state." not in explore
     assert "sdk.state." not in verify
@@ -481,20 +571,20 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.output.submit(" in stateful
 
     stateful_reference = STATEFUL_PATH.read_text(encoding="utf-8")
-    assert len(stateful_reference.splitlines()) <= 225
-    assert len(stateful_stages) == 4
-    assert max(len(program.splitlines()) for program in stateful_stages) <= 55
-    assert "Use, combine, or replace" in stateful_reference
-    assert "not a required workspace schema or stage sequence" in stateful_reference
+    assert len(stateful_reference.splitlines()) <= 230
+    assert len(stateful_stages) == 1
+    assert "Multiple `sac_run` calls alone do not require state" in stateful_reference
+    assert "Adapt its inputs and bounds; they are not a required strategy" in stateful_reference
     assert "## Canonical stateful pattern" not in stateful_reference
-    assert "## Example workspace layout" in stateful_reference
-    assert "| `manifest.json` |" in stateful_reference
+    assert "## Small data model" in stateful_reference
+    assert "| `meta.json` |" in stateful_reference
     assert "| `pool.jsonl` |" in stateful_reference
-    assert "| `evidence.json` |" in stateful_reference
-    assert "| `attempts.json` |" in stateful_reference
-    assert "workspace is the program's durable notebook" in " ".join(
-        stateful_reference.lower().split()
-    )
+    assert "| `content.jsonl` |" in stateful_reference
+    assert "not a workflow state machine" in stateful_reference
+    assert "Keep one cumulative file for each role" in stateful_reference
+    assert "do not create `pool_round2.jsonl` or `content_stage3.jsonl`" in stateful_reference
+    assert "sdk.state.write_jsonl(pool_path, pool)" in stateful_reference
+    assert "sdk.state.write_jsonl(content_path, content)" in stateful_reference
 
     assert len(recipes) == 4
     recipe_text = "\n".join(recipes)
@@ -518,68 +608,41 @@ def test_query_recipe_builds_a_bounded_unique_year_matrix() -> None:
     assert all(any(str(year) in query for query in queries) for year in range(2019, 2024))
 
 
-def test_workspace_probe_recovers_saved_research_progress(tmp_path: Path) -> None:
-    research_id = "workspace-test"
-    root = f"runs/{research_id}"
-    state = StateResource(str(tmp_path))
-    state.write_json(f"{root}/manifest.json", {"task": "test"})
-    state.write_jsonl(f"{root}/pool.jsonl", [{"source": "doc_1"}])
-    state.write_json(f"{root}/evidence.json", {"phrase": {"source": "doc_1"}})
-    state.write_json(f"{root}/attempts.json", {"phrase": {"sources": ["doc_1"]}})
+def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> None:
+    program = _python_blocks(STATEFUL_PATH)[0]
 
-    program = _workspace_probe().replace("copy-the-task-derived-id", research_id)
-    _, _, output, printed = _run_pattern(tmp_path, program=program)
+    sdk, content, output, first = _run_pattern(tmp_path, program=program)
 
-    assert f"WORKSPACE research={research_id}" in printed
-    assert "pool=1" in printed
-    assert "evidence=['phrase']" in printed
-    assert "terminal=None" in printed
-    assert printed.strip().endswith("NEXT: resume only the missing constraint or stage")
+    assert sdk.search.many_calls
+    assert content.passage_calls
+    assert content.read_sources
+    assert "new_queries=2" in first
+    assert "EVIDENCE source=" in first
+    assert first.strip().endswith(
+        "NEXT: judge these rows, answer if complete, or extend unresolved requirements"
+    )
+    artifact_names = {Path(path).name for path in sdk.state.list()}
+    assert artifact_names == {"meta.json", "pool.jsonl", "content.jsonl"}
+    meta = sdk.state.read_json(_artifact(sdk.state, "meta.json"))
+    pool = sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
+    cached_content = sdk.state.read_jsonl(_artifact(sdk.state, "content.jsonl"))
+    assert len(meta.queries) == 2
+    assert pool
+    assert cached_content
+    assert all(row.key.startswith(f"{row.source}#L") for row in cached_content)
     assert not output.submissions
 
-
-def test_stateful_stage_examples_progress_from_workspace_to_submit(tmp_path: Path) -> None:
-    stages = _python_blocks(STATEFUL_PATH)
-
-    sdk, _, output, searched = _run_pattern(tmp_path, program=stages[0])
-    match = re.search(r"research=([0-9a-f]{12})", searched)
-    assert match is not None
-    research_id = match.group(1)
-    assert sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
-    assert "NEXT: inspect candidates" in searched
-    assert not output.submissions
-
-    _, _, output, verified_phrase = _run_pattern(
+    resumed_sdk, resumed_content, resumed_output, second = _run_pattern(
         tmp_path,
-        program=stages[1].replace("copy-the-task-derived-id", research_id),
+        program=program,
     )
-    assert "constraint=phrase verified=True" in verified_phrase
-    assert not output.submissions
 
-    year_stage = (
-        stages[1]
-        .replace("copy-the-task-derived-id", research_id)
-        .replace('name = "phrase"', 'name = "year"')
-        .replace(
-            'requirement = "Attribute the target phrase to the entity."',
-            'requirement = "Relate the target event to 1998 or 1999."',
-        )
-        .replace(
-            'pattern = r"(target phrase|other spelling)"',
-            r'pattern = r"\b(1998|1999)\b"',
-        )
-    )
-    sdk, _, output, verified_year = _run_pattern(tmp_path, program=year_stage)
-    assert "constraint=year verified=True" in verified_year
-    assert set(sdk.state.read_json(_artifact(sdk.state, "evidence.json"))) == {"phrase", "year"}
-    assert not output.submissions
-
-    _, _, output, printed = _run_pattern(
-        tmp_path,
-        program=stages[3].replace("copy-the-task-derived-id", research_id),
-    )
-    assert printed == ""
-    assert len(output.submissions) == 1
+    assert not resumed_sdk.search.many_calls
+    assert not resumed_content.passage_calls
+    assert not resumed_content.read_sources
+    assert "new_queries=0" in second
+    assert {Path(path).name for path in resumed_sdk.state.list()} == artifact_names
+    assert not resumed_output.submissions
 
 
 def test_explore_pattern_stops_for_model_judgment(tmp_path: Path) -> None:
@@ -592,8 +655,25 @@ def test_explore_pattern_stops_for_model_judgment(tmp_path: Path) -> None:
     assert not output.submissions
 
 
-def test_verify_pattern_submits_instead_of_printing_final_evidence(tmp_path: Path) -> None:
+def test_verify_pattern_returns_runtime_evidence_for_model_synthesis(tmp_path: Path) -> None:
     _, content, output, printed = _run_pattern(tmp_path, program=_verify_pattern())
+
+    assert len(content.grep_calls) == 2
+    assert content.read_sources
+    assert "EVIDENCE phrase:" in printed
+    assert "EVIDENCE year:" in printed
+    assert printed.strip().endswith(
+        "NEXT: synthesize the user-facing answer from this verified evidence"
+    )
+    assert not output.submissions
+
+
+def test_verify_pattern_submits_runtime_evidence_when_requested(tmp_path: Path) -> None:
+    program = _verify_pattern().replace(
+        "structured_output_requested = False",
+        "structured_output_requested = True",
+    )
+    _, content, output, printed = _run_pattern(tmp_path, program=program)
 
     assert printed == ""
     assert len(content.grep_calls) == 2
