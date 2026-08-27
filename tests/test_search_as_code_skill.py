@@ -389,8 +389,11 @@ def _run_pattern(
 def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
     flat_skill = " ".join(skill.split())
+    description = skill.splitlines()[2]
 
     assert len(skill) < 10_000
+    assert "Codex" not in description
+    assert "Claude" not in description
     assert "MCP tool `sac_run(code)`" in flat_skill
     assert "REST sessions" not in flat_skill
     assert "request metadata" not in flat_skill

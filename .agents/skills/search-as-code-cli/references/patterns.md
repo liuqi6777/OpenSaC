@@ -7,8 +7,10 @@ workspace; use the stateful reference only when durable artifacts are useful acr
 ## Example building blocks
 
 - **Explore candidates** demonstrates bounded multi-query search and reusable source output.
-- **Rank passages** demonstrates semantic ranking over a fused candidate set.
-- **Verify and submit** demonstrates exact checks, context expansion, and final submission.
+- **Compose retrieval and inspection** demonstrates a complete stateless search, ranking, and focused
+  read pipeline.
+- **Verify and return evidence** demonstrates exact checks, context expansion, and the optional
+  structured-output branch.
 
 Each block illustrates capability mechanics. Its query count, bounds, call grouping, and stopping
 point are examples for the agent to adapt.
@@ -54,10 +56,11 @@ else:
         print(f"NEXT: rewrite or broaden the queries; failed_queries={failed}")
 ```
 
-## Rank passages across fused candidates
+## Compose retrieval and focused inspection
 
-This is the default semantic evidence funnel. Passage text is exact document text, but the score
-only orders this one report; inspect the text and source before trusting it.
+This is the default semantic evidence funnel. It keeps the mechanically dependent search, ranking,
+passage selection, and focused reads in one program without workspace state. Passage scores only
+order this report; inspect the returned text and source before trusting it.
 
 ```python
 from opensac_sdk import BrokerError, sdk
@@ -78,28 +81,58 @@ try:
         limit=8,
         max_per_source=2,
     )
+    windows = []
+    seen = set()
+    for passage in report.passages:
+        key = (passage.source, passage.coordinates["start_line"])
+        if key in seen:
+            continue
+        seen.add(key)
+        windows.append(
+            {
+                "source": passage.source,
+                "offset": max(passage.coordinates["start_line"] - 8, 1),
+                "limit": 50,
+                "max_chars": 16_000,
+                "coordinates": dict(passage.coordinates),
+            }
+        )
+        if len(windows) >= 6:
+            break
+    read_report = sdk.content.read_many(
+        [
+            {key: row[key] for key in ("source", "offset", "limit", "max_chars")}
+            for row in windows
+        ]
+    ) if windows else None
 except BrokerError as error:
     print(f"ERROR: evidence retrieval code={error.code} retryable={error.retryable}")
 else:
-    for item in report.passages:
-        excerpt = " ".join(item.text.split())[:700]
+    window_by_index = {index: row for index, row in enumerate(windows)}
+    for item in (read_report.results if read_report else [])[:4]:
+        window = window_by_index[item.input_index]
+        excerpt = " ".join(item.text.split())[:600]
         print(
-            f"PASSAGE rank={item.rank} source={item.source!r} title={item.title!r} "
-            f"coordinates={dict(item.coordinates)!r} "
+            f"EVIDENCE source={item.source!r} title={item.title!r} "
+            f"coordinates={window['coordinates']!r} "
             f"text={excerpt!r}"
         )
-    failures = [item.code for item in report.failures]
+    failures = [item.code for item in search_report.failures]
+    failures.extend(item.code for item in report.failures)
+    if read_report:
+        failures.extend(item.code for item in read_report.failures)
     print(
-        "NEXT: inspect source quality and passage entailment; use grep/read for exact "
-        f"checks or context, then submit source URLs; failures={failures[:4]}"
+        "NEXT: judge source quality and entailment; refine only the unresolved constraints; "
+        f"failures={failures[:4]}"
     )
 ```
 
-## Verify selected sources and submit
+## Verify selected sources and return evidence
 
 Use exact sources chosen from exploration. Grep and read stay together because their next inputs are
-mechanical. The program submits when all checks pass; otherwise it returns bounded evidence and a
-`NEXT:` decision for the control model.
+mechanical. By default the program returns bounded runtime evidence for the control model to
+synthesize. Set the structured-output flag only when the caller or downstream contract needs
+`ExecResult.output`.
 
 ```python
 import re
@@ -107,6 +140,7 @@ import re
 from opensac_sdk import BrokerError, sdk
 
 sources = ["selected-source-url-1", "selected-source-url-2"]
+structured_output_requested = False
 checks = {
     "phrase": r"(target phrase|other spelling)",
     "year": r"\b(1998|1999)\b",
@@ -154,15 +188,22 @@ if missing:
         print(f"EVIDENCE {name}: source={row['source']!r} text={excerpt!r}")
     print(f"NEXT: revise sources/checks for missing={missing}; problems={problems[:4]}")
 else:
-    sdk.output.submit(
-        {
-            "evidence": [
-                {"constraint": name, "source": row["source"], "text": row["text"][:2_000]}
-                for name, row in evidence.items()
-            ]
-        },
-        citations=list(dict.fromkeys(row["source"] for row in evidence.values())),
-    )
+    result = {
+        "evidence": [
+            {"constraint": name, "source": row["source"], "text": row["text"][:2_000]}
+            for name, row in evidence.items()
+        ]
+    }
+    if structured_output_requested:
+        sdk.output.submit(
+            result,
+            citations=list(dict.fromkeys(row["source"] for row in evidence.values())),
+        )
+    else:
+        for item in result["evidence"]:
+            excerpt = " ".join(item["text"].split())[:500]
+            print(f"EVIDENCE {item['constraint']}: source={item['source']!r} text={excerpt!r}")
+        print("NEXT: synthesize the user-facing answer from this verified evidence")
 ```
 
 Use a relation-specific check. If text presence alone cannot verify the requested relationship,

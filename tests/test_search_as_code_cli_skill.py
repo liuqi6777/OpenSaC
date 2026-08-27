@@ -35,32 +35,38 @@ def _posix_program() -> str:
 
 def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
+    flat_skill = " ".join(skill.split())
+    description = skill.splitlines()[2]
 
-    assert len(skill) < 6_500
+    assert len(skill) < 10_000
     assert "opensac agent-run <<'OPENSAC_PY'" in skill
-    assert "Never create or manage REST sessions" in skill
-    assert "stable `research_id`" in skill
+    assert "uv run opensac agent-run" in skill
+    assert "Never expose or override its identity, manage REST sessions" in flat_skill
     assert "state_lost" in skill
     assert "submitted program was not replayed" in skill
-    assert "execution outcome may be" in skill
     assert "`HTTP 401` or `HTTP 403`" in skill
-    assert "without printing or embedding any credential" in skill
+    assert "without printing or embedding any credential" in flat_skill
     assert "references/sdk-contract.md" in skill
     assert "references/advanced.md" in skill
     assert "references/patterns.md" in skill
     assert "references/python-recipes.md" in skill
     assert "references/stateful-research.md" in skill
-    assert "Split on model judgment" in skill
-    assert "exploratory search-only stage is valid" in skill
-    assert "A final research result must use `submit`" in skill
-    assert "semantic map, not an inner tool-calling agent" in skill
-    assert "Use the workspace as program memory" in skill
+    assert "Treat one program as one semantic checkpoint" in flat_skill
+    assert "search -> fuse -> passages or grep -> focused reads -> normalize" in flat_skill
+    assert "Make normalized row schemas total" in flat_skill
+    assert "small data cache over a workflow state machine" in flat_skill
+    assert "Keep each cache cumulative" in flat_skill
+    assert "Agent completion is the final response to the user" in flat_skill
+    assert "`submit` is optional" in flat_skill
+    assert "same substantive payload could be written before research ran" in flat_skill
+    assert "A final research result must use `submit`" not in skill
     assert "program-to-program memory" in skill
-    assert "Observations show artifact paths, not their contents" in skill
-    assert "Before ending with `NEXT:`" in skill
     assert "no `sdk.workspace` API" in skill
-    assert "search.fuse_rrf` -> `content.passages" in skill
-    assert "Codex, Claude Code, or another shell-capable agent" in skill.split("---", 2)[1]
+    assert "shell-capable environments" in description
+    assert "Codex" not in description
+    assert "Claude" not in description
+    assert "Use 2-4 queries" not in skill
+    assert "6-12" not in skill
     assert "SAC_API_" not in skill
     assert "SAC_CLI_" not in skill
     assert "SAC_AGENT_" not in skill
@@ -100,23 +106,42 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
         RECIPES_PATH.read_bytes()
         == (MCP_SKILL_DIR / "references" / "python-recipes.md").read_bytes()
     )
-    assert (
-        STATEFUL_PATH.read_bytes()
-        == (MCP_SKILL_DIR / "references" / "stateful-research.md").read_bytes()
+    expected_stateful = (
+        (MCP_SKILL_DIR / "references" / "stateful-research.md")
+        .read_text(encoding="utf-8")
+        .replace("Multiple `sac_run` calls", "Multiple `agent-run` calls")
     )
+    assert STATEFUL_PATH.read_text(encoding="utf-8") == expected_stateful
 
-    for path, heading in (
-        (PATTERNS_PATH, "## Explore candidates"),
-        (PATTERNS_PATH, "## Rank passages across fused candidates"),
-        (PATTERNS_PATH, "## Verify selected sources and submit"),
-    ):
+    pattern_headings = (
+        "## Explore candidates",
+        "## Compose retrieval and focused inspection",
+        "## Verify selected sources and return evidence",
+    )
+    for heading in pattern_headings:
+        path = PATTERNS_PATH
         program = _fenced_block(path, "python", heading=heading)
         compile(program, "<search-as-code-cli-pattern>", "exec")
         validate_code(program)
 
+    composed = _fenced_block(
+        PATTERNS_PATH,
+        "python",
+        heading="## Compose retrieval and focused inspection",
+    )
+    assert composed.index("sdk.search.many(") < composed.index("sdk.search.fuse_rrf(")
+    assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.passages(")
+    assert composed.index("sdk.content.passages(") < composed.index("sdk.content.read_many(")
+
+    verify = _fenced_block(
+        PATTERNS_PATH,
+        "python",
+        heading="## Verify selected sources and return evidence",
+    )
+    assert "structured_output_requested = False" in verify
+
     stateful_stages = _fenced_blocks(STATEFUL_PATH, "python")
-    assert len(stateful_stages) == 4
-    assert max(len(program.splitlines()) for program in stateful_stages) <= 55
+    assert len(stateful_stages) == 1
     for program in stateful_stages:
         compile(program, "<search-as-code-cli-stateful-stage>", "exec")
         validate_code(program)

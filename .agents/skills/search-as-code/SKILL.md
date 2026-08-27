@@ -1,6 +1,6 @@
 ---
 name: search-as-code
-description: Run evidence-grounded research with OpenSAC through the sac_run MCP tool. Use when sac_run is available and Codex needs programmable web or local search, source discovery, document inspection, fact checking, structured extraction, stateful multi-call research, or URL-cited structured results.
+description: Run evidence-grounded research with OpenSAC through the sac_run MCP tool. Use when sac_run is available for programmable search, source discovery, document inspection, fact checking, structured extraction, stateful multi-call research, or URL-cited structured results.
 ---
 
 # Search as Code

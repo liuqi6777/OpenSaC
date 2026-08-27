@@ -153,11 +153,18 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   `max_per_source=1..10`, and applies the per-source cap after global ranking.
 - `grep` fetches documents before matching them. Session caching can avoid another backend
   fetch, but every requested source still counts as a content fetch for strategy budgets.
+- Each grep match has one string `text` line and `before` / `after` context as `list[str]`. Use its
+  `source` and 1-indexed `line` to select a focused `read` window for material evidence instead of
+  assuming the context fields are one string.
 - `grep` match lines and `read` offsets are 1-indexed. `read.metadata` reports `start_line`,
   `end_line`, `total_lines`, and `next_offset`.
 - Content accepts only URL/local-ID strings, not search-hit or content-result records.
 - `citations` is an optional list of at most 256 non-empty source strings. It is written locally,
   does not call the broker, and is not evidence validation.
+- `sdk.output.submit` atomically writes the current execution's structured output artifact. It does
+  not call the broker, terminate the program, complete the agent task, or validate the answer.
+- Repeated submissions in one execution replace the prior artifact. A well-formed research program
+  should submit at most once, only when its caller needs a structured runtime result.
 
 ## Workspace state, output, and lifecycle
 

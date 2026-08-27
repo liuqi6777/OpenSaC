@@ -1,167 +1,134 @@
-# REPL namespace and optional recovery checkpoints
+# Live namespace and lightweight recovery state
 
-This reference shows one possible use of the persistent namespace and `sdk.state`; it is not a
-required state layout or cell sequence. Python globals are live working memory. Files are a separate,
-optional recovery mechanism when the deployment enables persistence.
+The persistent namespace is the default working memory. Use `sdk.state` only when a durable cache
+would save meaningful external work after interpreter loss or support a later program. Files and live
+Python objects are independent; do not mirror the whole namespace after every cell.
 
-## Contents
+## Small durable data model
 
-- [Runtime semantics](#runtime-semantics)
-- [1. Build live working state](#1-build-live-working-state)
-- [2. Verify incrementally](#2-verify-incrementally)
-- [3. Inspect after an uncertain failure](#3-inspect-after-an-uncertain-failure)
-- [4. Optionally checkpoint and submit](#4-optionally-checkpoint-and-submit)
-- [Interpreter loss](#interpreter-loss)
+When recovery value justifies persistence, three cumulative artifacts are usually enough:
 
-## Runtime semantics
+| Artifact | Reusable data |
+| --- | --- |
+| `meta.json` | Task, attempted queries, bounded failures or coverage |
+| `pool.jsonl` | Normalized candidates, deduplicated by `source` |
+| `content.jsonl` | Inspected windows with source, coordinates, and text |
 
-- Choose global names and structures that fit the task. Names in these examples are illustrative.
-- Reuse live objects, recompute them, or overwrite and delete them as useful. The example `NEXT:`
-  lines are optional stdout conventions, not a cell protocol.
-- Ordinary Python exceptions do not clear assignments completed earlier in the same cell.
-- Choose whether to checkpoint from recomputation cost and failure risk. No checkpoint boundary or
-  schema is required; avoid mirroring the entire namespace by default.
-- Confirm `sdk.session.capabilities()["mechanisms"]["persistence"]` before relying on a checkpoint.
-  With persistence disabled, `sdk.state` uses the current temporary workspace and cannot recover a
-  later cell or a lost interpreter.
-- If an adapter failure leaves execution uncertain, first inspect globals and
-  `sdk.session.usage()` without making another external call.
-- Public web URLs remain reusable after recovery. Local document IDs must be re-admitted by search
-  after interpreter or session loss.
+This is a data cache, not a workflow state machine. Do not create per-cell logs, `round2` or `stage3`
+files, duplicate raw reports, or a final ledger unless the task needs them. Keep values used only by
+the next live cell in Python.
 
-## 1. Build live working state
+Confirm `sdk.session.capabilities()["mechanisms"]["persistence"]` before relying on files across
+cells. With persistence disabled, each cell gets a temporary workspace even though Python globals
+remain alive.
+
+## Optionally checkpoint useful live rows
+
+Run this after a composed retrieval cell only when recovery is worth the I/O. It merges bounded live
+rows into the same cache files instead of encoding cell progression in filenames.
 
 ```python
 import hashlib
-import json
 
-from opensac_sdk import BrokerError, sdk
-
-research_manifest = {
-    "task": "Identify the target and verify the requested phrase and year.",
-    "requirements": ["phrase", "year"],
-    "source_policy": "Prefer primary sources when available.",
-}
-manifest_text = json.dumps(research_manifest, sort_keys=True)
-research_id = hashlib.sha256(manifest_text.encode()).hexdigest()[:12]
-checkpoint_root = f"runs/{research_id}"
-queries = ['"exact phrase" entity', "entity alternate wording", "rare clue organization"]
-
-try:
-    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
-except BrokerError as error:
-    print(f"ERROR: search code={error.code} retryable={error.retryable}")
-else:
-    candidate_pool = sdk.search.fuse_rrf(search_report, k=60, limit=40)
-    verified_evidence = {}
-    print(f"candidates={len(candidate_pool)} research={research_id}")
-    print(
-        "NEXT: inspect and verify one requirement; reuse candidate_pool, "
-        "verified_evidence, research_manifest, checkpoint_root"
-    )
-```
-
-## 2. Verify incrementally
-
-Adapt one rule at a time. `verified_evidence` retains successful checks across later cells.
-
-```python
-import re
-
-from opensac_sdk import BrokerError, sdk
-
-constraint_name = "phrase"
-pattern = r"(target phrase|other spelling)"
-candidate_sources = [item.source for item in candidate_pool[:30]]
-
-try:
-    grep_report = sdk.content.grep(candidate_sources, pattern, context=2)
-except BrokerError as error:
-    print(f"ERROR: grep code={error.code} retryable={error.retryable}")
-else:
-    for match in grep_report.matches[:6]:
-        passage = sdk.content.read(
-            match.source, offset=max(match.line - 10, 1), limit=40, max_chars=16_000
-        )
-        if re.search(pattern, passage.text, re.IGNORECASE):
-            verified_evidence[constraint_name] = {
-                "source": passage.source,
-                "text": passage.text,
-                "pattern": pattern,
-            }
-            break
-    print(f"verified={sorted(verified_evidence)}")
-    print(
-        "NEXT: verify another requirement or checkpoint; reuse candidate_pool, "
-        "verified_evidence, checkpoint_root"
-    )
-```
-
-## 3. Inspect after an uncertain failure
-
-This probe performs no search, content, extraction, state write, or output submission. Run it before
-deciding whether any capability call needs to be retried.
-
-```python
 from opensac_sdk import sdk
 
-important_names = [
-    "research_id",
-    "candidate_pool",
-    "grep_report",
-    "verified_evidence",
-    "checkpoint_root",
-]
-present_names = [name for name in important_names if name in globals()]
-usage_snapshot = sdk.session.usage()
-verified_names = sorted(verified_evidence) if "verified_evidence" in globals() else []
-
-print(
-    f"RECOVERY globals={present_names} verified={verified_names} "
-    f"terminal={usage_snapshot.get('terminal_reason')!r}"
-)
-print(
-    "NEXT: resume only the missing operation; reuse present_names, "
-    "usage_snapshot, verified_evidence when present"
-)
-```
-
-## 4. Optionally checkpoint and submit
-
-This example saves a compact recovery artifact only when filesystem persistence is enabled. Adapt or
-omit the artifact, schema, and timing. Converting SDK records to plain dictionaries keeps a saved
-checkpoint independent of in-memory record classes.
-
-```python
-from opensac_sdk import sdk
-
-required_constraints = set(research_manifest["requirements"])
-missing_constraints = sorted(required_constraints - verified_evidence.keys())
-checkpoint = {
-    "manifest": research_manifest,
-    "candidates": [dict(item) for item in candidate_pool[:40]],
-    "evidence": verified_evidence,
-}
 capabilities = sdk.session.capabilities()
 persistence_enabled = bool(capabilities["mechanisms"]["persistence"])
-if persistence_enabled:
-    sdk.state.write_json(f"{checkpoint_root}/checkpoint.json", checkpoint)
-
-if missing_constraints:
-    print(
-        f"NEXT: verify missing constraints {missing_constraints}; "
-        "reuse candidate_pool, verified_evidence, checkpoint_root"
-    )
+if not persistence_enabled:
+    print("CACHE disabled; continue with the live namespace")
 else:
-    sdk.output.submit(
-        {"research_id": research_id, "evidence": verified_evidence},
-        citations=list(dict.fromkeys(row["source"] for row in verified_evidence.values())),
+    goal = research_goal if "research_goal" in globals() else "replace with the evidence question"
+    research_id = hashlib.sha256(goal.encode()).hexdigest()[:12]
+    cache_root = f"runs/{research_id}"
+    meta_path = f"{cache_root}/meta.json"
+    pool_path = f"{cache_root}/pool.jsonl"
+    content_path = f"{cache_root}/content.jsonl"
+
+    meta = dict(sdk.state.read_json(meta_path)) if sdk.state.exists(meta_path) else {
+        "goal": goal,
+        "queries": [],
+    }
+    existing_pool = (
+        [dict(row) for row in sdk.state.read_jsonl(pool_path)]
+        if sdk.state.exists(pool_path)
+        else []
+    )
+    existing_content = (
+        [dict(row) for row in sdk.state.read_jsonl(content_path)]
+        if sdk.state.exists(content_path)
+        else []
+    )
+
+    live_queries = queries if "queries" in globals() else []
+    meta["queries"] = list(dict.fromkeys([*meta["queries"], *live_queries]))[-100:]
+    pool_by_source = {row["source"]: row for row in existing_pool}
+    for row in candidate_pool if "candidate_pool" in globals() else []:
+        pool_by_source[row.source] = {
+            "source": row.source,
+            "title": row.title,
+            "domain": row.domain,
+            "date": row.date,
+            "snippet": (row.snippet or "")[:500],
+            "rank": row.fused_rank,
+            "score": row.fused_score,
+        }
+
+    content_by_key = {row["key"]: row for row in existing_content}
+    for row in evidence_windows if "evidence_windows" in globals() else []:
+        start = row["coordinates"].get("start_line")
+        end = row["coordinates"].get("end_line")
+        key = f"{row['source']}#L{start}-{end}"
+        content_by_key[key] = {
+            "key": key,
+            "source": row["source"],
+            "title": row["title"],
+            "text": row["text"],
+            "coordinates": row["coordinates"],
+        }
+
+    cached_pool = list(pool_by_source.values())[-300:]
+    cached_content = list(content_by_key.values())[-300:]
+    sdk.state.write_json(meta_path, meta)
+    sdk.state.write_jsonl(pool_path, cached_pool)
+    sdk.state.write_jsonl(content_path, cached_content)
+    print(
+        f"CACHE research={research_id} pool={len(cached_pool)} "
+        f"content={len(cached_content)}"
     )
 ```
 
-## Interpreter loss
+## Inspect before replay or recover after loss
 
-An observation with `interpreter_state=lost` or `state_lost` means the cell is never replayed.
-The adapter discards that session; the next invocation starts a clean one. Restore a trustworthy
-checkpoint if one exists, re-admit local sources, and redo any work that evidence does not show as
-complete. Never infer completion merely because a capability appeared in the lost cell's source.
+After an adapter failure with unknown outcome, first inspect relevant globals and
+`sdk.session.usage()` in a read-only cell. Do not repeat an external call merely because its
+observation was lost.
+
+After explicit `interpreter_state=lost` or `state_lost`, the next invocation starts with a clean
+namespace. Load a trustworthy cache only when persistence was enabled. Print bounded cached excerpts
+for the next judgment; re-admit local IDs through search before using them again.
+
+```python
+from opensac_sdk import sdk
+
+research_id = "copy-the-task-derived-id"
+cache_root = f"runs/{research_id}"
+meta_path = f"{cache_root}/meta.json"
+pool_path = f"{cache_root}/pool.jsonl"
+content_path = f"{cache_root}/content.jsonl"
+
+cached_meta = dict(sdk.state.read_json(meta_path)) if sdk.state.exists(meta_path) else {}
+cached_pool = sdk.state.read_jsonl(pool_path) if sdk.state.exists(pool_path) else []
+cached_content = sdk.state.read_jsonl(content_path) if sdk.state.exists(content_path) else []
+
+print(
+    f"RECOVERY research={research_id} pool={len(cached_pool)} "
+    f"content={len(cached_content)} queries={len(cached_meta.get('queries', []))}"
+)
+for row in cached_content[-4:]:
+    excerpt = " ".join(row.text.split())[:500]
+    print(f"EVIDENCE source={row.source!r} excerpt={excerpt!r}")
+print("NEXT: judge cached evidence, re-admit local IDs, or resume only missing work")
+```
+
+Public web URLs remain reusable after recovery. Never infer completion merely because a capability
+call appeared in the lost cell's source; require live or cached evidence of its result.

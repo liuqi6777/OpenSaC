@@ -1,43 +1,37 @@
-# Workspace-backed Search-as-Code research
+# Lightweight state for multi-call research
 
-This reference shows one workspace-backed design for research across multiple OpenSAC program calls.
-It is an adaptable example, not a required workspace schema or stage sequence. The workspace is the
-program's durable notebook; stdout is only the control model's bounded view. Use, combine, or replace
-the blocks and artifacts according to the task.
+Use state when later programs can save external work by reusing search candidates or inspected
+content. Multiple `agent-run` calls alone do not require state; read [patterns.md](patterns.md) for the
+default stateless pipeline.
 
-## Contents
+## Small data model
 
-- [Example workspace layout](#example-workspace-layout)
-- [1. Search or extend the candidate pool](#1-search-or-extend-the-candidate-pool)
-- [2. Verify one missing constraint](#2-verify-one-missing-constraint)
-- [3. Inspect workspace after an uncertain failure](#3-inspect-workspace-after-an-uncertain-failure)
-- [4. Submit a complete ledger](#4-submit-a-complete-ledger)
+Three artifacts are usually enough:
 
-## Example workspace layout
+| Artifact | Reusable data |
+| --- | --- |
+| `meta.json` | Task, attempted queries, bounded failure or coverage summaries |
+| `pool.jsonl` | Normalized search candidates, deduplicated by `source` |
+| `content.jsonl` | Inspected passages or read windows with source, coordinates, and text |
 
-This example uses one task-derived `runs/<research_id>/` namespace. Observations show artifact paths,
-not file contents; every later program must explicitly load the files it needs.
+These files are a data cache, not a workflow state machine. Do not create per-stage logs, duplicate
+raw reports, or a final ledger unless the caller needs one. Use ordinary Python variables for values
+consumed inside the same program.
 
-| Artifact | Durable decision | Update rule |
-| --- | --- | --- |
-| `manifest.json` | Task, stable requirements, source policy | Write once per namespace |
-| `pool.jsonl` | Bounded candidate metadata and sources | Merge, rerank, then prune |
-| `evidence.json` | Verified passages and source URLs | Keep matching fingerprints |
-| `attempts.json` | Sources tried for each matching rule | Save before capability calls |
+Keep one cumulative file for each role. Update `pool.jsonl` by `source` and `content.jsonl` by a
+stable source-window key; do not create `pool_round2.jsonl` or `content_stage3.jsonl`. The program
+that fetches content should print bounded target excerpts plus explicit no-match, blocked, and typed
+failure summaries before it ends. A later state-only program is useful when asking a new semantic
+question of cached text, not simply to display a document the fetching program could have surfaced.
 
-When adapting this example, preserve the platform semantics while choosing the state shape freely:
+Each later program should load the rows it needs, filter already attempted queries or fetched
+sources, extend the cache, and print the bounded decision surface needed by the agent. Bound or prune
+the files according to the task and workspace budget.
 
-- Use a namespace that does not collide with other research in the conversation.
-- Start with `sdk.state.list(f"{root}/")`, then read the artifacts the stage needs.
-- Save useful progress before the call ends because Python variables do not survive calls.
-- Bound artifacts and repeated work to fit the task's execution budget.
-- Public web URLs remain reusable across sessions; re-search local IDs after session loss.
-- Use bounded `print` output for progress; use `sdk.output.submit` for the final result.
+## One composed cache-extending program
 
-## 1. Search or extend the candidate pool
-
-This stage also initializes the namespace. Reuse its printed `research_id` later. Run it again only
-with useful new queries when the pool does not cover a missing constraint.
+This example searches only new queries, updates the candidate pool, inspects previously unfetched
+sources, and stores focused windows. Adapt its inputs and bounds; they are not a required strategy.
 
 ```python
 import hashlib
@@ -45,167 +39,129 @@ import json
 
 from opensac_sdk import sdk
 
-manifest = {
-    "task": "Identify the target entity and verify the requested phrase and year.",
-    "requirements": {
-        "phrase": "Attribute the target phrase to the entity.",
-        "year": "Relate the target event to 1998 or 1999.",
-    },
-    "source_policy": {"preferred": "Primary sources when available."},
+task = "Identify the target and verify the requested relation."
+research_id = hashlib.sha256(task.encode()).hexdigest()[:12]
+root = f"runs/{research_id}"
+meta_path = f"{root}/meta.json"
+pool_path = f"{root}/pool.jsonl"
+content_path = f"{root}/content.jsonl"
+
+meta = dict(sdk.state.read_json(meta_path)) if sdk.state.exists(meta_path) else {
+    "task": task,
+    "queries": [],
+    "failures": [],
 }
-identity = json.dumps(manifest, ensure_ascii=True, sort_keys=True)
-research_id = hashlib.sha256(identity.encode()).hexdigest()[:12]
-root = f"runs/{research_id}"
-manifest_path = f"{root}/manifest.json"
-pool_path = f"{root}/pool.jsonl"
-artifacts = set(sdk.state.list(f"{root}/"))
-if manifest_path not in artifacts:
-    sdk.state.write_json(manifest_path, manifest)
-
-queries = ['"exact phrase" entity', "entity alternate wording", "rare clue organization"]
-search_report = sdk.search.many(queries, limit_per_query=10, concurrency=6)
-fusion = sdk.search.fuse_rrf(search_report, k=60)
-rank_now = {candidate.source: candidate.fused_rank for candidate in fusion}
-new_rows = [
-    {
-        "source": candidate.source,
-        "title": candidate.title,
-        "domain": candidate.domain,
-        "snippet": candidate.snippet[:400],
-        "score": candidate.fused_score,
-    }
-    for candidate in fusion
-]
-sdk.state.merge_jsonl(pool_path, new_rows)
-pool = [dict(row) for row in sdk.state.read_jsonl(pool_path)]
-pool.sort(
-    key=lambda row: (
-        0 if row["source"] in rank_now else 1,
-        rank_now.get(row["source"], 1_000_000),
-        -float(row.get("score") or 0.0),
-    )
+pool = [dict(row) for row in sdk.state.read_jsonl(pool_path)] if sdk.state.exists(pool_path) else []
+content = (
+    [dict(row) for row in sdk.state.read_jsonl(content_path)]
+    if sdk.state.exists(content_path)
+    else []
 )
-sdk.state.write_jsonl(pool_path, pool[:200])
 
-print(f"WORKSPACE research={research_id} pool={min(len(pool), 200)}")
-for row in pool[:5]:
-    print(f"CANDIDATE {row.get('domain') or '-'} | {row.get('title') or '(untitled)'}")
-print("NEXT: inspect candidates, verify a constraint, or refine the queries")
-```
+planned_queries = ['"exact phrase" entity', "rare clue alternate wording"]
+tried = set(meta["queries"])
+queries = [query for query in dict.fromkeys(planned_queries) if query not in tried]
+pool_by_source = {row["source"]: row for row in pool}
 
-## 2. Verify one missing constraint
+if queries:
+    # Save attempted queries before an expensive call only when avoiding blind replay matters.
+    meta["queries"] = sorted(tried | set(queries))
+    sdk.state.write_json(meta_path, meta)
+    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
+    fused = sdk.search.fuse_rrf(search_report, k=60, limit=50)
+    for row in fused:
+        pool_by_source[row.source] = {
+            "source": row.source,
+            "title": row.title,
+            "domain": row.domain,
+            "date": row.date,
+            "snippet": (row.snippet or "")[:500],
+            "rank": row.fused_rank,
+            "score": row.fused_score,
+            "provenance": row.provenance,
+        }
+    meta["failures"].extend(
+        {"stage": "search", "query": row.query, "code": row.code}
+        for row in search_report.failures
+    )
 
-Adapt `name`, `requirement`, and `pattern`, then run this stage for one missing constraint. Its
-fingerprint invalidates only that constraint when the rule changes. Attempted sources are saved before
-content calls so the next stage does not silently rescan them.
+pool = sorted(pool_by_source.values(), key=lambda row: row.get("rank", 1_000_000))[:300]
+sdk.state.write_jsonl(pool_path, pool)
 
-```python
-import hashlib
-import json
-import re
-
-from opensac_sdk import sdk
-
-research_id = "copy-the-task-derived-id"
-root = f"runs/{research_id}"
-name = "phrase"
-requirement = "Attribute the target phrase to the entity."
-pattern = r"(target phrase|other spelling)"
-pool_path = f"{root}/pool.jsonl"
-evidence_path = f"{root}/evidence.json"
-attempts_path = f"{root}/attempts.json"
-artifacts = set(sdk.state.list(f"{root}/"))
-pool = sdk.state.read_jsonl(pool_path) if pool_path in artifacts else []
-evidence = dict(sdk.state.read_json(evidence_path)) if evidence_path in artifacts else {}
-attempts = dict(sdk.state.read_json(attempts_path)) if attempts_path in artifacts else {}
-
-rule = {"requirement": requirement, "pattern": pattern}
-fingerprint = hashlib.sha256(json.dumps(rule, sort_keys=True).encode()).hexdigest()
-if evidence.get(name, {}).get("fingerprint") != fingerprint:
-    evidence.pop(name, None)
-saved = attempts.get(name, {})
-attempted = set(saved.get("sources", [])) if saved.get("fingerprint") == fingerprint else set()
-sources = [row.source for row in pool if row.source not in attempted][:40]
-
+inspected_sources = {row["source"] for row in content}
+sources = [row["source"] for row in pool if row["source"] not in inspected_sources][:24]
 if sources:
-    attempted.update(sources)
-    attempts[name] = {"fingerprint": fingerprint, "sources": sorted(attempted)}
-    sdk.state.write_json(attempts_path, attempts)
-    report = sdk.content.grep(sources, pattern, context=2)
-    for match in report.matches[:6]:
-        passage = sdk.content.read(
-            match.source, offset=max(match.line - 10, 1), limit=40, max_chars=16_000
-        )
-        if re.search(pattern, passage.text, re.IGNORECASE):
-            evidence[name] = {
-                "fingerprint": fingerprint,
-                "requirement": requirement,
+    passage_report = sdk.content.passages(task, sources, limit=10, max_per_source=2)
+    windows = []
+    seen = set()
+    for passage in passage_report.passages:
+        key = (passage.source, passage.coordinates["start_line"])
+        if key in seen:
+            continue
+        seen.add(key)
+        windows.append(
+            {
                 "source": passage.source,
-                "text": passage.text,
+                "offset": max(passage.coordinates["start_line"] - 8, 1),
+                "limit": 50,
+                "max_chars": 16_000,
+                "passage_coordinates": dict(passage.coordinates),
             }
-            sdk.state.write_json(evidence_path, evidence)
+        )
+        if len(windows) >= 6:
             break
 
-print(f"constraint={name} verified={name in evidence} tried={len(attempted)}")
-print("NEXT: verify another constraint, search for new candidates, or submit")
-```
+    read_report = sdk.content.read_many(
+        [
+            {key: row[key] for key in ("source", "offset", "limit", "max_chars")}
+            for row in windows
+        ]
+    ) if windows else None
+    window_by_index = {index: row for index, row in enumerate(windows)}
+    content_by_key = {row["key"]: row for row in content}
+    for row in (read_report.results if read_report else []):
+        window = window_by_index[row.input_index]
+        start = row.metadata.get("start_line")
+        end = row.metadata.get("end_line")
+        key = f"{row.source}#L{start}-{end}"
+        content_by_key[key] = {
+            "key": key,
+            "source": row.source,
+            "title": row.title,
+            "text": row.text,
+            "coordinates": {
+                "start_line": start,
+                "end_line": end,
+                "passage": window["passage_coordinates"],
+            },
+        }
+    meta["failures"].extend(
+        {"stage": "passages", "source": row.source, "code": row.code}
+        for row in passage_report.failures
+    )
+    meta["failures"].extend(
+        {"stage": "read", "source": row.source, "code": row.code}
+        for row in (read_report.failures if read_report else [])
+    )
+    content = list(content_by_key.values())[-300:]
+    sdk.state.write_jsonl(content_path, content)
 
-## 3. Inspect workspace after an uncertain failure
-
-Use this read-only probe after an adapter failure whose execution outcome is unknown. After explicit
-`state_lost`, start a clean generation instead.
-
-```python
-from opensac_sdk import sdk
-
-research_id = "copy-the-task-derived-id"
-root = f"runs/{research_id}"
-artifacts = sdk.state.list(f"{root}/")
-pool_path = f"{root}/pool.jsonl"
-evidence_path = f"{root}/evidence.json"
-pool_count = len(sdk.state.read_jsonl(pool_path)) if sdk.state.exists(pool_path) else 0
-evidence = sdk.state.read_json(evidence_path) if sdk.state.exists(evidence_path) else {}
-usage = sdk.session.usage()
+meta["failures"] = meta["failures"][-100:]
+sdk.state.write_json(meta_path, meta)
 
 print(
-    f"WORKSPACE research={research_id} artifacts={artifacts} "
-    f"pool={pool_count} evidence={sorted(evidence)} terminal={usage['terminal_reason']!r}"
+    f"CACHE research={research_id} pool={len(pool)} content={len(content)} "
+    f"new_queries={len(queries)} failures={len(meta['failures'])}"
 )
-print("NEXT: resume only the missing constraint or stage")
+for row in content[-4:]:
+    excerpt = " ".join(row["text"].split())[:500]
+    print(f"EVIDENCE source={row['source']!r} excerpt={excerpt!r}")
+print("NEXT: judge these rows, answer if complete, or extend unresolved requirements")
 ```
 
-## 4. Submit a complete ledger
+The example filters sources already represented in `content.jsonl`; a task may deliberately revisit
+one source for a different window or requirement. Use a stable composite `key` for those windows.
 
-Use `submit` only when every requirement has verified evidence. If anything is missing, print the
-next action instead of a final-looking answer.
-
-```python
-from opensac_sdk import sdk
-
-research_id = "copy-the-task-derived-id"
-root = f"runs/{research_id}"
-required = ["phrase", "year"]
-artifacts = set(sdk.state.list(f"{root}/"))
-evidence_path = f"{root}/evidence.json"
-evidence = sdk.state.read_json(evidence_path) if evidence_path in artifacts else {}
-missing = [name for name in required if name not in evidence]
-
-if missing:
-    print(f"NEXT: verify missing constraints {missing}")
-else:
-    sdk.output.submit(
-        {
-            "research_id": research_id,
-            "evidence": [
-                {
-                    "constraint": name,
-                    "requirement": evidence[name]["requirement"],
-                    "source": evidence[name]["source"],
-                    "text": evidence[name]["text"][:2_000],
-                }
-                for name in required
-            ],
-        },
-        citations=list(dict.fromkeys(evidence[name]["source"] for name in required)),
-    )
-```
+After an adapter failure with unknown outcome, inspect the existing cache and session usage before
+choosing new work. After explicit `state_lost`, rebuild state and re-admit local IDs; public URLs
+remain reusable. Use `sdk.output.submit(...)` only when structured runtime output is requested.
