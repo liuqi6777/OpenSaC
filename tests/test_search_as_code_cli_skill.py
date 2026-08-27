@@ -72,6 +72,15 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "lease" not in skill
 
 
+def test_claude_code_project_uses_cli_instead_of_removed_mcp_binding() -> None:
+    assert not (ROOT / ".mcp.json").exists()
+    settings_path = ROOT / ".claude" / "settings.json"
+    if settings_path.exists():
+        settings = settings_path.read_text(encoding="utf-8")
+        assert "mcp__opensac__sac_run" not in settings
+        assert "bind_context" not in settings
+
+
 def test_cli_skill_invocation_compiles_and_passes_sandbox_validation() -> None:
     program = _posix_program()
     compile(program, "<search-as-code-cli-invocation>", "exec")
