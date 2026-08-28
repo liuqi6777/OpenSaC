@@ -140,8 +140,6 @@ class SearchBackendSettings(BaseModel):
     def validate_connection(self) -> SearchBackendSettings:
         if self.provider == "local":
             self.base_url = self.base_url or DEFAULT_LOCAL_BACKEND_BASE_URL
-        elif self.base_url is not None:
-            raise ValueError("backends.search.base_url is supported only by the local provider")
         return self
 
 
@@ -155,8 +153,6 @@ class DocumentBackendSettings(BaseModel):
     def validate_connection(self) -> DocumentBackendSettings:
         if self.provider == "local":
             self.base_url = self.base_url or DEFAULT_LOCAL_BACKEND_BASE_URL
-        elif self.base_url is not None:
-            raise ValueError("backends.document.base_url is supported only by the local provider")
         return self
 
 

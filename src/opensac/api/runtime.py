@@ -180,10 +180,12 @@ class ApplicationRuntime:
             search_backend = SerperBackend(
                 settings.serper_api_key,
                 timeout=search_timeout,
+                base_url=settings.backends.search.base_url,
             )
             document_backend = JinaReaderBackend(
                 settings.jina_api_key,
                 timeout=document_timeout,
+                base_url=settings.backends.document.base_url,
             )
         if settings.backends.rerank.provider == "jina":
             reranker = JinaReranker(

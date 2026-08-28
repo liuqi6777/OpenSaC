@@ -95,6 +95,24 @@ providers:
     assert settings.provider_services.search.concurrency == 4
 
 
+def test_web_backends_accept_custom_base_urls() -> None:
+    settings = Settings(
+        backends={
+            "search": {
+                "provider": "serper",
+                "base_url": "https://search.example.test/api",
+            },
+            "document": {
+                "provider": "jina",
+                "base_url": "https://reader.example.test",
+            },
+        }
+    )
+
+    assert settings.backends.search.base_url == "https://search.example.test/api"
+    assert settings.backends.document.base_url == "https://reader.example.test"
+
+
 def test_no_config_uses_defaults() -> None:
     settings = load_settings()
 

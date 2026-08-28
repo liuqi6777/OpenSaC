@@ -31,9 +31,12 @@ class SerperBackend:
         self,
         api_key: str = "",
         timeout: float = 30.0,
+        base_url: str | None = None,
     ) -> None:
         self.api_key = api_key
         self.timeout = timeout
+        self.base_url = base_url if base_url is not None else self.search_url
+        self.search_url = self.base_url
         self._client: httpx.AsyncClient | None = None
 
     @property

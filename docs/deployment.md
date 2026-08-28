@@ -236,6 +236,22 @@ OPENSAC_JINA_API_KEY=replace-with-jina-key
 
 They remain in the host broker and are not passed to sandbox programs.
 
+To route Serper-compatible search through another endpoint, set its complete request URL in the
+backend configuration. OpenSAC uses this value unchanged:
+
+```yaml
+backends:
+  search:
+    provider: serper
+    base_url: https://search.example.com/api/search
+  document:
+    provider: jina
+    base_url: https://reader.example.com
+```
+
+The document backend uses its configured value unchanged as the Jina Reader prefix and appends
+`/{document_url}` for each fetch.
+
 Search and document providers are configured independently but must currently use one supported
 source-family pair: `local` + `local`, or `serper` + `jina`. The public session contract continues
 to identify those source families as `local` and `web`.

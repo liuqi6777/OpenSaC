@@ -405,12 +405,15 @@ def test_bundled_fetch_preflight_validates_handles_and_credentials() -> None:
 async def test_web_backends_use_independent_reusable_http_clients(monkeypatch) -> None:
     class RecordingClient:
         instances = []
+        post_urls = []
+        get_urls = []
 
         def __init__(self, *args, **kwargs) -> None:
             self.closed = False
             self.instances.append(self)
 
         async def post(self, url, *, headers, json):
+            self.post_urls.append(url)
             return FakeResponse(
                 {
                     "organic": [
@@ -424,7 +427,7 @@ async def test_web_backends_use_independent_reusable_http_clients(monkeypatch) -
             )
 
         async def get(self, url, *, headers):
-            assert url == "https://r.jina.ai/https://example.com/a"
+            self.get_urls.append(url)
             assert headers == {"Authorization": "Bearer jina-secret"}
             return FakeResponse({}, text="page")
 
@@ -433,8 +436,11 @@ async def test_web_backends_use_independent_reusable_http_clients(monkeypatch) -
 
     monkeypatch.setattr(serper_module.httpx, "AsyncClient", RecordingClient)
     monkeypatch.setattr(jina_module.httpx, "AsyncClient", RecordingClient)
-    search_backend = SerperBackend("key")
-    document_backend = JinaReaderBackend("jina-secret")
+    search_backend = SerperBackend("key", base_url="https://search.example.test/api/search/")
+    document_backend = JinaReaderBackend(
+        "jina-secret",
+        base_url="https://reader.example.test/api/",
+    )
 
     hits = await search_backend.search("query", limit=1)
     assert hits[0].retrieval is not None
@@ -444,6 +450,8 @@ async def test_web_backends_use_independent_reusable_http_clients(monkeypatch) -
     )
 
     assert len(RecordingClient.instances) == 2
+    assert RecordingClient.post_urls == ["https://search.example.test/api/search/"]
+    assert RecordingClient.get_urls == ["https://reader.example.test/api//https://example.com/a"]
     await search_backend.aclose()
     await document_backend.aclose()
     assert all(instance.closed for instance in RecordingClient.instances)

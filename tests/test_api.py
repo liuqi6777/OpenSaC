@@ -234,8 +234,14 @@ def test_sessions_inherit_the_service_search_backend(tmp_path) -> None:
         data_dir=tmp_path / "data",
         broker_socket=tmp_path / "broker.sock",
         backends={
-            "search": {"provider": "serper"},
-            "document": {"provider": "jina"},
+            "search": {
+                "provider": "serper",
+                "base_url": "https://search.internal/serper",
+            },
+            "document": {
+                "provider": "jina",
+                "base_url": "https://reader.internal/jina",
+            },
         },
         serper_api_key="serper-secret",
         jina_api_key="jina-secret",
@@ -252,7 +258,11 @@ def test_sessions_inherit_the_service_search_backend(tmp_path) -> None:
         assert set(broker.search_backends) == {"web"}
         assert set(broker.document_backends) == {"web"}
         assert broker.search_backends["web"].api_key == "serper-secret"
+        assert broker.search_backends["web"].base_url == "https://search.internal/serper"
+        assert broker.search_backends["web"].search_url == "https://search.internal/serper"
         assert broker.document_backends["web"].api_key == "jina-secret"
+        assert broker.document_backends["web"].base_url == "https://reader.internal/jina"
+        assert broker.document_backends["web"].reader_url == "https://reader.internal/jina"
         assert broker.search_backends["web"].timeout == 7.0
         assert broker.document_backends["web"].timeout == 11.0
         assert client.get("/healthz").json()["build"]["search_backend"] == "web"
