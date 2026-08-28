@@ -227,16 +227,16 @@ async def test_broker_runs_bundled_content_preflight_before_transport() -> None:
         rank=1,
     )
 
-    report = await service.call(
-        "token",
-        "content.get_many",
-        {"sources": ["1"]},
-        execution_id="content-preflight",
-    )
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call(
+            "token",
+            "content.fetch",
+            {"source": "1"},
+            execution_id="content-preflight",
+        )
 
-    assert report["results"] == []
-    assert report["failures"][0]["code"] == "invalid_request"
-    assert report["failures"][0]["attempts"] == 0
+    assert failed.value.code == "invalid_request"
+    assert failed.value.attempts == 0
     assert state.policy.usage.content_fetches == 1
     assert state.policy.usage.content_backend_fetches == 0
     assert state.policy.usage.provider_attempts_by_capability.get("content", 0) == 0
@@ -505,15 +505,16 @@ async def test_content_provider_timeout_retries_real_fetch_attempts() -> None:
     state = service.register_session(make_session(backend="web"))
     source = (await service.call("token", "search.query", {"query": "timeout"}))[0]["source"]
 
-    report = await service.call(
-        "token",
-        "content.get_many",
-        {"sources": [source]},
-        execution_id="content-timeout-retry",
-    )
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call(
+            "token",
+            "content.fetch",
+            {"source": source},
+            execution_id="content-timeout-retry",
+        )
 
-    assert report["failures"][0]["code"] == "provider_timeout"
-    assert report["failures"][0]["attempts"] == 3
+    assert failed.value.code == "provider_timeout"
+    assert failed.value.attempts == 3
     assert backend.fetch_calls == 3
     assert state.policy.usage.provider_attempts_by_capability["content"] == 3
     assert state.policy.usage.provider_retries == 2
@@ -614,7 +615,7 @@ async def test_content_dedupes_sources_and_grep_keeps_failure_indexes() -> None:
     assert only_failure["failures"][0]["code"] == "provider_not_found"
 
 
-async def test_systemic_content_failure_stays_aligned_and_is_never_cached() -> None:
+async def test_systemic_content_failure_is_typed_and_never_cached() -> None:
     backend = LocalBackend(documents={"1": "body"})
     backend.failures["1"] = ProviderRequestError(
         "provider_unavailable",
@@ -625,13 +626,15 @@ async def test_systemic_content_failure_stays_aligned_and_is_never_cached() -> N
     state = service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    report = await service.call("token", "content.get_many", {"sources": [source]})
-    assert report["failures"][0]["code"] == "provider_unavailable"
-    assert report["failures"][0]["attempts"] == 1
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call("token", "content.fetch", {"source": source})
+    assert failed.value.code == "provider_unavailable"
+    assert failed.value.attempts == 1
     assert state.content_cache == {}
 
-    repeated = await service.call("token", "content.get_many", {"sources": [source]})
-    assert repeated["failures"][0]["code"] == "provider_unavailable"
+    with pytest.raises(CapabilityProviderError) as repeated:
+        await service.call("token", "content.fetch", {"source": source})
+    assert repeated.value.code == "provider_unavailable"
     assert backend.fetches == ["1", "1"]
 
 
@@ -654,7 +657,7 @@ async def test_single_content_read_promotes_failure_to_rpc_error() -> None:
     assert raised.value.component == "document"
 
 
-async def test_ambiguous_reader_403_stays_source_aligned() -> None:
+async def test_ambiguous_reader_403_stays_typed() -> None:
     class ForbiddenReaderBackend(LocalBackend):
         name = "web"
         source_kind = "public_url"
@@ -682,22 +685,17 @@ async def test_ambiguous_reader_403_stays_source_aligned() -> None:
     service.register_session(make_session(backend="web"))
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    report = await service.call("token", "content.get_many", {"sources": [source]})
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call("token", "content.fetch", {"source": source})
 
-    assert report["results"] == []
-    assert report["failures"][0] == {
-        "input_index": 0,
-        "source": source,
-        "code": "provider_auth_failed",
-        "message": "Provider rejected its configured credentials or permissions.",
-        "retryable": False,
-        "attempts": 1,
-        "provider_status": 403,
-        "retry_after_seconds": None,
-        "provider": "jina_reader",
-        "component": "document",
-        "scope": "unknown",
-    }
+    assert failed.value.code == "provider_auth_failed"
+    assert str(failed.value) == "Provider rejected its configured credentials or permissions."
+    assert failed.value.retryable is False
+    assert failed.value.attempts == 1
+    assert failed.value.provider_status == 403
+    assert failed.value.provider == "jina_reader"
+    assert failed.value.component == "document"
+    assert failed.value.scope == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -727,21 +725,21 @@ async def test_permanent_content_failures_remain_aligned_rows(
     hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
     sources = [hit["source"] for hit in hits]
 
-    failed = await service.call("token", "content.get_many", {"sources": sources})
+    failed = await service.call("token", "content.grep", {"sources": sources, "pattern": "."})
 
-    assert failed["results"] == []
+    assert failed["source_results"] == []
     assert [row["code"] for row in failed["failures"]] == [code, code]
     assert [row["attempts"] for row in failed["failures"]] == [attempts, attempts]
 
     backend.failures.pop("1")
-    partial = await service.call("token", "content.get_many", {"sources": sources})
-    assert partial["results"][0]["input_index"] == 0
-    assert partial["results"][0]["text"] == "one"
+    partial = await service.call("token", "content.grep", {"sources": sources, "pattern": "."})
+    assert partial["source_results"][0]["input_index"] == 0
+    assert partial["matches"][0]["text"] == "one"
     assert partial["failures"][0]["input_index"] == 1
     assert partial["failures"][0]["code"] == code
 
 
-async def test_content_batch_deadline_returns_an_aligned_timeout_row() -> None:
+async def test_content_deadline_returns_a_typed_timeout() -> None:
     class HangingBackend(LocalBackend):
         async def fetch(self, hit, *, query=None):
             self.fetches.append(str(hit.docid))
@@ -755,21 +753,15 @@ async def test_content_batch_deadline_returns_an_aligned_timeout_row() -> None:
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    report = await service.call("token", "content.get_many", {"sources": [source]})
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call("token", "content.fetch", {"source": source})
 
-    assert report["failures"][0] == {
-        "input_index": 0,
-        "source": source,
-        "code": "content_deadline_exceeded",
-        "message": "The content batch deadline was exceeded.",
-        "retryable": True,
-        "attempts": 1,
-        "provider_status": None,
-        "retry_after_seconds": None,
-        "provider": "local",
-        "component": "document",
-        "scope": "unknown",
-    }
+    assert failed.value.code == "content_deadline_exceeded"
+    assert str(failed.value) == "The content batch deadline was exceeded."
+    assert failed.value.retryable is True
+    assert failed.value.attempts == 1
+    assert failed.value.provider == "local"
+    assert failed.value.component == "document"
     assert backend.fetches == ["1"]
 
 
@@ -813,16 +805,16 @@ async def test_internet_archive_text_fallback_is_separately_accounted() -> None:
     state = service.register_session(make_session(backend="web"))
     source = (await service.call("token", "search.query", {"query": "book"}))[0]["source"]
 
-    report = await service.call(
+    document = await service.call(
         "token",
-        "content.get_many",
-        {"sources": [source]},
+        "content.fetch",
+        {"source": source},
         execution_id="archive-fallback",
     )
 
-    assert report["results"][0]["text"] == "archive text"
-    assert report["results"][0]["source"] == source
-    assert report["results"][0]["metadata"]["representation"] == "internet_archive_djvu_text"
+    assert document["text"] == "archive text"
+    assert document["source"] == source
+    assert document["metadata"]["representation"] == "internet_archive_djvu_text"
     assert backend.fetches == [
         "https://archive.org/details/example_book",
         "https://archive.org/download/example_book/example_book_djvu.txt",
@@ -841,8 +833,8 @@ async def test_content_source_limit_rejects_before_usage_or_provider_side_effect
     with pytest.raises(ValueError, match="3 sources"):
         await service.call(
             "token",
-            "content.get_many",
-            {"sources": [source, source, source]},
+            "content.grep",
+            {"sources": [source, source, source], "pattern": "body"},
         )
 
     assert state.policy.usage.content_fetches == 0
@@ -856,8 +848,8 @@ async def test_content_cache_budget_counts_utf8_bytes() -> None:
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    await service.call("token", "content.get_many", {"sources": [source]})
-    await service.call("token", "content.get_many", {"sources": [source]})
+    await service.call("token", "content.fetch", {"source": source})
+    await service.call("token", "content.fetch", {"source": source})
 
     # The passage is one Unicode code point but two UTF-8 bytes, so it cannot
     # enter a one-byte cache and must be fetched again.
@@ -925,20 +917,20 @@ async def test_web_provider_cache_reuses_search_and_scrape_across_sessions() -> 
         )[0]["source"]
         await service.call(
             "first-token",
-            "content.get_many",
-            {"sources": [first_source]},
+            "content.fetch",
+            {"source": first_source},
             execution_id="first-content",
         )
-        report = await service.call(
+        document = await service.call(
             "second-token",
-            "content.get_many",
-            {"sources": [second_source]},
+            "content.fetch",
+            {"source": second_source},
             execution_id="second-content",
         )
     finally:
         await service.aclose()
 
-    assert report["results"][0]["text"] == f"body for {first_source}"
+    assert document["text"] == f"body for {first_source}"
     assert backend.search_calls == 1
     assert backend.fetch_calls == 1
     assert first.policy.usage.provider_attempts_by_capability["search"] == 1

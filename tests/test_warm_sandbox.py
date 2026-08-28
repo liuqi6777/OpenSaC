@@ -73,7 +73,7 @@ class _FakeDocker:
         top_outputs: list[bytes] | None = None,
         ps_outputs: list[bytes] | None = None,
         rm_results: list[tuple[int, bytes]] | None = None,
-        image_contract: bytes = b"13\n",
+        image_contract: bytes = b"14\n",
     ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.exec_gates = list(exec_gates or [])
@@ -106,11 +106,7 @@ class _FakeDocker:
             if self.on_exec is not None:
                 self.on_exec(command, index)
             gate = self.exec_gates[index] if index < len(self.exec_gates) else None
-            stdout = (
-                self.exec_outputs.pop(0)
-                if self.exec_outputs
-                else f"exec-{index}\n".encode()
-            )
+            stdout = self.exec_outputs.pop(0) if self.exec_outputs else f"exec-{index}\n".encode()
             return _FakeProcess(stdout=stdout, gate=gate)
         if operation == "top":
             stdout = self.top_outputs.pop(0) if self.top_outputs else b"PID\n100\n101\n"
@@ -190,9 +186,7 @@ def test_warm_sandbox_accepts_an_explicit_docker_host_platform(tmp_path: Path) -
 
     assert all(
         argument in command
-        for argument in broker_socket_mount_args(
-            sandbox.broker_socket, platform="darwin"
-        )
+        for argument in broker_socket_mount_args(sandbox.broker_socket, platform="darwin")
     )
 
 
@@ -245,7 +239,7 @@ async def test_warm_sandbox_reports_stale_image_as_launch_error(
     result = await sandbox.execute(_request(tmp_path))
 
     assert result.exit_code == 125
-    assert "has contract '2'; expected 13" in (result.launch_error or "")
+    assert "has contract '2'; expected 14" in (result.launch_error or "")
     assert fake.operations("run") == []
 
 
@@ -386,9 +380,7 @@ async def test_warm_container_limit_evicts_only_idle_lru_sessions(
 
     assert first_result.succeeded and second_result.succeeded
     assert len(fake.operations("run")) == 2
-    assert [command[-1] for command in fake.operations("rm")] == [
-        "warm-container-1"
-    ]
+    assert [command[-1] for command in fake.operations("rm")] == ["warm-container-1"]
     assert sandbox.snapshot()["containers"] == 1
     assert sandbox.snapshot()["limit"] == 1
     assert sandbox.snapshot()["waiting"] == 0
@@ -399,9 +391,7 @@ async def test_background_descendant_poisons_container_and_next_exec_is_fresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     baseline = b"PID\n100\n101\n"
-    fake = _FakeDocker(
-        top_outputs=[baseline, b"PID\n100\n101\n202\n", baseline, baseline]
-    )
+    fake = _FakeDocker(top_outputs=[baseline, b"PID\n100\n101\n202\n", baseline, baseline])
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
     sandbox = _sandbox(tmp_path)
 

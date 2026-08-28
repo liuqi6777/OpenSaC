@@ -7,12 +7,8 @@ source: str = hits[0].source
 rank: int = hits[0]["rank"]
 
 batches = sdk.search.many(["OpenSAC", "search as code"])
-if batches.failures:
-    failure_provider: str | None = batches.failures[0].provider
-    failure_component: str | None = batches.failures[0].component
-    failure_scope: str | None = batches.failures[0].scope
-else:
-    failure_provider = failure_component = failure_scope = None
+search_status: str = batches[0].status
+search_hit_count: int = len(batches[0].hits)
 
 fused = sdk.search.fuse_rrf(batches)
 fused_rank: int | None = fused[0].rank if fused else None
@@ -26,29 +22,25 @@ except BrokerError as error:
 else:
     broker_provider = broker_component = broker_scope = None
 
-row = sdk.content.read(source, offset=1, limit=20)
+row = sdk.content.read(source, start_line=1, line_count=20)
 text: str = row.text
-next_offset: int | None = row.metadata.next_offset
+next_line: int | None = row.window.next.start_line if row.window.next else None
+document = sdk.content.fetch(source)
+document_title: str = document.title
+input_index: int = fused[0].provenance[0].input_index if fused else 0
 
-rows = sdk.content.read_many(
-    [
-        {"source": source, "offset": 1, "limit": 20},
-        {"source": source, "offset": 21, "limit": 20, "max_chars": 8_000},
-    ]
-)
-input_index: int = rows.results[0].input_index
-
-report = sdk.content.grep([source], "OpenSAC", mode="literal", case_sensitive=True)
-match_line: int = report.matches[0].line
-scan_complete: bool = report.source_results[0].scan_complete
+grep_outcomes = sdk.content.grep("OpenSAC", sources=[source], mode="literal", case_sensitive=True)
+grep_status: str = grep_outcomes[0].status
+match_line: int = grep_outcomes[0].matches[0].line
+grep_exhaustive: bool = grep_outcomes[0].next_start_line is None
 
 capabilities = sdk.session.capabilities()
 capability_contract: int = capabilities.contracts.capability
 usage = sdk.session.usage()
-content_backend_fetches: int = usage.content_backend_fetches
+content_fetches: int = usage.content_fetches
 
-extractions = sdk.llm.extract_many(
-    [{"text": text}],
+extraction = sdk.llm.extract(
+    {"text": text},
     instruction="Extract a label.",
     schema={
         "type": "object",
@@ -57,7 +49,7 @@ extractions = sdk.llm.extract_many(
         "additionalProperties": False,
     },
 )
-failure_code: str | None = extractions.failures[0].code if extractions.failures else None
+extracted_label: object = extraction["label"]
 
 sdk.output.submit(
     {
@@ -65,17 +57,18 @@ sdk.output.submit(
         "fused_rank": fused_rank,
         "input_index": input_index,
         "match_line": match_line,
-        "scan_complete": scan_complete,
+        "grep_exhaustive": grep_exhaustive,
         "capability_contract": capability_contract,
-        "content_backend_fetches": content_backend_fetches,
-        "failure_code": failure_code,
-        "failure_provider": failure_provider,
-        "failure_component": failure_component,
-        "failure_scope": failure_scope,
+        "content_fetches": content_fetches,
+        "document_title": document_title,
+        "extracted_label": extracted_label,
+        "search_status": search_status,
+        "search_hit_count": search_hit_count,
+        "grep_status": grep_status,
         "broker_provider": broker_provider,
         "broker_component": broker_component,
         "broker_scope": broker_scope,
-        "next_offset": next_offset,
+        "next_line": next_line,
     },
     citations=[source],
 )

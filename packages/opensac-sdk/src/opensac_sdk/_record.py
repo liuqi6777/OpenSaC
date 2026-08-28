@@ -4,7 +4,7 @@ from typing import Any
 
 
 class Record(dict[str, Any]):
-    """A JSON object with both mapping and attribute reads."""
+    """A JSON object with canonical mapping reads and attribute convenience."""
 
     def __getattr__(self, name: str) -> Any:
         try:

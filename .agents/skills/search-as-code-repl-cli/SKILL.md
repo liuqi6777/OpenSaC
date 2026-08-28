@@ -36,12 +36,12 @@ name, cleanup convention, or checkpoint schema is required.
 - Search with `sdk.search(...)` or `sdk.search.many(...)`; use `sdk.search.fuse_rrf(...)` when
   fusion, domain policy, or diversity helps.
 - Rank and inspect text with `sdk.content.passages(...)`, `sdk.content.grep(...)`, and focused
-  `sdk.content.read(...)` or `sdk.content.read_many(...)` windows.
+  `sdk.content.read(...)` windows. Loop in Python when several independent reads are needed.
 - Pass source strings, not result records, to content. Public URLs are reusable; local IDs remain
   bound to this session.
 - Use snippets for triage, not document claims. Inspect text for every material claim; treat mirrors,
   repeated records, and RRF agreement as one source family rather than corroboration.
-- Treat optional `sdk.llm.extract_many(...)` as transformation of supplied text, not new evidence.
+- Treat optional `sdk.llm.extract(...)` as transformation of supplied text, not new evidence.
   Validate quotes against its inputs.
 - Keep evidence source-scoped. Record a bounded exact excerpt and limitation for each requirement;
   verify a relation from entailing text or an explicit evidence-backed join.
@@ -57,8 +57,9 @@ failure types, or citations. Inspect one exact method's `__doc__` when necessary
 - Start another cell when the control model must make a new semantic choice, a separate budget helps,
   or recovery/debugging is useful. Live variables may carry structured rows across that boundary;
   do not serialize or print them merely to pass sources and offsets.
-- Normalize successes, typed failures, provenance, bounded excerpts, and coordinates while handling
-  each capability. Derive later inputs and coverage from those rows rather than concatenated text.
+- Normalize aligned outcome statuses, structured passage failures, provenance, bounded excerpts,
+  and coordinates while handling each capability. Derive later inputs and coverage from those rows
+  rather than concatenated text.
 - End a checkpoint with the bounded candidates or evidence needed for the next judgment. Counts alone
   should not force another cell whose only purpose is to reveal already available rows.
 - Reuse, replace, or delete live values as useful. Avoid accumulating parallel copies of raw reports
@@ -102,9 +103,10 @@ Warnings, stdout, stderr, and submitted output share one observation budget; kee
 
 ## Handle interpreter and adapter failures
 
-Inspect typed item failures when code must branch; successful rows remain usable. Empty results
-without a failure are successful reports. A caught `BrokerError` must leave the checkpoint incomplete
-with a bounded error or next action. Let host policy own retries.
+For `search.many` and `content.grep`, branch only on `status == "success"`; any other status is
+human-readable and must not be parsed. Passage failures remain structured records. Empty hits or
+matches with success status are successful results. A caught `BrokerError` must leave the checkpoint
+incomplete with a bounded error or next action. Let host policy own retries.
 
 If an observation reports `interpreter_state=lost` or `state_lost`, the submitted cell is never
 replayed and the next invocation starts clean. Restore a trustworthy checkpoint if one exists,

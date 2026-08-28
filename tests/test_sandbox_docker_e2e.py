@@ -53,7 +53,7 @@ def sandbox_image() -> str:
             )
 
 
-def test_built_image_exposes_contract_13_and_compact_sdk(sandbox_image: str) -> None:
+def test_built_image_exposes_contract_14_and_compact_sdk(sandbox_image: str) -> None:
     image = sandbox_image
     inspected = subprocess.run(
         [
@@ -68,7 +68,7 @@ def test_built_image_exposes_contract_13_and_compact_sdk(sandbox_image: str) -> 
         capture_output=True,
         text=True,
     )
-    assert inspected.stdout.strip() == "13"
+    assert inspected.stdout.strip() == "14"
 
     inspected_version = subprocess.run(
         [
@@ -90,8 +90,7 @@ def test_built_image_exposes_contract_13_and_compact_sdk(sandbox_image: str) -> 
         "from opensac_sdk import __version__; "
         "from opensac_sdk._resources import SearchResource; "
         "hit = {'source': 'doc_a', 'backend': 'local', 'rank': 1}; "
-        "batch = {'input_index': 0, 'query': 'q', 'hits': [hit]}; "
-        "report = {'results': [batch], 'failures': [], 'input_count': 1}; "
+        "report = [{'query': 'q', 'status': 'success', 'hits': [hit]}]; "
         "result = SearchResource(None).fuse_rrf(report); "
         "print(json.dumps({'version': __version__, "
         "'fusion': result, "

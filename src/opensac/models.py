@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from opensac.tracing import CapabilityEvent as _CapabilityEvent
 
-CAPABILITY_CONTRACT = 12
+CAPABILITY_CONTRACT = 13
 
 ExecutionMode = Literal["program", "persistent_interpreter"]
 InterpreterState = Literal["not_applicable", "not_started", "ready", "lost"]
@@ -46,16 +46,14 @@ class ResourceBudget(BaseModel):
 CAPABILITY_METHODS: tuple[str, ...] = (
     "search.query",
     "search.query_many",
-    "content.get_many",
+    "content.fetch",
     "content.passages",
     "content.read",
-    "content.read_many",
     "content.grep",
     "session.usage",
     "session.capabilities",
     "llm.complete",
-    "llm.complete_many",
-    "llm.extract_many",
+    "llm.extract",
 )
 
 # method -> the params key holding its batch. Used to bound fan-out when
@@ -63,9 +61,6 @@ CAPABILITY_METHODS: tuple[str, ...] = (
 # rather than on "does this method exist".
 FANOUT_METHODS: dict[str, str] = {
     "search.query_many": "queries",
-    "content.read_many": "windows",
-    "llm.complete_many": "prompts",
-    "llm.extract_many": "items",
 }
 
 
@@ -83,10 +78,8 @@ class Mechanisms(BaseModel):
     run's arm recoverable after the fact.
     """
 
-    # `*_many` fan-out. Disabled, a batch method still exists but accepts one
-    # item, so the program has to loop. Removing the methods outright would
-    # also remove structured extraction (`llm.extract_many` has no singular
-    # form) and the arm would measure two things at once.
+    # Multi-query search fan-out. Disabled, `search.many` still exists but
+    # accepts one query, so the program has to loop without losing search.
     batching: bool = True
     # The workspace filesystem surviving across `/exec` calls. Governs
     # agent-authored state only; the broker's reference table is a capability

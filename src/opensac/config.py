@@ -94,11 +94,9 @@ _CAPABILITY_YAML_FIELDS = {
         "batch_deadline_seconds",
     },
     "extraction": {
-        "max_items",
         "max_instruction_bytes",
         "max_schema_bytes",
         "max_item_bytes",
-        "max_total_item_bytes",
         "max_schema_depth",
         "max_repair_attempts",
     },
@@ -230,13 +228,11 @@ class ExtractionCapabilitySettings(BaseModel):
 
     # Byte limits use UTF-8 encoded request sizes so non-ASCII inputs cannot
     # exceed the admission budget while appearing short in Python characters.
-    max_items: int = Field(default=256, ge=1)
     max_instruction_bytes: int = Field(default=16_384, ge=1)
     max_schema_bytes: int = Field(default=65_536, ge=1)
     max_item_bytes: int = Field(default=65_536, ge=1)
-    max_total_item_bytes: int = Field(default=2_097_152, ge=1)
     max_schema_depth: int = Field(default=8, ge=1)
-    max_repair_attempts: int = Field(default=1, ge=0, le=1)
+    max_repair_attempts: int = Field(default=1, ge=0)
 
 
 class CapabilitySettings(BaseModel):

@@ -64,33 +64,42 @@ class ContentFailure(CapabilityFailure):
     source: str = Field(min_length=1, max_length=4_096)
 
 
-class ContentReport(BaseModel):
-    """Successful and failed content outcomes, partitioned by input index."""
+class ContentCursor(BaseModel):
+    """Exact location of the next unread character in normalized content."""
 
     model_config = ConfigDict(extra="forbid")
 
-    results: list[ContentResult] = Field(default_factory=list)
-    failures: list[ContentFailure] = Field(default_factory=list)
-    input_count: int = Field(ge=0)
-
-    @model_validator(mode="after")
-    def _validate_partition(self) -> Self:
-        indexes = [row.input_index for row in self.results]
-        indexes.extend(row.input_index for row in self.failures)
-        if sorted(indexes) != list(range(self.input_count)):
-            raise ValueError("content results and failures must partition the input indexes")
-        return self
+    start_line: int = Field(ge=1)
+    start_character: int = Field(ge=0)
 
 
-class ContentReadWindow(BaseModel):
-    """One independently sliced source window for ``content.read_many``."""
+class ContentWindow(BaseModel):
+    """Coordinates describing one bounded content slice."""
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid")
 
-    source: str = Field(min_length=1, max_length=4_096)
-    offset: int = Field(default=1, ge=1)
-    limit: int = Field(default=200, ge=1, le=5_000)
-    max_chars: int = Field(default=100_000, ge=1, le=400_000)
+    start_line: int | None = Field(default=None, ge=1)
+    start_character: int = Field(ge=0)
+    end_line: int | None = Field(default=None, ge=1)
+    end_character: int = Field(ge=0)
+    total_lines: int = Field(ge=0)
+    next: ContentCursor | None = None
+    truncated_by_max_chars: bool
+
+
+class ContentSlice(ContentDocument):
+    """One read window with provider metadata kept separate from coordinates."""
+
+    window: ContentWindow
+
+
+class ContentMatchSpan(BaseModel):
+    """One 0-based, end-exclusive match span within a line."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    start_character: int = Field(ge=0)
+    end_character: int = Field(ge=0)
 
 
 class ContentMatch(BaseModel):
@@ -104,6 +113,7 @@ class ContentMatch(BaseModel):
     text: str
     before: list[str] = Field(default_factory=list)
     after: list[str] = Field(default_factory=list)
+    spans: list[ContentMatchSpan] = Field(min_length=1)
     input_index: int = Field(ge=0)
 
 
@@ -117,6 +127,7 @@ class ContentGrepSourceResult(BaseModel):
     title: str = ""
     match_count: int = Field(ge=0)
     scan_complete: bool
+    next_start_line: int | None = Field(default=None, ge=1)
 
 
 class ContentGrepReport(BaseModel):
@@ -127,8 +138,9 @@ class ContentGrepReport(BaseModel):
     pattern: str = Field(min_length=1, max_length=4_096)
     mode: Literal["regex", "literal"]
     case_sensitive: bool
-    context: int = Field(ge=0, le=20)
-    max_matches_per_source: int = Field(ge=1, le=200)
+    start_line: int = Field(ge=1)
+    context_lines: int = Field(ge=0, le=20)
+    limit_per_source: int = Field(ge=1, le=200)
     matches: list[ContentMatch] = Field(default_factory=list)
     source_results: list[ContentGrepSourceResult] = Field(default_factory=list)
     failures: list[ContentFailure] = Field(default_factory=list)
@@ -150,8 +162,10 @@ class ContentGrepReport(BaseModel):
         for row in self.source_results:
             if row.match_count != counts[row.input_index]:
                 raise ValueError("source result match_count does not match flat matches")
-            if not row.scan_complete and row.match_count != self.max_matches_per_source:
+            if not row.scan_complete and row.match_count != self.limit_per_source:
                 raise ValueError("an incomplete scan must have reached the per-source limit")
+            if row.scan_complete != (row.next_start_line is None):
+                raise ValueError("grep continuation must agree with scan_complete")
         return self
 
 
@@ -405,36 +419,32 @@ class ContentCapabilities:
 
     @staticmethod
     def _content_source_argument(params: dict[str, Any]) -> str:
+        if "refs" in params:
+            raise ValueError("Unsupported legacy content parameter: refs")
         if "sources" in params:
-            raise ValueError("content.read uses singular source; use read_many for batches")
+            raise ValueError("this content operation accepts one source")
         if "source" not in params:
-            raise ValueError("content.read must provide source")
+            raise ValueError("content request must provide source")
         source = params["source"]
         if not isinstance(source, str):
             raise ValueError("content source must be a string")
         return source
 
-    async def get_many(
+    async def fetch(
         self,
         state: BrokerSession,
         params: dict[str, Any],
     ) -> dict[str, Any]:
-        sources = self._content_sources_argument(params)
-        resolved = self._resolve_content_sources(state, sources)
+        source = self._content_source_argument(params)
+        resolved = self._resolve_content_sources(state, [source])
         outcomes = await self._fetch_content(state, resolved, query=None)
-        return self._content_report(outcomes, input_count=len(resolved))
-
-    @staticmethod
-    def _content_report(
-        outcomes: list[_FetchOutcome],
-        *,
-        input_count: int,
-    ) -> dict[str, Any]:
-        return ContentReport(
-            results=[row for row in outcomes if isinstance(row, ContentResult)],
-            failures=[row for row in outcomes if isinstance(row, ContentFailure)],
-            input_count=input_count,
-        ).model_dump(mode="json")
+        outcome = outcomes[0]
+        if isinstance(outcome, ContentFailure):
+            raise CapabilityProviderError.from_failure(
+                outcome.model_dump(mode="json", exclude={"input_index", "source"}),
+                attempts=outcome.attempts,
+            )
+        return outcome.model_dump(mode="json", exclude={"input_index"})
 
     async def _rerank_passages(
         self,
@@ -494,20 +504,20 @@ class ContentCapabilities:
                 f"of {self.max_search_query_chars}"
             )
         raw_limit = params.get("limit", 20)
-        raw_max_per_source = params.get("max_per_source", 3)
+        raw_limit_per_source = params.get("limit_per_source", 3)
         if (
             isinstance(raw_limit, bool)
             or not isinstance(raw_limit, int)
-            or isinstance(raw_max_per_source, bool)
-            or not isinstance(raw_max_per_source, int)
+            or isinstance(raw_limit_per_source, bool)
+            or not isinstance(raw_limit_per_source, int)
         ):
-            raise ValueError("limit and max_per_source must be integers")
+            raise ValueError("limit and limit_per_source must be integers")
         limit = raw_limit
-        max_per_source = raw_max_per_source
+        limit_per_source = raw_limit_per_source
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
-        if not 1 <= max_per_source <= 10:
-            raise ValueError("max_per_source must be between 1 and 10")
+        if not 1 <= limit_per_source <= 10:
+            raise ValueError("limit_per_source must be between 1 and 10")
 
         raw_sources = self._content_sources_argument(
             params,
@@ -584,13 +594,13 @@ class ContentCapabilities:
 
         retained = prefilter_passage_candidates(
             score_passage_prefilter(query, candidates),
-            max_per_source=max_per_source,
+            limit_per_source=limit_per_source,
             limit=self.passage_prefilter_limit,
         )
         ranker_name, reranked, rerank_warnings = await self._rerank_passages(state, query, retained)
         selected = select_passage_candidates(
             reranked,
-            max_per_source=max_per_source,
+            limit_per_source=limit_per_source,
             limit=limit,
         )
 
@@ -632,13 +642,13 @@ class ContentCapabilities:
             unique_source_count=len(unique),
         ).model_dump(mode="json")
 
-    # `read`, `read_many`, and `grep` share a 1-indexed line contract: a match line is
-    # directly usable as a read offset. Both operate on normalized backend text
-    # and remain independent of the selected search provider.
+    # `read` and `grep` share a 1-indexed line contract. Character positions are
+    # 0-based and end-exclusive, matching passage coordinates.
 
     @staticmethod
     def _document_lines(document: ContentDocument) -> list[str]:
-        return document.text.splitlines()
+        text = normalize_document_text(document.text)
+        return [] if not text else text.split("\n")
 
     async def read(
         self,
@@ -646,8 +656,18 @@ class ContentCapabilities:
         params: dict[str, Any],
     ) -> dict[str, Any]:
         source = self._content_source_argument(params)
-        offset = integer(params.get("offset", 1), "offset", minimum=1)
-        limit = integer(params.get("limit", 200), "limit", minimum=1, maximum=5_000)
+        start_line = integer(params.get("start_line", 1), "start_line", minimum=1)
+        start_character = integer(
+            params.get("start_character", 0),
+            "start_character",
+            minimum=0,
+        )
+        line_count = integer(
+            params.get("line_count", 200),
+            "line_count",
+            minimum=1,
+            maximum=5_000,
+        )
         max_chars = integer(
             params.get("max_chars", 100_000),
             "max_chars",
@@ -664,87 +684,134 @@ class ContentCapabilities:
             )
         return self._slice_content_document(
             outcome,
-            offset=offset,
-            limit=limit,
+            start_line=start_line,
+            start_character=start_character,
+            line_count=line_count,
             max_chars=max_chars,
         ).model_dump(mode="json")
-
-    async def read_many(
-        self,
-        state: BrokerSession,
-        params: dict[str, Any],
-    ) -> dict[str, Any]:
-        raw_windows = params.get("windows")
-        if not isinstance(raw_windows, list):
-            raise ValueError("windows must be a list")
-        if len(raw_windows) > self.max_content_sources_per_request:
-            raise ValueError(
-                f"content request contains {len(raw_windows)} windows, exceeding the "
-                f"broker maximum of {self.max_content_sources_per_request}"
-            )
-        windows = [ContentReadWindow.model_validate(window) for window in raw_windows]
-        resolved = self._resolve_content_sources(state, [window.source for window in windows])
-        outcomes = await self._fetch_content(state, resolved, query=None)
-        sliced: list[_FetchOutcome] = []
-        for window, outcome in zip(windows, outcomes, strict=True):
-            if isinstance(outcome, ContentFailure):
-                sliced.append(outcome)
-                continue
-            document = self._slice_content_document(
-                outcome,
-                offset=window.offset,
-                limit=window.limit,
-                max_chars=window.max_chars,
-            )
-            sliced.append(
-                ContentResult(
-                    input_index=outcome.input_index,
-                    **document.model_dump(mode="json"),
-                )
-            )
-        return self._content_report(sliced, input_count=len(windows))
 
     def _slice_content_document(
         self,
         document: ContentDocument,
         *,
-        offset: int,
-        limit: int,
+        start_line: int,
+        start_character: int,
+        line_count: int,
         max_chars: int,
-    ) -> ContentDocument:
+    ) -> ContentSlice:
         lines = self._document_lines(document)
-        total = len(lines)
-        window = lines[offset - 1 : offset - 1 + limit]
-        # A line can be much larger than the line count suggests. Trim whole
-        # lines first so end_line remains a resumable coordinate.
-        clipped = False
-        while window and len("\n".join(window)) > max_chars and len(window) > 1:
-            window.pop()
-            clipped = True
-        text = "\n".join(window)
-        partial_line = len(window) == 1 and len(text) > max_chars
-        if partial_line:
-            text = text[:max_chars]
-            clipped = True
-        end = offset - 1 + len(window)
-        metadata = {
-            **document.metadata,
-            "start_line": offset if window else 0,
-            "end_line": end,
-            "total_lines": total,
-            "next_offset": end + 1 if end < total else None,
-        }
-        if clipped:
-            metadata["truncated_by_max_chars"] = True
-        if partial_line:
-            metadata["truncated_mid_line"] = True
-            metadata["partial_line_remaining_chars"] = len(window[0]) - len(text)
-        return ContentDocument(
+        total_lines = len(lines)
+        if start_line > total_lines:
+            if start_character:
+                raise ValueError("start_character must be 0 when start_line is past EOF")
+            return ContentSlice(
+                source=document.source,
+                text="",
+                title=document.title,
+                date=document.date,
+                metadata=document.metadata,
+                window=ContentWindow(
+                    start_line=None,
+                    start_character=0,
+                    end_line=None,
+                    end_character=0,
+                    total_lines=total_lines,
+                    next=None,
+                    truncated_by_max_chars=False,
+                ),
+            )
+
+        first_index = start_line - 1
+        if start_character > len(lines[first_index]):
+            raise ValueError("start_character exceeds the length of start_line")
+
+        stop_index = min(total_lines, first_index + line_count)
+        pieces: list[str] = []
+        remaining = max_chars
+        current_index = first_index
+        character = start_character
+        end_line: int | None = None
+        end_character = 0
+        next_cursor: ContentCursor | None = None
+        truncated = False
+
+        while current_index < stop_index:
+            line = lines[current_index]
+            segment = line[character:]
+            separator = "\n" if current_index > first_index else ""
+            required = len(separator) + len(segment)
+            if required <= remaining:
+                pieces.append(separator + segment)
+                remaining -= required
+                end_line = current_index + 1
+                end_character = len(line)
+                current_index += 1
+                character = 0
+                continue
+
+            truncated = True
+            if separator and not remaining:
+                next_cursor = ContentCursor(
+                    start_line=current_index,
+                    start_character=len(lines[current_index - 1]),
+                )
+                break
+            if separator and remaining:
+                pieces.append(separator)
+                remaining -= 1
+                end_line = current_index + 1
+                end_character = 0
+            take = min(len(segment), remaining)
+            if take:
+                pieces.append(segment[:take])
+                end_line = current_index + 1
+                end_character = character + take
+            if character + take < len(line):
+                next_cursor = ContentCursor(
+                    start_line=current_index + 1,
+                    start_character=character + take,
+                )
+            elif current_index + 1 < total_lines:
+                next_cursor = ContentCursor(
+                    start_line=current_index + 2,
+                    start_character=0,
+                )
+            break
+
+        if not truncated and current_index < total_lines:
+            if remaining:
+                pieces.append("\n")
+                end_line = current_index + 1
+                end_character = 0
+                if current_index == total_lines - 1 and not lines[current_index]:
+                    next_cursor = None
+                else:
+                    next_cursor = ContentCursor(
+                        start_line=current_index + 1,
+                        start_character=0,
+                    )
+            else:
+                truncated = True
+                next_cursor = ContentCursor(
+                    start_line=current_index,
+                    start_character=len(lines[current_index - 1]),
+                )
+
+        return ContentSlice(
             source=document.source,
-            text=text,
+            text="".join(pieces),
             title=document.title,
             date=document.date,
-            metadata=metadata,
+            metadata=document.metadata,
+            window=ContentWindow(
+                start_line=start_line,
+                start_character=start_character,
+                end_line=end_line,
+                end_character=end_character,
+                total_lines=total_lines,
+                next=next_cursor,
+                truncated_by_max_chars=truncated,
+            ),
         )
 
     @staticmethod
@@ -771,10 +838,16 @@ class ContentCapabilities:
         if mode not in {"regex", "literal"}:
             raise ValueError("mode must be 'regex' or 'literal'")
         case_sensitive = boolean(params.get("case_sensitive", False), "case_sensitive")
-        context = integer(params.get("context", 0), "context", minimum=0, maximum=20)
-        max_per_source = integer(
-            params.get("max_matches_per_source", 20),
-            "max_matches_per_source",
+        start_line = integer(params.get("start_line", 1), "start_line", minimum=1)
+        context_lines = integer(
+            params.get("context_lines", 0),
+            "context_lines",
+            minimum=0,
+            maximum=20,
+        )
+        limit_per_source = integer(
+            params.get("limit_per_source", 20),
+            "limit_per_source",
             minimum=1,
             maximum=200,
         )
@@ -785,7 +858,7 @@ class ContentCapabilities:
         )
         sources = self._content_sources_argument(
             params,
-            legacy_options=("max_matches_per_ref",),
+            legacy_options=("max_matches_per_ref", "context", "max_matches_per_source"),
         )
         resolved = self._resolve_content_sources(state, sources)
         outcomes = await self._fetch_content(
@@ -804,12 +877,21 @@ class ContentCapabilities:
             lines = self._document_lines(outcome)
             found = 0
             scan_complete = True
-            for index, line in enumerate(lines):
-                if not regex.search(line):
+            next_start_line: int | None = None
+            for index in range(start_line - 1, len(lines)):
+                line = lines[index]
+                spans = [
+                    {
+                        "start_character": matched.start(),
+                        "end_character": matched.end(),
+                    }
+                    for matched in regex.finditer(line)
+                ]
+                if not spans:
                     continue
                 found += 1
-                before = lines[max(0, index - context) : index] if context else []
-                after = lines[index + 1 : index + 1 + context] if context else []
+                before = lines[max(0, index - context_lines) : index] if context_lines else []
+                after = lines[index + 1 : index + 1 + context_lines] if context_lines else []
                 match = {
                     "source": outcome.source,
                     "title": outcome.title,
@@ -817,11 +899,13 @@ class ContentCapabilities:
                     "text": line,
                     "before": before,
                     "after": after,
+                    "spans": spans,
                     "input_index": input_index,
                 }
                 matches.append(match)
-                if found >= max_per_source and index < len(lines) - 1:
+                if found >= limit_per_source and index < len(lines) - 1:
                     scan_complete = False
+                    next_start_line = index + 2
                     break
             source_results.append(
                 {
@@ -830,14 +914,16 @@ class ContentCapabilities:
                     "title": outcome.title,
                     "match_count": found,
                     "scan_complete": scan_complete,
+                    "next_start_line": next_start_line,
                 }
             )
         return ContentGrepReport(
             pattern=pattern,
             mode=mode,
             case_sensitive=case_sensitive,
-            context=context,
-            max_matches_per_source=max_per_source,
+            start_line=start_line,
+            context_lines=context_lines,
+            limit_per_source=limit_per_source,
             matches=matches,
             source_results=source_results,
             failures=failures,

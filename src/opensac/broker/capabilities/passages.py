@@ -124,7 +124,7 @@ def score_passage_prefilter(
 def prefilter_passage_candidates(
     candidates: list[PassageCandidate],
     *,
-    max_per_source: int,
+    limit_per_source: int,
     limit: int,
 ) -> list[PassageCandidate]:
     grouped: dict[str, list[PassageCandidate]] = {}
@@ -141,7 +141,7 @@ def prefilter_passage_candidates(
                     candidate.start,
                     candidate.end,
                 ),
-            )[: max(8, max_per_source)]
+            )[: max(8, limit_per_source)]
         )
     retained.sort(
         key=lambda candidate: (
@@ -157,7 +157,7 @@ def prefilter_passage_candidates(
 def select_passage_candidates(
     candidates: list[tuple[PassageCandidate, float]],
     *,
-    max_per_source: int,
+    limit_per_source: int,
     limit: int,
 ) -> list[tuple[PassageCandidate, float]]:
     ordered = sorted(
@@ -172,7 +172,7 @@ def select_passage_candidates(
     selected: list[tuple[PassageCandidate, float]] = []
     per_source: Counter[str] = Counter()
     for candidate, score in ordered:
-        if per_source[candidate.handle.source] >= max_per_source:
+        if per_source[candidate.handle.source] >= limit_per_source:
             continue
         per_source[candidate.handle.source] += 1
         selected.append((candidate, score))

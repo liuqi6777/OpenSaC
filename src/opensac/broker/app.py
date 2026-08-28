@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 from opensac.broker.failures import CapabilityFailure
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
 from opensac.broker.service import BrokerService
+from opensac.models import CAPABILITY_CONTRACT
 
 
 class RpcRequest(BaseModel):
@@ -18,6 +19,7 @@ class RpcRequest(BaseModel):
 class RpcResponse(BaseModel):
     """Transport envelope separating top-level errors from successful results."""
 
+    capability_contract: int = CAPABILITY_CONTRACT
     ok: bool
     result: Any = None
     error: CapabilityFailure | None = None
@@ -76,10 +78,26 @@ def create_broker_app(service: BrokerService) -> FastAPI:
     async def call(
         request: RpcRequest,
         authorization: str | None = Header(default=None),
+        x_opensac_capability_contract: str | None = Header(default=None),
         x_opensac_execution_id: str | None = Header(default=None),
     ) -> RpcResponse:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Missing bearer token")
+        expected_contract = str(CAPABILITY_CONTRACT)
+        if x_opensac_capability_contract != expected_contract:
+            reported = x_opensac_capability_contract or "missing"
+            return RpcResponse(
+                ok=False,
+                error=CapabilityFailure(
+                    code="capability_contract_mismatch",
+                    message=(
+                        f"Capability contract mismatch: broker requires {expected_contract}, "
+                        f"client reported {reported}. Deploy matching OpenSAC SDK, broker, "
+                        "and sandbox versions."
+                    ),
+                    retryable=False,
+                ),
+            )
         token = authorization.removeprefix("Bearer ")
         try:
             result = await service.call(

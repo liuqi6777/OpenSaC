@@ -47,11 +47,9 @@ capabilities:
     url_admission: searched_or_public_web
     batch_deadline_seconds: 60
   extraction:
-    max_items: 256
     max_instruction_bytes: 16384
     max_schema_bytes: 65536
     max_item_bytes: 65536
-    max_total_item_bytes: 2097152
     max_schema_depth: 8
     max_repair_attempts: 1
 
@@ -74,7 +72,7 @@ providers:
   result_cache_max_bytes: 128000000
 
 sandbox:
-  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.0
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.1
   mode: cold
   experimental_persistent_interpreter: false
   warm_idle_seconds: 300

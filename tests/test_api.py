@@ -34,7 +34,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         broker_socket=tmp_path / "broker.sock",
         api_key="public-secret",
         backend_metadata_hash="sha256:index-manifest",
-        capabilities={"extraction": {"max_items": 12}},
+        capabilities={"extraction": {"max_repair_attempts": 2}},
     )
     with TestClient(create_app(settings)) as client:
         unauthorized = client.post("/v1/sessions", json={})
@@ -52,7 +52,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v12",
+            "capability_contract_v13",
             "external_failure_warnings_v1",
             "content_passages_v1",
             "provider_reliability_v1",
@@ -76,20 +76,20 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["last_access"]
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
-        assert payload["environment"]["sandbox_contract"] == 13
-        assert payload["environment"]["capability_contract"] == 12
+        assert payload["environment"]["sandbox_contract"] == 14
+        assert payload["environment"]["capability_contract"] == 13
         sdk_capabilities = payload["environment"]["sdk_capabilities"]
-        assert sdk_capabilities["contracts"] == {"sandbox": 13, "capability": 12}
+        assert sdk_capabilities["contracts"] == {"sandbox": 14, "capability": 13}
         assert sdk_capabilities["search"]["backend"] == "local"
-        assert sdk_capabilities["search"]["supports_domains"] is False
+        assert sdk_capabilities["search"]["supports_include_domains"] is False
         assert sdk_capabilities["llm"]["available"] is False
         assert "secret" not in json.dumps(sdk_capabilities).lower()
         capability_limits = payload["environment"]["capability_limits"]
-        assert capability_limits["extract_many"]["max_items"] == 12
+        assert capability_limits["extract"]["max_repair_attempts"] == 2
         assert capability_limits["content"]["max_sources_per_request"] == 256
         assert capability_limits["content"]["url_admission"] == "searched_or_public_web"
         assert capability_limits["content"]["passage_limit"] == 100
-        assert capability_limits["content"]["passage_max_per_source"] == 10
+        assert capability_limits["content"]["passage_limit_per_source"] == 10
         assert capability_limits["content"]["passage_chunk_chars"] == 2_000
         assert capability_limits["provider_result_cache"]["services"] == []
         assert payload["environment"]["passage_ranker"] == "lexical"
@@ -224,7 +224,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.8.0"
+    assert schema["info"]["version"] == "0.8.1"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 
@@ -1647,7 +1647,7 @@ def test_session_advertises_llm_capabilities_only_when_model_is_configured(tmp_p
         assert backend.model == "pipeline-model"
         assert client.app.state.runtime.broker.llm_service is not None
 
-    assert "llm.extract_many" in payload["capabilities"]
+    assert "llm.extract" in payload["capabilities"]
     assert payload["environment"]["service_policies"]["llm"]["concurrency"] == 2
 
 

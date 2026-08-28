@@ -42,13 +42,13 @@ from opensac_sdk import BrokerError, sdk
 
 Core SDK surface:
 
-- Search with `sdk.search.many(...)`; combine its report with `sdk.search.fuse_rrf(...)`.
-- Inspect documents with `sdk.content.grep(...)` and `sdk.content.read(...)`; read offsets
-  are 1-indexed.
-- Use `sdk.llm.extract_many(...)` only for bounded semantic mapping.
+- Search with `sdk.search.many(...)`; combine its outcomes with `sdk.search.fuse_rrf(...)`.
+- Inspect documents with `sdk.content.grep(...)` and `sdk.content.read(...)`; read lines are
+  1-based, character positions are 0-based, and `window.next` continues losslessly.
+- Use single-item `sdk.llm.extract(...)` only for bounded semantic transformation.
 - Persist optional research state with `sdk.state`—there is no `sdk.workspace` API. Inspect
   recovery usage with `sdk.session.usage()`.
-- Finish with `sdk.output.submit(output, citations=[source_url])`.
+- Finish with `sdk.output.submit(value, citations=[source_url])`.
 
 ## Work in deliberate stages
 
@@ -67,8 +67,8 @@ When search results need interpretation, stop after a bounded preview:
 
 ```python
 queries = ['"exact phrase" entity', "entity alternate wording"]
-search_report = sdk.search.many(queries, limit_per_query=5)
-for item in sdk.search.fuse_rrf(search_report)[:5]:
+search_outcomes = sdk.search.many(queries, limit=5)
+for item in sdk.search.fuse_rrf(search_outcomes)[:5]:
     print(f"CANDIDATE source={item.source!r} title={item.title!r}")
 print("NEXT: choose sources and checks")
 ```
@@ -80,12 +80,15 @@ import re
 
 sources = ["selected-source-url"]
 pattern = r"target phrase"
-report = sdk.content.grep(sources, pattern, context=2)
+outcomes = sdk.content.grep(pattern, sources=sources, context_lines=2)
 passage = None
-for match in report.matches[:4]:
+for outcome in outcomes:
+    if outcome.status != "success" or not outcome.matches:
+        continue
+    match = outcome.matches[0]
     try:
         item = sdk.content.read(
-            match.source, offset=max(match.line - 8, 1), limit=30, max_chars=12_000
+            outcome.source, start_line=max(match.line - 8, 1), line_count=30, max_chars=12_000
         )
     except BrokerError:
         continue
@@ -104,9 +107,9 @@ else:
 
 Use bounded comprehensions, `filter`, dicts, sets, `sorted`, `any`, and `all` to generate queries,
 join by source, rank candidates, and measure coverage. Prefer `re`, dates, strings, and arithmetic
-to an extraction call. `extract_many` cannot call tools, create trusted sources, or certify
-citation labels:
-validate its quoted evidence, clean and cap proposed follow-up inputs, then make bounded SDK calls.
+to an extraction call. `extract` cannot call tools, create trusted sources, or certify citation
+labels. Validate its quoted evidence, clean and cap proposed follow-up inputs, then make bounded
+SDK calls. Loop explicitly and handle `BrokerError` per item when several extractions are needed.
 
 ## Keep the evidence boundary intact
 
@@ -116,9 +119,9 @@ validate its quoted evidence, clean and cap proposed follow-up inputs, then make
   support claims about document content.
 - For every material document-content claim, inspect non-empty text. Output citations are optional,
   unverified URL/source labels; prefer primary sources and corroborate disputed claims.
-- `[sac_run]` renders bounded external-failure warnings before stdout while keeping successful
-  rows. Inspect typed failures only when code must branch on them. Empty hits or zero matches
-  without a warning are successful results.
+- `[sac_run]` renders structured failure warnings. Branch on `status == "success"` for
+  `search.many` and `content.grep`; do not parse other statuses. Empty hits or matches with success
+  status are successful results.
 
 ## End each stage deliberately
 

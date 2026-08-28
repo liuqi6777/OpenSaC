@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from jsonschema import Draft202012Validator
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from opensac.broker.call_context import current_call, trace_error_message
 from opensac.broker.failures import CapabilityFailure
@@ -18,46 +15,13 @@ from opensac.broker.services.llm import LLMService
 from opensac.broker.session import BrokerSession
 from opensac.broker.validation import (
     finite_number,
-    integer,
     optional_integer,
     optional_string,
     string,
 )
 from opensac.tracing import ModelAttemptRecord
 
-
-class ExtractionResult(BaseModel):
-    """One successful structured extraction."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    input_index: int = Field(ge=0)
-    data: dict[str, Any]
-    attempts: int = Field(ge=1)
-
-
-class ExtractionFailure(CapabilityFailure):
-    """One failed structured extraction."""
-
-    input_index: int = Field(ge=0)
-
-
-class ExtractionReport(BaseModel):
-    """Successful and failed extractions, partitioned by input index."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    results: list[ExtractionResult] = Field(default_factory=list)
-    failures: list[ExtractionFailure] = Field(default_factory=list)
-    input_count: int = Field(ge=0)
-
-    @model_validator(mode="after")
-    def _validate_partition(self) -> Self:
-        indexes = [row.input_index for row in self.results]
-        indexes.extend(row.input_index for row in self.failures)
-        if sorted(indexes) != list(range(self.input_count)):
-            raise ValueError("extraction results and failures must partition the input indexes")
-        return self
+from ..providers.execution import CapabilityProviderError
 
 
 @dataclass(frozen=True)
@@ -65,7 +29,6 @@ class _ModelOutput:
     content: str | None
     tokens: int
     duration_seconds: float
-    provider_failed: bool = False
 
 
 class LLMCapabilities:
@@ -75,20 +38,16 @@ class LLMCapabilities:
         self,
         service: LLMService | None,
         *,
-        max_extract_items: int,
         max_instruction_bytes: int,
         max_schema_bytes: int,
         max_item_bytes: int,
-        max_total_item_bytes: int,
         max_schema_depth: int,
         max_repair_attempts: int,
     ) -> None:
         self.service = service
-        self.max_extract_items = max_extract_items
         self.max_extract_instruction_bytes = max_instruction_bytes
         self.max_extract_schema_bytes = max_schema_bytes
         self.max_extract_item_bytes = max_item_bytes
-        self.max_extract_total_item_bytes = max_total_item_bytes
         self.max_extract_schema_depth = max_schema_depth
         self.max_extract_repair_attempts = max_repair_attempts
 
@@ -155,57 +114,6 @@ class LLMCapabilities:
         if context is not None:
             context.model_tokens += tokens
         return answer
-
-    async def complete_many(self, state: BrokerSession, params: dict[str, Any]) -> list[str]:
-        raw_prompts = params.get("prompts", [])
-        if not isinstance(raw_prompts, list):
-            raise ValueError("prompts must be a list")
-        if any(not isinstance(prompt, str) for prompt in raw_prompts):
-            raise ValueError("prompts must contain only strings")
-        prompts = list(raw_prompts)
-        system = optional_string(params.get("system"), "system")
-        temperature = self._validate_temperature(params.get("temperature", 0.2))
-        requested_max_tokens = self._validate_max_tokens(params.get("max_tokens"))
-        concurrency = integer(
-            params.get("concurrency", 4),
-            "concurrency",
-            minimum=1,
-            maximum=12,
-        )
-        self._require_service()
-        if not prompts:
-            return []
-        if any(not prompt.strip() for prompt in prompts):
-            raise ValueError("prompts must not contain empty strings")
-        # The whole fan-out is counted before it runs, so a batch that dies
-        # partway is still reported at the size it was dispatched at rather than
-        # at however far it got.
-        max_tokens = await state.policy.reserve_llm(
-            len(prompts),
-            max_tokens=requested_max_tokens,
-        )
-        gate = asyncio.Semaphore(concurrency)
-
-        async def one(index: int, prompt: str) -> tuple[str, int]:
-            async with gate:
-                return await self._chat(
-                    state,
-                    prompt,
-                    system=system,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    request_index=index,
-                )
-
-        results = await asyncio.gather(
-            *(one(index, prompt) for index, prompt in enumerate(prompts))
-        )
-        total_tokens = sum(tokens for _, tokens in results)
-        await state.policy.record_pipeline_model_tokens(total_tokens)
-        context = current_call()
-        if context is not None:
-            context.model_tokens += total_tokens
-        return [answer for answer, _ in results]
 
     _SCHEMA_KEYWORDS = frozenset(
         {
@@ -329,15 +237,9 @@ class LLMCapabilities:
     def _prepare_extraction(
         self,
         params: dict[str, Any],
-    ) -> tuple[list[Any], list[str], str, str, Draft202012Validator, int, int]:
-        items = params.get("items", [])
-        if not isinstance(items, list):
-            raise ValueError("items must be a list")
-        if len(items) > self.max_extract_items:
-            raise ValueError(
-                f"extract_many contains {len(items)} items, exceeding the broker maximum "
-                f"of {self.max_extract_items}"
-            )
+    ) -> tuple[str, str, str, Draft202012Validator, int]:
+        if "item" not in params:
+            raise ValueError("extract must provide item")
         instruction = string(
             params.get("instruction", ""),
             "instruction",
@@ -360,47 +262,29 @@ class LLMCapabilities:
             )
         validator = self._validate_schema_subset(schema)
 
-        item_json: list[str] = []
-        total_item_bytes = 0
-        for index, item in enumerate(items):
-            encoded = self._json_payload(item, f"item at index {index}")
-            size = len(encoded.encode("utf-8"))
-            if size > self.max_extract_item_bytes:
-                raise ValueError(
-                    f"item at index {index} is {size} bytes, exceeding the broker maximum "
-                    f"of {self.max_extract_item_bytes}"
-                )
-            total_item_bytes += size
-            item_json.append(encoded)
-        if total_item_bytes > self.max_extract_total_item_bytes:
+        item_json = self._json_payload(params["item"], "item")
+        item_bytes = len(item_json.encode("utf-8"))
+        if item_bytes > self.max_extract_item_bytes:
             raise ValueError(
-                f"items total {total_item_bytes} bytes, exceeding the broker maximum "
-                f"of {self.max_extract_total_item_bytes}"
+                f"item is {item_bytes} bytes, exceeding the broker maximum "
+                f"of {self.max_extract_item_bytes}"
             )
 
         repair_attempts = params.get("repair_attempts", 0)
         if isinstance(repair_attempts, bool) or not isinstance(repair_attempts, int):
-            raise ValueError("repair_attempts must be 0 or 1")
-        if repair_attempts not in {0, 1}:
-            raise ValueError("repair_attempts must be 0 or 1")
+            raise ValueError("repair_attempts must be a non-negative integer")
+        if repair_attempts < 0:
+            raise ValueError("repair_attempts must be a non-negative integer")
         if repair_attempts > self.max_extract_repair_attempts:
             raise ValueError(
                 f"repair_attempts exceeds the broker maximum of {self.max_extract_repair_attempts}"
             )
-        concurrency = integer(
-            params.get("concurrency", 4),
-            "concurrency",
-            minimum=1,
-            maximum=12,
-        )
         return (
-            items,
             item_json,
             instruction,
             schema_json,
             validator,
             repair_attempts,
-            concurrency,
         )
 
     async def _model_output(
@@ -409,26 +293,15 @@ class LLMCapabilities:
         prompt: str,
         *,
         max_tokens: int | None,
-        gate: asyncio.Semaphore,
-        request_index: int,
     ) -> _ModelOutput:
         started = time.monotonic()
-        try:
-            async with gate:
-                content, tokens = await self._chat(
-                    state,
-                    prompt,
-                    max_tokens=max_tokens,
-                    json_object=True,
-                    request_index=request_index,
-                )
-        except Exception:
-            return _ModelOutput(
-                content=None,
-                tokens=0,
-                duration_seconds=time.monotonic() - started,
-                provider_failed=True,
-            )
+        content, tokens = await self._chat(
+            state,
+            prompt,
+            max_tokens=max_tokens,
+            json_object=True,
+            request_index=0,
+        )
         return _ModelOutput(
             content=content,
             tokens=tokens,
@@ -510,205 +383,98 @@ class LLMCapabilities:
     async def _record_model_tokens(
         self,
         state: BrokerSession,
-        outputs: list[_ModelOutput],
+        output: _ModelOutput,
     ) -> None:
-        total_tokens = sum(output.tokens for output in outputs)
-        await state.policy.record_pipeline_model_tokens(total_tokens)
+        await state.policy.record_pipeline_model_tokens(output.tokens)
         context = current_call()
         if context is not None:
-            context.model_tokens += total_tokens
+            context.model_tokens += output.tokens
 
     @staticmethod
-    def _append_model_attempts(
-        indexes: list[int],
+    def _append_model_attempt(
         phase: str,
-        outputs: list[_ModelOutput],
-        errors: list[CapabilityFailure | None],
+        output: _ModelOutput,
+        error: CapabilityFailure | None,
     ) -> None:
         context = current_call()
         if context is None:
             return
-        for index, output, error in zip(indexes, outputs, errors, strict=True):
-            code = "provider_error" if output.provider_failed else error.code if error else None
-            context.model_attempts.append(
-                ModelAttemptRecord(
-                    index=index,
-                    phase=phase,
-                    status="error" if code else "ok",
-                    duration_seconds=output.duration_seconds,
-                    model_tokens=output.tokens,
-                    error_code=code,
-                )
+        context.model_attempts.append(
+            ModelAttemptRecord(
+                index=0,
+                phase=phase,
+                status="error" if error else "ok",
+                duration_seconds=output.duration_seconds,
+                model_tokens=output.tokens,
+                error_code=error.code if error else None,
             )
+        )
 
-    async def extract_many(
+    async def extract(
         self,
         state: BrokerSession,
         params: dict[str, Any],
     ) -> dict[str, Any]:
         (
-            items,
             item_json,
             instruction,
             schema_json,
             validator,
             repair_attempts,
-            concurrency,
         ) = self._prepare_extraction(params)
         requested_max_tokens = self._validate_max_tokens(params.get("max_tokens"))
         self._require_service()
-        if not items:
-            return ExtractionReport(input_count=0).model_dump(mode="json")
         max_tokens = await state.policy.reserve_llm(
-            len(items),
+            1,
             max_tokens=requested_max_tokens,
         )
-        gate = asyncio.Semaphore(concurrency)
-
-        def initial_prompt(index: int) -> str:
-            prompt = (
-                f"{instruction}\n\nJSON schema:\n{schema_json}\n\n"
-                f"Input:\n{item_json[index]}\n\n"
-                "Return only one JSON object."
+        initial_prompt = (
+            f"{instruction}\n\nJSON schema:\n{schema_json}\n\n"
+            f"Input:\n{item_json}\n\n"
+            "Return only one JSON object."
+        )
+        initial_output = await self._model_output(
+            state,
+            initial_prompt,
+            max_tokens=max_tokens,
+        )
+        await self._record_model_tokens(state, initial_output)
+        data, error = self._checked_extraction(initial_output.content, validator)
+        self._append_model_attempt("initial", initial_output, error)
+        if error is None:
+            if data is None:
+                raise RuntimeError("Successful extraction has no data.")
+            return data
+        attempts = 1
+        previous_output = initial_output
+        while attempts <= repair_attempts and error.code in self._REPAIRABLE_EXTRACTION_ERRORS:
+            repair_max_tokens = await state.policy.reserve_llm(
+                1,
+                max_tokens=requested_max_tokens,
             )
-            return prompt
-
-        initial_outputs = await asyncio.gather(
-            *(
-                self._model_output(
-                    state,
-                    initial_prompt(index),
-                    max_tokens=max_tokens,
-                    gate=gate,
-                    request_index=index,
-                )
-                for index in range(len(items))
-            )
-        )
-        await self._record_model_tokens(state, initial_outputs)
-
-        checked: list[tuple[dict[str, Any] | None, CapabilityFailure | None]] = []
-        for output in initial_outputs:
-            if output.provider_failed:
-                checked.append(
-                    (
-                        None,
-                        CapabilityFailure(
-                            code="provider_error",
-                            message="Extraction provider request failed",
-                            retryable=True,
-                        ),
-                    )
-                )
-            else:
-                checked.append(self._checked_extraction(output.content, validator))
-        self._append_model_attempts(
-            list(range(len(items))),
-            "initial",
-            initial_outputs,
-            [error for _, error in checked],
-        )
-
-        attempts = [1] * len(items)
-        repair_indexes = [
-            index
-            for index, (_, error) in enumerate(checked)
-            if repair_attempts
-            and error is not None
-            and error.code in self._REPAIRABLE_EXTRACTION_ERRORS
-        ]
-        if not repair_indexes:
-            return self._extraction_report(checked, attempts)
-
-        # Reserve the complete, index-ordered repair set before dispatching any
-        # second attempt. A tight budget cannot make completion order decide
-        # which malformed rows get repaired.
-        repair_max_tokens = await state.policy.reserve_llm(
-            len(repair_indexes),
-            max_tokens=requested_max_tokens,
-        )
-
-        def repair_prompt(index: int) -> str:
-            assert initial_outputs[index].content is not None
-            error = checked[index][1]
-            assert error is not None
-            return (
+            repair_prompt = (
                 f"{instruction}\n\nJSON schema:\n{schema_json}\n\n"
-                f"Input:\n{item_json[index]}\n\n"
-                f"Previous invalid output:\n{initial_outputs[index].content}\n\n"
+                f"Input:\n{item_json}\n\n"
+                f"Previous invalid output:\n{previous_output.content}\n\n"
                 f"Validation error:\n{error.code}: {error.message}\n\n"
                 "Repair the output. Return only one JSON object matching the schema."
             )
-
-        repair_outputs = await asyncio.gather(
-            *(
-                self._model_output(
-                    state,
-                    repair_prompt(index),
-                    max_tokens=repair_max_tokens,
-                    gate=gate,
-                    request_index=index,
-                )
-                for index in repair_indexes
+            repair_output = await self._model_output(
+                state,
+                repair_prompt,
+                max_tokens=repair_max_tokens,
             )
-        )
-        await self._record_model_tokens(state, repair_outputs)
-        repair_checked: list[tuple[dict[str, Any] | None, CapabilityFailure | None]] = []
-        for output in repair_outputs:
-            if output.provider_failed:
-                repair_checked.append(
-                    (
-                        None,
-                        CapabilityFailure(
-                            code="provider_error",
-                            message="Extraction provider request failed",
-                            retryable=True,
-                        ),
-                    )
-                )
-            else:
-                repair_checked.append(self._checked_extraction(output.content, validator))
-        self._append_model_attempts(
-            repair_indexes,
-            "repair",
-            repair_outputs,
-            [error for _, error in repair_checked],
-        )
-        for index, (data, error) in zip(repair_indexes, repair_checked, strict=True):
-            checked[index] = (data, error)
-            attempts[index] = 2
-        return self._extraction_report(checked, attempts)
+            attempts += 1
+            await self._record_model_tokens(state, repair_output)
+            data, error = self._checked_extraction(repair_output.content, validator)
+            self._append_model_attempt("repair", repair_output, error)
+            if error is None:
+                if data is None:
+                    raise RuntimeError("Successful extraction has no data.")
+                return data
+            previous_output = repair_output
 
-    @staticmethod
-    def _extraction_report(
-        checked: list[tuple[dict[str, Any] | None, CapabilityFailure | None]],
-        attempts: list[int],
-    ) -> dict[str, Any]:
-        results: list[ExtractionResult] = []
-        failures: list[ExtractionFailure] = []
-        for input_index, ((data, failure), attempt_count) in enumerate(
-            zip(checked, attempts, strict=True)
-        ):
-            if failure is not None:
-                failures.append(
-                    ExtractionFailure(
-                        input_index=input_index,
-                        **failure.model_dump(mode="json", exclude={"attempts"}),
-                        attempts=attempt_count,
-                    )
-                )
-                continue
-            if data is None:
-                raise RuntimeError("Successful extraction has no data.")
-            results.append(
-                ExtractionResult(
-                    input_index=input_index,
-                    data=data,
-                    attempts=attempt_count,
-                )
-            )
-        return ExtractionReport(
-            results=results,
-            failures=failures,
-            input_count=len(checked),
-        ).model_dump(mode="json")
+        raise CapabilityProviderError.from_failure(
+            error.model_dump(mode="json"),
+            attempts=attempts,
+        )
