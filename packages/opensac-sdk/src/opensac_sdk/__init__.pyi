@@ -1,5 +1,5 @@
-from collections.abc import Mapping
-from typing import Any, Literal, Protocol, Required, TypedDict, overload
+from collections.abc import ItemsView, Iterator, KeysView, Mapping, ValuesView
+from typing import Any, Literal, Protocol
 
 class BrokerError(RuntimeError):
     code: str
@@ -11,7 +11,16 @@ class BrokerError(RuntimeError):
     component: str | None
     scope: Literal["request", "resource", "provider", "unknown"] | None
 
-class _FailureRecord(Protocol):
+class _Record(Protocol):
+    def __getitem__(self, key: str) -> Any: ...
+    def __iter__(self) -> Iterator[str]: ...
+    def __len__(self) -> int: ...
+    def get(self, key: str, default: Any = ...) -> Any: ...
+    def keys(self) -> KeysView[str]: ...
+    def items(self) -> ItemsView[str, Any]: ...
+    def values(self) -> ValuesView[Any]: ...
+
+class _FailureRecord(_Record, Protocol):
     code: str
     message: str
     retryable: bool
@@ -21,153 +30,90 @@ class _FailureRecord(Protocol):
     provider: str | None
     component: str | None
     scope: Literal["request", "resource", "provider", "unknown"] | None
-    @overload
-    def __getitem__(self, key: Literal["code", "message"]) -> str: ...
-    @overload
-    def __getitem__(self, key: Literal["retryable"]) -> bool: ...
-    @overload
-    def __getitem__(self, key: Literal["attempts"]) -> int: ...
-    @overload
-    def __getitem__(
-        self,
-        key: Literal["provider_status"],
-    ) -> int | None: ...
-    @overload
-    def __getitem__(
-        self,
-        key: Literal["retry_after_seconds"],
-    ) -> float | None: ...
-    @overload
-    def __getitem__(self, key: Literal["provider", "component"]) -> str | None: ...
-    @overload
-    def __getitem__(
-        self,
-        key: Literal["scope"],
-    ) -> Literal["request", "resource", "provider", "unknown"] | None: ...
 
-class _SearchHitRecord(Protocol):
+class _SearchHitRecord(_Record, Protocol):
     source: str
     backend: str
     title: str
-    snippet: str
+    domain: str | None
     date: str | None
+    snippet: str
     score: float | None
     rank: int
-    metadata: Mapping[str, Any]
-    @overload
-    def __getitem__(
-        self,
-        key: Literal["source", "backend", "title", "snippet"],
-    ) -> str: ...
-    @overload
-    def __getitem__(self, key: Literal["date"]) -> str | None: ...
-    @overload
-    def __getitem__(self, key: Literal["score"]) -> float | None: ...
-    @overload
-    def __getitem__(self, key: Literal["rank"]) -> int: ...
-    @overload
-    def __getitem__(self, key: Literal["metadata"]) -> Mapping[str, Any]: ...
+    retrieval: Mapping[str, Any] | None
+    metadata: dict[str, Any]
 
-class _SearchResultRecord(Protocol):
+class _FusionProvenanceRecord(_Record, Protocol):
     input_index: int
     query: str
+    backend: str
+    rank: int
+    score: float | None
+
+class _FusedSearchHitRecord(_SearchHitRecord, Protocol):
+    provenance: list[_FusionProvenanceRecord]
+    raw_fused_score: float
+    domain_weight: float
+    fused_score: float
+    fused_rank: int
+
+class _SearchOutcomeRecord(_Record, Protocol):
+    query: str
+    status: str
     hits: list[_SearchHitRecord]
-    @overload
-    def __getitem__(self, key: Literal["input_index"]) -> int: ...
-    @overload
-    def __getitem__(self, key: Literal["query"]) -> str: ...
-    @overload
-    def __getitem__(self, key: Literal["hits"]) -> list[_SearchHitRecord]: ...
 
-class _SearchFailureRecord(_FailureRecord, Protocol):
-    input_index: int
-    query: str
-    @overload
-    def __getitem__(self, key: Literal["input_index"]) -> int: ...
-    @overload
-    def __getitem__(self, key: Literal["query"]) -> str: ...
-
-class _SearchReportRecord(Protocol):
-    results: list[_SearchResultRecord]
-    failures: list[_SearchFailureRecord]
-    input_count: int
-
-class _ContentMetadataRecord(Protocol):
-    start_line: int
-    end_line: int
-    total_lines: int
-    next_offset: int | None
-    truncated_by_max_chars: bool
-    truncated_mid_line: bool
-    partial_line_remaining_chars: int
-
-class _ContentRowRecord(Protocol):
+class _DocumentRecord(_Record, Protocol):
     source: str
     text: str
     title: str
     date: str | None
-    metadata: _ContentMetadataRecord
-    @overload
-    def __getitem__(self, key: Literal["source", "text", "title"]) -> str: ...
-    @overload
-    def __getitem__(self, key: Literal["date"]) -> str | None: ...
-    @overload
-    def __getitem__(self, key: Literal["metadata"]) -> _ContentMetadataRecord: ...
+    metadata: dict[str, Any]
 
-class _ContentBatchRowRecord(_ContentRowRecord, Protocol):
-    input_index: int
-    @overload
-    def __getitem__(self, key: Literal["input_index"]) -> int: ...
-    @overload
-    def __getitem__(self, key: Literal["source", "text", "title"]) -> str: ...
-    @overload
-    def __getitem__(self, key: Literal["date"]) -> str | None: ...
-    @overload
-    def __getitem__(self, key: Literal["metadata"]) -> _ContentMetadataRecord: ...
+class _ContentCursorRecord(_Record, Protocol):
+    start_line: int
+    start_character: int
+
+class _ContentWindowRecord(_Record, Protocol):
+    start_line: int | None
+    start_character: int
+    end_line: int | None
+    end_character: int
+    total_lines: int
+    next: _ContentCursorRecord | None
+    truncated_by_max_chars: bool
+
+class _ContentSliceRecord(_DocumentRecord, Protocol):
+    window: _ContentWindowRecord
 
 class _ContentFailureRecord(_FailureRecord, Protocol):
     input_index: int
     source: str
 
-class _ContentReportRecord(Protocol):
-    results: list[_ContentBatchRowRecord]
-    failures: list[_ContentFailureRecord]
-    input_count: int
+class _ContentMatchSpanRecord(_Record, Protocol):
+    start_character: int
+    end_character: int
 
-class _ContentMatchRecord(Protocol):
-    source: str
-    title: str
+class _ContentMatchRecord(_Record, Protocol):
     line: int
     text: str
     before: list[str]
     after: list[str]
-    input_index: int
+    spans: list[_ContentMatchSpanRecord]
 
-class _GrepSourceResultRecord(Protocol):
-    input_index: int
+class _GrepOutcomeRecord(_Record, Protocol):
     source: str
-    title: str
-    match_count: int
-    scan_complete: bool
-
-class _GrepReportRecord(Protocol):
-    pattern: str
-    mode: Literal["regex", "literal"]
-    case_sensitive: bool
-    context: int
-    max_matches_per_source: int
+    title: str | None
+    status: str
     matches: list[_ContentMatchRecord]
-    source_results: list[_GrepSourceResultRecord]
-    failures: list[_ContentFailureRecord]
-    input_count: int
+    next_start_line: int | None
 
-class _PassageCoordinatesRecord(Protocol):
+class _PassageCoordinatesRecord(_Record, Protocol):
     start_line: int
     start_character: int
     end_line: int
     end_character: int
 
-class _PassageRecord(Protocol):
+class _PassageRecord(_Record, Protocol):
     source: str
     title: str
     date: str | None
@@ -177,7 +123,7 @@ class _PassageRecord(Protocol):
     score: float
     ranker: str
 
-class _PassageReportRecord(Protocol):
+class _PassageReportRecord(_Record, Protocol):
     query: str
     passages: list[_PassageRecord]
     failures: list[_ContentFailureRecord]
@@ -185,71 +131,56 @@ class _PassageReportRecord(Protocol):
     input_count: int
     unique_source_count: int
 
-class _ExtractionResultRecord(Protocol):
-    input_index: int
-    data: dict[str, Any]
-    attempts: int
-
-class _ExtractionFailureRecord(_FailureRecord, Protocol):
-    input_index: int
-
-class _ExtractionReportRecord(Protocol):
-    results: list[_ExtractionResultRecord]
-    failures: list[_ExtractionFailureRecord]
-    input_count: int
-
-class _ContractsRecord(Protocol):
+class _ContractsRecord(_Record, Protocol):
     sandbox: int
     capability: int
 
-class _SearchCapabilitiesRecord(Protocol):
+class _SearchCapabilitiesRecord(_Record, Protocol):
     backend: str
-    supports_domains: bool
+    supports_include_domains: bool
     max_depth: int | None
     limits: Mapping[str, int]
 
-class _ContentCapabilitiesRecord(Protocol):
+class _ContentCapabilitiesRecord(_Record, Protocol):
     url_admission: Literal["searched_only", "searched_or_public_web"]
     limits: Mapping[str, int]
 
-class _LLMCapabilitiesRecord(Protocol):
+class _LLMCapabilitiesRecord(_Record, Protocol):
     available: bool
     limits: Mapping[str, int]
 
-class _MechanismsRecord(Protocol):
+class _MechanismsRecord(_Record, Protocol):
     batching: bool
     persistence: bool
     llm_subroutine: bool
     context_decoupling: bool
 
-class _SessionCapabilitiesRecord(Protocol):
+class _SessionCapabilitiesRecord(_Record, Protocol):
     contracts: _ContractsRecord
     search: _SearchCapabilitiesRecord
     content: _ContentCapabilitiesRecord
     llm: _LLMCapabilitiesRecord
     mechanisms: _MechanismsRecord
 
-class _SessionUsageRecord(Protocol):
+class _BudgetRemainingRecord(_Record, Protocol):
+    max_exec_calls: int | None
+    max_search_queries: int | None
+    max_content_fetches: int | None
+    max_pipeline_llm_calls: int | None
+    max_pipeline_output_tokens: int | None
+    max_sandbox_seconds: float | None
+    max_workspace_bytes: int | None
+
+class _SessionUsageRecord(_Record, Protocol):
     exec_calls: int
     search_calls: int
     content_fetches: int
-    content_backend_fetches: int
     llm_calls: int
-    pipeline_model_tokens: int
     pipeline_output_tokens_reserved: int
     sandbox_seconds: float
     workspace_bytes: int
-    documents_seen: int
-    budget_consumed: Mapping[str, int | float]
-    budget_remaining: Mapping[str, int | float | None]
-    provider: Mapping[str, int | float]
+    budget_remaining: _BudgetRemainingRecord
     terminal_reason: str | None
-
-class _ReadWindow(TypedDict, total=False):
-    source: Required[str]
-    offset: int
-    limit: int
-    max_chars: int
 
 class _SearchResource(Protocol):
     def __call__(
@@ -258,20 +189,20 @@ class _SearchResource(Protocol):
         *,
         limit: int = ...,
         offset: int = ...,
-        domains: list[str] | None = ...,
+        include_domains: list[str] | None = ...,
     ) -> list[_SearchHitRecord]: ...
     def many(
         self,
         queries: list[str],
         *,
-        limit_per_query: int = ...,
+        limit: int = ...,
         offset: int = ...,
         concurrency: int = ...,
-        domains: list[str] | None = ...,
-    ) -> _SearchReportRecord: ...
+        include_domains: list[str] | None = ...,
+    ) -> list[_SearchOutcomeRecord]: ...
     def fuse_rrf(
         self,
-        report: _SearchReportRecord,
+        report: list[_SearchOutcomeRecord],
         *,
         weights: list[float] | None = ...,
         k: int = ...,
@@ -279,36 +210,37 @@ class _SearchResource(Protocol):
         exclude_domains: list[str] | None = ...,
         domain_weights: dict[str, float] | None = ...,
         max_per_domain: int | None = ...,
-    ) -> list[_SearchHitRecord]: ...
+    ) -> list[_FusedSearchHitRecord]: ...
 
 class _ContentResource(Protocol):
-    def get_many(self, sources: list[str]) -> _ContentReportRecord: ...
+    def fetch(self, source: str) -> _DocumentRecord: ...
     def read(
         self,
         source: str,
         *,
-        offset: int = ...,
-        limit: int = ...,
+        start_line: int = ...,
+        start_character: int = ...,
+        line_count: int = ...,
         max_chars: int = ...,
-    ) -> _ContentRowRecord: ...
-    def read_many(self, windows: list[_ReadWindow]) -> _ContentReportRecord: ...
+    ) -> _ContentSliceRecord: ...
     def grep(
         self,
-        sources: list[str],
         pattern: str,
         *,
+        sources: list[str],
         mode: Literal["regex", "literal"] = ...,
         case_sensitive: bool = ...,
-        context: int = ...,
-        max_matches_per_source: int = ...,
-    ) -> _GrepReportRecord: ...
+        start_line: int = ...,
+        context_lines: int = ...,
+        limit_per_source: int = ...,
+    ) -> list[_GrepOutcomeRecord]: ...
     def passages(
         self,
         query: str,
-        sources: list[str],
         *,
+        sources: list[str],
         limit: int = ...,
-        max_per_source: int = ...,
+        limit_per_source: int = ...,
     ) -> _PassageReportRecord: ...
 
 class _LLMResource(Protocol):
@@ -320,25 +252,15 @@ class _LLMResource(Protocol):
         temperature: float = ...,
         max_tokens: int | None = ...,
     ) -> str: ...
-    def complete_many(
+    def extract(
         self,
-        prompts: list[str],
-        *,
-        system: str | None = ...,
-        temperature: float = ...,
-        max_tokens: int | None = ...,
-        concurrency: int = ...,
-    ) -> list[str]: ...
-    def extract_many(
-        self,
-        items: list[Any],
+        item: Any,
         *,
         instruction: str,
         schema: dict[str, Any],
-        concurrency: int = ...,
         max_tokens: int | None = ...,
         repair_attempts: int = ...,
-    ) -> _ExtractionReportRecord: ...
+    ) -> dict[str, Any]: ...
 
 class _SessionResource(Protocol):
     def usage(self) -> _SessionUsageRecord: ...
@@ -347,7 +269,7 @@ class _SessionResource(Protocol):
 class _StateResource(Protocol):
     def write_jsonl(self, relative_path: str, rows: list[Any]) -> None: ...
     def append_jsonl(self, relative_path: str, rows: list[Any]) -> None: ...
-    def merge_jsonl(
+    def upsert_jsonl(
         self,
         relative_path: str,
         rows: list[Any],
@@ -360,7 +282,7 @@ class _StateResource(Protocol):
     def read_json(self, relative_path: str) -> Any: ...
 
 class _OutputResource(Protocol):
-    def submit(self, output: Any, *, citations: list[str] | None = ...) -> None: ...
+    def submit(self, value: Any, *, citations: list[str] | None = ...) -> None: ...
 
 class _SDK(Protocol):
     search: _SearchResource
@@ -369,6 +291,7 @@ class _SDK(Protocol):
     llm: _LLMResource
     state: _StateResource
     output: _OutputResource
+    def close(self) -> None: ...
 
 sdk: _SDK
 __version__: str

@@ -115,7 +115,7 @@ Download `configs/docker.yaml`, then set its two `storage` paths to `$OPENSAC_RU
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.0/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.1/configs/docker.yaml
 ```
 
 Start the published image:
@@ -211,14 +211,16 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | Namespace | Main operations | Role |
 | --- | --- | --- |
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
-| `sdk.content` | `passages`, `read`, `read_many`, `grep` | Rank, locate, and inspect evidence without hiding partial failures |
-| `sdk.llm` | `extract_many`, `complete`, `complete_many` | Optional brokered model calls and schema-checked extraction |
+| `sdk.content` | `fetch`, `read`, `grep`, `passages` | Fetch, locate, and inspect evidence with explicit cursors |
+| `sdk.llm` | `extract`, `complete` | Optional single-item model calls and schema-checked extraction |
 | `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
 | `sdk.session` | `usage`, `capabilities` | Inspect usage, budgets, active contracts, limits, and mechanisms |
 | `sdk.output` | `submit` | Return structured output with optional URL/source labels |
 
-Batch operations preserve input alignment and expose structured per-item failures. Each search hit has
-one `source`: a canonical web URL or local document ID. Empty search results are successful results.
+`search.many` and `content.grep` return input-aligned outcomes: success is
+`status == "success"`, while any other status is a display-only failure string. Independent content
+and LLM work uses explicit Python loops and per-call `BrokerError`. Each search hit has one
+`source`: a canonical web URL or local document ID. Empty search results are successful results.
 Content accepts URL/local-ID strings rather than result records. Web deployments can fetch bounded
 public HTTP(S) URLs directly; local IDs remain search-admitted. Output citations are optional
 source strings and are not evidence validation. Core signatures and intentional advanced operations
@@ -289,7 +291,7 @@ service also exposes the live runtime dashboard at `http://127.0.0.1:8000/dashbo
 
 | Goal | Document |
 | --- | --- |
-| Upgrade to v0.8.0 | [v0.8.0 release notes](docs/opensac-0.8.0.md) |
+| Upgrade to v0.8.1 | [v0.8.1 release notes](docs/opensac-0.8.1.md) |
 | Choose a YAML configuration profile | [Configuration profiles](docs/deployment.md#configuration-profiles) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Connect Codex, Claude Code, CLI, or a custom agent | [Agent integrations](docs/agent-integrations.md) |

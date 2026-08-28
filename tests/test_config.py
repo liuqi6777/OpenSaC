@@ -40,7 +40,7 @@ def test_local_template_defines_a_valid_complete_configuration() -> None:
     assert settings.backends.rerank.provider == "lexical"
     assert settings.backends.llm.provider == "none"
     assert settings.capabilities.search.max_top_k == 600
-    assert settings.capabilities.extraction.max_items == 256
+    assert settings.capabilities.extraction.max_repair_attempts == 1
     assert settings.provider_services.search.concurrency is None
     assert settings.provider_services.llm.concurrency is None
     assert settings.sandbox_docker_host_platform in {"darwin", "linux"}
@@ -366,7 +366,7 @@ capabilities:
   content:
     url_admission: searched_only
   extraction:
-    max_items: 11
+    max_repair_attempts: 2
 """,
         encoding="utf-8",
     )
@@ -375,7 +375,7 @@ capabilities:
 
     assert settings.capabilities.search.max_queries_per_request == 7
     assert settings.capabilities.content.url_admission == "searched_only"
-    assert settings.capabilities.extraction.max_items == 11
+    assert settings.capabilities.extraction.max_repair_attempts == 2
 
 
 def test_dotenv_rejects_non_secret_settings() -> None:

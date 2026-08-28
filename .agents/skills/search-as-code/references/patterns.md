@@ -34,11 +34,11 @@ queries = list(
 )
 
 try:
-    report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
+    outcomes = sdk.search.many(queries, limit=10, concurrency=4)
 except BrokerError as error:
     print(f"ERROR: search code={error.code} retryable={error.retryable}")
 else:
-    candidates = sdk.search.fuse_rrf(report, k=60)[:8]
+    candidates = sdk.search.fuse_rrf(outcomes, k=60)[:8]
     for item in candidates:
         snippet = " ".join((item.snippet or "").split())[:240]
         print(
@@ -46,7 +46,7 @@ else:
             f"domain={item.domain or '-'} title={item.title or '(untitled)'} "
             f"snippet={snippet!r}"
         )
-    failed = len(report.failures)
+    failed = sum(outcome.status != "success" for outcome in outcomes)
     if candidates:
         print(
             f"NEXT: inspect {len(candidates)} candidates and choose sources/checks; "
@@ -73,13 +73,13 @@ queries = [
 ]
 
 try:
-    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
-    fused = sdk.search.fuse_rrf(search_report, k=60, limit=12)
+    search_outcomes = sdk.search.many(queries, limit=10, concurrency=4)
+    fused = sdk.search.fuse_rrf(search_outcomes, k=60, limit=12)
     report = sdk.content.passages(
         goal,
-        [item.source for item in fused],
+        sources=[item.source for item in fused],
         limit=8,
-        max_per_source=2,
+        limit_per_source=2,
     )
     windows = []
     seen = set()
@@ -91,36 +91,41 @@ try:
         windows.append(
             {
                 "source": passage.source,
-                "offset": max(passage.coordinates["start_line"] - 8, 1),
-                "limit": 50,
+                "start_line": max(passage.coordinates["start_line"] - 8, 1),
+                "line_count": 50,
                 "max_chars": 16_000,
                 "coordinates": dict(passage.coordinates),
             }
         )
         if len(windows) >= 6:
             break
-    read_report = sdk.content.read_many(
-        [
-            {key: row[key] for key in ("source", "offset", "limit", "max_chars")}
-            for row in windows
-        ]
-    ) if windows else None
+    read_results = []
+    read_failures = []
+    for window in windows:
+        try:
+            item = sdk.content.read(
+                window["source"],
+                start_line=window["start_line"],
+                line_count=window["line_count"],
+                max_chars=window["max_chars"],
+            )
+        except BrokerError as error:
+            read_failures.append(error.code)
+        else:
+            read_results.append((window, item))
 except BrokerError as error:
     print(f"ERROR: evidence retrieval code={error.code} retryable={error.retryable}")
 else:
-    window_by_index = {index: row for index, row in enumerate(windows)}
-    for item in (read_report.results if read_report else [])[:4]:
-        window = window_by_index[item.input_index]
+    for window, item in read_results[:4]:
         excerpt = " ".join(item.text.split())[:600]
         print(
             f"EVIDENCE source={item.source!r} title={item.title!r} "
             f"coordinates={window['coordinates']!r} "
             f"text={excerpt!r}"
         )
-    failures = [item.code for item in search_report.failures]
+    failures = [outcome.status for outcome in search_outcomes if outcome.status != "success"]
     failures.extend(item.code for item in report.failures)
-    if read_report:
-        failures.extend(item.code for item in read_report.failures)
+    failures.extend(read_failures)
     print(
         "NEXT: judge source quality and entailment; refine only the unresolved constraints; "
         f"failures={failures[:4]}"
@@ -150,22 +155,29 @@ evidence = {}
 problems = []
 for name, pattern in checks.items():
     try:
-        report = sdk.content.grep(sources, pattern, context=2)
+        grep_outcomes = sdk.content.grep(pattern, sources=sources, context_lines=2)
     except BrokerError as error:
         problems.append(f"{name}:grep:{error.code}")
         continue
-    problems.extend(f"{name}:fetch:{item.code}" for item in report.failures)
-
+    problems.extend(
+        f"{name}:fetch:{outcome.status}" for outcome in grep_outcomes if outcome.status != "success"
+    )
     seen = set()
-    for match in report.matches:
-        if match.source in seen:
+    for outcome in grep_outcomes:
+        if outcome.status != "success":
             continue
         if len(seen) >= 4:
             break
-        seen.add(match.source)
+        if not outcome.matches or outcome.source in seen:
+            continue
+        seen.add(outcome.source)
+        match = outcome.matches[0]
         try:
             passage = sdk.content.read(
-                match.source, offset=max(match.line - 10, 1), limit=40, max_chars=16_000
+                outcome.source,
+                start_line=max(match.line - 10, 1),
+                line_count=40,
+                max_chars=16_000,
             )
         except BrokerError as error:
             problems.append(f"{name}:read:{error.code}")

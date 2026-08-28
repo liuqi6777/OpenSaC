@@ -30,7 +30,7 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
     OperationSpec("search", "__call__", SurfaceTier.CORE, "search.query", model_core=True),
     OperationSpec("search", "many", SurfaceTier.CORE, "search.query_many", model_core=True),
     OperationSpec("search", "fuse_rrf", SurfaceTier.HELPER, model_core=True),
-    OperationSpec("content", "get_many", SurfaceTier.ADVANCED, "content.get_many"),
+    OperationSpec("content", "fetch", SurfaceTier.ADVANCED, "content.fetch"),
     OperationSpec(
         "content",
         "passages",
@@ -39,13 +39,6 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
         model_core=True,
     ),
     OperationSpec("content", "read", SurfaceTier.CORE, "content.read", model_core=True),
-    OperationSpec(
-        "content",
-        "read_many",
-        SurfaceTier.CORE,
-        "content.read_many",
-        model_core=True,
-    ),
     OperationSpec(
         "content",
         "grep",
@@ -63,7 +56,7 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
     ),
     OperationSpec("state", "write_jsonl", SurfaceTier.HELPER),
     OperationSpec("state", "append_jsonl", SurfaceTier.HELPER),
-    OperationSpec("state", "merge_jsonl", SurfaceTier.HELPER),
+    OperationSpec("state", "upsert_jsonl", SurfaceTier.HELPER),
     OperationSpec("state", "exists", SurfaceTier.HELPER),
     OperationSpec("state", "list", SurfaceTier.HELPER),
     OperationSpec("state", "read_jsonl", SurfaceTier.HELPER),
@@ -73,12 +66,11 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
     OperationSpec("output", "submit", SurfaceTier.CORE, model_core=True),
     OperationSpec("output", "from_environment", SurfaceTier.INTERNAL),
     OperationSpec("llm", "complete", SurfaceTier.ADVANCED, "llm.complete"),
-    OperationSpec("llm", "complete_many", SurfaceTier.ADVANCED, "llm.complete_many"),
     OperationSpec(
         "llm",
-        "extract_many",
+        "extract",
         SurfaceTier.CORE,
-        "llm.extract_many",
+        "llm.extract",
         model_core=True,
     ),
 )

@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from ._record import wrap
+from ._version import CAPABILITY_CONTRACT
 
 
 class BrokerError(RuntimeError):
@@ -88,6 +89,16 @@ class UnixSocketTransport:
                 code="broker_protocol_error",
                 retryable=False,
             )
+        reported_contract = payload.get("capability_contract")
+        if isinstance(reported_contract, bool) or reported_contract != CAPABILITY_CONTRACT:
+            reported = "missing" if reported_contract is None else repr(reported_contract)
+            raise BrokerError(
+                f"Capability contract mismatch: SDK requires {CAPABILITY_CONTRACT}, "
+                f"broker reported {reported}. Deploy matching OpenSAC SDK, broker, "
+                "and sandbox versions.",
+                code="capability_contract_mismatch",
+                retryable=False,
+            )
         if not payload["ok"]:
             error = payload.get("error")
             if isinstance(error, dict):
@@ -132,7 +143,10 @@ class UnixSocketTransport:
         )
         if not session_token:
             raise RuntimeError("OpenSAC broker environment is not configured")
-        headers = {"Authorization": f"Bearer {session_token}"}
+        headers = {
+            "Authorization": f"Bearer {session_token}",
+            "X-OpenSAC-Capability-Contract": str(CAPABILITY_CONTRACT),
+        }
         execution_id = os.environ.get("OPENSAC_EXECUTION_ID", "").strip()
         if execution_id:
             headers["X-OpenSAC-Execution-ID"] = execution_id

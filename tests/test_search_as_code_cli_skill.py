@@ -131,7 +131,7 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
     )
     assert composed.index("sdk.search.many(") < composed.index("sdk.search.fuse_rrf(")
     assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.passages(")
-    assert composed.index("sdk.content.passages(") < composed.index("sdk.content.read_many(")
+    assert composed.index("sdk.content.passages(") < composed.index("sdk.content.read(")
 
     verify = _fenced_block(
         PATTERNS_PATH,

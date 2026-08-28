@@ -6,29 +6,29 @@ queries = [
     "approximate nearest neighbor search",
 ]
 
-search_report = sdk.search.many(queries, limit_per_query=5, concurrency=3)
+search_outcomes = sdk.search.many(queries, limit=5, concurrency=3)
 
-if len(search_report.failures) == search_report.input_count:
-    raise RuntimeError(f"Every local search failed: {search_report.failures[0]}")
-for failure in search_report.failures:
-    print(f"warning: '{failure.query}' failed: {failure}")
+failures = [outcome for outcome in search_outcomes if outcome.status != "success"]
+if len(failures) == len(search_outcomes):
+    raise RuntimeError(f"Every local search failed: {failures[0].status}")
+for failure in failures:
+    print(f"warning: '{failure.query}' failed: {failure.status}")
 
-# A local source is its document ID. Keep the highest-scoring hit per source.
-best: dict[str, object] = {}
-for batch in search_report.results:
-    for hit in batch.hits:
-        current = best.get(hit.source)
-        if current is None or (hit.score or 0) > (current.score or 0):
-            best[hit.source] = hit
+# A local source is its document ID. Sorting low-to-high makes each later
+# duplicate replace its lower-scoring predecessor in the comprehension.
+all_hits = [
+    hit for outcome in search_outcomes if outcome.status == "success" for hit in outcome.hits
+]
+best = {hit.source: hit for hit in sorted(all_hits, key=lambda candidate: candidate.score or 0)}
 
 ranked = sorted(best.values(), key=lambda hit: hit.score or 0, reverse=True)[:5]
 print(f"{len(ranked)} unique documents from {len(queries)} queries")
 
 report = sdk.content.passages(
     "vector index types and their tradeoffs",
-    [hit.source for hit in ranked],
+    sources=[hit.source for hit in ranked],
     limit=15,
-    max_per_source=3,
+    limit_per_source=3,
 )
 
 sdk.state.write_jsonl(

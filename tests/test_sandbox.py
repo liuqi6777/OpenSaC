@@ -121,13 +121,10 @@ def test_docker_sandbox_accepts_an_explicit_docker_host_platform(tmp_path) -> No
         docker_host_platform="darwin",
     )
 
-    command = sandbox.command(
-        SandboxRequest("pass", tmp_path / "workspace", "secret")
-    )
+    command = sandbox.command(SandboxRequest("pass", tmp_path / "workspace", "secret"))
 
     assert all(
-        argument in command
-        for argument in broker_socket_mount_args(socket, platform="darwin")
+        argument in command for argument in broker_socket_mount_args(socket, platform="darwin")
     )
 
 
@@ -138,7 +135,7 @@ async def test_sandbox_image_contract_is_inspected_once(
 
     async def create_process(*command: str, **_: object) -> _CompletedProcess:
         calls.append(command)
-        return _CompletedProcess(stdout=b"13\n")
+        return _CompletedProcess(stdout=b"14\n")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     verifier = DockerImageContractVerifier("opensac-test")
@@ -159,7 +156,7 @@ async def test_missing_sandbox_image_is_pulled_before_contract_check(
         [
             _CompletedProcess(returncode=1, stderr=b"No such image: published:0.6.0\n"),
             _CompletedProcess(stdout=b"pulled\n"),
-            _CompletedProcess(stdout=b"13\n"),
+            _CompletedProcess(stdout=b"14\n"),
         ]
     )
 
@@ -183,7 +180,7 @@ def test_execution_warnings_have_an_independent_output_budget(tmp_path) -> None:
     submitted = {"output": {"answer": "x" * 100}, "citations": []}
     warning = {
         "code": "external_result_failure",
-        "method": "content.read_many",
+        "method": "content.grep",
         "success_count": 1,
         "failure_count": 1,
         "failures": [{"code": "provider_timeout", "message": "timed out"}],
@@ -255,7 +252,7 @@ async def test_cold_sandbox_rejects_stale_image_before_workspace_setup(
     result = await sandbox.execute(SandboxRequest("pass", workspace, "secret"))
 
     assert result.exit_code == 125
-    assert "has contract '2'; expected 13" in (result.launch_error or "")
+    assert "has contract '2'; expected 14" in (result.launch_error or "")
     assert not workspace.exists()
     assert len(calls) == 1
     assert calls[0][1:3] == ("image", "inspect")
@@ -268,9 +265,7 @@ def test_startup_marker_is_converted_to_a_bounded_duration(tmp_path) -> None:
         marker, wall_started=101.0, duration_seconds=2.0
     ) == pytest.approx(0.25)
     # A corrupt or stale marker must not invent time outside this execution.
-    assert DockerSandbox._startup_seconds(
-        marker, wall_started=99.0, duration_seconds=1.0
-    ) == 1.0
+    assert DockerSandbox._startup_seconds(marker, wall_started=99.0, duration_seconds=1.0) == 1.0
 
 
 def test_docker_refusal_is_reported_as_a_launch_error() -> None:
@@ -293,7 +288,7 @@ def test_program_exiting_125_is_not_mistaken_for_a_docker_refusal() -> None:
     # 125 is only special when docker itself prints it; a program may exit
     # with any code, and its traceback belongs in stderr where the model can
     # act on it.
-    assert DockerSandbox._launch_error(125, 'Traceback...\nSystemExit: 125\n') is None
+    assert DockerSandbox._launch_error(125, "Traceback...\nSystemExit: 125\n") is None
     assert DockerSandbox._launch_error(125, "") is None
     assert DockerSandbox._launch_error(1, "docker: irrelevant\n") is None
 
@@ -344,9 +339,7 @@ async def test_cold_sandbox_propagates_output_limit_termination(
         )
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(
-        "opensac.sandbox.docker.read_bounded_process_output", capture_output
-    )
+    monkeypatch.setattr("opensac.sandbox.docker.read_bounded_process_output", capture_output)
     socket = tmp_path / "broker.sock"
     socket.touch()
     sandbox = DockerSandbox(
@@ -356,9 +349,7 @@ async def test_cold_sandbox_propagates_output_limit_termination(
     )
     sandbox._image_contract._verified = True
 
-    result = await sandbox.execute(
-        SandboxRequest("pass", tmp_path / "workspace", "secret")
-    )
+    result = await sandbox.execute(SandboxRequest("pass", tmp_path / "workspace", "secret"))
 
     assert result.output_limit_exceeded is True
     assert result.timed_out is False
@@ -468,12 +459,7 @@ async def test_real_subprocess_output_is_bounded_and_terminated() -> None:
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-c",
-        (
-            "import os\n"
-            "while True:\n"
-            " os.write(1, b'x' * 65536)\n"
-            " os.write(2, b'y' * 65536)\n"
-        ),
+        ("import os\nwhile True:\n os.write(1, b'x' * 65536)\n os.write(2, b'y' * 65536)\n"),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

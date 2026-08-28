@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from opensac_sdk._resources import LLMResource
 from opensac_sdk.transport import BrokerError, UnixSocketTransport
@@ -72,6 +73,44 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
         assert result[0]["snippet"] == "needle"
         assert result[0]["source"] == "doc-1"
         assert "docid" not in result[0]
+    finally:
+        await runtime.stop()
+
+
+async def test_broker_rejects_missing_or_mismatched_capability_contract(tmp_path) -> None:
+    service = _broker_service({"local": SocketBackend()})
+    service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            workspace=str(tmp_path / "workspace"),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+
+    def raw_call(reported_contract: str | None) -> httpx.Response:
+        headers = {"Authorization": "Bearer secret"}
+        if reported_contract is not None:
+            headers["X-OpenSAC-Capability-Contract"] = reported_contract
+        transport = httpx.HTTPTransport(uds=str(runtime.socket_path))
+        with httpx.Client(transport=transport, base_url="http://opensac") as client:
+            return client.post(
+                "/v1/call",
+                json={"method": "session.usage", "params": {}},
+                headers=headers,
+            )
+
+    try:
+        for reported_contract in (None, "12"):
+            response = await asyncio.to_thread(raw_call, reported_contract)
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["capability_contract"] == 13
+            assert payload["ok"] is False
+            assert payload["error"]["code"] == "capability_contract_mismatch"
+            assert "broker requires 13" in payload["error"]["message"]
     finally:
         await runtime.stop()
 
@@ -179,7 +218,7 @@ class FailingModelClient:
         return None
 
 
-async def test_extraction_provider_failure_stays_aligned_and_sanitized(tmp_path) -> None:
+async def test_extraction_provider_failure_is_typed_and_sanitized(tmp_path) -> None:
     service = _broker_service(
         {"local": SocketBackend()},
         llm_backend=OpenAICompatibleBackend(model="test-model", client=FailingModelClient()),
@@ -196,22 +235,21 @@ async def test_extraction_provider_failure_stays_aligned_and_sanitized(tmp_path)
     await runtime.start()
     try:
         resource = LLMResource(UnixSocketTransport(str(runtime.socket_path), "secret"))
-        report = await asyncio.to_thread(
-            resource.extract_many,
-            [{"value": 1}],
-            instruction="Copy the value.",
-            schema={
-                "type": "object",
-                "properties": {"value": {"type": "integer"}},
-                "required": ["value"],
-                "additionalProperties": False,
-            },
-        )
-        assert report.results == []
-        assert len(report.failures) == 1
-        assert report.failures[0].code == "provider_error"
-        assert report.failures[0].retryable is True
-        assert "provider response" not in report.failures[0].message
+        with pytest.raises(BrokerError) as failed:
+            await asyncio.to_thread(
+                resource.extract,
+                {"value": 1},
+                instruction="Copy the value.",
+                schema={
+                    "type": "object",
+                    "properties": {"value": {"type": "integer"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            )
+        assert failed.value.code == "provider_invalid_response"
+        assert failed.value.retryable is False
+        assert "provider response" not in str(failed.value)
     finally:
         await runtime.stop()
 
@@ -239,7 +277,10 @@ async def test_llm_resource_round_trips_over_real_unix_socket(tmp_path) -> None:
     try:
         resource = LLMResource(UnixSocketTransport(str(runtime.socket_path), "secret"))
         assert await asyncio.to_thread(resource.complete, "plan") == "PLAN"
-        assert await asyncio.to_thread(resource.complete_many, ["a", "b"]) == ["A", "B"]
+        assert [await asyncio.to_thread(resource.complete, prompt) for prompt in ["a", "b"]] == [
+            "A",
+            "B",
+        ]
         assert service.sessions["secret"].policy.usage.llm_calls == 3
     finally:
         await runtime.stop()

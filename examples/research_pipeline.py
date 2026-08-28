@@ -7,9 +7,9 @@ queries = [
 ]
 
 official_domains = {"postgresql.org", "github.com", "elastic.co", "milvus.io"}
-search_report = sdk.search.many(queries, limit_per_query=10, concurrency=3)
+search_outcomes = sdk.search.many(queries, limit=10, concurrency=3)
 fusion = sdk.search.fuse_rrf(
-    search_report,
+    search_outcomes,
     k=60,
     limit=24,
     domain_weights={domain: 1.5 for domain in official_domains},
@@ -22,9 +22,9 @@ unique = {
 
 report = sdk.content.passages(
     "vector index types, filtering, consistency and limitations",
-    list(unique),
+    sources=list(unique),
     limit=20,
-    max_per_source=3,
+    limit_per_source=3,
 )
 
 sdk.state.write_jsonl(

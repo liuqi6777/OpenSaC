@@ -16,8 +16,8 @@ count, capability sequence, stage split, or workspace schema is required.
 - Search with `sdk.search(...)` or `sdk.search.many(...)`; use `sdk.search.fuse_rrf(...)` when
   fusion, domain policy, or diversity helps.
 - Rank and inspect text with `sdk.content.passages(...)`, `sdk.content.grep(...)`, and focused
-  `sdk.content.read(...)` or `sdk.content.read_many(...)` windows.
-- Treat optional `sdk.llm.extract_many(...)` as transformation, not as new evidence. Validate quotes
+  `sdk.content.read(...)` windows. Loop in Python when several independent reads are needed.
+- Treat optional `sdk.llm.extract(...)` as transformation, not as new evidence. Validate quotes
   against its inputs.
 - Read usage or deployment capabilities with `sdk.session` when needed, and use `sdk.state` for
   artifacts. Use `sdk.output.submit(...)` only for a complete runtime result needed through
@@ -35,8 +35,8 @@ limits, or citations. Inspect one method's `__doc__` when necessary.
 - Treat mirrors, repeated catalog records, and RRF agreement as one source family, not independent
   corroboration.
 - Generate optional citation labels from inspected evidence; submission does not validate them.
-- Prefer `search -> passages or grep -> focused read` for long documents. Check `next_offset` or
-  `scan_complete` before treating a bounded scan as exhaustive.
+- Prefer `search -> passages or grep -> focused read` for long documents. Check `window.next` or
+  each successful grep outcome's `next_start_line` before treating a bounded operation as exhaustive.
 - Keep evidence source-scoped. For each requirement, record the inspected source, a bounded exact
   excerpt, whether it directly proves or only supports the claim, and any limitation. Verify a
   relation from one entailing excerpt or an explicit evidence-backed join; never concatenate
@@ -53,7 +53,8 @@ available to that program. Choose new inputs yourself.
 - Split into another `sac_run` only when the control model must make a new semantic choice, the next
   work needs a separate budget, or durable recovery is useful. Do not round-trip through stdout just
   to pass sources, offsets, or other values Python can derive directly.
-- Normalize successful rows, typed failures, source provenance, and bounded evidence immediately
+- Normalize aligned outcome statuses, structured passage failures, source provenance, and bounded evidence
+  immediately
   after each capability. Derive later inputs and coverage from those structured rows rather than
   concatenated document text or printed observations.
 - Persist compact artifacts needed by the next checkpoint. Avoid copying the same raw search hits or
@@ -113,9 +114,10 @@ use answered, partial, inconclusive, or externally blocked as appropriate.
 
 ## Handle failures and state loss
 
-`sac_run` renders bounded item-failure warnings while preserving successes. Inspect typed failures
-when branching and persist them when later completeness depends on them. Empty results without a
-failure are successful reports. Never hard-code zero failures.
+`sac_run` renders bounded structured item-failure warnings while preserving successes.
+`search.many` and `content.grep` outcomes branch only on `status == "success"`; any other status is
+human-readable and must not be parsed. Passage failures remain structured records. Empty hits or
+matches with success status are successful results. Never hard-code zero failures.
 
 An intermediate caught `BrokerError` must leave the stage incomplete with `ERROR:` or `NEXT:`. Let
 host policy own retries; do not retry blindly.

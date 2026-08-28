@@ -334,7 +334,7 @@ async def test_jina_reranking_uses_provider_retries_and_body_free_trace() -> Non
                 "query": "rankable passage",
                 "sources": [hit["source"] for hit in hits],
                 "limit": 2,
-                "max_per_source": 1,
+                "limit_per_source": 1,
             },
             execution_id="jina-retry",
         )

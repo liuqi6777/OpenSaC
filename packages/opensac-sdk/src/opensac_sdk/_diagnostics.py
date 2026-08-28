@@ -14,6 +14,7 @@ _MAX_FAILURES_PER_WARNING = 8
 _MAX_WARNING_BYTES = 4_096
 _MAX_CONTEXT_CHARS = 512
 _MAX_MESSAGE_CHARS = 1_024
+_MAX_FAILURE_STATUS_CHARS = 2_048
 _OUTPUT_LOCK = threading.Lock()
 _FAILURE_FIELDS = (
     "code",
@@ -83,6 +84,47 @@ def failure_detail(
             value = str(value)[:_MAX_CONTEXT_CHARS]
         detail[field] = value
     return detail
+
+
+def _status_text(value: Any, *, fallback: str = "") -> str:
+    printable = "".join(character if character.isprintable() else " " for character in str(value))
+    return " ".join(printable.split()) or fallback
+
+
+def failure_status(failure: Mapping[str, Any]) -> str:
+    """Render one structured failure as a bounded, human-readable status."""
+    detail = failure_detail(failure)
+    code = _status_text(detail.get("code") or "unknown", fallback="unknown")
+    message = _status_text(
+        detail.get("message") or "Operation failed",
+        fallback="Operation failed",
+    )
+    status = f"failure[{code}]: {message}"
+    fields: list[str] = []
+    for name in (
+        "retryable",
+        "attempts",
+        "provider_status",
+        "retry_after_seconds",
+        "provider",
+        "component",
+        "scope",
+    ):
+        value = detail.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        else:
+            rendered = _status_text(value)
+            if not rendered:
+                continue
+        fields.append(f"{name}={rendered}")
+    if fields:
+        status = f"{status}; {'; '.join(fields)}"
+    if len(status) > _MAX_FAILURE_STATUS_CHARS:
+        return f"{status[: _MAX_FAILURE_STATUS_CHARS - 3]}..."
+    return status
 
 
 def record_external_failures(

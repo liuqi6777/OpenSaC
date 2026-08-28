@@ -56,20 +56,21 @@ queries = list(
     )
 )
 try:
-    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=6)
+    search_outcomes = sdk.search.many(queries, limit=10, concurrency=6)
 except BrokerError as error:
     print(f"search failed: code={error.code} retryable={error.retryable} attempts={error.attempts}")
-    search_report = None
+    search_outcomes = []
 
-fusion = sdk.search.fuse_rrf(search_report, k=60) if search_report is not None else []
-search_results = search_report.results if search_report is not None else []
-search_failures = search_report.failures if search_report is not None else []
-for failure in search_failures:
-    print(f"query failed: {failure.query} code={failure.code}")
+fusion = sdk.search.fuse_rrf(search_outcomes, k=60)
+for outcome in search_outcomes:
+    if outcome.status != "success":
+        print(f"query failed: {outcome.query} status={outcome.status}")
 
 leader_sources = []
-for batch in search_results:
-    for hit in batch.hits[:2]:
+for outcome in search_outcomes:
+    if outcome.status != "success":
+        continue
+    for hit in outcome.hits[:2]:
         if hit.source not in leader_sources:
             leader_sources.append(hit.source)
 
@@ -94,7 +95,7 @@ for candidate in fusion:
     row["score"] = max(float(row.get("score") or 0.0), candidate.fused_score)
 
 # Merge first, then prune. Current-stage rank wins; historical score is only a fallback.
-sdk.state.merge_jsonl(pool_path, list(pool.values()))
+sdk.state.upsert_jsonl(pool_path, list(pool.values()))
 merged = [dict(row) for row in sdk.state.read_jsonl(pool_path)]
 ordered = sorted(
     merged,
@@ -162,46 +163,49 @@ for name, spec in constraints.items():
         chunk = available[start : start + CONTENT_BATCH]
         attempted[name].update(chunk)
         try:
-            report = sdk.content.grep(chunk, pattern, context=2)
+            grep_outcomes = sdk.content.grep(pattern, sources=chunk, context_lines=2)
         except BrokerError as error:
             print(f"grep failed: {name} code={error.code} retryable={error.retryable}")
             break
 
-        for failed in report.failures:
-            print(
-                f"fetch failed: {name} input={failed.input_index} "
-                f"code={failed.code} attempts={failed.attempts}"
-            )
+        for outcome in grep_outcomes:
+            if outcome.status != "success":
+                print(f"fetch failed: {name} source={outcome.source} status={outcome.status}")
 
         seen_matches = set()
-        for match in report.matches:
-            if reads_for_constraint >= READ_LIMIT_PER_CONSTRAINT:
-                break
-            if match.source in seen_matches:
+        for outcome in grep_outcomes:
+            if outcome.status != "success":
                 continue
-            seen_matches.add(match.source)
-            reads_for_constraint += 1
-            try:
-                passage = sdk.content.read(
-                    match.source,
-                    offset=max(match.line - 10, 1),
-                    limit=40,
-                    max_chars=16_000,
-                )
-            except BrokerError as error:
-                print(f"read failed: {name} code={error.code}")
-                continue
-            if not passage.text.strip() or not compiled.search(passage.text):
-                continue
+            for match in outcome.matches:
+                if reads_for_constraint >= READ_LIMIT_PER_CONSTRAINT:
+                    break
+                if outcome.source in seen_matches:
+                    continue
+                seen_matches.add(outcome.source)
+                reads_for_constraint += 1
+                try:
+                    passage = sdk.content.read(
+                        outcome.source,
+                        start_line=max(match.line - 10, 1),
+                        line_count=40,
+                        max_chars=16_000,
+                    )
+                except BrokerError as error:
+                    print(f"read failed: {name} code={error.code}")
+                    continue
+                if not passage.text.strip() or not compiled.search(passage.text):
+                    continue
 
-            evidence[name] = {
-                "fingerprint": fingerprints[name],
-                "requirement": spec["requirement"],
-                "source": passage.source,
-                "text": passage.text,
-            }
-            print(f"{name}: verified")
-            break
+                evidence[name] = {
+                    "fingerprint": fingerprints[name],
+                    "requirement": spec["requirement"],
+                    "source": passage.source,
+                    "text": passage.text,
+                }
+                print(f"{name}: verified")
+                break
+            if name in evidence or reads_for_constraint >= READ_LIMIT_PER_CONSTRAINT:
+                break
 
         if name in evidence or reads_for_constraint >= READ_LIMIT_PER_CONSTRAINT:
             break
