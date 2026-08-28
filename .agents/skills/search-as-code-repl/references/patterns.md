@@ -20,11 +20,11 @@ queries = [
 ]
 
 try:
-    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
+    search_outcomes = sdk.search.many(queries, limit=10, concurrency=4)
 except BrokerError as error:
     print(f"ERROR: search code={error.code} retryable={error.retryable}")
 else:
-    candidate_pool = sdk.search.fuse_rrf(search_report, k=60, limit=16)
+    candidate_pool = sdk.search.fuse_rrf(search_outcomes, k=60, limit=16)
     for item in candidate_pool[:8]:
         snippet = " ".join((item.snippet or "").split())[:240]
         print(
@@ -33,8 +33,8 @@ else:
         )
     print(
         "NEXT: choose sources and checks; "
-        "reuse research_goal, candidate_pool, search_report; "
-        f"failed_queries={len(search_report.failures)}"
+        "reuse research_goal, candidate_pool, search_outcomes; "
+        f"failed_queries={sum(row.status != 'success' for row in search_outcomes)}"
     )
 ```
 
@@ -55,13 +55,13 @@ queries = [
 ]
 
 try:
-    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
-    candidate_pool = sdk.search.fuse_rrf(search_report, k=60, limit=12)
+    search_outcomes = sdk.search.many(queries, limit=10, concurrency=4)
+    candidate_pool = sdk.search.fuse_rrf(search_outcomes, k=60, limit=12)
     passage_report = sdk.content.passages(
         research_goal,
-        [item.source for item in candidate_pool],
+        sources=[item.source for item in candidate_pool],
         limit=8,
-        max_per_source=2,
+        limit_per_source=2,
     )
     read_windows = []
     seen_windows = set()
@@ -73,27 +73,33 @@ try:
         read_windows.append(
             {
                 "source": passage.source,
-                "offset": max(passage.coordinates["start_line"] - 8, 1),
-                "limit": 50,
+                "start_line": max(passage.coordinates["start_line"] - 8, 1),
+                "line_count": 50,
                 "max_chars": 16_000,
                 "passage_coordinates": dict(passage.coordinates),
             }
         )
         if len(read_windows) >= 6:
             break
-    read_report = sdk.content.read_many(
-        [
-            {key: row[key] for key in ("source", "offset", "limit", "max_chars")}
-            for row in read_windows
-        ]
-    ) if read_windows else None
+    read_results = []
+    read_failures = []
+    for window in read_windows:
+        try:
+            item = sdk.content.read(
+                window["source"],
+                start_line=window["start_line"],
+                line_count=window["line_count"],
+                max_chars=window["max_chars"],
+            )
+        except BrokerError as error:
+            read_failures.append(error.code)
+        else:
+            read_results.append((window, item))
 except BrokerError as error:
     print(f"ERROR: evidence retrieval code={error.code} retryable={error.retryable}")
 else:
-    window_by_index = {index: row for index, row in enumerate(read_windows)}
     evidence_windows = []
-    for item in (read_report.results if read_report else []):
-        window = window_by_index[item.input_index]
+    for window, item in read_results:
         evidence_windows.append(
             {
                 "source": item.source,
@@ -101,8 +107,8 @@ else:
                 "text": item.text,
                 "coordinates": {
                     "passage": window["passage_coordinates"],
-                    "start_line": item.metadata.get("start_line"),
-                    "end_line": item.metadata.get("end_line"),
+                    "start_line": item.window.start_line,
+                    "end_line": item.window.end_line,
                 },
             }
         )
@@ -112,10 +118,11 @@ else:
             f"EVIDENCE source={row['source']!r} title={row['title']!r} "
             f"coordinates={row['coordinates']!r} text={excerpt!r}"
         )
-    retrieval_failures = [item.code for item in search_report.failures]
+    retrieval_failures = [
+        outcome.status for outcome in search_outcomes if outcome.status != "success"
+    ]
     retrieval_failures.extend(item.code for item in passage_report.failures)
-    if read_report:
-        retrieval_failures.extend(item.code for item in read_report.failures)
+    retrieval_failures.extend(read_failures)
     print(
         "NEXT: judge source quality and entailment; reuse evidence_windows and candidate_pool; "
         f"failures={retrieval_failures[:4]}"
@@ -150,23 +157,28 @@ for name, pattern in checks.items():
     if name in verified_evidence:
         continue
     try:
-        report = sdk.content.grep(selected_sources, pattern, context=2)
+        grep_outcomes = sdk.content.grep(pattern, sources=selected_sources, context_lines=2)
     except BrokerError as error:
         verification_problems.append(f"{name}:grep:{error.code}")
         continue
-    verification_problems.extend(f"{name}:fetch:{item.code}" for item in report.failures)
+    verification_problems.extend(
+        f"{name}:fetch:{outcome.status}" for outcome in grep_outcomes if outcome.status != "success"
+    )
     seen_sources = set()
-    for match in report.matches:
-        if match.source in seen_sources:
+    for outcome in grep_outcomes:
+        if outcome.status != "success":
             continue
         if len(seen_sources) >= 4:
             break
-        seen_sources.add(match.source)
+        if not outcome.matches or outcome.source in seen_sources:
+            continue
+        seen_sources.add(outcome.source)
+        match = outcome.matches[0]
         try:
             passage = sdk.content.read(
-                match.source,
-                offset=max(match.line - 10, 1),
-                limit=40,
+                outcome.source,
+                start_line=max(match.line - 10, 1),
+                line_count=40,
                 max_chars=16_000,
             )
         except BrokerError as error:
@@ -198,9 +210,7 @@ else:
     if structured_output_requested:
         sdk.output.submit(
             result,
-            citations=list(
-                dict.fromkeys(row["source"] for row in verified_evidence.values())
-            ),
+            citations=list(dict.fromkeys(row["source"] for row in verified_evidence.values())),
         )
     else:
         for item in result["evidence"]:

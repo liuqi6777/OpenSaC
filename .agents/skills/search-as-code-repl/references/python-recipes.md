@@ -39,7 +39,7 @@ means “broaden the heuristic” or “the hard constraint is unsupported.”
 ```python
 from opensac_sdk import sdk
 
-search_report = sdk.search.many(queries, limit_per_query=12, concurrency=4)
+search_report = sdk.search.many(queries, limit=12, concurrency=4)
 candidates = sdk.search.fuse_rrf(
     search_report,
     k=60,
@@ -79,10 +79,9 @@ independent sources corroborate a claim.
 
 ## Validate structured extraction
 
-`extract_many` is a semantic map over aligned inputs. It cannot call search or content tools, and
-it must never create sources. Ask it for semantic fields and a quote; let Python validate the quote
-against the original passage. This example handles one requested
-relation; for several constraints, add a constraint key and require set coverage before submit.
+`extract` transforms one supplied item. It cannot call search or content tools, and it must never
+create sources. Loop in Python, keep the input beside each result, and catch `BrokerError` per item.
+Ask for semantic fields and a quote; let Python validate the quote against the original passage.
 
 ```python
 from opensac_sdk import BrokerError, sdk
@@ -104,34 +103,23 @@ schema = {
     "additionalProperties": False,
 }
 
-try:
-    extraction_report = sdk.llm.extract_many(
-        items,
-        instruction=(
-            "Accept only when the passage explicitly states the requested relation. "
-            "Otherwise reject it or propose at most two focused search queries."
-        ),
-        schema=schema,
-        concurrency=4,
-        repair_attempts=1,
-    )
-except BrokerError as error:
-    extraction_error = f"{error.code}:{error.retryable}"
-    extraction_report = None
-else:
-    extraction_error = None
-
 accepted = []
 suggested_queries = []
-if extraction_error is None:
-    results_by_index = {
-        result.input_index: result for result in extraction_report.results
-    }
-    for input_index, (passage, item) in enumerate(zip(usable, items, strict=True)):
-        result = results_by_index.get(input_index)
-        if result is None:
-            continue
-        data = result.data or {}
+extraction_failures = []
+for passage, item in zip(usable, items, strict=True):
+    try:
+        data = sdk.llm.extract(
+            item,
+            instruction=(
+                "Accept only when the passage explicitly states the requested relation. "
+                "Otherwise reject it or propose at most two focused search queries."
+            ),
+            schema=schema,
+            repair_attempts=1,
+        )
+    except BrokerError as error:
+        extraction_failures.append(f"{error.code}:{error.retryable}")
+    else:
         quote = data.get("evidence_quote")
         if data.get("next_action") == "accept" and quote and quote in item["text"]:
             accepted.append(
@@ -176,7 +164,7 @@ if accepted:
     )
 elif followup_queries:
     try:
-        search_report = sdk.search.many(followup_queries, limit_per_query=8, concurrency=4)
+        search_report = sdk.search.many(followup_queries, limit=8, concurrency=4)
     except BrokerError as error:
         print(f"ERROR: follow-up search code={error.code} retryable={error.retryable}")
         print("NEXT: change the source or query strategy")
@@ -186,5 +174,5 @@ elif followup_queries:
             print(f"CANDIDATE source={item.source!r} title={item.title!r}")
         print("NEXT: inspect follow-up candidates and choose sources/checks")
 else:
-    print(f"NEXT: use deterministic checks; extraction_error={extraction_error!r}")
+    print(f"NEXT: use deterministic checks; extraction_failures={extraction_failures[:4]!r}")
 ```

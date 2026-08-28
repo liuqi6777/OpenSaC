@@ -49,7 +49,7 @@ def optional_integer(
     name: str,
     *,
     minimum: int,
-    maximum: int,
+    maximum: int | None = None,
 ) -> int | None:
     if value is None:
         return None

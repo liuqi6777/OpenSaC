@@ -5,18 +5,46 @@ from pathlib import Path
 
 import pytest
 
+import scripts.release as release_module
 from scripts.release import ReleaseValidationError, _dependency_names, validate_release
 
 
 def test_release_metadata_is_consistent() -> None:
     metadata = validate_release()
 
+    assert metadata.capability_contract == 13
+    assert metadata.sandbox_contract == 14
     assert validate_release(f"v{metadata.version}") == metadata
 
 
 def test_release_tag_must_match_package_version() -> None:
     with pytest.raises(ReleaseValidationError, match="does not match package version"):
         validate_release("v9.9.9")
+
+
+def test_release_rejects_sandbox_contract_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def write(relative_path: str, content: str) -> None:
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    write("src/opensac/_version.py", '__version__ = "0.8.1"\n')
+    write(
+        "packages/opensac-sdk/src/opensac_sdk/_version.py",
+        '__version__ = "0.8.1"\nCAPABILITY_CONTRACT = 13\n',
+    )
+    write("src/opensac/models.py", "CAPABILITY_CONTRACT = 13\n")
+    write("src/opensac/sandbox/docker_core.py", "SANDBOX_CONTRACT = 14\n")
+    write("pyproject.toml", "[project]\ndependencies = []\n")
+    write("packages/opensac-sdk/pyproject.toml", "[project]\ndependencies = []\n")
+    write("sandbox/Dockerfile", "ARG OPENSAC_SANDBOX_CONTRACT=13\n")
+    monkeypatch.setattr(release_module, "REPO_ROOT", tmp_path)
+
+    with pytest.raises(ReleaseValidationError, match="runtime contract 14"):
+        release_module.validate_release()
 
 
 def test_release_dependency_names_ignore_versions_and_extras() -> None:
@@ -58,4 +86,4 @@ def test_release_publishes_service_and_sandbox_images() -> None:
     assert "  local_search:" not in compose
     assert "  local-search:" not in compose
     assert configuration_profiles
-    assert all("ghcr.io/liuqi6777/opensac-sandbox:0.8.0" in text for text in configuration_profiles)
+    assert all("ghcr.io/liuqi6777/opensac-sandbox:0.8.1" in text for text in configuration_profiles)

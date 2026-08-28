@@ -13,14 +13,7 @@ from opensac_sdk._record import Record, record
 from opensac_sdk._resources import SearchResource, StateResource
 from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 
-from opensac.backends.document import DocumentContent
 from opensac.backends.search import SearchBatch, SearchHit
-from opensac.broker.capabilities.content import (
-    ContentFailure,
-    ContentGrepReport,
-    ContentGrepSourceResult,
-    ContentMatch,
-)
 from opensac.sandbox.validator import validate_code
 
 ROOT = Path(__file__).parents[1]
@@ -74,7 +67,7 @@ class FakeSearch:
         self.turn = 1
         self.many_calls: list[tuple[str, ...]] = []
 
-    def many(self, queries: list[str], **_kwargs: object) -> Record:
+    def many(self, queries: list[str], **_kwargs: object) -> list[Record]:
         self.many_calls.append(tuple(queries))
         prefix = f"turn_{self.turn}_" if self.vary_by_turn else ""
         if self.hits_per_query == 2:
@@ -106,16 +99,16 @@ class FakeSearch:
                 )
                 for index, query in enumerate(queries)
             ]
-            return record(
-                {
-                    "results": [
-                        {"input_index": index, **batch.model_dump(mode="json")}
-                        for index, batch in enumerate(batches)
-                    ],
-                    "failures": [],
-                    "input_count": len(queries),
-                }
-            )
+            return [
+                record(
+                    {
+                        "query": batch.query,
+                        "status": "success",
+                        "hits": batch.model_dump(mode="json")["hits"],
+                    }
+                )
+                for batch in batches
+            ]
 
         batches = [
             SearchBatch(
@@ -136,18 +129,18 @@ class FakeSearch:
             )
             for query_index, query in enumerate(queries)
         ]
-        return record(
-            {
-                "results": [
-                    {"input_index": index, **batch.model_dump(mode="json")}
-                    for index, batch in enumerate(batches)
-                ],
-                "failures": [],
-                "input_count": len(queries),
-            }
-        )
+        return [
+            record(
+                {
+                    "query": batch.query,
+                    "status": "success",
+                    "hits": batch.model_dump(mode="json")["hits"],
+                }
+            )
+            for batch in batches
+        ]
 
-    def fuse_rrf(self, report: Record, **kwargs: object):
+    def fuse_rrf(self, report: list[Record], **kwargs: object):
         return self._resource.fuse_rrf(report, **kwargs)
 
 
@@ -177,7 +170,13 @@ class FakeContent:
     def grep_widths(self) -> list[int]:
         return [len(sources) for _, sources in self.grep_calls]
 
-    def grep(self, sources: list[str], pattern: str, **_kwargs: object) -> ContentGrepReport:
+    def grep(
+        self,
+        pattern: str,
+        *,
+        sources: list[str],
+        **_kwargs: object,
+    ) -> list[Record]:
         self.grep_calls.append((pattern, tuple(sources)))
         if self.grep_error:
             raise BrokerError(
@@ -188,81 +187,96 @@ class FakeContent:
             )
         is_year = "1998" in pattern
         if self.no_matches or (is_year and (self.missing_year or self.turn < self.year_from_turn)):
-            matches = []
+            matched_index = None
+            match = None
         else:
             source = (
                 sources[0] if self.same_source or not is_year or len(sources) == 1 else sources[1]
             )
             line = 120 if is_year else 12
-            matches = [
-                ContentMatch(
-                    input_index=sources.index(source),
-                    source=source,
-                    title=source,
-                    line=line,
-                    text="1998" if is_year else "target phrase",
-                )
-            ]
-        failed_index = len(sources) - 1 if self.partial_failure else None
-        source_results = [
-            ContentGrepSourceResult(
-                input_index=index,
-                source=source,
-                title=source,
-                match_count=sum(match.input_index == index for match in matches),
-                scan_complete=True,
+            matched_index = sources.index(source)
+            match = record(
+                {
+                    "line": line,
+                    "text": "1998" if is_year else "target phrase",
+                    "before": [],
+                    "after": [],
+                    "spans": [
+                        {
+                            "start_character": 0,
+                            "end_character": 4 if is_year else 6,
+                        }
+                    ],
+                }
             )
-            for index, source in enumerate(sources)
-            if index != failed_index
-        ]
-        if failed_index is not None:
-            matches = [match for match in matches if match.input_index != failed_index]
-            failures = [
-                ContentFailure(
-                    input_index=failed_index,
-                    source=sources[failed_index],
-                    code="provider_timeout",
-                    message="document fetch timed out",
-                    retryable=True,
-                    attempts=3,
+        failed_index = len(sources) - 1 if self.partial_failure else None
+        outcomes = []
+        for index, source in enumerate(sources):
+            if index == failed_index:
+                outcomes.append(
+                    record(
+                        {
+                            "source": source,
+                            "title": None,
+                            "status": (
+                                "failure[provider_timeout]: document fetch timed out; "
+                                "retryable=true; attempts=3"
+                            ),
+                            "matches": [],
+                            "next_start_line": None,
+                        }
+                    )
                 )
-            ]
-        else:
-            failures = []
-        return ContentGrepReport(
-            pattern=pattern,
-            mode="regex",
-            case_sensitive=False,
-            context=2,
-            max_matches_per_source=20,
-            matches=matches,
-            source_results=source_results,
-            failures=failures,
-            input_count=len(sources),
-        )
+                continue
+            outcomes.append(
+                record(
+                    {
+                        "source": source,
+                        "title": source,
+                        "status": "success",
+                        "matches": [match] if index == matched_index and match is not None else [],
+                        "next_start_line": None,
+                    }
+                )
+            )
+        return outcomes
 
-    def read(self, source: str, **kwargs: object) -> DocumentContent:
+    def read(self, source: str, **kwargs: object) -> Record:
         self.read_sources.append(source)
-        offset = int(kwargs["offset"])
-        text = f"{'1998' if offset > 50 else 'target phrase'} evidence for {source}"
-        return DocumentContent(
-            source=source,
-            title=source,
-            text=text,
+        start_line = int(kwargs.get("start_line", 1))
+        line_count = int(kwargs.get("line_count", 200))
+        text = f"{'1998' if start_line > 50 else 'target phrase'} evidence for {source}"
+        return record(
+            {
+                "source": source,
+                "title": source,
+                "date": "1998",
+                "text": text,
+                "metadata": {},
+                "window": {
+                    "start_line": start_line,
+                    "start_character": int(kwargs.get("start_character", 0)),
+                    "end_line": start_line + line_count - 1,
+                    "end_character": len(text),
+                    "total_lines": 200,
+                    "next": None,
+                    "truncated_by_max_chars": False,
+                },
+            }
         )
 
     def passages(
         self,
         query: str,
-        sources: list[str],
         *,
+        sources: list[str],
         limit: int = 10,
-        max_per_source: int = 2,
+        limit_per_source: int = 2,
         **_kwargs: object,
     ) -> Record:
         self.passage_calls.append((query, tuple(sources)))
         rows = []
-        bounded_sources = sources if max_per_source > 0 else []
+        bounded_sources = sources if limit_per_source > 0 else []
         for index, source in enumerate(bounded_sources):
             if len(rows) >= limit:
                 break
@@ -295,42 +309,13 @@ class FakeContent:
             }
         )
 
-    def read_many(self, requests: list[dict[str, object]]) -> Record:
-        results = []
-        for index, request in enumerate(requests):
-            source = str(request["source"])
-            offset = int(request.get("offset", 1))
-            self.read_sources.append(source)
-            results.append(
-                {
-                    "input_index": index,
-                    "source": source,
-                    "title": source,
-                    "date": "1998",
-                    "text": f"target phrase 1998 evidence for {source}",
-                    "metadata": {
-                        "start_line": offset,
-                        "end_line": offset + int(request.get("limit", 50)) - 1,
-                        "total_lines": 200,
-                        "next_offset": None,
-                    },
-                }
-            )
-        return record(
-            {
-                "results": results,
-                "failures": [],
-                "input_count": len(requests),
-            }
-        )
-
 
 class FakeOutput:
     def __init__(self) -> None:
         self.submissions: list[tuple[object, list[str]]] = []
 
-    def submit(self, output: object, *, citations: list[str]) -> None:
-        self.submissions.append((output, citations))
+    def submit(self, value: object, *, citations: list[str]) -> None:
+        self.submissions.append((value, citations))
 
 
 def _run_pattern(
@@ -465,15 +450,18 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
 
     assert "opensac_sdk.types" not in contract
     assert "There is no public SDK model hierarchy" in contract
-    assert 'both `row.source` and `row["source"]`' in contract
+    assert "Mapping access is canonical" in contract
+    assert "known non-colliding fields" in contract
     assert "Fused candidate" in contract
     assert "Passage report" in contract
-    assert "structured interface to the session workspace" in contract
-    assert "Execution observations show artifact paths, not their contents" in contract
-    assert "not a separate database" in contract
-    assert "`sdk.workspace` resource" in contract
-    assert "`before` / `after` context as `list[str]`" in contract
-    assert "select a focused `read` window" in contract
+    assert "structured session-workspace interface" in contract
+    assert "there is no `sdk.workspace` resource" in contract
+    assert "Adapter failures occur outside the sandbox" in contract
+    assert "0-based, end-exclusive" in contract
+    assert "`read.window.next`" in contract
+    assert "Search outcome list" in contract
+    assert "Grep outcome list" in contract
+    assert 'Only compare it with `"success"`; do not parse failure text' in contract
 
 
 def test_surface_tiers_route_exact_signatures_to_the_right_reference() -> None:
@@ -532,7 +520,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert len(explore.splitlines()) <= 45
     assert "sdk.search.many(" in explore
     assert "sdk.search.fuse_rrf(" in explore
-    assert "fuse_rrf(report, k=60)[:8]" in explore
+    assert "fuse_rrf(outcomes, k=60)[:8]" in explore
     assert "NEXT:" in explore
     assert "sdk.content.grep(" not in explore
     assert "sdk.output.submit(" not in explore
@@ -540,10 +528,11 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.search.many(" in rank
     assert "sdk.search.fuse_rrf(" in rank
     assert "sdk.content.passages(" in rank
-    assert "sdk.content.read_many(" in rank
+    assert "sdk.content.read(" in rank
+    assert "for window in windows:" in rank
     assert "sdk.output.submit(" not in rank
     assert "NEXT:" in rank
-    assert "(read_report.results if read_report else [])[:4]" in rank
+    assert "for window, item in read_results[:4]:" in rank
     assert "[:600]" in rank
 
     assert len(verify.splitlines()) <= 90
@@ -563,7 +552,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "POOL_LIMIT = 200" in stateful
     assert "CONTENT_BATCH = 40" in stateful
     assert "READ_LIMIT_PER_CONSTRAINT = 6" in stateful
-    assert "sdk.state.merge_jsonl(pool_path" in stateful
+    assert "sdk.state.upsert_jsonl(pool_path" in stateful
     assert 'sdk.state.list(f"{root}/")' in stateful
     assert "sdk.state.write_jsonl(pool_path, bounded_pool)" in stateful
     assert '"requirements": {name: spec["requirement"]' in stateful
@@ -593,7 +582,8 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     recipe_text = "\n".join(recipes)
     assert "for year in years" in recipe_text
     assert "list(filter(keep, candidates))" in recipe_text
-    assert "sdk.llm.extract_many(" in recipe_text
+    assert "sdk.llm.extract(" in recipe_text
+    assert "for passage, item in zip(" in recipe_text
     assert 'quote in item["text"]' in recipe_text
     assert "sdk.search.many(followup_queries" in recipe_text
     assert "MAX_FOLLOWUPS = 6" in recipe_text
@@ -787,7 +777,7 @@ def test_pattern_unions_new_evidence_across_turns(tmp_path: Path) -> None:
 def test_pattern_reports_partial_fetch_failure_and_keeps_matches(tmp_path: Path) -> None:
     _, _, output, printed = _run_pattern(tmp_path, partial_failure=True)
 
-    assert "code=provider_timeout" in printed
+    assert "failure[provider_timeout]" in printed
     assert len(output.submissions) == 1
 
 

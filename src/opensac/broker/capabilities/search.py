@@ -133,7 +133,10 @@ class SearchCapabilities:
             strip=True,
             max_chars=self.max_search_query_chars,
         )
-        domains = optional_string_list(params.get("domains"), "domains")
+        domains = optional_string_list(
+            params.get("include_domains"),
+            "include_domains",
+        )
         # Refused rather than dropped. A backend-neutral method name is only
         # honest if a parameter it cannot honour fails loudly: a program that
         # asked for one site and silently got the whole web draws exactly the
@@ -141,7 +144,7 @@ class SearchCapabilities:
         if domains and not service.supports_domains:
             raise ValueError(
                 f"The '{backend_name}' backend has no domain filter, so "
-                f"domains={list(domains)!r} cannot be honoured. Drop the argument "
+                f"include_domains={list(domains)!r} cannot be honoured. Drop the argument "
                 "and filter the hits in Python, or put the constraint in the query."
             )
         limit, offset = self._search_window(params)
@@ -303,7 +306,7 @@ class SearchCapabilities:
                             "query": query,
                             "limit": limit,
                             "offset": offset,
-                            "domains": normalized_domains,
+                            "include_domains": normalized_domains,
                         },
                         record_usage=False,
                         request_id=group.request_id,
@@ -348,8 +351,11 @@ class SearchCapabilities:
         if any(not isinstance(query, str) for query in raw_queries):
             raise ValueError("queries must contain only strings")
         queries = list(raw_queries)
-        limit, offset = self._search_window(params, limit_key="limit_per_query")
-        domains_value = optional_string_list(params.get("domains"), "domains")
+        limit, offset = self._search_window(params)
+        domains_value = optional_string_list(
+            params.get("include_domains"),
+            "include_domains",
+        )
         domains = sorted(set(domains_value)) if domains_value else None
         concurrency = integer(
             params.get("concurrency", 5),
@@ -367,7 +373,7 @@ class SearchCapabilities:
                 "query": "x",
                 "limit": limit,
                 "offset": offset,
-                "domains": domains,
+                "include_domains": domains,
             },
         )
         await state.policy.record_search(len(queries))
@@ -461,7 +467,7 @@ class SearchCapabilities:
                                 "query": queries[index],
                                 "limit": limit,
                                 "offset": offset,
-                                "domains": domains,
+                                "include_domains": domains,
                             },
                             request_index=index,
                             record_usage=False,
@@ -582,7 +588,7 @@ class SearchCapabilities:
                                 "query": queries[index],
                                 "limit": limit,
                                 "offset": offset,
-                                "domains": domains,
+                                "include_domains": domains,
                             },
                             request_index=index,
                             record_usage=False,

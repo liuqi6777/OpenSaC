@@ -46,7 +46,8 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
         "Pass URL/local-ID strings, never result records",
         "Public web URLs can be read directly and reused across runs",
         "inspect non-empty text",
-        "read offsets are 1-indexed",
+        "read lines are 1-based, character positions are 0-based",
+        "`window.next` continues losslessly",
         "there is no `sdk.workspace` API",
         "or certify citation labels",
         "Even an Explore then Verify flow can remain stateless",
@@ -54,6 +55,8 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
         "Upgrade to `sdk.state` only when",
         "candidate pool, evidence ledger, or attempted-source history",
         "do not replay blindly",
+        'Branch on `status == "success"`',
+        "do not parse other statuses",
     ):
         assert guidance in normalized
 

@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from ._diagnostics import failure_detail, record_external_failures, write_submission
+from ._diagnostics import (
+    failure_detail,
+    failure_status,
+    record_external_failures,
+    write_submission,
+)
 from ._json import atomic_write_text, strict_json_dumps, strict_jsonl_dumps
 from ._record import Record, record, wrap
 from ._validation import (
@@ -20,13 +25,13 @@ from ._validation import (
     string,
     string_list,
 )
-from .transport import UnixSocketTransport
+from .transport import BrokerError, UnixSocketTransport
 
 
 class SearchResource:
     """Find documents and combine ranked search result sets.
 
-    Call ``sdk.search(query, limit=10, offset=0, domains=None)`` for one ranked
+    Call ``sdk.search(query, limit=10, offset=0, include_domains=None)`` for one ranked
     window. Each hit has one public ``source``: a canonical web URL for web
     results or a document ID for local results. An empty list is a successful
     no-match result.
@@ -44,12 +49,12 @@ class SearchResource:
         *,
         limit: int = 10,
         offset: int = 0,
-        domains: list[str] | None = None,
+        include_domains: list[str] | None = None,
     ) -> list[Record]:
         """Search one query and return a ranked window of hit records.
 
-        ``offset`` is depth in the full ranking, not a page number. ``domains``
-        is accepted only by backends that support domain filtering.
+        ``offset`` is depth in the full ranking, not a page number.
+        ``include_domains`` is accepted only by backends that support filtering.
 
         Returns:
             Hits ordered by ``rank``. Each record includes ``source``, ``backend``,
@@ -59,59 +64,55 @@ class SearchResource:
         Raises:
             BrokerError: The whole search failed or the request was rejected.
         """
-        query = string(query, "query", strip=True, max_chars=4096)
-        limit, offset = self._search_window(limit, offset, limit_name="limit")
-        domains = optional_string_list(domains, "domains")
+        query = string(query, "query", strip=True)
+        limit, offset = self._search_window(limit, offset)
+        include_domains = optional_string_list(include_domains, "include_domains")
         return self._transport.call(
             "search.query",
-            {"query": query, "limit": limit, "offset": offset, "domains": domains},
+            {
+                "query": query,
+                "limit": limit,
+                "offset": offset,
+                "include_domains": include_domains,
+            },
         )
 
     def many(
         self,
         queries: list[str],
         *,
-        limit_per_query: int = 10,
+        limit: int = 10,
         offset: int = 0,
         concurrency: int = 5,
-        domains: list[str] | None = None,
-    ) -> Record:
+        include_domains: list[str] | None = None,
+    ) -> list[Record]:
         """Search several queries with bounded broker-side concurrency.
 
-        ``limit_per_query`` and ``offset`` define each ranked window.
-        ``concurrency`` bounds simultaneous provider work; ``domains`` has the
-        same backend-dependent semantics as single-query search.
+        ``limit`` and ``offset`` define each ranked window. ``concurrency`` bounds
+        simultaneous provider work; ``include_domains`` has the same semantics as
+        single-query search.
 
         Returns:
-            A report with successful ``results``, flat ``failures``, and
-            ``input_count``. Both outcome lists carry ``input_index``; empty hits
-            are a successful result.
+            One outcome per input query, in input order. ``status`` is exactly
+            ``"success"`` or a human-readable failure string; callers should not
+            parse failure strings. Failed outcomes have empty ``hits``.
 
         Raises:
             BrokerError: The complete batch call failed before aligned results
                 could be returned.
         """
-        queries = string_list(
-            queries,
-            "queries",
-            max_items=64,
-            item_max_chars=4096,
-        )
-        limit_per_query, offset = self._search_window(
-            limit_per_query,
-            offset,
-            limit_name="limit_per_query",
-        )
-        concurrency = integer(concurrency, "concurrency", minimum=1, maximum=20)
-        domains = optional_string_list(domains, "domains")
+        queries = string_list(queries, "queries")
+        limit, offset = self._search_window(limit, offset)
+        concurrency = integer(concurrency, "concurrency", minimum=1)
+        include_domains = optional_string_list(include_domains, "include_domains")
         report = self._transport.call(
             "search.query_many",
             {
                 "queries": queries,
-                "limit_per_query": limit_per_query,
+                "limit": limit,
                 "offset": offset,
                 "concurrency": concurrency,
-                "domains": domains,
+                "include_domains": include_domains,
             },
         )
         failures = [
@@ -123,22 +124,66 @@ class SearchResource:
             success_count=len(report.results),
             failures=failures,
         )
-        return report
+        outcomes: list[Record | None] = [None] * len(queries)
+        self._validate_report_size("search.many", report.input_count, len(outcomes))
+        for result in report.results:
+            input_index = self._claim_outcome("search.many", outcomes, result.input_index)
+            outcomes[input_index] = record(
+                {
+                    "query": result.query,
+                    "status": "success",
+                    "hits": result.hits,
+                }
+            )
+        for failure in report.failures:
+            input_index = self._claim_outcome("search.many", outcomes, failure.input_index)
+            outcomes[input_index] = record(
+                {
+                    "query": failure.query,
+                    "status": failure_status(failure),
+                    "hits": [],
+                }
+            )
+        self._require_complete_report("search.many", outcomes)
+        return [outcome for outcome in outcomes if outcome is not None]
 
     @staticmethod
-    def _search_window(limit: Any, offset: Any, *, limit_name: str) -> tuple[int, int]:
-        validated_limit = integer(limit, limit_name, minimum=1, maximum=100)
-        validated_offset = integer(offset, "offset", minimum=0, maximum=500)
-        if validated_limit + validated_offset > 600:
-            raise ValueError(
-                f"offset={validated_offset} with {limit_name}={validated_limit} "
-                "must not exceed retrieval depth 600"
-            )
-        return validated_limit, validated_offset
+    def _search_window(limit: Any, offset: Any) -> tuple[int, int]:
+        return integer(limit, "limit", minimum=1), integer(offset, "offset", minimum=0)
+
+    @staticmethod
+    def _validate_report_size(method: str, reported: Any, expected: int) -> None:
+        if isinstance(reported, bool) or not isinstance(reported, int) or reported != expected:
+            raise SearchResource._protocol_error(method, "an invalid input_count")
+
+    @staticmethod
+    def _claim_outcome(method: str, outcomes: list[Record | None], input_index: Any) -> int:
+        if (
+            isinstance(input_index, bool)
+            or not isinstance(input_index, int)
+            or input_index < 0
+            or input_index >= len(outcomes)
+            or outcomes[input_index] is not None
+        ):
+            raise SearchResource._protocol_error(method, "invalid outcome alignment")
+        return input_index
+
+    @staticmethod
+    def _require_complete_report(method: str, outcomes: list[Record | None]) -> None:
+        if any(outcome is None for outcome in outcomes):
+            raise SearchResource._protocol_error(method, "incomplete outcome alignment")
+
+    @staticmethod
+    def _protocol_error(method: str, detail: str) -> BrokerError:
+        return BrokerError(
+            f"{method} returned {detail}",
+            code="broker_protocol_error",
+            retryable=False,
+        )
 
     def fuse_rrf(
         self,
-        report: Record | dict[str, Any],
+        report: list[Record | dict[str, Any]],
         *,
         weights: list[float] | None = None,
         k: int = 60,
@@ -147,11 +192,11 @@ class SearchResource:
         domain_weights: dict[str, float] | None = None,
         max_per_domain: int | None = None,
     ) -> list[Record]:
-        """Fuse a multi-query search report locally with domain-aware RRF.
+        """Fuse multi-query search outcomes locally with domain-aware RRF.
 
         This deterministic helper makes no broker call. ``weights`` aligns with the
-        report's original inputs, including failed ones; successful results retain
-        their ``input_index``. ``k`` controls rank smoothing and ``limit`` truncates
+        outcome order, including failed ones; provenance derives ``input_index``
+        from that order. ``k`` controls rank smoothing and ``limit`` truncates
         the fused list. Domain policies match an exact hostname or any subdomain.
         ``exclude_domains`` removes candidates, ``domain_weights`` multiplies their
         RRF scores, and ``max_per_domain`` caps candidates sharing one exact hostname
@@ -166,10 +211,15 @@ class SearchResource:
         Raises:
             ValueError: Weights, domains, ranks, ``k``, or limits are invalid.
         """
-        parsed_report = record(report)
-        parsed_batches = [record(batch) for batch in parsed_report.results]
+        if not isinstance(report, list):
+            raise ValueError("report must be the list returned by search.many")
+        parsed_batches: list[Record] = []
+        for outcome in report:
+            if not isinstance(outcome, dict):
+                raise ValueError("Every search outcome must be a mapping")
+            parsed_batches.append(record(outcome))
         normalized_weights = self._validate_fusion_options(
-            parsed_report.input_count, weights=weights, k=k, limit=limit
+            len(parsed_batches), weights=weights, k=k, limit=limit
         )
         normalized_exclusions = self._normalize_domain_list(
             exclude_domains, option="exclude_domains"
@@ -178,11 +228,17 @@ class SearchResource:
         self._validate_max_per_domain(max_per_domain)
         candidates: dict[str, dict[str, Any]] = {}
 
-        for batch in parsed_batches:
-            batch_index = batch.input_index
-            if batch_index < 0 or batch_index >= parsed_report.input_count:
-                raise ValueError("Every search result input_index must be in range")
-            weight = normalized_weights[batch_index]
+        for input_index, batch in enumerate(parsed_batches):
+            status = batch.get("status")
+            if not isinstance(status, str):
+                raise ValueError("Every search outcome status must be a string")
+            if not isinstance(batch.get("query"), str):
+                raise ValueError("Every search outcome query must be a string")
+            if not isinstance(batch.get("hits"), list):
+                raise ValueError("Every search outcome hits must be a list")
+            if status != "success":
+                continue
+            weight = normalized_weights[input_index]
             best_in_batch: dict[str, tuple[int, Record]] = {}
             for hit_index, hit in enumerate(batch.hits):
                 if hit.rank < 1:
@@ -197,21 +253,21 @@ class SearchResource:
             for hit_index, hit in best_in_batch.values():
                 provenance = record(
                     {
-                        "batch_index": batch_index,
+                        "input_index": input_index,
                         "query": batch.query,
                         "backend": hit.backend,
                         "rank": hit.rank,
                         "score": hit.get("score"),
                     }
                 )
-                representative_key = (hit.rank, batch_index, hit_index)
+                representative_key = (hit.rank, input_index, hit_index)
                 candidate = candidates.get(hit.source)
                 if candidate is None:
                     candidates[hit.source] = {
                         "hit": hit,
                         "representative_key": representative_key,
                         "best_rank": hit.rank,
-                        "earliest_batch": batch_index,
+                        "earliest_input": input_index,
                         "provenance": [provenance],
                         "fused_score": weight / (k + hit.rank),
                         "domain": self._source_domain(hit.source),
@@ -221,7 +277,7 @@ class SearchResource:
                 candidate["provenance"].append(provenance)
                 candidate["fused_score"] += weight / (k + hit.rank)
                 candidate["best_rank"] = min(candidate["best_rank"], hit.rank)
-                candidate["earliest_batch"] = min(candidate["earliest_batch"], batch_index)
+                candidate["earliest_input"] = min(candidate["earliest_input"], input_index)
                 if representative_key < candidate["representative_key"]:
                     candidate["hit"] = hit
                     candidate["representative_key"] = representative_key
@@ -243,7 +299,7 @@ class SearchResource:
             key=lambda item: (
                 -item[1]["fused_score"],
                 item[1]["best_rank"],
-                item[1]["earliest_batch"],
+                item[1]["earliest_input"],
                 item[0],
             ),
         )
@@ -416,8 +472,8 @@ class ContentResource:
     """Locate and read text from URL or local-document source strings.
 
     Prefer ``passages`` for semantic discovery, ``grep`` for exact text,
-    and ``read`` for deliberate line-window expansion. Content operations report
-    partial fetch failures instead of silently dropping unreadable sources.
+    and ``read`` for deliberate line-window expansion. Single-source failures raise
+    ``BrokerError``; collection tasks retain per-source failures in aligned outcomes or reports.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
@@ -427,8 +483,6 @@ class ContentResource:
     def _sources(sources: list[str]) -> list[str]:
         if not isinstance(sources, list):
             raise ValueError("sources must be a list of source strings")
-        if len(sources) > 256:
-            raise ValueError("sources must contain at most 256 items")
         validated: list[str] = []
         for input_index, source in enumerate(sources):
             if not isinstance(source, str):
@@ -436,10 +490,6 @@ class ContentResource:
             source = source.strip()
             if not source:
                 raise ValueError(f"source at input index {input_index} must not be empty")
-            if len(source) > 4096:
-                raise ValueError(
-                    f"source at input index {input_index} must be at most 4096 characters"
-                )
             validated.append(source)
         return validated
 
@@ -451,153 +501,97 @@ class ContentResource:
             message = str(exc).replace("source at input index 0", "source")
             raise ValueError(message) from None
 
-    def get_many(self, sources: list[str]) -> Record:
-        """Fetch complete normalized documents for advanced local processing.
+    def fetch(self, source: str) -> Record:
+        """Fetch one complete normalized document for advanced local processing.
 
         Returns:
-            A report with successful ``results``, flat ``failures``, and
-            ``input_count``. Prefer narrower content operations when possible.
+            A document containing ``source``, ``title``, ``date``, ``text``, and
+            provider-owned ``metadata``. Prefer narrower operations when possible.
 
         Raises:
-            BrokerError: The broker could not return input-aligned content rows.
+            BrokerError: The source could not be fetched.
         """
-        report = self._transport.call("content.get_many", {"sources": self._sources(sources)})
-        self._record_report_failures("content.get_many", report)
-        return report
+        return self._transport.call("content.fetch", {"source": self._source(source)})
 
     def read(
         self,
         source: str,
         *,
-        offset: int = 1,
-        limit: int = 200,
+        start_line: int = 1,
+        start_character: int = 0,
+        line_count: int = 200,
         max_chars: int = 100_000,
     ) -> Record:
         """Read one 1-indexed line window from a source.
 
-        ``offset`` is the first line and ``limit`` bounds line count; ``max_chars``
-        also bounds unusually long lines. Use ``metadata.next_offset`` to continue.
+        Lines are 1-based and characters are 0-based. ``line_count`` bounds logical
+        lines and ``max_chars`` bounds returned text. Pass ``window.next`` back as
+        ``start_line`` and ``start_character`` to continue without losing text.
 
         Returns:
-            One content record. ``metadata`` includes ``start_line``,
-            ``end_line``, ``total_lines``, and ``next_offset``. An unreadable source
-            raises ``BrokerError``.
+            One content slice with provider ``metadata`` and a separate ``window``.
 
         Raises:
             BrokerError: The broker could not return a typed content row.
         """
-        offset = integer(offset, "offset", minimum=1)
-        limit = integer(limit, "limit", minimum=1, maximum=5_000)
-        max_chars = integer(max_chars, "max_chars", minimum=1, maximum=400_000)
-        row = self._transport.call(
+        start_line = integer(start_line, "start_line", minimum=1)
+        start_character = integer(start_character, "start_character", minimum=0)
+        line_count = integer(line_count, "line_count", minimum=1)
+        max_chars = integer(max_chars, "max_chars", minimum=1)
+        return self._transport.call(
             "content.read",
             {
                 "source": self._source(source),
-                "offset": offset,
-                "limit": limit,
+                "start_line": start_line,
+                "start_character": start_character,
+                "line_count": line_count,
                 "max_chars": max_chars,
             },
         )
-        return row
-
-    def read_many(self, windows: list[dict[str, Any]]) -> Record:
-        """Read a different 1-indexed line window for each source.
-
-        Successful ``results`` and flat ``failures`` carry ``input_index``.
-        Repeated sources are fetched once by the broker and sliced independently.
-
-        Raises:
-            ValueError: A window has unknown fields or invalid values.
-            BrokerError: The broker could not return input-aligned content rows.
-        """
-        if not isinstance(windows, list):
-            raise ValueError("windows must be a list")
-        if len(windows) > 256:
-            raise ValueError("windows must contain at most 256 items")
-        allowed = {"source", "offset", "limit", "max_chars"}
-        validated: list[dict[str, Any]] = []
-        for input_index, window in enumerate(windows):
-            if not isinstance(window, dict):
-                raise ValueError(f"windows[{input_index}] must be an object")
-            unknown = sorted(set(window) - allowed)
-            if unknown:
-                raise ValueError(
-                    f"windows[{input_index}] contains unsupported field {unknown[0]!r}"
-                )
-            if "source" not in window:
-                raise ValueError(f"windows[{input_index}] must provide source")
-            source = self._source(window["source"])
-            validated.append(
-                {
-                    "source": source,
-                    "offset": integer(
-                        window.get("offset", 1),
-                        f"windows[{input_index}].offset",
-                        minimum=1,
-                    ),
-                    "limit": integer(
-                        window.get("limit", 200),
-                        f"windows[{input_index}].limit",
-                        minimum=1,
-                        maximum=5_000,
-                    ),
-                    "max_chars": integer(
-                        window.get("max_chars", 100_000),
-                        f"windows[{input_index}].max_chars",
-                        minimum=1,
-                        maximum=400_000,
-                    ),
-                }
-            )
-        report = self._transport.call("content.read_many", {"windows": validated})
-        self._record_report_failures("content.read_many", report)
-        return report
 
     def grep(
         self,
-        sources: list[str],
         pattern: str,
         *,
+        sources: list[str],
         mode: str = "regex",
         case_sensitive: bool = False,
-        context: int = 0,
-        max_matches_per_source: int = 20,
-    ) -> Record:
+        start_line: int = 1,
+        context_lines: int = 0,
+        limit_per_source: int = 20,
+    ) -> list[Record]:
         """Search document lines and preserve per-source fetch failures.
 
-        ``mode`` selects regular-expression or literal matching. ``context`` adds
-        surrounding lines and
-        ``max_matches_per_source`` bounds each document's contribution. Match line
-        numbers are 1-indexed and can be passed directly to ``read``.
+        ``mode`` selects regular-expression or literal matching. ``start_line`` is
+        1-based, ``context_lines`` adds surrounding lines, and ``limit_per_source``
+        bounds each document's contribution.
 
         Returns:
-            A report with flat ``matches``, successful ``source_results``, and flat
-            ``failures``. ``scan_complete`` distinguishes complete zero-match scans
-            from capped scans.
+            One outcome per source, in input order. ``status`` is exactly
+            ``"success"`` or a human-readable failure string. Each outcome owns
+            its ``matches``; a non-null ``next_start_line`` continues a capped scan.
 
         Raises:
             BrokerError: The report could not be produced.
         """
-        pattern = string(pattern, "pattern", max_chars=4096)
+        pattern = string(pattern, "pattern")
         if mode not in {"regex", "literal"}:
             raise ValueError("mode must be 'regex' or 'literal'")
         case_sensitive = boolean(case_sensitive, "case_sensitive")
-        context = integer(context, "context", minimum=0, maximum=20)
-        max_matches_per_source = integer(
-            max_matches_per_source,
-            "max_matches_per_source",
-            minimum=1,
-            maximum=200,
-        )
+        start_line = integer(start_line, "start_line", minimum=1)
+        context_lines = integer(context_lines, "context_lines", minimum=0)
+        limit_per_source = integer(limit_per_source, "limit_per_source", minimum=1)
+        sources = self._sources(sources)
         report = self._transport.call(
             "content.grep",
             {
-                "sources": self._sources(sources),
+                "sources": sources,
                 "pattern": pattern,
                 "mode": mode,
                 "case_sensitive": case_sensitive,
-                "context": context,
-                "max_matches_per_source": max_matches_per_source,
+                "start_line": start_line,
+                "context_lines": context_lines,
+                "limit_per_source": limit_per_source,
             },
         )
         failures = [
@@ -609,20 +603,73 @@ class ContentResource:
             success_count=report.input_count - len(failures),
             failures=failures,
         )
-        return report
+        SearchResource._validate_report_size("content.grep", report.input_count, len(sources))
+        matches_by_input: list[list[Record]] = [[] for _ in sources]
+        for match in report.matches:
+            input_index = match.input_index
+            if (
+                isinstance(input_index, bool)
+                or not isinstance(input_index, int)
+                or input_index < 0
+                or input_index >= len(sources)
+            ):
+                raise SearchResource._protocol_error("content.grep", "invalid match alignment")
+            matches_by_input[input_index].append(
+                record(
+                    {
+                        "line": match.line,
+                        "text": match.text,
+                        "before": match.get("before", []),
+                        "after": match.get("after", []),
+                        "spans": match.spans,
+                    }
+                )
+            )
+
+        outcomes: list[Record | None] = [None] * len(sources)
+        for result in report.source_results:
+            input_index = SearchResource._claim_outcome(
+                "content.grep", outcomes, result.input_index
+            )
+            outcomes[input_index] = record(
+                {
+                    "source": result.source,
+                    "title": result.title,
+                    "status": "success",
+                    "matches": matches_by_input[input_index],
+                    "next_start_line": result.next_start_line,
+                }
+            )
+        for failure in report.failures:
+            input_index = SearchResource._claim_outcome(
+                "content.grep", outcomes, failure.input_index
+            )
+            if matches_by_input[input_index]:
+                raise SearchResource._protocol_error("content.grep", "matches for a failed source")
+            outcomes[input_index] = record(
+                {
+                    "source": failure.source,
+                    "title": None,
+                    "status": failure_status(failure),
+                    "matches": [],
+                    "next_start_line": None,
+                }
+            )
+        SearchResource._require_complete_report("content.grep", outcomes)
+        return [outcome for outcome in outcomes if outcome is not None]
 
     def passages(
         self,
         query: str,
-        sources: list[str],
         *,
+        sources: list[str],
         limit: int = 20,
-        max_per_source: int = 3,
+        limit_per_source: int = 3,
     ) -> Record:
         """Rank passages across a caller-supplied set of sources.
 
         The broker deduplicates sources in first-seen order, ranks successful documents
-        together, then applies ``max_per_source``. ``limit`` bounds the whole report.
+        together, then applies ``limit_per_source``. ``limit`` bounds the report.
         Scores are comparable only within this report.
 
         Returns:
@@ -633,21 +680,16 @@ class ContentResource:
         Raises:
             BrokerError: The report could not be produced.
         """
-        query = string(query, "query", strip=True, max_chars=4096)
-        limit = integer(limit, "limit", minimum=1, maximum=100)
-        max_per_source = integer(
-            max_per_source,
-            "max_per_source",
-            minimum=1,
-            maximum=10,
-        )
+        query = string(query, "query", strip=True)
+        limit = integer(limit, "limit", minimum=1)
+        limit_per_source = integer(limit_per_source, "limit_per_source", minimum=1)
         report = self._transport.call(
             "content.passages",
             {
                 "query": query,
                 "sources": self._sources(sources),
                 "limit": limit,
-                "max_per_source": max_per_source,
+                "limit_per_source": limit_per_source,
             },
         )
         failures = [
@@ -667,23 +709,11 @@ class ContentResource:
         )
         return report
 
-    @staticmethod
-    def _record_report_failures(method: str, report: Record) -> None:
-        failures = [
-            failure_detail(row, input_index=row.input_index, source=row.source)
-            for row in report.failures
-        ]
-        record_external_failures(
-            method,
-            success_count=len(report.results),
-            failures=failures,
-        )
-
 
 class LLMResource:
     """Use the optional pipeline model for bounded semantic subroutines.
 
-    Prefer deterministic Python whenever it is sufficient. Use ``extract_many`` for
+    Prefer deterministic Python whenever it is sufficient. Use ``extract`` for
     structured results; free-form completion methods are advanced operations.
     """
 
@@ -701,7 +731,7 @@ class LLMResource:
         """Run one free-form pipeline-model completion.
 
         ``system`` supplies optional instructions, ``temperature`` controls sampling,
-        and ``max_tokens`` optionally bounds the response. Prefer ``extract_many``
+        and ``max_tokens`` optionally bounds the response. Prefer ``extract``
         when downstream code expects structured data.
 
         Returns:
@@ -722,7 +752,6 @@ class LLMResource:
             max_tokens,
             "max_tokens",
             minimum=1,
-            maximum=32_000,
         )
         return self._transport.call(
             "llm.complete",
@@ -734,116 +763,53 @@ class LLMResource:
             },
         )
 
-    def complete_many(
+    def extract(
         self,
-        prompts: list[str],
-        *,
-        system: str | None = None,
-        temperature: float = 0.2,
-        max_tokens: int | None = None,
-        concurrency: int = 4,
-    ) -> list[str]:
-        """Run aligned free-form completions with bounded concurrency.
-
-        ``system``, ``temperature``, and ``max_tokens`` apply to every prompt.
-        ``concurrency`` bounds simultaneous model requests.
-
-        Returns:
-            One response string per prompt, in input order.
-
-        Raises:
-            BrokerError: The deployment has no pipeline model or the batch fails.
-        """
-        prompts = string_list(prompts, "prompts", strip=False)
-        system = optional_string(system, "system")
-        temperature = finite_number(
-            temperature,
-            "temperature",
-            minimum=0.0,
-            maximum=2.0,
-        )
-        max_tokens = optional_integer(
-            max_tokens,
-            "max_tokens",
-            minimum=1,
-            maximum=32_000,
-        )
-        concurrency = integer(concurrency, "concurrency", minimum=1, maximum=12)
-        return self._transport.call(
-            "llm.complete_many",
-            {
-                "prompts": prompts,
-                "system": system,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "concurrency": concurrency,
-            },
-        )
-
-    def extract_many(
-        self,
-        items: list[Any],
+        item: Any,
         *,
         instruction: str,
         schema: dict[str, Any],
-        concurrency: int = 4,
         max_tokens: int | None = None,
         repair_attempts: int = 0,
     ) -> Record:
-        """Map items to a caller-defined JSON object schema.
+        """Transform one JSON value into a schema-checked JSON object.
 
-        ``schema`` and every item must be JSON serializable. The schema root must be
-        an object. ``repair_attempts`` is 0 or 1; results remain aligned even when an
-        individual item does not satisfy the schema. ``instruction`` and ``schema``
-        apply to every item, while ``concurrency`` and ``max_tokens`` bound execution.
+        ``item`` and ``schema`` must be strict-JSON serializable. The schema root
+        must be an object. ``repair_attempts`` must be non-negative and cannot
+        exceed the broker-advertised limit.
 
         Returns:
-            A report with successful ``results``, flat ``failures``, and
-            ``input_count``. Every outcome carries ``input_index`` and ``attempts``.
+            The validated JSON object directly.
 
         Raises:
             ValueError: Local arguments are not JSON serializable or valid.
-            BrokerError: The broker cannot return input-aligned extraction rows.
+            BrokerError: Provider, JSON, schema, repair, or quota processing fails.
         """
         instruction = string(instruction, "instruction", nonempty=False)
-        concurrency = integer(concurrency, "concurrency", minimum=1, maximum=12)
         max_tokens = optional_integer(
             max_tokens,
             "max_tokens",
             minimum=1,
-            maximum=32_000,
         )
         repair_attempts = integer(
             repair_attempts,
             "repair_attempts",
             minimum=0,
-            maximum=1,
         )
         if not isinstance(schema, dict):
             raise ValueError("schema must be a JSON-serializable object")
         self._ensure_json_serializable(schema, "schema")
-        if not isinstance(items, list):
-            raise ValueError("items must be a list")
-        for index, item in enumerate(items):
-            self._ensure_json_serializable(item, f"items[{index}]")
+        self._ensure_json_serializable(item, "item")
 
         params = {
-            "items": items,
+            "item": item,
             "instruction": instruction,
             "schema": schema,
-            "concurrency": concurrency,
             "repair_attempts": repair_attempts,
         }
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
-        report = self._transport.call("llm.extract_many", params)
-        failures = [failure_detail(row, input_index=row.input_index) for row in report.failures]
-        record_external_failures(
-            "llm.extract_many",
-            success_count=len(report.results),
-            failures=failures,
-        )
-        return report
+        return self._transport.call("llm.extract", params)
 
     @staticmethod
     def _ensure_json_serializable(value: Any, field: str) -> None:
@@ -860,9 +826,8 @@ class SessionResource:
         """Return current capability spend, remaining budgets, and terminal state.
 
         Returns:
-            A record containing ``exec_calls``, ``search_calls``,
-            ``content_fetches``, ``llm_calls``, ``pipeline_model_tokens``,
-            ``documents_seen``, ``budget_remaining``, and ``terminal_reason``.
+            Core logical counters, reserved output tokens, sandbox/workspace use,
+            ``budget_remaining``, and ``terminal_reason``.
 
         Raises:
             BrokerError: Session usage cannot be read.
@@ -909,7 +874,7 @@ class StateResource:
         """Replace a JSONL artifact with ``rows``, creating parent directories.
 
         SDK records can be written directly. Use ``append_jsonl`` to extend an event
-        log and ``merge_jsonl`` to upsert a keyed candidate pool.
+        log and ``upsert_jsonl`` to upsert a keyed candidate pool.
 
         Raises:
             ValueError: The path escapes the workspace.
@@ -921,7 +886,7 @@ class StateResource:
         """Append rows to a JSONL artifact without reading or rewriting it.
 
         The file and parent directories are created when absent. This operation does
-        not deduplicate rows; use ``merge_jsonl`` for keyed state.
+        not deduplicate rows; use ``upsert_jsonl`` for keyed state.
 
         Raises:
             ValueError: The path escapes the workspace.
@@ -932,14 +897,14 @@ class StateResource:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(encoded)
 
-    def merge_jsonl(self, relative_path: str, rows: list[Any], key: str = "source") -> int:
+    def upsert_jsonl(self, relative_path: str, rows: list[Any], key: str = "source") -> int:
         """Upsert JSONL rows by ``key`` while preserving first-seen order.
 
         An absent file behaves like an empty pool. A repeated key replaces its row
         without moving it; pre-existing keyless rows are preserved.
 
         Returns:
-            The total row count after the merge.
+            The total row count after the upsert.
 
         Raises:
             ValueError: A new row lacks ``key`` or the path escapes the workspace.
@@ -958,7 +923,7 @@ class StateResource:
                     else type(row).__name__
                 )
                 raise ValueError(
-                    f"merge_jsonl needs a {key!r} field on every row to know what "
+                    f"upsert_jsonl needs a {key!r} field on every row to know what "
                     f"is the same document. Got a row with: {shape}. Pass key= the "
                     f"field you are deduplicating on, or use append_jsonl if these "
                     f"rows have no identity."
@@ -1044,7 +1009,7 @@ class OutputResource:
 
     def submit(
         self,
-        output: Any,
+        value: Any,
         *,
         citations: list[str] | None = None,
     ) -> None:
@@ -1061,7 +1026,7 @@ class OutputResource:
         if citations is not None and len(citations) > 256:
             raise ValueError("citations must contain at most 256 source strings")
         sources = [self._citation(item, index) for index, item in enumerate(citations or [])]
-        write_submission(self._path(), output, sources)
+        write_submission(self._path(), value, sources)
 
     @staticmethod
     def _citation(item: Any, input_index: int) -> str:

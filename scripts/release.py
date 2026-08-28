@@ -19,6 +19,7 @@ class ReleaseValidationError(ValueError):
 @dataclass(frozen=True)
 class ReleaseMetadata:
     version: str
+    capability_contract: int
     sandbox_contract: int
 
 
@@ -49,12 +50,28 @@ def validate_release(tag: str | None = None) -> ReleaseMetadata:
         REPO_ROOT / "packages/opensac-sdk/src/opensac_sdk/_version.py",
         "__version__",
     )
-    contract = _literal_assignment(
+    host_capability_contract = _literal_assignment(
+        REPO_ROOT / "src/opensac/models.py", "CAPABILITY_CONTRACT"
+    )
+    sdk_capability_contract = _literal_assignment(
+        REPO_ROOT / "packages/opensac-sdk/src/opensac_sdk/_version.py",
+        "CAPABILITY_CONTRACT",
+    )
+    sandbox_contract = _literal_assignment(
         REPO_ROOT / "src/opensac/sandbox/docker_core.py", "SANDBOX_CONTRACT"
     )
     if not isinstance(opensac_version, str) or not isinstance(sdk_version, str):
         raise ReleaseValidationError("Package versions must be strings")
-    if not isinstance(contract, int):
+    if not isinstance(host_capability_contract, int) or not isinstance(
+        sdk_capability_contract, int
+    ):
+        raise ReleaseValidationError("CAPABILITY_CONTRACT values must be integers")
+    if host_capability_contract != sdk_capability_contract:
+        raise ReleaseValidationError(
+            f"host capability contract {host_capability_contract} does not match "
+            f"SDK capability contract {sdk_capability_contract}"
+        )
+    if not isinstance(sandbox_contract, int):
         raise ReleaseValidationError("SANDBOX_CONTRACT must be an integer")
     if opensac_version != sdk_version:
         raise ReleaseValidationError(
@@ -81,10 +98,11 @@ def validate_release(tag: str | None = None) -> ReleaseMetadata:
 
     dockerfile = (REPO_ROOT / "sandbox/Dockerfile").read_text(encoding="utf-8")
     contract_arg = re.search(r"^ARG OPENSAC_SANDBOX_CONTRACT=([0-9]+)$", dockerfile, re.M)
-    if contract_arg is None or int(contract_arg.group(1)) != contract:
+    if contract_arg is None or int(contract_arg.group(1)) != sandbox_contract:
         rendered = contract_arg.group(1) if contract_arg is not None else "missing"
         raise ReleaseValidationError(
-            f"sandbox/Dockerfile contract {rendered!r} does not match runtime contract {contract}"
+            f"sandbox/Dockerfile contract {rendered!r} does not match runtime contract "
+            f"{sandbox_contract}"
         )
 
     image_tag_pattern = re.compile(
@@ -108,7 +126,11 @@ def validate_release(tag: str | None = None) -> ReleaseMetadata:
                 f"{opensac_version!r}"
             )
 
-    return ReleaseMetadata(version=opensac_version, sandbox_contract=contract)
+    return ReleaseMetadata(
+        version=opensac_version,
+        capability_contract=host_capability_contract,
+        sandbox_contract=sandbox_contract,
+    )
 
 
 def main() -> int:
@@ -116,7 +138,7 @@ def main() -> int:
     parser.add_argument("--tag", help="Require this Git tag to match v<package-version>.")
     parser.add_argument(
         "--field",
-        choices=("version", "contract"),
+        choices=("version", "contract", "capability-contract"),
         help="Print one machine-readable field instead of the validation summary.",
     )
     args = parser.parse_args()
@@ -128,9 +150,12 @@ def main() -> int:
         print(metadata.version)
     elif args.field == "contract":
         print(metadata.sandbox_contract)
+    elif args.field == "capability-contract":
+        print(metadata.capability_contract)
     else:
         print(
             f"release metadata valid: version={metadata.version} "
+            f"capability_contract={metadata.capability_contract} "
             f"sandbox_contract={metadata.sandbox_contract}"
         )
     return 0

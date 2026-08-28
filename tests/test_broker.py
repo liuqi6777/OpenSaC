@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import Counter
+from contextlib import suppress
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -24,7 +26,11 @@ from opensac.broker.app import RpcResponse
 from opensac.broker.call_context import trace_error_message
 from opensac.broker.failures import CapabilityFailure
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
-from opensac.broker.providers import InflightCapacityError, ProviderExecutionConfig
+from opensac.broker.providers import (
+    CapabilityProviderError,
+    InflightCapacityError,
+    ProviderExecutionConfig,
+)
 from opensac.broker.service import BrokerService
 from opensac.broker.sources import canonical_url, normalize_web_source
 from opensac.models import (
@@ -45,7 +51,9 @@ def test_rpc_response_separates_result_and_error() -> None:
         retryable=True,
     )
 
-    assert RpcResponse(ok=True, result={"value": 1}).error is None
+    successful = RpcResponse(ok=True, result={"value": 1})
+    assert successful.error is None
+    assert successful.capability_contract == 13
     assert RpcResponse(ok=False, error=failure).result is None
     with pytest.raises(ValidationError, match="cannot contain an error"):
         RpcResponse(ok=True, result={}, error=failure)
@@ -309,7 +317,7 @@ async def test_broker_rejects_legacy_source_parameters_and_removed_citations() -
     service.register_session(make_session())
 
     with pytest.raises(ValueError, match="legacy content"):
-        await service.call("token", "content.get_many", {"refs": []})
+        await service.call("token", "content.fetch", {"refs": []})
     with pytest.raises(ValueError, match="legacy content"):
         await service.call(
             "token",
@@ -388,15 +396,15 @@ async def test_document_service_rejects_invalid_backend_output() -> None:
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "source"}))[0]["source"]
 
-    report = await service.call(
-        "token",
-        "content.get_many",
-        {"sources": [source]},
-        execution_id="invalid-document-output",
-    )
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call(
+            "token",
+            "content.fetch",
+            {"source": source},
+            execution_id="invalid-document-output",
+        )
 
-    assert report["results"] == []
-    assert report["failures"][0]["code"] == "provider_invalid_response"
+    assert failed.value.code == "provider_invalid_response"
     attempt = service.take_trace("token", "invalid-document-output")[0].provider_attempts[0]
     assert (attempt.component, attempt.status) == ("document", "error")
 
@@ -411,17 +419,17 @@ async def test_document_service_rejects_candidate_that_changes_authorized_source
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "source"}))[0]["source"]
 
-    report = await service.call(
-        "token",
-        "content.get_many",
-        {"sources": [source]},
-        execution_id="invalid-document-candidate",
-    )
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call(
+            "token",
+            "content.fetch",
+            {"source": source},
+            execution_id="invalid-document-candidate",
+        )
 
-    assert report["results"] == []
-    assert report["failures"][0]["code"] == "provider_invalid_response"
-    assert report["failures"][0]["attempts"] == 0
-    assert report["failures"][0]["component"] == "document"
+    assert failed.value.code == "provider_invalid_response"
+    assert failed.value.attempts == 0
+    assert failed.value.component == "document"
     trace = service.take_trace("token", "invalid-document-candidate")[0]
     assert trace.provider_attempts == []
 
@@ -463,7 +471,9 @@ async def test_search_refuses_a_domain_filter_the_backend_cannot_honour() -> Non
     service = _broker_service({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
     with pytest.raises(ValueError, match="no domain filter"):
-        await service.call("token", "search.query", {"query": "q", "domains": ["example.com"]})
+        await service.call(
+            "token", "search.query", {"query": "q", "include_domains": ["example.com"]}
+        )
     # The same call without the argument is fine, so the refusal is about the
     # parameter rather than about the backend.
     assert await service.call("token", "search.query", {"query": "q"})
@@ -504,7 +514,9 @@ async def test_search_rejects_query_and_depth_budgets_before_backend_call() -> N
     with pytest.raises(ValueError, match="retrieval depth 21"):
         await service.call("token", "search.query", {"query": "ok", "limit": 10, "offset": 11})
     with pytest.raises(ValueError, match="domains must be a list"):
-        await service.call("token", "search.query", {"query": "ok", "domains": "example.com"})
+        await service.call(
+            "token", "search.query", {"query": "ok", "include_domains": "example.com"}
+        )
 
     assert backend.calls == 0
     assert state.policy.usage.search_calls == 0
@@ -535,7 +547,7 @@ async def test_search_many_rejects_hard_budgets_before_fanout() -> None:
         await service.call(
             "token",
             "search.query_many",
-            {"queries": ["ok"], "limit_per_query": 10, "offset": 11},
+            {"queries": ["ok"], "limit": 10, "offset": 11},
         )
 
     assert state.policy.usage.search_calls == 2
@@ -659,7 +671,7 @@ async def test_custom_route_search_many_prefers_backend_batch_and_preserves_orde
     report = await service.call(
         "token",
         "search.query_many",
-        {"queries": ["second", "", "first"], "limit_per_query": 1},
+        {"queries": ["second", "", "first"], "limit": 1},
         execution_id="custom-batch",
     )
 
@@ -956,7 +968,7 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
     await service.call(
         "token",
         "search.query_many",
-        {"queries": ["one", "two"], "limit_per_query": 1},
+        {"queries": ["one", "two"], "limit": 1},
         execution_id="exec-1",
     )
     with pytest.raises(ValueError):
@@ -990,9 +1002,9 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
         {"query": "q", "sources": [], "limit": "invalid"},
         {"query": "q", "sources": [], "limit": True},
         {"query": "q", "sources": [], "limit": 101},
-        {"query": "q", "sources": [], "max_per_source": 0},
-        {"query": "q", "sources": [], "max_per_source": None},
-        {"query": "q", "sources": [], "max_per_source": 11},
+        {"query": "q", "sources": [], "limit_per_source": 0},
+        {"query": "q", "sources": [], "limit_per_source": None},
+        {"query": "q", "sources": [], "limit_per_source": 11},
     ],
 )
 async def test_passages_reject_invalid_public_parameters(params) -> None:
@@ -1021,7 +1033,7 @@ async def test_passages_empty_sources_and_exact_duplicates_are_successful() -> N
             "query": "evidence",
             "sources": [hits[0]["source"], hits[0]["source"], hits[1]["source"]],
             "limit": 2,
-            "max_per_source": 1,
+            "limit_per_source": 1,
         },
     )
 
@@ -1095,7 +1107,7 @@ async def test_passages_bm25_supports_english_and_chinese_queries() -> None:
     ]
 
 
-async def test_passages_stably_break_ties_and_apply_max_per_source_after_ranking() -> None:
+async def test_passages_stably_break_ties_and_apply_limit_per_source_after_ranking() -> None:
     backend = PassageCorpusBackend(["a" * 180, "b" * 180])
     service = _broker_service(
         {"web": backend},
@@ -1109,12 +1121,12 @@ async def test_passages_stably_break_ties_and_apply_max_per_source_after_ranking
     first = await service.call(
         "token",
         "content.passages",
-        {"query": "unmatched", "sources": sources, "limit": 4, "max_per_source": 2},
+        {"query": "unmatched", "sources": sources, "limit": 4, "limit_per_source": 2},
     )
     second = await service.call(
         "token",
         "content.passages",
-        {"query": "unmatched", "sources": sources, "limit": 4, "max_per_source": 2},
+        {"query": "unmatched", "sources": sources, "limit": 4, "limit_per_source": 2},
     )
 
     assert first["passages"] == second["passages"]
@@ -1144,7 +1156,7 @@ async def test_passages_keep_partial_fetch_failures() -> None:
     report = await service.call(
         "token",
         "content.passages",
-        {"query": "alpha", "sources": sources, "limit": 2, "max_per_source": 1},
+        {"query": "alpha", "sources": sources, "limit": 2, "limit_per_source": 1},
         execution_id="passages-partial",
     )
 
@@ -1187,7 +1199,7 @@ async def test_passage_reranker_maps_scores_by_index_even_when_results_are_unord
             "query": "alpha",
             "sources": [hit["source"] for hit in hits],
             "limit": 2,
-            "max_per_source": 1,
+            "limit_per_source": 1,
         },
         execution_id="passages-rerank",
     )
@@ -1263,7 +1275,7 @@ async def test_passage_prefilter_keeps_eight_per_source_then_caps_globally_at_10
             "query": "unmatched",
             "sources": [hit["source"] for hit in hits],
             "limit": 1,
-            "max_per_source": 3,
+            "limit_per_source": 3,
         },
     )
 
@@ -1310,95 +1322,15 @@ async def test_jina_mode_falls_back_on_failure_but_empty_pages_need_no_warning()
     assert not any(attempt.component == "rerank" for attempt in trace.provider_attempts)
 
 
-async def test_llm_complete_many_preserves_prompt_order() -> None:
-    service, _ = make_llm_service()
-    answers = await service.call(
-        "token",
-        "llm.complete_many",
-        {"prompts": ["one", "two", "three"], "concurrency": 3},
-        execution_id="exec-many",
-    )
-    assert answers == ["echo:one", "echo:two", "echo:three"]
-    assert service.sessions["token"].policy.usage.llm_calls == 3
-    event = service.take_trace("token", "exec-many")[0]
-    assert event.model_tokens == 33
-    assert sorted(attempt.request_indexes for attempt in event.provider_attempts) == [[0], [1], [2]]
-
-
-async def test_extract_many_returns_checked_rows_and_rejects_non_strict_json() -> None:
-    service, _ = make_scripted_llm_service(
-        [
-            '{"name":"valid"}',
-            "[]",
-            '{"name":"first","name":"duplicate"}',
-            '{"name":NaN}',
-            '{"name":1e400}',
-            "   ",
-        ]
-    )
-    schema = {
-        "type": "object",
-        "properties": {"name": {"type": "string"}},
-        "required": ["name"],
-        "additionalProperties": False,
-    }
-
-    report = await service.call(
-        "token",
-        "llm.extract_many",
-        {
-            "items": list(range(6)),
-            "instruction": "Extract a name",
-            "schema": schema,
-            "concurrency": 1,
-        },
-        execution_id="exec-extract",
-    )
-
-    assert report["results"][0] == {
-        "input_index": 0,
-        "data": {"name": "valid"},
-        "attempts": 1,
-    }
-    assert [row["input_index"] for row in report["failures"]] == [1, 2, 3, 4, 5]
-    assert [row["code"] for row in report["failures"]] == [
-        "non_object",
-        "invalid_json",
-        "invalid_json",
-        "invalid_json",
-        "empty_output",
-    ]
-    event = service.take_trace("token", "exec-extract")[0]
-    assert event.model_tokens == 42
-    assert [attempt.index for attempt in event.model_attempts] == list(range(6))
-    assert [attempt.error_code for attempt in event.model_attempts] == [
-        None,
-        "non_object",
-        "invalid_json",
-        "invalid_json",
-        "invalid_json",
-        "empty_output",
-    ]
-    assert event.result_payload is None
-    assert set(event.model_attempts[0].model_dump()) == {
-        "index",
-        "phase",
-        "status",
-        "duration_seconds",
-        "model_tokens",
-        "error_code",
-    }
-
-
-async def test_extract_many_supports_nested_arrays_nullable_scalars_and_enum() -> None:
+async def test_extract_returns_one_checked_json_object() -> None:
     service, _ = make_scripted_llm_service(
         ['{"status":"ok","note":null,"tags":["a"],"details":{"count":2}}']
     )
-    report = await service.call(
+    result = await service.call(
         "token",
-        "llm.extract_many",
+        "llm.extract",
         {
-            "items": ["input"],
+            "item": "input",
             "instruction": "extract",
             "schema": {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1418,222 +1350,116 @@ async def test_extract_many_supports_nested_arrays_nullable_scalars_and_enum() -
                 "additionalProperties": False,
             },
         },
+        execution_id="exec-extract",
     )
 
-    assert report["failures"] == []
-    assert report["results"][0]["data"]["details"] == {"count": 2}
+    assert result["details"] == {"count": 2}
+    state = service.sessions["token"]
+    assert state.policy.usage.llm_calls == 1
+    assert state.policy.usage.pipeline_model_tokens == 7
+    event = service.take_trace("token", "exec-extract")[0]
+    assert [
+        (attempt.index, attempt.phase, attempt.error_code) for attempt in event.model_attempts
+    ] == [(0, "initial", None)]
+    assert event.result_payload is None
 
 
-async def test_extract_many_validates_schema_and_limits_before_charging() -> None:
+@pytest.mark.parametrize(
+    ("outcome", "code"),
+    [
+        ("[]", "non_object"),
+        ('{"name":"first","name":"duplicate"}', "invalid_json"),
+        ('{"name":NaN}', "invalid_json"),
+        ('{"name":1e400}', "invalid_json"),
+        ('{"name":1}', "schema_mismatch"),
+        ("   ", "empty_output"),
+    ],
+)
+async def test_extract_promotes_invalid_model_output_to_top_level_error(
+    outcome: str,
+    code: str,
+) -> None:
+    service, _ = make_scripted_llm_service([outcome])
+
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call(
+            "token",
+            "llm.extract",
+            {
+                "item": 1,
+                "instruction": "Extract a name",
+                "schema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+            },
+        )
+
+    assert failed.value.code == code
+    assert failed.value.attempts == 1
+
+
+async def test_extract_validates_schema_and_limits_before_charging() -> None:
     service, client = make_scripted_llm_service(
         ['{"ok":true}'],
         max_extract_instruction_bytes=3,
+        max_extract_schema_bytes=50,
         max_extract_item_bytes=4,
+        max_extract_schema_depth=2,
     )
     state = service.sessions["token"]
-
-    with pytest.raises(ValueError, match="JSON-serializable"):
-        await service.call(
-            "token",
-            "llm.extract_many",
+    cases = [
+        (
             {
-                "items": [1],
+                "item": 1,
                 "instruction": "",
-                "schema": {
-                    "type": "object",
-                    "properties": {"ok": {"type": bool}},
-                },
+                "schema": {"type": "object", "properties": {"ok": {"type": bool}}},
             },
-        )
-    with pytest.raises(ValueError, match="keyword 'pattern'.*not supported"):
-        await service.call(
-            "token",
-            "llm.extract_many",
+            "JSON-serializable",
+        ),
+        (
             {
-                "items": [1],
+                "item": 1,
                 "instruction": "",
-                "schema": {
-                    "type": "object",
-                    "properties": {"ok": {"type": "string", "pattern": "x"}},
-                },
+                "schema": {"type": "object", "properties": {"ok": {"type": "string"}}},
             },
-        )
-    with pytest.raises(ValueError, match="one type plus null"):
-        await service.call(
-            "token",
-            "llm.extract_many",
+            "schema is",
+        ),
+        (
+            {"item": 1, "instruction": "four", "schema": {"type": "object"}},
+            "instruction is 4 bytes",
+        ),
+        (
+            {"item": "long", "instruction": "", "schema": {"type": "object"}},
+            "item is 6 bytes",
+        ),
+        (
             {
-                "items": [1],
-                "instruction": "",
-                "schema": {
-                    "type": "object",
-                    "properties": {"ok": {"type": [{}, "null"]}},
-                },
-            },
-        )
-    with pytest.raises(ValueError, match="instruction is 4 bytes"):
-        await service.call(
-            "token",
-            "llm.extract_many",
-            {
-                "items": [1],
-                "instruction": "four",
-                "schema": {"type": "object"},
-            },
-        )
-    with pytest.raises(ValueError, match="item at index 0 is 6 bytes"):
-        await service.call(
-            "token",
-            "llm.extract_many",
-            {
-                "items": ["long"],
+                "item": 1,
                 "instruction": "",
                 "schema": {"type": "object"},
+                "repair_attempts": 2,
             },
-        )
-    with pytest.raises(ValueError, match="concurrency must be an integer"):
-        await service.call(
-            "token",
-            "llm.extract_many",
-            {
-                "items": [1],
-                "instruction": "",
-                "schema": {"type": "object"},
-                "concurrency": None,
-            },
-        )
+            "broker maximum of 1",
+        ),
+    ]
+    for params, message in cases:
+        with pytest.raises(ValueError, match=message):
+            await service.call("token", "llm.extract", params)
 
     assert client.calls == []
     assert state.policy.usage.llm_calls == 0
 
 
-async def test_extract_many_enforces_batch_schema_total_and_depth_limits() -> None:
-    cases = [
-        (
-            {"max_extract_items": 1},
-            {
-                "items": [1, 2],
-                "instruction": "",
-                "schema": {"type": "object"},
-            },
-            "exceeding the broker maximum of 1",
-        ),
-        (
-            {"max_extract_schema_bytes": 16},
-            {
-                "items": [1],
-                "instruction": "",
-                "schema": {"type": "object"},
-            },
-            "schema is 17 bytes",
-        ),
-        (
-            {"max_extract_total_item_bytes": 3},
-            {
-                "items": [10, 20],
-                "instruction": "",
-                "schema": {"type": "object"},
-            },
-            "items total 4 bytes",
-        ),
-        (
-            {"max_extract_schema_depth": 2},
-            {
-                "items": [1],
-                "instruction": "",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "outer": {
-                            "type": "object",
-                            "properties": {"inner": {"type": "string"}},
-                        }
-                    },
-                },
-            },
-            "schema nesting exceeds maximum depth 2",
-        ),
-    ]
-
-    for limits, params, message in cases:
-        service, client = make_scripted_llm_service(['{"ok":true}'], **limits)
-        state = service.sessions["token"]
-        with pytest.raises(ValueError, match=message):
-            await service.call("token", "llm.extract_many", params)
-        assert client.calls == []
-        assert state.policy.usage.llm_calls == 0
-
-
-async def test_extract_many_keeps_partial_provider_failure_and_success_tokens() -> None:
-    service, _ = make_scripted_llm_service(
-        [RuntimeError("provider secret response body"), '{"value":2}']
-    )
-    report = await service.call(
+async def test_extract_repairs_once_and_returns_repaired_object() -> None:
+    service, client = make_scripted_llm_service(["not json", '{"value":1}'])
+    result = await service.call(
         "token",
-        "llm.extract_many",
+        "llm.extract",
         {
-            "items": [1, 2],
-            "instruction": "extract",
-            "schema": {
-                "type": "object",
-                "properties": {"value": {"type": "integer"}},
-                "required": ["value"],
-            },
-            "concurrency": 1,
-        },
-        execution_id="exec-partial",
-    )
-
-    assert report["failures"][0]["input_index"] == 0
-    assert report["failures"][0]["code"] == "provider_error"
-    assert report["failures"][0]["message"] == "Extraction provider request failed"
-    assert report["failures"][0]["retryable"] is True
-    assert report["results"][0]["input_index"] == 1
-    assert report["results"][0]["data"] == {"value": 2}
-    assert service.sessions["token"].policy.usage.pipeline_model_tokens == 7
-    event = service.take_trace("token", "exec-partial")[0]
-    assert event.model_tokens == 7
-    assert "secret" not in event.model_dump_json()
-
-
-async def test_extract_many_returns_safe_failures_when_provider_fails_all_items() -> None:
-    service, _ = make_scripted_llm_service(
-        [RuntimeError("first secret"), RuntimeError("second secret")]
-    )
-    report = await service.call(
-        "token",
-        "llm.extract_many",
-        {
-            "items": [1, 2],
-            "instruction": "extract",
-            "schema": {"type": "object"},
-            "concurrency": 1,
-        },
-        execution_id="exec-provider-down",
-    )
-
-    assert report["results"] == []
-    assert [row["code"] for row in report["failures"]] == [
-        "provider_error",
-        "provider_error",
-    ]
-    event = service.take_trace("token", "exec-provider-down")[0]
-    assert [attempt.error_code for attempt in event.model_attempts] == [
-        "provider_error",
-        "provider_error",
-    ]
-    assert "secret" not in event.model_dump_json()
-
-
-async def test_extract_many_repairs_in_index_order_after_one_budget_reservation() -> None:
-    service, client = make_scripted_llm_service(
-        ["not json", '{"value":"wrong"}', '{"value":1}', '{"value":"still wrong"}']
-    )
-    report = await service.call(
-        "token",
-        "llm.extract_many",
-        {
-            "items": [1, 2],
+            "item": 1,
             "instruction": "extract",
             "schema": {
                 "type": "object",
@@ -1641,62 +1467,115 @@ async def test_extract_many_repairs_in_index_order_after_one_budget_reservation(
                 "required": ["value"],
             },
             "repair_attempts": 1,
-            "concurrency": 1,
         },
         execution_id="exec-repair",
     )
 
-    assert report["results"][0] == {
-        "input_index": 0,
-        "data": {"value": 1},
-        "attempts": 2,
-    }
-    assert report["failures"][0]["input_index"] == 1
-    assert report["failures"][0]["attempts"] == 2
-    assert report["failures"][0]["code"] == "schema_mismatch"
+    assert result == {"value": 1}
+    assert len(client.calls) == 2
     state = service.sessions["token"]
-    assert state.policy.usage.llm_calls == 4
-    assert state.policy.usage.pipeline_model_tokens == 28
+    assert state.policy.usage.llm_calls == 2
+    assert state.policy.usage.pipeline_model_tokens == 14
     event = service.take_trace("token", "exec-repair")[0]
     assert [(attempt.index, attempt.phase) for attempt in event.model_attempts] == [
         (0, "initial"),
-        (1, "initial"),
         (0, "repair"),
-        (1, "repair"),
     ]
-    repair_prompts = [call["messages"][-1]["content"] for call in client.calls[2:]]
-    assert "Validation error:\ninvalid_json:" in repair_prompts[0]
-    assert "Validation error:\nschema_mismatch:" in repair_prompts[1]
-    assert all("provider_error" not in prompt for prompt in repair_prompts)
+    assert "Validation error:\ninvalid_json:" in client.calls[1]["messages"][-1]["content"]
 
 
-async def test_extract_many_reserves_all_repairs_before_dispatch() -> None:
+async def test_extract_supports_multiple_broker_configured_repairs() -> None:
     service, client = make_scripted_llm_service(
-        ["not json", '{"value":2}', '{"value":1}'],
-        budget=ResourceBudget(max_pipeline_llm_calls=2),
+        ["not json", '{"value":"wrong"}', '{"value":1}'],
+        max_extract_repair_attempts=2,
     )
-    with pytest.raises(BudgetExceeded, match="max_pipeline_llm_calls"):
+
+    result = await service.call(
+        "token",
+        "llm.extract",
+        {
+            "item": 1,
+            "instruction": "extract",
+            "schema": {
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+            },
+            "repair_attempts": 2,
+        },
+        execution_id="exec-multiple-repairs",
+    )
+
+    assert result == {"value": 1}
+    assert len(client.calls) == 3
+    state = service.sessions["token"]
+    assert state.policy.usage.llm_calls == 3
+    event = service.take_trace("token", "exec-multiple-repairs")[0]
+    assert [(attempt.phase, attempt.error_code) for attempt in event.model_attempts] == [
+        ("initial", "invalid_json"),
+        ("repair", "schema_mismatch"),
+        ("repair", None),
+    ]
+
+
+async def test_extract_repair_failure_preserves_error_and_attempt_count() -> None:
+    service, _ = make_scripted_llm_service(["not json", "still not json"])
+
+    with pytest.raises(CapabilityProviderError) as failed:
         await service.call(
             "token",
-            "llm.extract_many",
+            "llm.extract",
             {
-                "items": [1, 2],
+                "item": 1,
                 "instruction": "extract",
                 "schema": {"type": "object"},
                 "repair_attempts": 1,
-                "concurrency": 1,
             },
         )
 
-    assert len(client.calls) == 2
-    assert service.sessions["token"].policy.usage.pipeline_model_tokens == 14
+    assert failed.value.code == "invalid_json"
+    assert failed.value.attempts == 2
 
 
-async def test_a_fanout_is_counted_at_the_size_it_was_dispatched() -> None:
-    """A batch that dies partway is still reported at its full width."""
-    service, _ = make_llm_service()
-    await service.call("token", "llm.complete_many", {"prompts": ["one", "two", "three"]})
-    assert service.sessions["token"].policy.usage.llm_calls == 3
+async def test_extract_provider_failure_is_top_level_and_sanitized() -> None:
+    service, _ = make_scripted_llm_service([RuntimeError("provider secret response body")])
+
+    with pytest.raises(ProviderRequestError) as failed:
+        await service.call(
+            "token",
+            "llm.extract",
+            {"item": 1, "instruction": "extract", "schema": {"type": "object"}},
+            execution_id="exec-provider-down",
+        )
+
+    assert failed.value.attempts == 1
+    assert "secret" not in str(failed.value)
+    event = service.take_trace("token", "exec-provider-down")[0]
+    assert "secret" not in event.model_dump_json()
+
+
+async def test_extract_reserves_quota_before_repair() -> None:
+    service, client = make_scripted_llm_service(
+        ["not json", '{"value":1}'],
+        budget=ResourceBudget(max_pipeline_llm_calls=1),
+    )
+
+    with pytest.raises(BudgetExceeded, match="max_pipeline_llm_calls"):
+        await service.call(
+            "token",
+            "llm.extract",
+            {
+                "item": 1,
+                "instruction": "extract",
+                "schema": {"type": "object"},
+                "repair_attempts": 1,
+            },
+        )
+
+    assert len(client.calls) == 1
+    state = service.sessions["token"]
+    assert state.policy.usage.llm_calls == 1
+    assert state.policy.usage.pipeline_model_tokens == 7
 
 
 async def test_llm_calls_fail_when_no_model_is_configured() -> None:
@@ -1777,9 +1656,9 @@ async def test_local_source_is_the_document_id() -> None:
 
     assert hits[0]["source"] == "1"
     assert "docid" not in hits[0]
-    report = await service.call("token", "content.get_many", {"sources": [hits[0]["source"]]})
+    document = await service.call("token", "content.fetch", {"source": hits[0]["source"]})
 
-    assert report["results"][0]["source"] == "1"
+    assert document["source"] == "1"
 
 
 async def test_a_document_this_session_never_searched_is_still_refused() -> None:
@@ -1793,9 +1672,10 @@ async def test_a_document_this_session_never_searched_is_still_refused() -> None
     service.register_session(make_session(backends=["local"]))
     await service.call("token", "search.query", {"query": "q"})
 
-    report = await service.call("token", "content.get_many", {"sources": ["999"]})
-    assert report["failures"][0]["code"] == "unknown_source"
-    assert report["failures"][0]["attempts"] == 0
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call("token", "content.fetch", {"source": "999"})
+    assert failed.value.code == "unknown_source"
+    assert failed.value.attempts == 0
 
 
 async def test_offset_reaches_ranks_a_bare_limit_cannot() -> None:
@@ -1848,7 +1728,7 @@ async def test_grep_line_numbers_are_read_offsets() -> None:
     report = await service.call(
         "token",
         "content.grep",
-        {"sources": [source], "pattern": r"target \w+", "context": 1},
+        {"sources": [source], "pattern": r"target \w+", "context_lines": 1},
     )
     matches = report["matches"]
     assert len(matches) == 1
@@ -1862,15 +1742,17 @@ async def test_grep_line_numbers_are_read_offsets() -> None:
     assert report["source_results"][0]["scan_complete"] is True
 
     window = await service.call(
-        "token", "content.read", {"source": source, "offset": matches[0]["line"], "limit": 2}
+        "token",
+        "content.read",
+        {"source": source, "start_line": matches[0]["line"], "line_count": 2},
     )
     assert window["text"].splitlines()[0] == "the target phrase is here"
-    assert window["metadata"]["start_line"] == 25
-    assert window["metadata"]["total_lines"] == 40
+    assert window["window"]["start_line"] == 25
+    assert window["window"]["total_lines"] == 40
 
 
 async def test_read_reports_where_to_continue_and_where_to_stop() -> None:
-    """`next_offset` is None at the end, so `while offset:` terminates."""
+    """The next cursor is exact and becomes None at EOF."""
 
     class Doc(_LocalBackendTraits):
         name = "local"
@@ -1887,16 +1769,39 @@ async def test_read_reports_where_to_continue_and_where_to_stop() -> None:
     service.register_session(make_session(backends=["local"]))
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    head = await service.call("token", "content.read", {"source": source, "limit": 3})
-    assert head["text"] == "a\nb\nc"
-    assert head["metadata"]["next_offset"] == 4
+    head = await service.call("token", "content.read", {"source": source, "line_count": 3})
+    assert head["text"] == "a\nb\nc\n"
+    assert head["window"]["next"] == {"start_line": 4, "start_character": 0}
 
-    tail = await service.call("token", "content.read", {"source": source, "offset": 4, "limit": 3})
+    tail = await service.call(
+        "token",
+        "content.read",
+        {"source": source, **head["window"]["next"], "line_count": 3},
+    )
     assert tail["text"] == "d\ne"
-    assert tail["metadata"]["next_offset"] is None
+    assert tail["window"]["next"] is None
+    assert head["text"] + tail["text"] == "a\nb\nc\nd\ne"
+
+    past_eof = await service.call("token", "content.read", {"source": source, "start_line": 6})
+    assert past_eof["text"] == ""
+    assert past_eof["window"]["start_line"] is None
+    assert past_eof["window"]["next"] is None
+
+    with pytest.raises(ValueError, match="exceeds the length"):
+        await service.call(
+            "token",
+            "content.read",
+            {"source": source, "start_line": 1, "start_character": 2},
+        )
+    with pytest.raises(ValueError, match="must be 0"):
+        await service.call(
+            "token",
+            "content.read",
+            {"source": source, "start_line": 6, "start_character": 1},
+        )
 
 
-async def test_read_many_keeps_windows_aligned_and_deduplicates_fetches() -> None:
+async def test_repeated_reads_reuse_the_session_cache() -> None:
     class Doc(_LocalBackendTraits):
         name = "local"
         supports_domains = False
@@ -1917,26 +1822,24 @@ async def test_read_many_keeps_windows_aligned_and_deduplicates_fetches() -> Non
     state = service.register_session(make_session(backends=["local"]))
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
-    report = await service.call(
+    head = await service.call(
         "token",
-        "content.read_many",
-        {
-            "windows": [
-                {"source": source, "offset": 1, "limit": 2},
-                {"source": source, "offset": 3, "limit": 2},
-            ]
-        },
+        "content.read",
+        {"source": source, "start_line": 1, "line_count": 2},
+    )
+    tail = await service.call(
+        "token",
+        "content.read",
+        {"source": source, "start_line": 3, "line_count": 2},
     )
 
-    assert report["failures"] == []
-    assert [row["input_index"] for row in report["results"]] == [0, 1]
-    assert [row["text"] for row in report["results"]] == ["one\ntwo", "three\nfour"]
+    assert [head["text"], tail["text"]] == ["one\ntwo\n", "three\nfour"]
     assert backend.fetches == 1
     assert state.policy.usage.content_fetches == 2
     assert state.policy.usage.content_backend_fetches == 1
 
 
-async def test_read_many_rejects_invalid_windows_before_fetching() -> None:
+async def test_read_rejects_invalid_coordinates_before_fetching() -> None:
     backend = CountingBackend()
     service = _broker_service({"local": backend})
     state = service.register_session(make_session(backends=["local"]))
@@ -1944,14 +1847,14 @@ async def test_read_many_rejects_invalid_windows_before_fetching() -> None:
     with pytest.raises(ValueError):
         await service.call(
             "token",
-            "content.read_many",
-            {"windows": [{"source": "1", "offset": 0}]},
+            "content.read",
+            {"source": "1", "start_line": 0},
         )
     with pytest.raises(ValueError):
         await service.call(
             "token",
-            "content.read_many",
-            {"windows": [{"source": "1", "offset": "2"}]},
+            "content.read",
+            {"source": "1", "start_character": "2"},
         )
 
     assert backend.fetched == []
@@ -2016,13 +1919,13 @@ async def test_grep_reports_complete_capped_and_failed_sources() -> None:
             "sources": [hits[0]["source"], hits[1]["source"], "missing"],
             "pattern": "target",
             "mode": "literal",
-            "max_matches_per_source": 1,
+            "limit_per_source": 1,
         },
     )
 
     assert report["pattern"] == "target"
     assert report["mode"] == "literal"
-    assert report["max_matches_per_source"] == 1
+    assert report["limit_per_source"] == 1
     assert [row["match_count"] for row in report["source_results"]] == [1, 1]
     assert [row["scan_complete"] for row in report["source_results"]] == [
         False,
@@ -2044,6 +1947,44 @@ async def test_grep_reports_complete_capped_and_failed_sources() -> None:
     )
     assert case_sensitive["matches"] == []
     assert case_sensitive["source_results"][0]["scan_complete"] is True
+
+
+async def test_grep_cursor_continues_without_duplicate_or_missing_matches() -> None:
+    class Docs(_LocalBackendTraits):
+        name = "local"
+        supports_domains = False
+        max_depth = None
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            return [SearchHit(source="", backend="local", docid="d1", snippet="s", rank=1)]
+
+        async def fetch(self, hit, *, query=None):
+            return DocumentContent(source=hit.source, text="target one\nother\ntarget two")
+
+    service = _broker_service({"local": Docs()})
+    service.register_session(make_session(backends=["local"]))
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
+
+    first = await service.call(
+        "token",
+        "content.grep",
+        {"pattern": "target", "sources": [source], "limit_per_source": 1},
+    )
+    cursor = first["source_results"][0]["next_start_line"]
+    second = await service.call(
+        "token",
+        "content.grep",
+        {
+            "pattern": "target",
+            "sources": [source],
+            "start_line": cursor,
+            "limit_per_source": 1,
+        },
+    )
+
+    assert [row["line"] for row in first["matches"] + second["matches"]] == [1, 3]
+    assert first["matches"][0]["spans"] == [{"start_character": 0, "end_character": 6}]
+    assert second["source_results"][0]["next_start_line"] is None
 
 
 async def test_read_does_not_expose_locator_or_trace_document_text() -> None:
@@ -2075,15 +2016,45 @@ async def test_read_reports_when_one_line_is_truncated() -> None:
     row = await service.call(
         "token",
         "content.read",
-        {"source": source, "limit": 1, "max_chars": 10},
+        {"source": source, "line_count": 1, "max_chars": 10},
         execution_id="exec-partial-line",
     )
 
     assert row["text"] == "x" * 10
-    assert row["metadata"]["truncated_by_max_chars"] is True
-    assert row["metadata"]["truncated_mid_line"] is True
-    assert row["metadata"]["partial_line_remaining_chars"] == 20
+    assert row["window"]["truncated_by_max_chars"] is True
+    assert row["window"]["next"] == {"start_line": 1, "start_character": 10}
+    remainder = await service.call(
+        "token",
+        "content.read",
+        {"source": source, **row["window"]["next"], "line_count": 2},
+    )
+    assert row["text"] + remainder["text"] == "x" * 30 + "\nnext"
+    assert remainder["window"]["next"] is None
     assert "locator" not in row
+
+
+async def test_read_cursor_preserves_a_newline_when_max_chars_ends_at_line_boundary() -> None:
+    class BoundaryBackend(FakeBackend):
+        async def fetch(self, hit, *, query=None):
+            return DocumentContent(source=hit.source, text="abc\ndef")
+
+    service = _broker_service({"web": BoundaryBackend("web")})
+    service.register_session(make_session())
+    source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
+
+    chunks = []
+    cursor = {"start_line": 1, "start_character": 0}
+    while cursor is not None:
+        row = await service.call(
+            "token",
+            "content.read",
+            {"source": source, **cursor, "line_count": 1, "max_chars": 3},
+        )
+        chunks.append(row["text"])
+        cursor = row["window"]["next"]
+
+    assert chunks == ["abc", "\n", "def"]
+    assert "".join(chunks) == "abc\ndef"
 
 
 async def test_grep_returns_context_without_locator() -> None:
@@ -2097,7 +2068,7 @@ async def test_grep_returns_context_without_locator() -> None:
     report = await service.call(
         "token",
         "content.grep",
-        {"sources": [source], "pattern": "target", "context": 1},
+        {"sources": [source], "pattern": "target", "context_lines": 1},
     )
     matches = report["matches"]
     assert matches[0]["before"] == ["before"]
@@ -2157,13 +2128,11 @@ async def test_a_document_is_retrieved_once_per_session() -> None:
     hits = await service.call("token", "search.query", {"query": "q", "limit": 3})
     sources = [hit["source"] for hit in hits]
 
-    await service.call("token", "content.get_many", {"sources": sources})
+    for source in sources:
+        await service.call("token", "content.fetch", {"source": source})
     await service.call("token", "content.grep", {"sources": sources, "pattern": "body"})
-    await service.call(
-        "token",
-        "content.read_many",
-        {"windows": [{"source": source} for source in sources]},
-    )
+    for source in sources:
+        await service.call("token", "content.read", {"source": source})
 
     assert backend.fetched == ["1", "2", "3"]
     # Both numbers are reported: one follows the program's behaviour, the other
@@ -2172,58 +2141,64 @@ async def test_a_document_is_retrieved_once_per_session() -> None:
     assert state.policy.usage.content_backend_fetches == 3
 
 
-async def test_every_requested_document_comes_back_in_order() -> None:
-    """A short list is never mistaken for a complete one.
-
-    A dropped failure makes a partial result look whole: the program sees two
-    pages where it asked for three and cannot learn which one is missing, and
-    `read` on a page that failed to load becomes indistinguishable from `read`
-    on a page that is empty.
-    """
+async def test_callers_can_loop_over_fetch_and_keep_failures_aligned() -> None:
     backend = CountingBackend(fail={"2"})
     service = _broker_service({"local": backend})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q", "limit": 3})
     sources = [hit["source"] for hit in hits]
 
-    report = await service.call("token", "content.get_many", {"sources": sources})
+    results: list[tuple[int, dict[str, Any]]] = []
+    failures: list[tuple[int, CapabilityProviderError]] = []
+    for input_index, source in enumerate(sources):
+        try:
+            document = await service.call("token", "content.fetch", {"source": source})
+        except CapabilityProviderError as exc:
+            failures.append((input_index, exc))
+        else:
+            results.append((input_index, document))
 
-    assert [row["input_index"] for row in report["results"]] == [0, 2]
-    assert [row["source"] for row in report["results"]] == [sources[0], sources[2]]
-    assert report["failures"][0]["input_index"] == 1
-    assert report["failures"][0]["message"] == "Provider rejected one document."
-    assert "HTTPError" not in json.dumps(report["failures"][0])
+    assert [input_index for input_index, _ in results] == [0, 2]
+    assert [row["source"] for _, row in results] == [sources[0], sources[2]]
+    assert failures[0][0] == 1
+    assert str(failures[0][1]) == "Provider rejected one document."
+    assert "HTTPError" not in str(failures[0][1])
     # A failure is not cached: a transient timeout must not be frozen for the
     # rest of the rollout.
-    await service.call("token", "content.get_many", {"sources": sources})
+    for source in sources:
+        with suppress(CapabilityProviderError):
+            await service.call("token", "content.fetch", {"source": source})
     assert backend.fetched == ["1", "2", "3", "2"]
 
 
-async def test_all_permanent_document_failures_remain_typed_aligned_rows() -> None:
+async def test_permanent_document_failures_remain_typed_and_sanitized() -> None:
     backend = CountingBackend(fail={"1", "2"})
     service = _broker_service({"local": backend})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q", "limit": 2})
 
-    report = await service.call(
-        "token",
-        "content.get_many",
-        {"sources": [hit["source"] for hit in hits]},
-        execution_id="sanitized-content",
-    )
+    failures: list[CapabilityProviderError] = []
+    for index, hit in enumerate(hits):
+        with pytest.raises(CapabilityProviderError) as failed:
+            await service.call(
+                "token",
+                "content.fetch",
+                {"source": hit["source"]},
+                execution_id=f"sanitized-content-{index}",
+            )
+        failures.append(failed.value)
 
-    assert report["results"] == []
-    assert [row["code"] for row in report["failures"]] == [
+    assert [failure.code for failure in failures] == [
         "provider_rejected",
         "provider_rejected",
     ]
-    assert all("text" not in row and "locator" not in row for row in report["failures"])
-    assert [row["message"] for row in report["failures"]] == [
+    assert [str(failure) for failure in failures] == [
         "Provider rejected one document.",
         "Provider rejected one document.",
     ]
-    event = service.take_trace("token", "sanitized-content")[0]
-    assert "HTTPError" not in event.model_dump_json()
+    for index in range(2):
+        event = service.take_trace("token", f"sanitized-content-{index}")[0]
+        assert "HTTPError" not in event.model_dump_json()
 
 
 async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
@@ -2245,23 +2220,24 @@ async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
     row = await service.call(
-        "token", "content.read", {"source": source, "limit": 20, "max_chars": 1200}
+        "token",
+        "content.read",
+        {"source": source, "line_count": 20, "max_chars": 1200},
     )
     assert len(row["text"]) <= 1200
-    assert row["metadata"]["truncated_by_max_chars"] is True
-    # Trimmed on a line boundary, so the reported end_line is a real one and a
-    # follow-up read resumes where this one stopped.
-    assert row["metadata"]["end_line"] == 2
-    assert row["metadata"]["next_offset"] == 3
+    assert row["window"]["truncated_by_max_chars"] is True
+    assert row["window"]["end_line"] == 3
+    assert row["window"]["next"] == {"start_line": 3, "start_character": 198}
+    tail = await service.call(
+        "token",
+        "content.read",
+        {"source": source, **row["window"]["next"], "line_count": 20},
+    )
+    assert row["text"] + tail["text"] == "\n".join(["x" * 500] * 20)
 
 
 async def test_a_program_can_read_what_it_has_spent() -> None:
-    """The counts, so a program can ration itself.
-
-    The broker imposes no ceiling, which is what makes this necessary rather
-    than merely informative: a policy the program applies is visible in its
-    code and can be measured, and one the broker imposes can only be hit.
-    """
+    """The compact public view exposes counters and remaining enforced quota."""
     service = _broker_service({"local": FakeBackend("local", depth=5)})
     service.register_session(
         make_session(
@@ -2270,48 +2246,28 @@ async def test_a_program_can_read_what_it_has_spent() -> None:
         )
     )
     await service.call("token", "search.query", {"query": "q", "limit": 2})
-    await service.call("token", "content.get_many", {"sources": ["1"]})
+    await service.call("token", "content.fetch", {"source": "1"})
 
     usage = await service.call("token", "session.usage", {})
 
     assert usage["search_calls"] == 1
     assert usage["content_fetches"] == 1
-    assert usage["content_backend_fetches"] == 1
-    assert usage["documents_seen"] == 2
-    assert usage["budget_consumed"]["max_search_queries"] == 1
-    assert usage["budget_consumed"]["max_content_fetches"] == 1
     assert usage["budget_remaining"]["max_search_queries"] == 2
     assert usage["budget_remaining"]["max_content_fetches"] == 3
-    assert (
-        usage["budget_consumed"]["max_search_queries"]
-        + usage["budget_remaining"]["max_search_queries"]
-        == 3
-    )
-    assert (
-        usage["budget_consumed"]["max_content_fetches"]
-        + usage["budget_remaining"]["max_content_fetches"]
-        == 4
-    )
-    assert usage["provider"]["attempts_by_capability"] == {"content": 1, "search": 1}
-    assert "max_search_calls" not in usage
     assert set(usage) == {
         "exec_calls",
         "search_calls",
         "content_fetches",
-        "content_backend_fetches",
-        "direct_url_attempts",
-        "direct_url_successes",
         "llm_calls",
-        "pipeline_model_tokens",
         "pipeline_output_tokens_reserved",
         "sandbox_seconds",
         "workspace_bytes",
-        "documents_seen",
-        "budget_consumed",
         "budget_remaining",
-        "provider",
         "terminal_reason",
     }
+    state = service.sessions["token"]
+    assert state.policy.usage.content_backend_fetches == 1
+    assert state.policy.usage.provider_attempts_by_capability == {"content": 1, "search": 1}
 
 
 def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:
@@ -2336,15 +2292,15 @@ async def test_web_content_directly_admits_a_public_url() -> None:
     state = service.register_session(make_session())
     source = "https://example.com/direct?b=2&a=1#section"
 
-    report = await service.call(
+    document = await service.call(
         "token",
-        "content.get_many",
-        {"sources": [source]},
+        "content.fetch",
+        {"source": source},
         execution_id="exec-direct-url",
     )
 
-    assert report["results"][0]["source"] == source
-    assert report["results"][0]["text"] == "body"
+    assert document["source"] == source
+    assert document["text"] == "body"
     record = state.document_for_alias("https://example.com/direct?a=1&b=2")
     assert record is not None
     assert record.admission == "direct_url"
@@ -2383,14 +2339,14 @@ async def test_custom_public_url_backend_uses_source_traits_and_document_role() 
     service = _broker_service({"custom": backend})
     state = service.register_session(make_session(backends=["custom"]))
 
-    report = await service.call(
+    document = await service.call(
         "token",
-        "content.get_many",
-        {"sources": ["https://example.com/custom"]},
+        "content.fetch",
+        {"source": "https://example.com/custom"},
         execution_id="custom-direct",
     )
 
-    assert report["results"][0]["text"] == "custom body"
+    assert document["text"] == "custom body"
     assert backend.fetches == 1
     record = state.document_for_alias("https://example.com/custom")
     assert record is not None and record.route == "custom"
@@ -2403,14 +2359,15 @@ async def test_custom_opaque_backend_rejects_unsearched_public_url() -> None:
     service = _broker_service({"custom": backend})
     state = service.register_session(make_session(backends=["custom"]))
 
-    report = await service.call(
-        "token",
-        "content.get_many",
-        {"sources": ["https://example.com/not-admitted"]},
-    )
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call(
+            "token",
+            "content.fetch",
+            {"source": "https://example.com/not-admitted"},
+        )
 
-    assert report["failures"][0]["code"] == "url_not_admitted"
-    assert report["failures"][0]["component"] == "document"
+    assert failed.value.code == "url_not_admitted"
+    assert failed.value.component == "document"
     assert state.policy.usage.direct_url_attempts == 0
 
 
@@ -2419,10 +2376,10 @@ async def test_web_content_directly_admits_a_public_url_without_a_scheme() -> No
     state = service.register_session(make_session())
     source = "Example.com/direct?b=2&utm_source=x&a=1#section"
 
-    report = await service.call("token", "content.get_many", {"sources": [source]})
+    document = await service.call("token", "content.fetch", {"source": source})
 
-    assert report["results"][0]["source"] == source
-    assert report["results"][0]["text"] == "body"
+    assert document["source"] == source
+    assert document["text"] == "body"
     record = state.document_for_alias("https://example.com/direct?a=1&b=2")
     assert record is not None
     assert record.handle.url == "https://example.com/direct?a=1&b=2"
@@ -2437,35 +2394,36 @@ async def test_schemeless_web_source_matches_a_search_admission() -> None:
     state = service.register_session(make_session())
     await service.call("token", "search.query", {"query": "q"})
 
-    report = await service.call(
+    document = await service.call(
         "token",
-        "content.get_many",
-        {"sources": ["example.com/searched"]},
+        "content.fetch",
+        {"source": "example.com/searched"},
         execution_id="exec-schemeless-search-source",
     )
 
-    assert report["results"][0]["source"] == "example.com/searched"
-    assert report["results"][0]["text"] == "body"
+    assert document["source"] == "example.com/searched"
+    assert document["text"] == "body"
     assert state.policy.usage.direct_url_attempts == 0
     event = service.take_trace("token", "exec-schemeless-search-source")[0]
     assert event.hits[0].admission == "search"
 
 
-async def test_strict_content_admission_returns_an_aligned_refusal() -> None:
+async def test_strict_content_admission_returns_a_typed_refusal() -> None:
     service = _broker_service(
         {"web": RankedBackend([])},
         content_url_admission="searched_only",
     )
     state = service.register_session(make_session())
 
-    report = await service.call(
-        "token",
-        "content.get_many",
-        {"sources": ["https://example.com/not-searched"]},
-    )
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call(
+            "token",
+            "content.fetch",
+            {"source": "https://example.com/not-searched"},
+        )
 
-    assert report["failures"][0]["code"] == "url_not_admitted"
-    assert report["failures"][0]["attempts"] == 0
+    assert failed.value.code == "url_not_admitted"
+    assert failed.value.attempts == 0
     assert state.documents_by_id == {}
 
 
@@ -2474,14 +2432,11 @@ async def test_direct_content_rejects_private_urls_before_provider_work(source: 
     service = _broker_service({"web": RankedBackend([])})
     state = service.register_session(make_session())
 
-    report = await service.call(
-        "token",
-        "content.get_many",
-        {"sources": [source]},
-    )
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call("token", "content.fetch", {"source": source})
 
-    assert report["failures"][0]["code"] == "unknown_source"
-    assert report["failures"][0]["attempts"] == 0
+    assert failed.value.code == "unknown_source"
+    assert failed.value.attempts == 0
     assert state.policy.usage.content_backend_fetches == 0
     assert state.documents_by_id == {}
 
@@ -2502,7 +2457,7 @@ async def test_trace_records_identity_and_rank_for_every_hit() -> None:
     await service.call(
         "token",
         "search.query_many",
-        {"queries": ["one", "two"], "limit_per_query": 2},
+        {"queries": ["one", "two"], "limit": 2},
         execution_id="exec-hits",
     )
     event = service.take_trace("token", "exec-hits")[0]
@@ -2533,8 +2488,8 @@ async def test_trace_records_which_documents_a_content_call_opened() -> None:
 
     await service.call(
         "token",
-        "content.get_many",
-        {"sources": ["2", "3"]},
+        "content.grep",
+        {"sources": ["2", "3"], "pattern": "body"},
         execution_id="exec-read",
     )
     event = service.take_trace("token", "exec-read")[0]
@@ -2546,17 +2501,18 @@ async def test_trace_records_which_documents_a_content_call_opened() -> None:
     assert "content:" not in event.model_dump_json()
 
 
-async def test_unknown_source_is_data_while_invalid_pattern_is_an_error() -> None:
+async def test_unknown_source_and_invalid_pattern_are_top_level_errors() -> None:
     service = _broker_service({"local": FakeBackend("local", depth=2)})
     service.register_session(make_session(backends=["local"]))
     await service.call("token", "search.query", {"query": "q", "limit": 2})
 
-    report = await service.call(
-        "token",
-        "content.get_many",
-        {"sources": ["nope"]},
-        execution_id="exec-unknown",
-    )
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call(
+            "token",
+            "content.fetch",
+            {"source": "nope"},
+            execution_id="exec-unknown",
+        )
     with pytest.raises(ValueError):
         await service.call(
             "token",
@@ -2568,9 +2524,9 @@ async def test_unknown_source_is_data_while_invalid_pattern_is_an_error() -> Non
     unknown = service.take_trace("token", "exec-unknown")[0]
     pattern = service.take_trace("token", "exec-pattern")[0]
 
-    assert report["failures"][0]["code"] == "unknown_source"
-    assert unknown.status == "ok"
-    assert unknown.error_type is None
+    assert failed.value.code == "unknown_source"
+    assert unknown.status == "error"
+    assert unknown.error_type == "CapabilityProviderError"
     assert pattern.error_type == "ValueError"
     assert "pattern must not be empty" in (pattern.error or "")
     assert [hit.identity for hit in unknown.hits] == ["local:docid:nope"]
@@ -2592,12 +2548,7 @@ def test_a_trace_error_message_is_bounded_but_never_empty() -> None:
 
 
 async def test_batching_disabled_forces_one_item_per_call() -> None:
-    """The switch bounds fan-out; it does not remove the method.
-
-    Removing `*_many` outright would also remove structured extraction, since
-    `llm.extract_many` has no singular form, and the arm would then be measuring
-    two things at once.
-    """
+    """The switch bounds the only remaining public fan-out operation."""
     service = _broker_service({"web": RankedBackend(["https://example.com/a"])})
     service.register_session(make_session(mechanisms=Mechanisms(batching=False)))
 
@@ -2677,7 +2628,12 @@ async def test_capability_methods_stay_in_step_with_the_handler_table() -> None:
     service.register_session(make_session())
     with pytest.raises(ValueError, match="Unsupported capability"):
         await service.call("token", "search.nope", {})
-    for removed in ("content.snippets", "content.grep_report"):
+    for removed in (
+        "content.get_many",
+        "content.read_many",
+        "llm.complete_many",
+        "llm.extract_many",
+    ):
         with pytest.raises(ValueError, match="Unsupported capability"):
             await service.call("token", removed, {})
 
@@ -2691,8 +2647,8 @@ def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
     without_llm = Mechanisms(llm_subroutine=False).capabilities()
     assert not any(method.startswith("llm.") for method in without_llm)
     assert "search.query_many" in without_llm
-    # Batching bounds a call's width rather than removing it, so the method is
-    # still reachable and must still be advertised.
+    # Batching now controls only search.query_many; the method stays advertised
+    # and rejects fan-out wider than one at runtime when disabled.
     assert Mechanisms(batching=False).capabilities() == list(CAPABILITY_METHODS)
 
 
@@ -2714,10 +2670,10 @@ async def test_session_capabilities_reflect_backend_limits_and_mechanisms() -> N
 
     capabilities = await service.call("token", "session.capabilities", {})
 
-    assert capabilities["contracts"] == {"sandbox": 13, "capability": 12}
+    assert capabilities["contracts"] == {"sandbox": 14, "capability": 13}
     assert capabilities["search"] == {
         "backend": "local",
-        "supports_domains": False,
+        "supports_include_domains": False,
         "max_depth": None,
         "limits": {
             "max_queries_per_request": 7,
@@ -2744,11 +2700,11 @@ async def test_equivalent_url_spelling_resolves_the_admitted_source() -> None:
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
     alternate = "HTTPS://EXAMPLE.COM/a?id=7#other"
-    alternate_report = await service.call("token", "content.get_many", {"sources": [alternate]})
-    source_report = await service.call("token", "content.get_many", {"sources": [source]})
-    assert alternate_report["results"][0]["source"] == alternate
-    assert source_report["results"][0]["source"] == source
-    assert alternate_report["results"][0]["text"] == source_report["results"][0]["text"]
+    alternate_document = await service.call("token", "content.fetch", {"source": alternate})
+    source_document = await service.call("token", "content.fetch", {"source": source})
+    assert alternate_document["source"] == alternate
+    assert source_document["source"] == source
+    assert alternate_document["text"] == source_document["text"]
 
 
 async def test_a_mistyped_source_is_refused_rather_than_repaired() -> None:
@@ -2758,28 +2714,24 @@ async def test_a_mistyped_source_is_refused_rather_than_repaired() -> None:
     source = hits[0]["source"]
 
     one_character_off = source[:-1] + ("0" if source[-1] != "0" else "1")
-    report = await service.call("token", "content.get_many", {"sources": [one_character_off]})
-    assert report["failures"][0]["code"] == "unknown_source"
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call("token", "content.fetch", {"source": one_character_off})
+    assert failed.value.code == "unknown_source"
     # Prefix/suffix mistakes are not repaired into an admitted source.
-    report = await service.call("token", "content.get_many", {"sources": [source + "x"]})
-    assert report["failures"][0]["code"] == "unknown_source"
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call("token", "content.fetch", {"source": source + "x"})
+    assert failed.value.code == "unknown_source"
 
 
-async def test_a_single_source_passed_unwrapped_is_not_read_character_by_character() -> None:
-    """A bare string is iterable, so the error it produced named nothing.
-
-    `Unknown sources: d, o, c` tells a program neither what was wrong nor
-    which source failed. Accepting the unwrapped form resolves the same
-    document the wrapped form would, so nothing new becomes reachable.
-    """
+async def test_fetch_requires_the_singular_source_parameter() -> None:
     service = _broker_service({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q"})
 
-    unwrapped = await service.call("token", "content.get_many", {"sources": hits[0]["source"]})
-    assert unwrapped == await service.call(
-        "token", "content.get_many", {"sources": [hits[0]["source"]]}
-    )
+    document = await service.call("token", "content.fetch", {"source": hits[0]["source"]})
+    assert document["source"] == hits[0]["source"]
+    with pytest.raises(ValueError, match="accepts one source"):
+        await service.call("token", "content.fetch", {"sources": [hits[0]["source"]]})
 
 
 async def test_a_snippet_carries_the_date_of_the_hit_that_found_it() -> None:
@@ -2787,8 +2739,8 @@ async def test_a_snippet_carries_the_date_of_the_hit_that_found_it() -> None:
     service = _broker_service({"local": FakeBackend("local")})
     service.register_session(make_session(backends=["local"]))
     hits = await service.call("token", "search.query", {"query": "q"})
-    report = await service.call("token", "content.get_many", {"sources": [hits[0]["source"]]})
-    assert report["results"][0].get("date") == hits[0].get("date")
+    document = await service.call("token", "content.fetch", {"source": hits[0]["source"]})
+    assert document.get("date") == hits[0].get("date")
 
 
 async def _wait_for_condition(predicate, *, turns: int = 200) -> None:
@@ -3141,8 +3093,8 @@ async def test_content_coalescing_counts_only_real_backend_leader_and_copies_row
     first = asyncio.create_task(
         service.call(
             "token",
-            "content.get_many",
-            {"sources": [source]},
+            "content.fetch",
+            {"source": source},
             execution_id="content-leader",
         )
     )
@@ -3150,8 +3102,8 @@ async def test_content_coalescing_counts_only_real_backend_leader_and_copies_row
     second = asyncio.create_task(
         service.call(
             "token",
-            "content.get_many",
-            {"sources": [source]},
+            "content.fetch",
+            {"source": source},
             execution_id="content-follower",
         )
     )
@@ -3159,14 +3111,14 @@ async def test_content_coalescing_counts_only_real_backend_leader_and_copies_row
         lambda: len(state.flights) == 1 and next(iter(state.flights.values())).waiters == 2
     )
     backend.fetch_release.set()
-    first_report, second_report = await asyncio.gather(first, second)
+    first_document, second_document = await asyncio.gather(first, second)
 
     assert backend.fetch_calls == 1
     assert state.policy.usage.content_fetches == 2
     assert state.policy.usage.content_backend_fetches == 1
     assert state.policy.usage.provider_coalesced_requests == 1
-    first_report["results"][0]["metadata"]["nested"]["value"] = 9
-    assert second_report["results"][0]["metadata"]["nested"]["value"] == 1
+    first_document["metadata"]["nested"]["value"] = 9
+    assert second_document["metadata"]["nested"]["value"] == 1
     leader_trace = service.take_trace("token", "content-leader")
     follower_trace = service.take_trace("token", "content-follower")
     assert len(leader_trace[0].provider_attempts) == 1
@@ -3182,7 +3134,7 @@ async def test_content_leader_caches_before_flight_cleanup_lock_queue() -> None:
     record = state.document_for_alias(source)
     assert record is not None
     identity = record.document_id
-    leader = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
+    leader = asyncio.create_task(service.call("token", "content.fetch", {"source": source}))
     await backend.fetch_started.wait()
 
     # Hold the registry lock so the completed transport's cleanup is queued.
@@ -3195,16 +3147,14 @@ async def test_content_leader_caches_before_flight_cleanup_lock_queue() -> None:
         await _wait_for_condition(lambda: identity in state.content_cache)
         assert len(state.flights) == 1
 
-        third = asyncio.create_task(
-            service.call("token", "content.get_many", {"sources": [source]})
-        )
+        third = asyncio.create_task(service.call("token", "content.fetch", {"source": source}))
         await _wait_for_condition(third.done)
-        assert (await third)["results"][0]["text"] == "shared full document"
+        assert (await third)["text"] == "shared full document"
         assert backend.fetch_calls == 1
     finally:
         state.flight_lock.release()
 
-    assert (await leader)["results"][0]["text"] == "shared full document"
+    assert (await leader)["text"] == "shared full document"
     assert state.flights == {}
 
 
@@ -3227,15 +3177,15 @@ async def test_content_refreshes_stale_misses_after_usage_reservation() -> None:
             await resume_follower.wait()
 
     state.policy.record_content_fetches = gated_record
-    leader = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
+    leader = asyncio.create_task(service.call("token", "content.fetch", {"source": source}))
     await backend.fetch_started.wait()
-    follower = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
+    follower = asyncio.create_task(service.call("token", "content.fetch", {"source": source}))
     await follower_reserved.wait()
 
     backend.fetch_release.set()
-    assert (await leader)["results"][0]["text"] == "shared full document"
+    assert (await leader)["text"] == "shared full document"
     resume_follower.set()
-    assert (await follower)["results"][0]["text"] == "shared full document"
+    assert (await follower)["text"] == "shared full document"
     assert backend.fetch_calls == 1
     assert state.policy.usage.content_fetches == 2
     assert state.policy.usage.content_backend_fetches == 1
@@ -3246,7 +3196,7 @@ async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> No
     service = _broker_service({"web": backend}, provider_execution_config=COALESCING)
     state = service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "doc"}))[0]["source"]
-    leader = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
+    leader = asyncio.create_task(service.call("token", "content.fetch", {"source": source}))
     await backend.fetch_started.wait()
 
     original_admit = service.providers.flights.admit
@@ -3259,18 +3209,18 @@ async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> No
         return await original_admit(state_arg, requests, group_new=group_new)
 
     service.providers.flights.admit = gated_admit
-    follower = asyncio.create_task(service.call("token", "content.get_many", {"sources": [source]}))
+    follower = asyncio.create_task(service.call("token", "content.fetch", {"source": source}))
     await follower_at_admission.wait()
 
     # The follower already classified the row as a miss, but has not acquired
     # the flight registry lock. Let the old leader cache and remove its flight
     # before the follower admits a new key.
     backend.fetch_release.set()
-    assert (await leader)["results"][0]["text"] == "shared full document"
+    assert (await leader)["text"] == "shared full document"
     assert state.flights == {}
     resume_follower.set()
 
-    assert (await follower)["results"][0]["text"] == "shared full document"
+    assert (await follower)["text"] == "shared full document"
     assert backend.fetch_calls == 1
     assert state.policy.usage.content_backend_fetches == 1
 

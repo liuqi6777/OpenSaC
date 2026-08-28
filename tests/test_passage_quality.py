@@ -86,7 +86,7 @@ async def test_frozen_gold_passages_are_retrieved_and_resolvable() -> None:
                 "query": case["query"],
                 "sources": [source],
                 "limit": 5,
-                "max_per_source": 5,
+                "limit_per_source": 5,
             },
         )
 

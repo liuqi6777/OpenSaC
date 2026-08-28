@@ -20,7 +20,7 @@ consumed inside the same program.
 
 Keep one cumulative file for each role. Update `pool.jsonl` by `source` and `content.jsonl` by a
 stable source-window key; do not create `pool_round2.jsonl` or `content_stage3.jsonl`. The program
-that fetches content should print bounded target excerpts plus explicit no-match, blocked, and typed
+that fetches content should print bounded target excerpts plus explicit no-match, blocked, and
 failure summaries before it ends. A later state-only program is useful when asking a new semantic
 question of cached text, not simply to display a document the fetching program could have surfaced.
 
@@ -37,7 +37,7 @@ sources, and stores focused windows. Adapt its inputs and bounds; they are not a
 import hashlib
 import json
 
-from opensac_sdk import sdk
+from opensac_sdk import BrokerError, sdk
 
 task = "Identify the target and verify the requested relation."
 research_id = hashlib.sha256(task.encode()).hexdigest()[:12]
@@ -46,11 +46,15 @@ meta_path = f"{root}/meta.json"
 pool_path = f"{root}/pool.jsonl"
 content_path = f"{root}/content.jsonl"
 
-meta = dict(sdk.state.read_json(meta_path)) if sdk.state.exists(meta_path) else {
-    "task": task,
-    "queries": [],
-    "failures": [],
-}
+meta = (
+    dict(sdk.state.read_json(meta_path))
+    if sdk.state.exists(meta_path)
+    else {
+        "task": task,
+        "queries": [],
+        "failures": [],
+    }
+)
 pool = [dict(row) for row in sdk.state.read_jsonl(pool_path)] if sdk.state.exists(pool_path) else []
 content = (
     [dict(row) for row in sdk.state.read_jsonl(content_path)]
@@ -67,8 +71,8 @@ if queries:
     # Save attempted queries before an expensive call only when avoiding blind replay matters.
     meta["queries"] = sorted(tried | set(queries))
     sdk.state.write_json(meta_path, meta)
-    search_report = sdk.search.many(queries, limit_per_query=10, concurrency=4)
-    fused = sdk.search.fuse_rrf(search_report, k=60, limit=50)
+    search_outcomes = sdk.search.many(queries, limit=10, concurrency=4)
+    fused = sdk.search.fuse_rrf(search_outcomes, k=60, limit=50)
     for row in fused:
         pool_by_source[row.source] = {
             "source": row.source,
@@ -81,8 +85,9 @@ if queries:
             "provenance": row.provenance,
         }
     meta["failures"].extend(
-        {"stage": "search", "query": row.query, "code": row.code}
-        for row in search_report.failures
+        {"stage": "search", "query": row.query, "status": row.status}
+        for row in search_outcomes
+        if row.status != "success"
     )
 
 pool = sorted(pool_by_source.values(), key=lambda row: row.get("rank", 1_000_000))[:300]
@@ -91,7 +96,7 @@ sdk.state.write_jsonl(pool_path, pool)
 inspected_sources = {row["source"] for row in content}
 sources = [row["source"] for row in pool if row["source"] not in inspected_sources][:24]
 if sources:
-    passage_report = sdk.content.passages(task, sources, limit=10, max_per_source=2)
+    passage_report = sdk.content.passages(task, sources=sources, limit=10, limit_per_source=2)
     windows = []
     seen = set()
     for passage in passage_report.passages:
@@ -102,8 +107,8 @@ if sources:
         windows.append(
             {
                 "source": passage.source,
-                "offset": max(passage.coordinates["start_line"] - 8, 1),
-                "limit": 50,
+                "start_line": max(passage.coordinates["start_line"] - 8, 1),
+                "line_count": 50,
                 "max_chars": 16_000,
                 "passage_coordinates": dict(passage.coordinates),
             }
@@ -111,18 +116,24 @@ if sources:
         if len(windows) >= 6:
             break
 
-    read_report = sdk.content.read_many(
-        [
-            {key: row[key] for key in ("source", "offset", "limit", "max_chars")}
-            for row in windows
-        ]
-    ) if windows else None
-    window_by_index = {index: row for index, row in enumerate(windows)}
+    read_results = []
+    read_failures = []
+    for window in windows:
+        try:
+            row = sdk.content.read(
+                window["source"],
+                start_line=window["start_line"],
+                line_count=window["line_count"],
+                max_chars=window["max_chars"],
+            )
+        except BrokerError as error:
+            read_failures.append({"stage": "read", "source": window["source"], "code": error.code})
+        else:
+            read_results.append((window, row))
     content_by_key = {row["key"]: row for row in content}
-    for row in (read_report.results if read_report else []):
-        window = window_by_index[row.input_index]
-        start = row.metadata.get("start_line")
-        end = row.metadata.get("end_line")
+    for window, row in read_results:
+        start = row.window.start_line
+        end = row.window.end_line
         key = f"{row.source}#L{start}-{end}"
         content_by_key[key] = {
             "key": key,
@@ -139,10 +150,7 @@ if sources:
         {"stage": "passages", "source": row.source, "code": row.code}
         for row in passage_report.failures
     )
-    meta["failures"].extend(
-        {"stage": "read", "source": row.source, "code": row.code}
-        for row in (read_report.failures if read_report else [])
-    )
+    meta["failures"].extend(read_failures)
     content = list(content_by_key.values())[-300:]
     sdk.state.write_jsonl(content_path, content)
 

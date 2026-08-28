@@ -138,7 +138,7 @@ def test_repl_examples_compile_and_pass_sandbox_validation() -> None:
     composed = _python_block(patterns_path, "## Compose retrieval and focused inspection")
     assert composed.index("sdk.search.many(") < composed.index("sdk.search.fuse_rrf(")
     assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.passages(")
-    assert composed.index("sdk.content.passages(") < composed.index("sdk.content.read_many(")
+    assert composed.index("sdk.content.passages(") < composed.index("sdk.content.read(")
 
     verify = _python_block(patterns_path, "## Verify selected sources and return evidence")
     assert "structured_output_requested = False" in verify
