@@ -155,6 +155,8 @@ class FakeOpenSAC:
                 stdout = (
                     f"persisted={'pool.jsonl' in self.workspace[session_id]}"
                     if code == "read"
+                    else "stdout only"
+                    if code == "rich-output"
                     else "ok"
                 )
                 interpreter_lost = code == "lose-kernel"
@@ -162,11 +164,29 @@ class FakeOpenSAC:
                     "exit_code": 0,
                     "duration_seconds": 0.01,
                     "stdout": stdout,
-                    "stderr": "",
-                    "output": None,
-                    "citations": [],
-                    "artifacts": sorted(self.workspace[session_id]),
-                    "usage": {"search_calls": 0, "content_fetches": 0},
+                    "stderr": "hidden stderr" if code == "rich-output" else "",
+                    "output": {"hidden": "output"} if code == "rich-output" else None,
+                    "citations": (["https://example.com/hidden"] if code == "rich-output" else []),
+                    "artifacts": (
+                        ["hidden-workspace.jsonl"]
+                        if code == "rich-output"
+                        else sorted(self.workspace[session_id])
+                    ),
+                    "usage": {
+                        "search_calls": 7 if code == "rich-output" else 0,
+                        "content_fetches": 11 if code == "rich-output" else 0,
+                    },
+                    "warnings": (
+                        [
+                            {
+                                "method": "content.read",
+                                "success_count": 0,
+                                "failure_count": 1,
+                            }
+                        ]
+                        if code == "rich-output"
+                        else []
+                    ),
                     "error": None,
                     "execution_mode": self.execution_mode_by_session.get(session_id, "program"),
                     "interpreter_state": (
@@ -243,7 +263,7 @@ async def test_codex_context_reuses_and_isolates_sessions_without_leaking_ids(
     finally:
         await bridge.aclose()
 
-    assert "exit_code=0" in first
+    assert (first, second, third) == ("ok", "ok", "ok")
     assert "private-thread" not in first + second + third
     assert len(server.create_payloads) == 2
     assert [payload["lease_seconds"] for payload in server.create_payloads] == [3_600, 3_600]
@@ -299,6 +319,17 @@ async def test_restart_resumes_same_leased_session_and_workspace(tmp_path: Path)
     assert not server.deleted
 
 
+async def test_mcp_returns_only_program_stdout(tmp_path: Path) -> None:
+    server = FakeOpenSAC()
+    bridge = _bridge(tmp_path, server)
+    try:
+        observation = await bridge.run_code("rich-output", {"thread_id": "stdout-only"})
+    finally:
+        await bridge.aclose()
+
+    assert observation == "stdout only"
+
+
 @pytest.mark.parametrize("loss_code", ["session_expired", "worker_restarted", "interpreter_lost"])
 async def test_state_loss_rotates_generation_without_replaying_code(
     tmp_path: Path, loss_code: str
@@ -316,7 +347,7 @@ async def test_state_loss_rotates_generation_without_replaying_code(
 
     assert "state_lost" in lost
     assert "not replayed" in lost
-    assert "exit_code=0" in recovered
+    assert recovered == "ok"
     assert len(server.create_payloads) == 2
     assert server.create_payloads[0]["request_id"].endswith(":g1")
     assert server.create_payloads[1]["request_id"].endswith(":g2")
@@ -338,7 +369,7 @@ async def test_transient_failures_do_not_rotate_generation(
 
     assert "failed" in failed.lower() or "timed out" in failed.lower()
     assert "session-1" not in failed
-    assert "exit_code=0" in recovered
+    assert recovered == "ok"
     assert len(server.create_payloads) == 1
     assert server.create_payloads[0]["request_id"].endswith(":g1")
 
@@ -358,7 +389,7 @@ async def test_lost_exec_response_retries_same_id_without_reexecution(
     finally:
         await bridge.aclose()
 
-    assert "exit_code=0" in observation
+    assert observation == "ok"
     assert server.exec_calls == [("session-1", "write"), ("session-1", "write")]
     assert server.executions == [("session-1", "write")]
     exec_ids = [payload["exec_id"] for _, payload in server.exec_payloads]
@@ -436,7 +467,7 @@ async def test_mcp_refuses_unsafe_exec_against_older_server(tmp_path: Path) -> N
     assert not server.exec_calls
 
 
-async def test_mcp_requests_persistent_mode_and_reports_it(tmp_path: Path) -> None:
+async def test_mcp_requests_persistent_mode_and_returns_stdout(tmp_path: Path) -> None:
     server = FakeOpenSAC()
     config = MCPConfig(
         api_base="http://opensac.test",
@@ -452,9 +483,7 @@ async def test_mcp_requests_persistent_mode_and_reports_it(tmp_path: Path) -> No
         await bridge.aclose()
 
     assert server.create_payloads[0]["execution_mode"] == "persistent_interpreter"
-    assert "execution_mode=persistent_interpreter" in observation
-    assert "interpreter_state=ready" in observation
-    assert "namespace_symbols=3" in observation
+    assert observation == "ok"
 
 
 async def test_lost_interpreter_result_rotates_without_replaying_cell(tmp_path: Path) -> None:
@@ -473,10 +502,9 @@ async def test_lost_interpreter_result_rotates_without_replaying_cell(tmp_path: 
     finally:
         await bridge.aclose()
 
-    assert "state_lost" in lost
-    assert "will not be replayed" in lost
+    assert lost == "ok"
     assert [code for _, code in server.exec_calls].count("lose-kernel") == 1
-    assert "interpreter_state=ready" in recovered
+    assert recovered == "ok"
     assert len(server.create_payloads) == 2
     assert len(server.deleted) == 1
 
@@ -496,7 +524,7 @@ async def test_restart_detects_state_loss_during_idempotent_create(tmp_path: Pat
         await second_bridge.aclose()
 
     assert "state_lost" in lost
-    assert "exit_code=0" in recovered
+    assert recovered == "ok"
     assert [code for _, code in server.exec_calls] == ["setup", "fresh"]
     request_ids = [payload["request_id"] for payload in server.create_payloads]
     assert request_ids[0] == request_ids[1]
@@ -518,7 +546,7 @@ async def test_transient_create_failures_reuse_generation(
         await bridge.aclose()
 
     assert "failed" in failed.lower() or "timed out" in failed.lower()
-    assert "exit_code=0" in recovered
+    assert recovered == "ok"
     request_ids = [payload["request_id"] for payload in server.create_payloads]
     assert request_ids[0] == request_ids[1]
     assert request_ids[0].endswith(":g1")

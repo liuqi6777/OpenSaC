@@ -10,9 +10,10 @@ import sqlite3
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -51,6 +52,8 @@ IDEMPOTENT_EXEC_UNAVAILABLE_OBSERVATION = (
 )
 _IDEMPOTENT_EXEC_FEATURE = "idempotent_exec"
 _EXEC_TRANSPORT_ATTEMPTS = 2
+
+ObservationRenderer = Callable[[Mapping[str, Any]], str]
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,7 @@ class AgentSessionManager:
         transport: httpx.AsyncBaseTransport | None = None,
         registry: GenerationRegistry | None = None,
         registry_name: str = "mcp_sessions.sqlite3",
+        observation_renderer: ObservationRenderer = render_observation,
     ) -> None:
         self.config = config
         self._transport = transport
@@ -216,6 +220,7 @@ class AgentSessionManager:
         )
         self._owns_registry = registry is None
         self._policy_hash = _policy_hash(self.config)
+        self._observation_renderer = observation_renderer
         self._entries: dict[str, _SessionEntry] = {}
         self._context_locks: dict[str, asyncio.Lock] = {}
         self._locks_guard = asyncio.Lock()
@@ -312,7 +317,7 @@ class AgentSessionManager:
                         code,
                         self._exec_id(entry, invocation_id),
                     )
-                observation = render_observation(payload)
+                observation = self._observation_renderer(payload)
                 if payload.get("interpreter_state") == "lost":
                     self._registry.advance(hashed_context, generation)
                     with contextlib.suppress(httpx.HTTPError):

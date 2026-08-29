@@ -33,6 +33,11 @@ _CONTEXT_UNAVAILABLE_OBSERVATION = (
 )
 
 
+def _render_stdout(payload: Mapping[str, Any]) -> str:
+    stdout = payload.get("stdout")
+    return "" if stdout is None else str(stdout)
+
+
 @dataclass(frozen=True)
 class MCPConfig(AgentSessionConfig):
     @classmethod
@@ -115,6 +120,7 @@ class OpenSACMCP:
             transport=transport,
             registry=registry,
             registry_name="mcp_sessions.sqlite3",
+            observation_renderer=_render_stdout,
         )
         self._codex = CodexContextResolver()
         self._invocation_namespace = uuid.uuid4().hex
@@ -167,6 +173,7 @@ def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
         instructions=(
             "Run Search-as-Code programs with sac_run. The current agent conversation is "
             "bound by the MCP host; never create, pass, display, or delete OpenSAC sessions. "
+            "Only the program's stdout is returned, so print any result the agent needs. "
             f"The execution mode is {adapter.config.execution_mode}."
         ),
         lifespan=lifespan,
@@ -174,7 +181,7 @@ def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
     )
 
     async def sac_run(code: str, ctx: Any) -> str:
-        """Run Python code in this conversation's persistent OpenSAC workspace."""
+        """Run Python code and return only stdout from this conversation's OpenSAC workspace."""
         return await adapter.run_code(
             code,
             ctx.request_context.meta,
