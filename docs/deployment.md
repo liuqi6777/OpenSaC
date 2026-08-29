@@ -1,6 +1,6 @@
 # Deployment
 
-OpenSAC `v0.8.1` is available as version-matched service and sandbox images on GHCR.
+OpenSAC `v0.8.2` is available as version-matched service and sandbox images on GHCR.
 The Docker CLI provides a no-checkout quick start with one YAML profile. Docker Compose remains
 available for declarative deployments. Both run the API and capability broker from the service
 image and start an isolated sandbox container for each execution. Neither builds nor runs the
@@ -57,7 +57,7 @@ for macOS:
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.1/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/configs/docker.yaml
 ```
 
 Export the provider credentials and host-specific runtime values in the current shell:
@@ -101,7 +101,7 @@ docker run --detach \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:0.8.1 \
+  ghcr.io/liuqi6777/opensac:0.8.2 \
   opensac serve --config /etc/opensac/opensac.yaml
 ```
 
@@ -130,14 +130,14 @@ source repository, build an image, or install Python packages:
 mkdir opensac-deploy
 cd opensac-deploy
 curl -fsSLo compose.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.1/compose.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/compose.yaml
 curl -fsSLo .env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.1/.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/.env.example
 curl -fsSLo compose.env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.1/compose.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/compose.env.example
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.1/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/configs/docker.yaml
 mkdir -p "$PWD/.opensac"
 ```
 

@@ -126,10 +126,11 @@ use answered, partial, inconclusive, or externally blocked as appropriate.
 
 ## Handle failures and state loss
 
-`[sac_run]` renders bounded structured item-failure warnings while preserving successes.
-`search.many` and `content.grep` outcomes branch only on `status == "success"`; any other status is
-human-readable and must not be parsed. Passage failures remain structured records. Empty hits or
-matches with success status are successful results. Never hard-code zero failures.
+`[sac_run]` renders bounded structured item-failure warnings while preserving successes. For
+`search.many`, branch on `status == "success"` and read failed rows from `outcome.error`; status is
+only `"success"` or `"failure"`. For `content.grep`, other statuses are human-readable and must not
+be parsed. Passage failures remain structured records. Empty hits or matches with success status
+are successful results. Never hard-code zero failures.
 
 An intermediate caught `BrokerError` must leave the program incomplete with `ERROR:` or `NEXT:`.
 Let host policy own retries; do not retry blindly.

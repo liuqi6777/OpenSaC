@@ -112,9 +112,7 @@ try:
                 continue
             start = max(0, match.start() - 200)
             end = min(len(document.text), match.end() + 300, start + 700)
-            local_evidence.append(
-                {"source": document.source, "text": document.text[start:end]}
-            )
+            local_evidence.append({"source": document.source, "text": document.text[start:end]})
             break
 
     # Keep this branch when semantic localization adds value; otherwise local_evidence is enough.
@@ -128,10 +126,7 @@ except BrokerError as error:
 else:
     for item in local_evidence[:2]:
         excerpt = " ".join(item["text"].split())[:500]
-        print(
-            f"LOCAL_EVIDENCE source={item['source']!r} "
-            f"text={excerpt!r}"
-        )
+        print(f"LOCAL_EVIDENCE source={item['source']!r} text={excerpt!r}")
     if passage_report is not None:
         for passage in passage_report.passages[:4]:
             excerpt = " ".join(passage.text.split())[:500]
@@ -139,7 +134,11 @@ else:
                 f"SEMANTIC_EVIDENCE source={passage.source!r} "
                 f"coordinates={dict(passage.coordinates)!r} text={excerpt!r}"
             )
-    failures = [outcome.status for outcome in search_outcomes if outcome.status != "success"]
+    failures = [
+        outcome.error.code if outcome.error is not None else "unknown"
+        for outcome in search_outcomes
+        if outcome.status != "success"
+    ]
     failures.extend(fetch_failures)
     if passage_report is not None:
         failures.extend(item.code for item in passage_report.failures)

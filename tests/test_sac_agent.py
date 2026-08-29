@@ -55,8 +55,9 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
         "Upgrade to `sdk.state` only when",
         "candidate pool, evidence ledger, or attempted-source history",
         "do not replay blindly",
-        'Branch on `status == "success"`',
-        "do not parse other statuses",
+        "For `search.many`, branch on",
+        "read failure details from `outcome.error`",
+        "other statuses as displayable failure text",
     ):
         assert guidance in normalized
 

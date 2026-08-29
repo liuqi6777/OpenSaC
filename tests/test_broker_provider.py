@@ -9,7 +9,7 @@ import pytest
 
 from opensac.backends.document import DocumentContent, DocumentHandle, document_fetch_candidates
 from opensac.backends.document.local_http import LocalDocumentBackend
-from opensac.backends.search import SearchBatch, SearchHit
+from opensac.backends.search import SearchHit
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
 from opensac.broker.providers import ProviderExecutionConfig, ProviderExecutor
@@ -56,7 +56,6 @@ class LocalBackend:
     provider_identity = "local:test"
 
     def __init__(self, *, documents: dict[str, str] | None = None) -> None:
-        self.search_many_calls: list[list[str]] = []
         self.fetches: list[str] = []
         self.documents = documents or {"1": "body"}
         self.failures: dict[str, ProviderRequestError] = {}
@@ -76,17 +75,6 @@ class LocalBackend:
         del query, domains
         docids = list(self.documents)[offset : offset + limit]
         return [self._hit(docid, offset + rank) for rank, docid in enumerate(docids, 1)]
-
-    async def search_many(self, queries, *, limit, offset=0, domains=None):
-        del domains
-        self.search_many_calls.append(list(queries))
-        return [
-            SearchBatch(
-                query=query,
-                hits=await self.search(query, limit=limit, offset=offset),
-            )
-            for query in queries
-        ]
 
     async def fetch(self, hit, *, query=None):
         del query
@@ -177,20 +165,17 @@ async def test_broker_runs_bundled_search_preflight_before_provider_usage() -> N
     )
     state = service.register_session(make_session(backend="web"))
 
-    report = await service.call(
-        "token",
-        "search.query_many",
-        {"queries": ["alpha", "beta"]},
-        execution_id="search-preflight",
-    )
+    with pytest.raises(ProviderRequestError) as failed:
+        await service.call(
+            "token",
+            "search.query",
+            {"query": "alpha"},
+            execution_id="search-preflight",
+        )
 
-    assert report["results"] == []
-    assert [row["code"] for row in report["failures"]] == [
-        "provider_not_configured",
-        "provider_not_configured",
-    ]
-    assert all(row["attempts"] == 0 for row in report["failures"])
-    assert state.policy.usage.search_calls == 2
+    assert failed.value.code == "provider_not_configured"
+    assert failed.value.attempts == 0
+    assert state.policy.usage.search_calls == 1
     assert state.policy.usage.provider_attempts_by_capability.get("search", 0) == 0
     assert state.policy.usage.provider_retries == 0
     assert state.policy.usage.provider_queue_seconds == 0
@@ -244,7 +229,7 @@ async def test_broker_runs_bundled_content_preflight_before_transport() -> None:
     assert service.take_trace("token", "content-preflight")[0].provider_attempts == []
 
 
-async def test_fake_http_provider_retries_one_real_local_microbatch() -> None:
+async def test_fake_http_provider_retries_one_real_local_search() -> None:
     calls: list[dict] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -264,16 +249,15 @@ async def test_fake_http_provider_retries_one_real_local_microbatch() -> None:
                 "result_mode": "query_aware",
                 "results": [
                     {
-                        "query": query,
+                        "query": payload["query"],
                         "hits": [
                             {
-                                "docid": str(index),
-                                "snippet": f"result for {query}",
+                                "docid": "1",
+                                "snippet": f"result for {payload['query']}",
                                 "rank": 1,
                             }
                         ],
                     }
-                    for index, query in enumerate(payload["queries"], start=1)
                 ],
             },
             request=request,
@@ -295,23 +279,22 @@ async def test_fake_http_provider_retries_one_real_local_microbatch() -> None:
     )
     state = service.register_session(make_session())
     try:
-        report = await service.call(
+        hits = await service.call(
             "token",
-            "search.query_many",
-            {"queries": ["alpha", "alpha", "beta"]},
+            "search.query",
+            {"query": "alpha"},
             execution_id="fake-http-provider",
         )
     finally:
         await service.aclose()
 
     assert calls == [
-        {"queries": ["alpha", "beta"], "top_k": 10},
-        {"queries": ["alpha", "beta"], "top_k": 10},
+        {"query": "alpha", "top_k": 10},
+        {"query": "alpha", "top_k": 10},
     ]
-    assert [row["query"] for row in report["results"]] == ["alpha", "alpha", "beta"]
-    assert [row["hits"][0]["source"] for row in report["results"]] == ["1", "1", "2"]
-    assert all("docid" not in row["hits"][0] for row in report["results"])
-    assert state.policy.usage.search_calls == 3
+    assert hits[0]["source"] == "1"
+    assert "docid" not in hits[0]
+    assert state.policy.usage.search_calls == 1
     assert state.policy.usage.provider_attempts_by_capability["search"] == 2
     assert state.policy.usage.provider_retries == 1
     trace = service.take_trace("token", "fake-http-provider")[0]
@@ -365,33 +348,6 @@ def test_provider_canonical_serialization_preserves_normalization_rules() -> Non
         assert encoded == expected
         assert ProviderExecutor.fingerprint(value) == f"sha256:v1:{digest}"
         assert ProviderResultCache._encoded_size(value) == len(encoded)
-
-
-async def test_local_query_many_deduplicates_before_one_transport_microbatch() -> None:
-    backend = LocalBackend()
-    service = _broker_service(
-        {"local": backend},
-        max_search_queries_per_request=128,
-    )
-    state = service.register_session(make_session())
-
-    report = await service.call(
-        "token",
-        "search.query_many",
-        {"queries": ["same"] * 100},
-        execution_id="dedupe-search",
-    )
-
-    assert len(report["results"]) == 100
-    assert all(row["query"] == "same" and len(row["hits"]) == 1 for row in report["results"])
-    assert backend.search_many_calls == [["same"]]
-    assert state.policy.usage.search_calls == 100
-    assert state.policy.usage.provider_attempts_by_capability["search"] == 1
-    assert state.policy.usage.intra_call_deduplicated_items == 99
-    trace = service.take_trace("token", "dedupe-search")[0]
-    assert trace.provider_attempts[0].request_indexes == [0]
-    assert trace.provider_attempts[0].response_fingerprint is not None
-    assert len(trace.deduplicated_requests) == 99
 
 
 async def test_safe_retry_changes_attempt_usage_not_logical_search_usage() -> None:
@@ -448,7 +404,7 @@ async def test_safe_retry_changes_attempt_usage_not_logical_search_usage() -> No
     assert "secret" not in "".join(attempt.model_dump_json() for attempt in attempts)
 
 
-async def test_all_failed_batch_preserves_each_failure_and_attempt_count() -> None:
+async def test_unary_search_preserves_failure_code_and_attempt_count() -> None:
     class MixedWeb(_WebBackendTraits):
         provider_identity = "web:mixed-failures"
 
@@ -472,18 +428,16 @@ async def test_all_failed_batch_preserves_each_failure_and_attempt_count() -> No
     service = _broker_service({"web": MixedWeb()})
     service.register_session(make_session(backend="web"))
 
-    report = await service.call(
-        "token",
-        "search.query_many",
-        {"queries": ["temporary", "permanent"]},
-    )
-
-    assert [row["code"] for row in report["failures"]] == [
-        "provider_timeout",
-        "provider_auth_failed",
+    expected = [
+        ("temporary", "provider_timeout", True),
+        ("permanent", "provider_auth_failed", False),
     ]
-    assert [row["retryable"] for row in report["failures"]] == [True, False]
-    assert [row["attempts"] for row in report["failures"]] == [1, 1]
+    for query, code, retryable in expected:
+        with pytest.raises(ProviderRequestError) as failed:
+            await service.call("token", "search.query", {"query": query})
+        assert failed.value.code == code
+        assert failed.value.retryable is retryable
+        assert failed.value.attempts == 1
 
 
 async def test_content_provider_timeout_retries_real_fetch_attempts() -> None:

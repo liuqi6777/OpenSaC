@@ -1,2 +1,2 @@
-__version__ = "0.8.1"
-CAPABILITY_CONTRACT = 13
+__version__ = "0.8.2"
+CAPABILITY_CONTRACT = 14

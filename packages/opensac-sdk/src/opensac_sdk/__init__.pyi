@@ -59,8 +59,20 @@ class _FusedSearchHitRecord(_SearchHitRecord, Protocol):
 
 class _SearchOutcomeRecord(_Record, Protocol):
     query: str
-    status: str
+    status: Literal["success", "failure"]
     hits: list[_SearchHitRecord]
+    error: _SearchOutcomeErrorRecord | None
+
+class _SearchOutcomeErrorRecord(_Record, Protocol):
+    code: str
+    message: str
+    retryable: bool
+    attempts: int | None
+    provider_status: int | None
+    retry_after_seconds: float | None
+    provider: str | None
+    component: str | None
+    scope: Literal["request", "resource", "provider", "unknown"] | None
 
 class _DocumentRecord(_Record, Protocol):
     source: str

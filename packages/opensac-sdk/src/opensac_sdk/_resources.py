@@ -14,6 +14,7 @@ from ._diagnostics import (
     write_submission,
 )
 from ._json import atomic_write_text, strict_json_dumps, strict_jsonl_dumps
+from ._many import _ManyFailure, _ManySuccess, _run_many
 from ._record import Record, record, wrap
 from ._validation import (
     boolean,
@@ -86,66 +87,189 @@ class SearchResource:
         concurrency: int = 5,
         include_domains: list[str] | None = None,
     ) -> list[Record]:
-        """Search several queries with bounded broker-side concurrency.
+        """Search several queries with bounded concurrency and aligned outcomes.
 
         ``limit`` and ``offset`` define each ranked window. ``concurrency`` bounds
-        simultaneous provider work; ``include_domains`` has the same semantics as
-        single-query search.
+        helper fan-out; the broker remains authoritative for actual provider
+        concurrency. ``include_domains`` has the same semantics as single-query
+        search.
 
         Returns:
             One outcome per input query, in input order. ``status`` is exactly
-            ``"success"`` or a human-readable failure string; callers should not
-            parse failure strings. Failed outcomes have empty ``hits``.
+            ``"success"`` or ``"failure"``. ``error`` is ``None`` on success and
+            contains structured failure details otherwise. Failed outcomes have
+            empty ``hits``.
 
         Raises:
-            BrokerError: The complete batch call failed before aligned results
-                could be returned.
+            BrokerError: Admission failed, or every item failed with a transport,
+                protocol, contract, or permission error.
         """
         queries = string_list(queries, "queries")
         limit, offset = self._search_window(limit, offset)
         concurrency = integer(concurrency, "concurrency", minimum=1)
         include_domains = optional_string_list(include_domains, "include_domains")
-        report = self._transport.call(
-            "search.query_many",
-            {
-                "queries": queries,
-                "limit": limit,
-                "offset": offset,
-                "concurrency": concurrency,
-                "include_domains": include_domains,
-            },
+        return self._many_concurrent(
+            queries,
+            limit=limit,
+            offset=offset,
+            concurrency=concurrency,
+            include_domains=include_domains,
         )
-        failures = [
-            failure_detail(failure, input_index=failure.input_index, query=failure.query)
-            for failure in report.failures
-        ]
-        record_external_failures(
+
+    def _many_concurrent(
+        self,
+        queries: list[str],
+        *,
+        limit: int,
+        offset: int,
+        concurrency: int,
+        include_domains: list[str] | None,
+    ) -> list[Record]:
+        self._validate_many_admission(
+            queries,
+            limit=limit,
+            offset=offset,
+            concurrency=concurrency,
+            include_domains=include_domains,
+        )
+
+        def search_one(query: str) -> list[Record]:
+            return self(
+                query,
+                limit=limit,
+                offset=offset,
+                include_domains=include_domains,
+            )
+
+        report = _run_many(queries, concurrency=concurrency, call=search_one)
+        report.raise_for_all_system_failures()
+        outcomes: list[Record] = []
+        for result in report.outcomes:
+            if isinstance(result, _ManySuccess):
+                outcomes.append(
+                    record(
+                        {
+                            "query": result.item,
+                            "status": "success",
+                            "hits": result.value,
+                            "error": None,
+                        }
+                    )
+                )
+                continue
+            if not isinstance(result, _ManyFailure):
+                raise RuntimeError("many search returned an invalid internal outcome")
+            outcomes.append(
+                record(
+                    {
+                        "query": result.item,
+                        "status": "failure",
+                        "hits": [],
+                        "error": result.info,
+                    }
+                )
+            )
+
+        report.record_failures(
             "search.many",
-            success_count=len(report.results),
-            failures=failures,
+            detail=lambda failure: failure_detail(
+                failure.info,
+                input_index=failure.input_index,
+                query=failure.item,
+            ),
         )
-        outcomes: list[Record | None] = [None] * len(queries)
-        self._validate_report_size("search.many", report.input_count, len(outcomes))
-        for result in report.results:
-            input_index = self._claim_outcome("search.many", outcomes, result.input_index)
-            outcomes[input_index] = record(
-                {
-                    "query": result.query,
-                    "status": "success",
-                    "hits": result.hits,
-                }
+        return outcomes
+
+    def _validate_many_admission(
+        self,
+        queries: list[str],
+        *,
+        limit: int,
+        offset: int,
+        concurrency: int,
+        include_domains: list[str] | None,
+    ) -> None:
+        manifest = self._transport.call("session.capabilities", {})
+        try:
+            search = manifest["search"]
+            limits = search["limits"]
+            mechanisms = manifest["mechanisms"]
+            supports_domains = search["supports_include_domains"]
+            max_depth = search["max_depth"]
+            batching = mechanisms["batching"]
+        except (KeyError, TypeError) as exc:
+            raise self._protocol_error(
+                "session.capabilities", "an invalid search manifest"
+            ) from exc
+
+        if not isinstance(supports_domains, bool) or not isinstance(batching, bool):
+            raise self._protocol_error("session.capabilities", "an invalid search manifest")
+        if max_depth is not None and (
+            isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 1
+        ):
+            raise self._protocol_error("session.capabilities", "an invalid search manifest")
+
+        max_queries = self._manifest_limit(limits, "max_queries_per_request")
+        max_concurrency = self._manifest_limit(limits, "max_concurrency")
+        max_limit = self._manifest_limit(limits, "max_limit")
+        max_offset = self._manifest_limit(limits, "max_offset", minimum=0)
+        max_top_k = self._manifest_limit(limits, "max_top_k")
+
+        if len(queries) > max_queries:
+            raise self._admission_error(
+                f"search.many contains {len(queries)} queries, exceeding the broker maximum "
+                f"of {max_queries}"
             )
-        for failure in report.failures:
-            input_index = self._claim_outcome("search.many", outcomes, failure.input_index)
-            outcomes[input_index] = record(
-                {
-                    "query": failure.query,
-                    "status": failure_status(failure),
-                    "hits": [],
-                }
+        if not batching and len(queries) > 1:
+            raise self._admission_error(
+                "Batching is disabled for this session: search.many accepts at most one query.",
+                code="capability_disabled",
             )
-        self._require_complete_report("search.many", outcomes)
-        return [outcome for outcome in outcomes if outcome is not None]
+        if concurrency > max_concurrency:
+            raise self._admission_error(
+                f"concurrency must be at most {max_concurrency} for search.many"
+            )
+        if limit > max_limit:
+            raise self._admission_error(f"limit must be at most {max_limit}")
+        if offset > max_offset:
+            raise self._admission_error(f"offset must be at most {max_offset}")
+        depth = offset + limit
+        if depth > max_top_k:
+            raise self._admission_error(
+                f"offset={offset} with limit={limit} asks for retrieval depth {depth}, "
+                f"exceeding the broker maximum of {max_top_k}"
+            )
+        if max_depth is not None and depth > max_depth:
+            raise self._admission_error(
+                f"The active backend reaches rank {max_depth} at most, and offset={offset} "
+                f"with limit={limit} asks for {depth}."
+            )
+        if include_domains and not supports_domains:
+            raise self._admission_error(
+                "The active backend has no domain filter, so include_domains cannot be honoured."
+            )
+
+    @classmethod
+    def _manifest_limit(
+        cls,
+        limits: Any,
+        field: str,
+        *,
+        minimum: int = 1,
+    ) -> int:
+        try:
+            value = limits[field]
+        except (KeyError, TypeError) as exc:
+            raise cls._protocol_error(
+                "session.capabilities", "an invalid search limits manifest"
+            ) from exc
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise cls._protocol_error("session.capabilities", "an invalid search limits manifest")
+        return value
+
+    @staticmethod
+    def _admission_error(message: str, *, code: str = "invalid_request") -> BrokerError:
+        return BrokerError(message, code=code, retryable=False, attempts=0)
 
     @staticmethod
     def _search_window(limit: Any, offset: Any) -> tuple[int, int]:

@@ -28,7 +28,7 @@ class OperationSpec:
 
 SDK_SURFACE: tuple[OperationSpec, ...] = (
     OperationSpec("search", "__call__", SurfaceTier.CORE, "search.query", model_core=True),
-    OperationSpec("search", "many", SurfaceTier.CORE, "search.query_many", model_core=True),
+    OperationSpec("search", "many", SurfaceTier.CORE, model_core=True),
     OperationSpec("search", "fuse_rrf", SurfaceTier.HELPER, model_core=True),
     OperationSpec("content", "fetch", SurfaceTier.CORE, "content.fetch", model_core=True),
     OperationSpec(
@@ -83,7 +83,7 @@ SDK_PUBLIC_OPERATIONS: tuple[str, ...] = tuple(
     operation.public_name for operation in SDK_SURFACE if operation.tier is not SurfaceTier.INTERNAL
 )
 
-BROKER_METHODS: tuple[str, ...] = tuple(
+SDK_TRANSPORT_METHODS: tuple[str, ...] = tuple(
     dict.fromkeys(
         operation.transport_method
         for operation in SDK_SURFACE

@@ -10,9 +10,14 @@ search_outcomes = sdk.search.many(queries, limit=5, concurrency=3)
 
 failures = [outcome for outcome in search_outcomes if outcome.status != "success"]
 if len(failures) == len(search_outcomes):
-    raise RuntimeError(f"Every local search failed: {failures[0].status}")
+    error = failures[0].error
+    detail = error.message if error is not None else "unknown search failure"
+    raise RuntimeError(f"Every local search failed: {detail}")
 for failure in failures:
-    print(f"warning: '{failure.query}' failed: {failure.status}")
+    error = failure.error
+    code = error.code if error is not None else "unknown"
+    message = error.message if error is not None else "search failed"
+    print(f"warning: '{failure.query}' failed: code={code} message={message}")
 
 # A local source is its document ID. Sorting low-to-high makes each later
 # duplicate replace its lower-scoring predecessor in the comprehension.

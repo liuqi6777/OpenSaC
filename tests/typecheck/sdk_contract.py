@@ -9,6 +9,8 @@ rank: int = hits[0]["rank"]
 batches = sdk.search.many(["OpenSAC", "search as code"])
 search_status: str = batches[0].status
 search_hit_count: int = len(batches[0].hits)
+search_error = batches[0].error
+search_error_code: str | None = search_error.code if search_error is not None else None
 
 fused = sdk.search.fuse_rrf(batches)
 fused_rank: int | None = fused[0].rank if fused else None
@@ -64,6 +66,7 @@ sdk.output.submit(
         "extracted_label": extracted_label,
         "search_status": search_status,
         "search_hit_count": search_hit_count,
+        "search_error_code": search_error_code,
         "grep_status": grep_status,
         "broker_provider": broker_provider,
         "broker_component": broker_component,

@@ -2,7 +2,7 @@ name: opensac
 
 services:
   opensac:
-    image: ${OPENSAC_SERVICE_IMAGE:-ghcr.io/liuqi6777/opensac:0.8.1}
+    image: ${OPENSAC_SERVICE_IMAGE:-ghcr.io/liuqi6777/opensac:0.8.2}
     init: true
     user: "${OPENSAC_UID:-10001}:${OPENSAC_GID:-10001}"
     group_add:

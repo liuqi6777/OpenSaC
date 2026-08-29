@@ -1,7 +1,7 @@
 # OpenSAC SDK 参考
 
-本文档对应捆绑的 `opensac_sdk` 0.8.1。0.8.1 是有意破坏兼容性的 pre-1.0 版本：
-capability contract 为 13，sandbox contract 为 14，新旧 SDK、broker 与 sandbox 不能混用。
+本文档对应捆绑的 `opensac_sdk` 0.8.2。0.8.2 是有意破坏兼容性的 pre-1.0 patch：
+capability contract 为 14，sandbox contract 为 14，新旧 SDK、broker 与 sandbox 不能混用。
 
 ## 约定
 
@@ -26,7 +26,7 @@ SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 
 - 本地参数错误抛 `ValueError`。
 - provider、quota、transport、抽取 JSON/schema/repair 失败抛 `BrokerError`，尽可能保留
   `code`、`retryable`、`attempts`、`provider`、`component` 和 `scope`。
-- 只有 `search.many` 是公共 batch helper；独立的 content/LLM 调用由 Python 循环。
+- 只有 `search.many` 是公共多查询 helper；独立的 content/LLM 调用由 Python 循环。
 
 ## 公共接口
 
@@ -73,20 +73,44 @@ sdk.search.many(
 ```
 
 返回列表与 `queries` 一一对齐，列表位置就是输入标识。每个 outcome 都有 `query`、
-`status` 和 `hits`：
+`status`、`hits` 和 `error`：
 
 ```python
 [
-    {"query": "q1", "status": "success", "hits": [...]},
-    {"query": "q2", "status": "failure[provider_timeout]: ...", "hits": []},
+    {"query": "q1", "status": "success", "hits": [...], "error": None},
+    {
+        "query": "q2",
+        "status": "failure",
+        "hits": [],
+        "error": {
+            "code": "provider_timeout",
+            "message": "...",
+            "retryable": True,
+            "attempts": 2,
+            "provider_status": None,
+            "retry_after_seconds": None,
+            "provider": "example",
+            "component": "search",
+            "scope": "provider",
+        },
+    },
 ]
 ```
 
-成功时 `status` 严格等于 `"success"`；其他字符串都是有长度上限、供人阅读的失败说明，
-调用方应展示或记录，不应解析。成功且 `hits` 为空表示正常的零匹配。结构化失败详情仍保留在
-宿主侧 diagnostics 中。
+`status` 严格为 `"success"` 或 `"failure"`。成功时 `error=None`；失败时它是有长度上限的
+结构化记录。失败原因从 `error.code` 和 `error.message` 读取，不展示或解析 `status`。成功且
+`hits` 为空表示正常的零匹配。
+
+Provider、quota 和 deadline 错误保留为逐项 outcome。若每一项都因 transport、protocol、
+contract 或 permission 错误失败，`many` 会提升一个代表性的顶层 `BrokerError`。
 
 `Mechanisms.batching` 只控制这个操作。关闭时仍允许单个 query，但拒绝更宽的 fan-out。
+
+实现固定为 SDK 有界线程池路径：先通过 `session.capabilities` 做 admission，再为每个输入发出
+单项 `search.query`，没有环境变量或 broker/client 模式开关。这里的 concurrency 是 helper
+admission，不是 provider semaphore；预算、rate limit、retry、cache/coalescing 和实际 provider
+并发仍由 broker 控制。SDK 不去重，broker 也不再暴露 batch search RPC。迁移边界见
+[版本说明](opensac-0.8.2.md)。
 
 ### `sdk.search.fuse_rrf(...)`
 
@@ -195,7 +219,8 @@ sdk.content.grep(
 match 包含 1-based `line`、`text`、`before`、`after` 和 `spans`，source/title 从所属
 outcome 读取。span 使用 0-based、end-exclusive 的 `start_character`/`end_character`。
 成功 outcome 的 `next_start_line` 非空时可从该行继续；为 `None` 表示已扫描到 EOF。成功且
-`matches` 为空不是失败。与 search 一样，只比较 `status == "success"`，不要解析失败说明。
+`matches` 为空不是失败。对 grep outcome 只比较 `status == "success"`；其他值是可展示的
+失败说明，不要解析。
 
 ### `sdk.content.passages(...)`
 
@@ -320,6 +345,20 @@ sdk.output.submit(value, *, citations: list[str] | None = None) -> None
 
 `submit` 原子写入当前 execution 输出；citation 只是 source label，不代表 broker 做了证据校验。
 重复 submit 会覆盖先前输出。
+
+## 0.8.2 Breaking 迁移
+
+不提供 broker batch 兼容 handler 或 SDK 模式开关。
+
+| 0.8.1 行为或 API | 0.8.2 替代 |
+| --- | --- |
+| broker `search.query_many` transport | SDK 有界并发调用 unary `search.query` |
+| search 失败 outcome 的 status 包含展示文本 | `status == "failure"` 加结构化 `error` |
+| broker-facing `BatchSearchBackend` | unary `SearchBackend.search` |
+| `LocalSearchBackend.search_many(...)` | 并发 unary adapter 调用；后端内部 batching 属于私有实现 |
+
+`sdk.search.many` 签名不变。0.8.2 SDK 与 broker 必须配套部署；capability contract 14 会有意
+拒绝 0.8.1 wire surface。
 
 ## 0.8.1 Breaking 迁移
 

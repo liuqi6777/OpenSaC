@@ -1,7 +1,7 @@
 # OpenSAC SDK reference
 
-This reference covers the bundled `opensac_sdk` 0.8.1 interface. Version 0.8.1 is an intentional
-breaking pre-1.0 release: capability contract 13 and sandbox contract 14 prevent older SDK,
+This reference covers the bundled `opensac_sdk` 0.8.2 interface. Version 0.8.2 is an intentional
+breaking pre-1.0 patch: capability contract 14 and sandbox contract 14 prevent older SDK,
 broker, and sandbox combinations from running together.
 
 ## Conventions
@@ -29,7 +29,8 @@ enforced by the broker and reported by `sdk.session.capabilities()`.
 - Local argument errors raise `ValueError`.
 - Provider, quota, transport, extraction JSON/schema, and repair failures raise `BrokerError` with
   `code`, `retryable`, `attempts`, `provider`, `component`, and `scope` details when available.
-- Only `search.many` is a public batch helper. Loop in Python for independent content or LLM calls.
+- Only `search.many` is a public multi-query helper. Loop in Python for independent content or LLM
+  calls.
 
 ## Public surface
 
@@ -76,21 +77,46 @@ sdk.search.many(
 ```
 
 The returned list is aligned one-to-one with `queries`; list position is the input identity. Every
-outcome has `query`, `status`, and `hits`:
+outcome has `query`, `status`, `hits`, and `error`:
 
 ```python
 [
-    {"query": "q1", "status": "success", "hits": [...]},
-    {"query": "q2", "status": "failure[provider_timeout]: ...", "hits": []},
+    {"query": "q1", "status": "success", "hits": [...], "error": None},
+    {
+        "query": "q2",
+        "status": "failure",
+        "hits": [],
+        "error": {
+            "code": "provider_timeout",
+            "message": "...",
+            "retryable": True,
+            "attempts": 2,
+            "provider_status": None,
+            "retry_after_seconds": None,
+            "provider": "example",
+            "component": "search",
+            "scope": "provider",
+        },
+    },
 ]
 ```
 
-`status` is exactly `"success"` for success. Any other string is a bounded, human-readable failure
-description; callers should display or log it, not parse it. Empty `hits` with success status is a
-valid no-match result. Structured failure details remain in host-side diagnostics.
+`status` is exactly `"success"` or `"failure"`. On success, `error` is `None`; on failure, it is a
+bounded structured record. Read failure details from `error.code` and `error.message`, rather than
+displaying or parsing `status`. Empty `hits` with success status is a valid no-match result.
+
+Provider, quota, and deadline errors remain item outcomes. If every item fails with a transport,
+protocol, contract, or permission error, `many` raises one representative top-level `BrokerError`.
 
 `Mechanisms.batching` controls this operation only. When batching is disabled, one query is still
 accepted but a wider fan-out is rejected.
+
+The implementation is a single bounded SDK thread-pool path. It checks `session.capabilities` for
+admission and then issues one `search.query` call per input; there is no environment variable or
+broker/client mode switch. Its concurrency value is helper admission, not the provider semaphore.
+The broker still owns budgets, rate limits, retries, cache/coalescing, and actual provider
+concurrency. The SDK does not deduplicate, and the broker exposes no batch search RPC. The
+[release notes](opensac-0.8.2.md) describe the migration boundaries.
 
 ### `sdk.search.fuse_rrf(...)`
 
@@ -201,7 +227,8 @@ A match contains 1-based `line`, `text`, `before`, `after`, and `spans`; its sou
 from the owning outcome. Each span contains 0-based, end-exclusive `start_character` and
 `end_character`. On a successful outcome, continue a capped scan from non-null `next_start_line`;
 `None` means that source was scanned to EOF. Zero matches with success status is not a failure.
-As with search outcomes, only compare `status` with `"success"`; do not parse failure descriptions.
+For grep outcomes, compare `status` with `"success"`; other values are displayable failure
+descriptions and should not be parsed.
 
 ### `sdk.content.passages(...)`
 
@@ -329,6 +356,20 @@ sdk.output.submit(value, *, citations: list[str] | None = None) -> None
 
 Submission atomically writes the current execution output. Citation strings are labels, not broker
 evidence validation. Repeated submissions replace the previous output.
+
+## 0.8.2 breaking migration
+
+No broker batch compatibility handler or SDK mode switch is provided.
+
+| 0.8.1 behavior or API | 0.8.2 replacement |
+| --- | --- |
+| broker `search.query_many` transport | bounded SDK calls to unary `search.query` |
+| failed search outcome status contains display text | `status == "failure"` plus structured `error` |
+| broker-facing `BatchSearchBackend` | unary `SearchBackend.search` |
+| `LocalSearchBackend.search_many(...)` | concurrent unary adapter calls; backend-internal batching is private |
+
+The `sdk.search.many` signature is unchanged. Deploy the 0.8.2 SDK and broker together because
+capability contract 14 intentionally rejects the 0.8.1 wire surface.
 
 ## 0.8.1 breaking migration
 

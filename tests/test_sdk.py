@@ -3,13 +3,21 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 import opensac_sdk
 import pytest
-from opensac_sdk._diagnostics import failure_status
+from opensac_sdk._diagnostics import error_info, failure_status
+from opensac_sdk._many import (
+    _SYSTEM_FAILURE_CODES,
+    _ManyFailure,
+    _ManySuccess,
+    _run_many,
+)
 from opensac_sdk._record import Record, record, wrap
 from opensac_sdk._resources import (
     ContentResource,
@@ -19,7 +27,11 @@ from opensac_sdk._resources import (
     SessionResource,
     StateResource,
 )
-from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
+from opensac_sdk._surface import (
+    SDK_SURFACE,
+    SDK_TRANSPORT_METHODS,
+    SurfaceTier,
+)
 from opensac_sdk.transport import BrokerError, UnixSocketTransport
 
 RESOURCE_TYPES = {
@@ -84,6 +96,17 @@ def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
     assert declared == implemented
 
 
+def test_search_many_is_composed_locally_not_mapped_to_broker_batch() -> None:
+    search_many = next(
+        operation
+        for operation in SDK_SURFACE
+        if operation.resource == "search" and operation.method == "many"
+    )
+
+    assert search_many.transport_method is None
+    assert "search.query_many" not in SDK_TRANSPORT_METHODS
+
+
 def test_surface_manifest_keeps_model_core_small() -> None:
     model_core = [operation for operation in SDK_SURFACE if operation.model_core]
     assert len(SDK_SURFACE) == 22
@@ -137,7 +160,8 @@ def test_lazy_sdk_exposes_resource_and_method_docs_without_a_broker_call() -> No
             many_doc = " ".join((opensac_sdk.sdk.search.many.__doc__ or "").split())
             assert "status" in many_doc
             assert '"success"' in many_doc
-            assert "should not parse failure strings" in many_doc
+            assert '"failure"' in many_doc
+            assert "structured failure details" in many_doc
     finally:
         opensac_sdk.sdk.close()
 
@@ -168,7 +192,7 @@ def test_unix_transport_reuses_one_http_client_for_all_calls() -> None:
         200,
         request=httpx.Request("POST", "http://opensac/v1/call"),
         json={
-            "capability_contract": 13,
+            "capability_contract": 14,
             "ok": True,
             "result": {"value": 1},
             "error": None,
@@ -200,7 +224,7 @@ def test_unix_transport_reuses_one_http_client_for_all_calls() -> None:
     assert client_type.call_args.kwargs["timeout"] is None
     assert fake.posts == 2
     assert fake.closed == 1
-    assert all(headers["X-OpenSAC-Capability-Contract"] == "13" for headers in fake.headers)
+    assert all(headers["X-OpenSAC-Capability-Contract"] == "14" for headers in fake.headers)
 
 
 def test_unix_transport_exposes_typed_broker_errors() -> None:
@@ -208,7 +232,7 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
         200,
         request=httpx.Request("POST", "http://opensac/v1/call"),
         json={
-            "capability_contract": 13,
+            "capability_contract": 14,
             "ok": False,
             "result": None,
             "error": {
@@ -244,7 +268,7 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
     assert raised.value.scope == "provider"
 
 
-@pytest.mark.parametrize("reported_contract", [None, 12])
+@pytest.mark.parametrize("reported_contract", [None, 13])
 def test_unix_transport_rejects_missing_or_mismatched_capability_contract(
     reported_contract: int | None,
 ) -> None:
@@ -337,14 +361,20 @@ def _search_outcomes(
     outcomes: list[Record | None] = [None] * report.input_count
     for result in report.results:
         outcomes[result.input_index] = record(
-            {"query": result.query, "status": "success", "hits": result.hits}
+            {
+                "query": result.query,
+                "status": "success",
+                "hits": result.hits,
+                "error": None,
+            }
         )
     for failure in report.failures:
         outcomes[failure.input_index] = record(
             {
                 "query": failure.query,
-                "status": failure_status(failure),
+                "status": "failure",
                 "hits": [],
+                "error": error_info(failure),
             }
         )
     assert all(outcome is not None for outcome in outcomes)
@@ -354,13 +384,14 @@ def _search_outcomes(
 def test_search_many_returns_input_aligned_outcomes() -> None:
     class ManyTransport:
         def call(self, method, params):
-            assert method == "search.query_many"
-            return _search_report(
-                [
-                    {"input_index": index, "query": query, "hits": []}
-                    for index, query in enumerate(params["queries"])
-                ]
-            )
+            if method == "session.capabilities":
+                return _search_capabilities()
+            assert method == "search.query"
+            assert params["query"] in {"one", "two"}
+            assert params["limit"] == 12
+            assert params["offset"] == 4
+            assert params["include_domains"] == ["example.com"]
+            return []
 
     outcomes = SearchResource(ManyTransport()).many(
         ["one", "two"],
@@ -370,21 +401,9 @@ def test_search_many_returns_input_aligned_outcomes() -> None:
     )
 
     assert [dict(outcome) for outcome in outcomes] == [
-        {"query": "one", "status": "success", "hits": []},
-        {"query": "two", "status": "success", "hits": []},
+        {"query": "one", "status": "success", "hits": [], "error": None},
+        {"query": "two", "status": "success", "hits": [], "error": None},
     ]
-
-
-def test_search_many_rejects_malformed_broker_alignment() -> None:
-    class MalformedManyTransport:
-        def call(self, method, params):
-            return _search_report([], input_count=0)
-
-    with pytest.raises(BrokerError) as raised:
-        SearchResource(MalformedManyTransport()).many(["one"])
-
-    assert raised.value.code == "broker_protocol_error"
-    assert raised.value.retryable is False
 
 
 def test_search_many_records_all_failed_warning_without_raising(tmp_path, monkeypatch) -> None:
@@ -393,23 +412,17 @@ def test_search_many_records_all_failed_warning_without_raising(tmp_path, monkey
 
     class FailedManyTransport:
         def call(self, method, params):
-            assert method == "search.query_many"
-            return _search_report(
-                [],
-                failures=[
-                    {
-                        "input_index": input_index,
-                        "query": query,
-                        "code": "provider_timeout",
-                        "message": "Search provider timed out.",
-                        "retryable": True,
-                        "attempts": 3,
-                        "provider": "serper",
-                        "component": "search",
-                        "scope": "provider",
-                    }
-                    for input_index, query in enumerate(params["queries"])
-                ],
+            if method == "session.capabilities":
+                return _search_capabilities()
+            assert method == "search.query"
+            raise BrokerError(
+                "Search provider timed out.",
+                code="provider_timeout",
+                retryable=True,
+                attempts=3,
+                provider="serper",
+                component="search",
+                scope="provider",
             )
 
     search = SearchResource(FailedManyTransport())
@@ -418,14 +431,12 @@ def test_search_many_records_all_failed_warning_without_raising(tmp_path, monkey
 
     assert [outcome.query for outcome in outcomes] == ["one", "two"]
     assert all(outcome.hits == [] for outcome in outcomes)
-    assert all(
-        outcome.status
-        == (
-            "failure[provider_timeout]: Search provider timed out.; retryable=true; "
-            "attempts=3; provider=serper; component=search; scope=provider"
-        )
-        for outcome in outcomes
-    )
+    assert all(outcome.status == "failure" for outcome in outcomes)
+    assert all(outcome.error.code == "provider_timeout" for outcome in outcomes)
+    assert all(outcome.error.message == "Search provider timed out." for outcome in outcomes)
+    assert all(outcome.error.retryable is True for outcome in outcomes)
+    assert all(outcome.error.attempts == 3 for outcome in outcomes)
+    assert all(outcome.error.provider == "serper" for outcome in outcomes)
     warnings = json.loads(output_path.read_text(encoding="utf-8"))["warnings"]
     assert len(warnings) == 1
     warning = warnings[0]
@@ -442,20 +453,15 @@ def test_sdk_failure_warnings_are_strictly_bounded(tmp_path, monkeypatch) -> Non
 
     class FailedManyTransport:
         def call(self, method, params):
-            assert method == "search.query_many"
-            return _search_report(
-                [],
-                failures=[
-                    {
-                        "input_index": input_index,
-                        "query": query,
-                        "code": "provider_timeout",
-                        "message": "x" * 10_000,
-                        "retryable": True,
-                        "attempts": 3,
-                    }
-                    for input_index, query in enumerate(params["queries"])
-                ],
+            del params
+            if method == "session.capabilities":
+                return _search_capabilities()
+            assert method == "search.query"
+            raise BrokerError(
+                "x" * 10_000,
+                code="provider_timeout",
+                retryable=True,
+                attempts=3,
             )
 
     outcomes = SearchResource(FailedManyTransport()).many([f"query-{index}" for index in range(64)])
@@ -467,8 +473,9 @@ def test_sdk_failure_warnings_are_strictly_bounded(tmp_path, monkeypatch) -> Non
     warning = payload["warnings"][0]
     assert len(encoded_warnings) <= 4_096
     assert len(warning["failures"]) + warning["omitted_failure_count"] == 64
-    assert all(len(outcome.status) <= 2_048 for outcome in outcomes)
-    assert all("\n" not in outcome.status for outcome in outcomes)
+    assert all(outcome.status == "failure" for outcome in outcomes)
+    assert all(len(outcome.error.message) <= 1_024 for outcome in outcomes)
+    assert all("\n" not in outcome.error.message for outcome in outcomes)
 
 
 def test_warning_budget_keeps_later_failure_summaries(tmp_path, monkeypatch) -> None:
@@ -477,20 +484,17 @@ def test_warning_budget_keeps_later_failure_summaries(tmp_path, monkeypatch) -> 
 
     class FailedManyTransport:
         def call(self, method, params):
-            return _search_report(
-                [],
-                failures=[
-                    {
-                        "input_index": 0,
-                        "query": params["queries"][0],
-                        "code": "provider_invalid_response" + "x" * 480,
-                        "message": "x" * 1_024,
-                        "retryable": False,
-                        "attempts": 1,
-                        "provider": "p" * 512,
-                        "component": "o" * 512,
-                    }
-                ],
+            del params
+            if method == "session.capabilities":
+                return _search_capabilities()
+            assert method == "search.query"
+            raise BrokerError(
+                "x" * 1_024,
+                code="provider_invalid_response" + "x" * 480,
+                retryable=False,
+                attempts=1,
+                provider="p" * 512,
+                component="o" * 512,
             )
 
     search = SearchResource(FailedManyTransport())
@@ -526,6 +530,118 @@ def test_failure_status_is_bounded_single_line_and_not_a_parse_contract() -> Non
     )
 
 
+@pytest.mark.parametrize("retry_after_seconds", [float("nan"), float("inf"), -1.0])
+def test_error_info_is_total_and_strict_json_serializable(retry_after_seconds: float) -> None:
+    info = error_info(
+        {
+            "code": "provider_timeout",
+            "message": "timed out",
+            "retryable": True,
+            "retry_after_seconds": retry_after_seconds,
+            "scope": "unexpected-scope",
+        }
+    )
+
+    assert info["retry_after_seconds"] is None
+    assert info["scope"] == "unknown"
+    json.dumps(info, allow_nan=False)
+
+
+def test_run_many_bounds_workers_preserves_identity_and_joins_threads() -> None:
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def call(index: int) -> int:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep((4 - index) * 0.01)
+            return index * 10
+        finally:
+            with lock:
+                active -= 1
+
+    report = _run_many([0, 1, 2, 3], concurrency=2, call=call)
+
+    assert [
+        (result.input_index, result.item, result.value)
+        for result in report.outcomes
+        if isinstance(result, _ManySuccess)
+    ] == [
+        (0, 0, 0),
+        (1, 1, 10),
+        (2, 2, 20),
+        (3, 3, 30),
+    ]
+    assert report.success_count == 4
+    assert report.failure_count == 0
+    assert max_active == 2
+    assert active == 0
+    assert not any(thread.name.startswith("opensac-sdk") for thread in threading.enumerate())
+
+
+def test_run_many_runs_one_item_inline_and_only_captures_broker_errors() -> None:
+    caller_thread = threading.get_ident()
+    inline = _run_many(
+        ["one"],
+        concurrency=5,
+        call=lambda _item: threading.get_ident(),
+    )
+    assert isinstance(inline.outcomes[0], _ManySuccess)
+    assert inline.outcomes[0].value == caller_thread
+
+    failure = BrokerError(
+        "provider failed",
+        code="provider_timeout",
+        retryable=True,
+        attempts=2,
+    )
+    captured = _run_many(
+        ["one"],
+        concurrency=1,
+        call=lambda _item: (_ for _ in ()).throw(failure),
+    )
+    assert isinstance(captured.outcomes[0], _ManyFailure)
+    assert captured.outcomes[0].error is failure
+    assert captured.outcomes[0].input_index == 0
+    assert captured.outcomes[0].item == "one"
+    assert captured.outcomes[0].info["code"] == "provider_timeout"
+    assert captured.success_count == 0
+    assert captured.failure_count == 1
+
+    with pytest.raises(ValueError, match="unexpected"):
+        _run_many(
+            ["one", "two"],
+            concurrency=2,
+            call=lambda _item: (_ for _ in ()).throw(ValueError("unexpected")),
+        )
+    assert not any(thread.name.startswith("opensac-sdk") for thread in threading.enumerate())
+
+
+def test_many_report_promotes_only_all_system_failures() -> None:
+    def fail(code: str):
+        return lambda _item: (_ for _ in ()).throw(BrokerError(code, code=code, retryable=False))
+
+    report = _run_many(
+        ["one", "two"],
+        concurrency=2,
+        call=fail("broker_transport_error"),
+    )
+    with pytest.raises(BrokerError) as raised:
+        report.raise_for_all_system_failures()
+    assert raised.value is report.failures[0].error
+
+    provider_report = _run_many(
+        ["one", "two"],
+        concurrency=2,
+        call=fail("provider_timeout"),
+    )
+    provider_report.raise_for_all_system_failures()
+
+
 def _hit(source: str, rank: int, *, backend: str = "local", score: float | None = None):
     return record(
         {
@@ -545,6 +661,227 @@ def _hit(source: str, rank: int, *, backend: str = "local", score: float | None 
     )
 
 
+def _search_capabilities(
+    *,
+    batching: bool = True,
+    supports_domains: bool = True,
+    max_depth: int | None = None,
+    max_queries: int = 64,
+    max_concurrency: int = 20,
+    max_limit: int = 100,
+    max_offset: int = 500,
+    max_top_k: int = 600,
+) -> Record:
+    return record(
+        {
+            "contracts": {"sandbox": 14, "capability": 14},
+            "search": {
+                "backend": "test",
+                "supports_include_domains": supports_domains,
+                "max_depth": max_depth,
+                "limits": {
+                    "max_queries_per_request": max_queries,
+                    "max_query_chars": 4_096,
+                    "max_top_k": max_top_k,
+                    "max_limit": max_limit,
+                    "max_offset": max_offset,
+                    "max_concurrency": max_concurrency,
+                },
+            },
+            "mechanisms": {"batching": batching},
+        }
+    )
+
+
+def test_search_many_is_bounded_aligned_and_does_not_deduplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(tmp_path / "output.json"))
+
+    class ClientTransport:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.query_calls: list[str] = []
+            self.active = 0
+            self.max_active = 0
+
+        def call(self, method, params):
+            if method == "session.capabilities":
+                return _search_capabilities()
+            assert method == "search.query"
+            query = params["query"]
+            with self.lock:
+                self.query_calls.append(query)
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep({"slow": 0.04, "failed": 0.01, "fast": 0.005}[query])
+                if query == "failed":
+                    raise BrokerError(
+                        "Search provider timed out.",
+                        code="provider_timeout",
+                        retryable=True,
+                        attempts=3,
+                        provider="test",
+                        component="search",
+                        scope="provider",
+                    )
+                return [_hit(f"doc-{query}", 1)]
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    transport = ClientTransport()
+    outcomes = SearchResource(transport).many(
+        ["slow", "failed", "fast", "slow"],
+        concurrency=2,
+    )
+
+    assert [outcome.query for outcome in outcomes] == ["slow", "failed", "fast", "slow"]
+    assert [outcome.status for outcome in outcomes] == [
+        "success",
+        "failure",
+        "success",
+        "success",
+    ]
+    assert outcomes[0].error is None
+    assert outcomes[1].hits == []
+    assert dict(outcomes[1].error) == {
+        "code": "provider_timeout",
+        "message": "Search provider timed out.",
+        "retryable": True,
+        "attempts": 3,
+        "provider_status": None,
+        "retry_after_seconds": None,
+        "provider": "test",
+        "component": "search",
+        "scope": "provider",
+    }
+    assert transport.max_active == 2
+    assert transport.query_calls.count("slow") == 2
+    warning = json.loads((tmp_path / "output.json").read_text())["warnings"][0]
+    assert warning["success_count"] == 3
+    assert warning["failure_count"] == 1
+
+
+def test_search_many_checks_manifest_admission_before_fanout() -> None:
+    class ManifestTransport:
+        def __init__(self, manifest: Record) -> None:
+            self.manifest = manifest
+            self.calls: list[str] = []
+
+        def call(self, method, params):
+            del params
+            self.calls.append(method)
+            if method == "session.capabilities":
+                return self.manifest
+            raise AssertionError("search fan-out must not start after failed admission")
+
+    cases = [
+        (
+            _search_capabilities(batching=False),
+            ["one", "two"],
+            {},
+            "capability_disabled",
+        ),
+        (_search_capabilities(max_queries=1), ["one", "two"], {}, "invalid_request"),
+        (_search_capabilities(max_concurrency=1), ["one"], {"concurrency": 2}, "invalid_request"),
+        (
+            _search_capabilities(supports_domains=False),
+            ["one"],
+            {"include_domains": ["example.com"]},
+            "invalid_request",
+        ),
+        (_search_capabilities(max_depth=5), ["one"], {}, "invalid_request"),
+    ]
+    for manifest, queries, kwargs, code in cases:
+        transport = ManifestTransport(manifest)
+        with pytest.raises(BrokerError) as raised:
+            SearchResource(transport).many(queries, **kwargs)
+        assert raised.value.code == code
+        assert transport.calls == ["session.capabilities"]
+
+
+def test_search_many_rejects_malformed_manifest() -> None:
+    class MalformedTransport:
+        def call(self, method, params):
+            del method, params
+            return {"search": {}}
+
+    with pytest.raises(BrokerError) as raised:
+        SearchResource(MalformedTransport()).many(["one"])
+    assert raised.value.code == "broker_protocol_error"
+
+
+def test_search_many_promotes_only_all_system_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(tmp_path / "output.json"))
+
+    class FailingTransport:
+        def __init__(self, *, code: str, succeed: set[str] | None = None) -> None:
+            self.code = code
+            self.succeed = succeed or set()
+
+        def call(self, method, params):
+            if method == "session.capabilities":
+                return _search_capabilities()
+            if params["query"] in self.succeed:
+                return []
+            raise BrokerError(
+                f"{self.code} for {params['query']}",
+                code=self.code,
+                retryable=self.code == "broker_transport_error",
+                attempts=1 if self.code.startswith("provider_") else None,
+            )
+
+    for code in sorted(_SYSTEM_FAILURE_CODES):
+        with pytest.raises(BrokerError) as raised:
+            SearchResource(FailingTransport(code=code)).many(["one", "two"])
+        assert raised.value.code == code
+
+    class MixedSystemTransport(FailingTransport):
+        def call(self, method, params):
+            if method == "session.capabilities":
+                return _search_capabilities()
+            code = "broker_transport_error" if params["query"] == "one" else "broker_protocol_error"
+            raise BrokerError(f"{code} for {params['query']}", code=code, retryable=False)
+
+    with pytest.raises(BrokerError) as mixed_system:
+        SearchResource(MixedSystemTransport(code="unused")).many(["one", "two"])
+    assert mixed_system.value.code == "broker_transport_error"
+
+    mixed = SearchResource(
+        FailingTransport(code="broker_transport_error", succeed={"one"}),
+    ).many(["one", "two"])
+    assert [outcome.status for outcome in mixed] == ["success", "failure"]
+    assert mixed[1].error.code == "broker_transport_error"
+
+    provider = SearchResource(FailingTransport(code="provider_timeout")).many(["one", "two"])
+    assert [outcome.status for outcome in provider] == ["failure", "failure"]
+    assert [outcome.error.code for outcome in provider] == [
+        "provider_timeout",
+        "provider_timeout",
+    ]
+
+
+def test_search_many_validates_empty_input_without_starting_search() -> None:
+    class EmptyTransport:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def call(self, method, params):
+            del params
+            self.calls.append(method)
+            return _search_capabilities()
+
+    transport = EmptyTransport()
+    assert SearchResource(transport).many([]) == []
+    assert transport.calls == ["session.capabilities"]
+
+
 def test_search_many_restores_partial_duplicate_queries_to_input_order(
     tmp_path, monkeypatch
 ) -> None:
@@ -552,34 +889,29 @@ def test_search_many_restores_partial_duplicate_queries_to_input_order(
 
     class PartialManyTransport:
         def call(self, method, params):
-            assert method == "search.query_many"
-            assert params["queries"] == ["same", "failed", "same"]
-            return _search_report(
-                [
-                    {"input_index": 2, "query": "same", "hits": [_hit("doc-2", 1)]},
-                    {"input_index": 0, "query": "same", "hits": [_hit("doc-0", 1)]},
-                ],
-                failures=[
-                    {
-                        "input_index": 1,
-                        "query": "failed",
-                        "code": "provider_timeout",
-                        "message": "timed out",
-                        "retryable": True,
-                        "attempts": 2,
-                    }
-                ],
-                input_count=3,
-            )
+            if method == "session.capabilities":
+                return _search_capabilities()
+            assert method == "search.query"
+            if params["query"] == "failed":
+                raise BrokerError(
+                    "timed out",
+                    code="provider_timeout",
+                    retryable=True,
+                    attempts=2,
+                )
+            return [_hit("doc-same", 1)]
 
     search = SearchResource(PartialManyTransport())
     outcomes = search.many(["same", "failed", "same"])
 
     assert [outcome.query for outcome in outcomes] == ["same", "failed", "same"]
     assert [outcome.status == "success" for outcome in outcomes] == [True, False, True]
-    assert [hit.source for outcome in outcomes for hit in outcome.hits] == ["doc-0", "doc-2"]
+    assert [hit.source for outcome in outcomes for hit in outcome.hits] == [
+        "doc-same",
+        "doc-same",
+    ]
     fused = search.fuse_rrf(outcomes)
-    assert [item.provenance[0].input_index for item in fused] == [0, 2]
+    assert [row.input_index for row in fused[0].provenance] == [0, 2]
 
 
 def test_search_rrf_fuses_sources_locally_and_preserves_provenance() -> None:
@@ -613,7 +945,8 @@ def test_search_rrf_fuses_sources_locally_and_preserves_provenance() -> None:
     assert transport.calls == []
     assert [candidate.source for candidate in result] == ["b", "a"]
     assert [candidate.fused_rank for candidate in result] == [1, 2]
-    assert report[2].status.startswith("failure[provider_timeout]:")
+    assert report[2].status == "failure"
+    assert report[2].error.code == "provider_timeout"
 
     candidate_a = result[1]
     assert isinstance(candidate_a, Record)
@@ -813,7 +1146,8 @@ def test_search_rrf_ignores_separate_failures() -> None:
     result = SearchResource(FakeTransport()).fuse_rrf(report)
 
     assert result == []
-    assert report[0].status.startswith("failure[provider_rate_limited]:")
+    assert report[0].status == "failure"
+    assert report[0].error.code == "provider_rate_limited"
 
 
 def test_content_grep_returns_matches_and_source_aligned_status(tmp_path, monkeypatch) -> None:
@@ -1164,13 +1498,13 @@ def test_session_capabilities_is_a_broker_operation() -> None:
 
         def call(self, method, params):
             self.calls.append((method, params))
-            return record({"contracts": {"sandbox": 14, "capability": 13}})
+            return record({"contracts": {"sandbox": 14, "capability": 14}})
 
     transport = SessionTransport()
     capabilities = SessionResource(transport).capabilities()
 
     assert capabilities.contracts.sandbox == 14
-    assert capabilities.contracts.capability == 13
+    assert capabilities.contracts.capability == 14
     assert transport.calls == [("session.capabilities", {})]
 
 
@@ -1394,7 +1728,7 @@ def test_environment_transport_refreshes_token_and_execution_id(
         )
         return httpx.Response(
             200,
-            json={"capability_contract": 13, "ok": True, "result": {}},
+            json={"capability_contract": 14, "ok": True, "result": {}},
         )
 
     monkeypatch.setenv("OPENSAC_BROKER_SOCKET", "/tmp/broker.sock")
@@ -1414,8 +1748,8 @@ def test_environment_transport_refreshes_token_and_execution_id(
         transport.close()
 
     assert observed == [
-        ("Bearer token-1", "exec-1", "13"),
-        ("Bearer token-2", "exec-2", "13"),
+        ("Bearer token-1", "exec-1", "14"),
+        ("Bearer token-2", "exec-2", "14"),
     ]
 
 

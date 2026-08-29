@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from opensac_sdk._resources import LLMResource
+from opensac_sdk._resources import LLMResource, SearchResource
 from opensac_sdk.transport import BrokerError, UnixSocketTransport
 
 from opensac.backends.document import DocumentContent, DocumentHandle
 from opensac.backends.llm import OpenAICompatibleBackend
 from opensac.backends.search import SearchHit
 from opensac.broker import BrokerAlreadyRunning, BrokerRuntime, BrokerService
-from opensac.models import Session
+from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderRequestError
 
 
@@ -77,6 +78,275 @@ async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:
         await runtime.stop()
 
 
+async def test_search_many_round_trips_concurrently_over_unix_socket(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class ConcurrentBackend(SocketBackend):
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.calls: list[str] = []
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            del limit, offset, domains
+            self.calls.append(query)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep({"slow": 0.04, "failed": 0.01, "fast": 0.005}[query])
+                if query == "failed":
+                    raise ProviderRequestError(
+                        "provider_timeout",
+                        "Search provider timed out.",
+                        retryable=True,
+                    )
+                return [
+                    SearchHit(
+                        source="",
+                        backend="local",
+                        docid=f"doc-{query}",
+                        snippet=query,
+                        rank=1,
+                    )
+                ]
+            finally:
+                self.active -= 1
+
+    backend = ConcurrentBackend()
+    service = _broker_service({"local": backend})
+    service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            workspace=str(tmp_path / "workspace"),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+    transport = UnixSocketTransport(str(runtime.socket_path), "secret")
+    monkeypatch.setenv("OPENSAC_EXECUTION_ID", "client-many-uds")
+    search = SearchResource(transport)
+    try:
+        outcomes = await asyncio.to_thread(
+            search.many,
+            ["slow", "failed", "fast"],
+            concurrency=2,
+        )
+        assert [outcome.query for outcome in outcomes] == ["slow", "failed", "fast"]
+        assert [outcome.status for outcome in outcomes] == ["success", "failure", "success"]
+        assert outcomes[1].error.code == "provider_timeout"
+        assert outcomes[1].error.attempts == 1
+        assert backend.max_active == 2
+        assert sorted(backend.calls) == ["failed", "fast", "slow"]
+        fused = search.fuse_rrf(outcomes)
+        assert [candidate.source for candidate in fused] == ["doc-slow", "doc-fast"]
+        assert [candidate.provenance[0].input_index for candidate in fused] == [0, 2]
+        trace = service.take_trace("secret", "client-many-uds")
+        assert [event.method for event in trace].count("session.capabilities") == 1
+        assert [event.method for event in trace].count("search.query") == 3
+    finally:
+        transport.close()
+        await runtime.stop()
+
+
+async def test_search_many_allows_partial_budget_success_over_unix_socket(
+    tmp_path,
+) -> None:
+    class CountingBackend(SocketBackend):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            self.calls += 1
+            await asyncio.sleep(0)
+            return await super().search(
+                query,
+                limit=limit,
+                offset=offset,
+                domains=domains,
+            )
+
+    backend = CountingBackend()
+    service = _broker_service({"local": backend})
+    state = service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            workspace=str(tmp_path / "workspace"),
+            budget=ResourceBudget(max_search_queries=2),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+    transport = UnixSocketTransport(str(runtime.socket_path), "secret")
+    try:
+        outcomes = await asyncio.to_thread(
+            SearchResource(transport).many,
+            ["one", "two", "three", "four"],
+            concurrency=4,
+        )
+        assert sum(outcome.status == "success" for outcome in outcomes) == 2
+        assert (
+            sum(outcome.error.code == "budget_exhausted" for outcome in outcomes if outcome.error)
+            == 2
+        )
+        assert backend.calls == 2
+        assert state.policy.usage.search_calls == 2
+    finally:
+        transport.close()
+        await runtime.stop()
+
+
+async def test_search_many_honours_batching_mechanism_over_unix_socket(
+    tmp_path,
+) -> None:
+    service = _broker_service({"local": SocketBackend()})
+    state = service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            workspace=str(tmp_path / "workspace"),
+            mechanisms=Mechanisms(batching=False),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+    transport = UnixSocketTransport(str(runtime.socket_path), "secret")
+    try:
+        with pytest.raises(BrokerError) as raised:
+            await asyncio.to_thread(
+                SearchResource(transport).many,
+                ["one", "two"],
+            )
+        assert raised.value.code == "capability_disabled"
+        assert state.policy.usage.search_calls == 0
+    finally:
+        transport.close()
+        await runtime.stop()
+
+
+async def test_search_many_registers_shared_source_by_completion_order(
+    tmp_path,
+) -> None:
+    class CompletionOrderBackend(SocketBackend):
+        async def search(self, query, *, limit, offset=0, domains=None):
+            del limit, offset, domains
+            if query == "first":
+                await asyncio.sleep(0.03)
+            return [
+                SearchHit(
+                    source="",
+                    backend="local",
+                    title=query,
+                    docid="shared",
+                    snippet=query,
+                    rank=1,
+                )
+            ]
+
+    service = _broker_service({"local": CompletionOrderBackend()})
+    state = service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            workspace=str(tmp_path / "workspace"),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+    transport = UnixSocketTransport(str(runtime.socket_path), "secret")
+    try:
+        outcomes = await asyncio.to_thread(
+            SearchResource(transport).many,
+            ["first", "second"],
+            concurrency=2,
+        )
+        assert [outcome.query for outcome in outcomes] == ["first", "second"]
+        source = outcomes[0].hits[0].source
+        assert outcomes[1].hits[0].source == source
+        remembered = state.document_for_alias(source)
+        assert remembered is not None and remembered.handle.title == "second"
+    finally:
+        transport.close()
+        await runtime.stop()
+
+
+async def test_search_many_cancellation_drains_socket_calls_and_threads(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class BlockingBackend(SocketBackend):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.started_count = 0
+            self.cancelled_count = 0
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            del query, limit, offset, domains
+            self.started_count += 1
+            if self.started_count == 2:
+                self.started.set()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled_count += 1
+                raise
+            return []
+
+    backend = BlockingBackend()
+    service = _broker_service({"local": backend})
+    service.register_session(
+        Session(
+            id="session",
+            token="secret",
+            backends=["local"],
+            workspace=str(tmp_path / "workspace"),
+        )
+    )
+    runtime = BrokerRuntime(service, tmp_path / "broker.sock")
+    await runtime.start()
+    transport = UnixSocketTransport(str(runtime.socket_path), "secret")
+    monkeypatch.setenv("OPENSAC_EXECUTION_ID", "client-many-cancel")
+    running = asyncio.create_task(
+        asyncio.to_thread(
+            SearchResource(transport).many,
+            ["one", "two"],
+            concurrency=2,
+        )
+    )
+    try:
+        await asyncio.wait_for(backend.started.wait(), timeout=2)
+        cancelled = await service.cancel_execution(
+            "secret", "client-many-cancel", reason="test_cancelled"
+        )
+        assert cancelled >= 2
+        assert ("secret", "client-many-cancel") not in service.execution_tasks
+
+        with pytest.raises(BrokerError) as raised:
+            await asyncio.wait_for(running, timeout=2)
+        assert raised.value.code == "broker_transport_error"
+        assert backend.cancelled_count == 2
+        assert not any(thread.name.startswith("opensac-sdk") for thread in threading.enumerate())
+
+        trace = service.take_trace("secret", "client-many-cancel")
+        search_events = [event for event in trace if event.method == "search.query"]
+        assert len(search_events) == 2
+        assert all(event.status == "cancelled" for event in search_events)
+    finally:
+        backend.release.set()
+        if not running.done():
+            await service.cancel_execution("secret", "client-many-cancel")
+            await asyncio.gather(running, return_exceptions=True)
+        transport.close()
+        await runtime.stop()
+
+
 async def test_broker_rejects_missing_or_mismatched_capability_contract(tmp_path) -> None:
     service = _broker_service({"local": SocketBackend()})
     service.register_session(
@@ -103,14 +373,14 @@ async def test_broker_rejects_missing_or_mismatched_capability_contract(tmp_path
             )
 
     try:
-        for reported_contract in (None, "12"):
+        for reported_contract in (None, "13"):
             response = await asyncio.to_thread(raw_call, reported_contract)
             assert response.status_code == 200
             payload = response.json()
-            assert payload["capability_contract"] == 13
+            assert payload["capability_contract"] == 14
             assert payload["ok"] is False
             assert payload["error"]["code"] == "capability_contract_mismatch"
-            assert "broker requires 13" in payload["error"]["message"]
+            assert "broker requires 14" in payload["error"]["message"]
     finally:
         await runtime.stop()
 
