@@ -39,8 +39,8 @@ def test_base_runtime_does_not_require_pipeline_llm_dependencies(
         )
     )
 
-    assert runtime.broker.llm.service is None
-    assert runtime.broker.llm_service is None
+    assert runtime.broker.llm.binding is None
+    assert runtime.broker.llm_binding is None
 
 
 def test_configured_pipeline_model_requires_llm_extra(

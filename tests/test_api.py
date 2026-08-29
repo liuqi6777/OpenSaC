@@ -17,6 +17,7 @@ from opensac.api.errors import (
     SessionExpiredError,
 )
 from opensac.backends.llm import OpenAICompatibleBackend
+from opensac.broker import BrokerBuilder
 from opensac.config import Settings, load_settings
 from opensac.models import (
     ExecCreate,
@@ -109,6 +110,26 @@ def test_public_session_api_rejects_request_level_backend(tmp_path) -> None:
         response = client.post("/v1/sessions", json={"backends": ["web"]})
         assert response.status_code == 422
         assert "configured when OpenSAC starts" in response.text
+
+
+def test_application_can_assemble_a_capability_subset(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", broker_socket=tmp_path / "broker.sock")
+
+    with TestClient(
+        create_app(
+            settings,
+            broker_builder=BrokerBuilder(
+                enabled_capabilities=("search", "content", "session"),
+            ),
+        )
+    ) as client:
+        payload = client.post("/v1/sessions", json={}).json()
+        runtime = client.app.state.runtime
+
+    assert runtime.broker.registry.module_names == ("search", "content", "session")
+    assert not any(method.startswith("llm.") for method in payload["capabilities"])
+    assert "llm" not in payload["environment"]["sdk_capabilities"]
+    assert "extract" not in payload["environment"]["capability_limits"]
 
 
 def test_manifest_advertises_effective_provider_policy_and_enabled_coalescing(
@@ -1655,7 +1676,7 @@ def test_session_advertises_llm_capabilities_only_when_model_is_configured(tmp_p
         backend = client.app.state.runtime.broker.llm_backend
         assert isinstance(backend, OpenAICompatibleBackend)
         assert backend.model == "pipeline-model"
-        assert client.app.state.runtime.broker.llm_service is not None
+        assert client.app.state.runtime.broker.llm_binding is not None
 
     assert "llm.extract" in payload["capabilities"]
     assert payload["environment"]["service_policies"]["llm"]["concurrency"] == 2

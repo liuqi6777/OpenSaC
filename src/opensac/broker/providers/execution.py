@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from opensac.broker.call_context import current_call
@@ -26,6 +27,23 @@ from .cache import ProviderResultCache
 from .config import ProviderExecutionConfig
 from .flights import ProviderFlightCoordinator
 from .serialization import canonical_json_bytes
+
+
+@dataclass(frozen=True, slots=True)
+class BackendBinding[BackendT]:
+    """One backend paired with the host-owned execution policy for its role."""
+
+    backend: BackendT
+    runtime: ProviderRuntime
+    component: str
+    route: str = ""
+    revision: str = ""
+    resource_failures: bool = False
+    namespace: str = field(
+        default_factory=lambda: f"backend:{uuid.uuid4().hex}",
+        repr=False,
+        compare=False,
+    )
 
 
 class CapabilityProviderError(RuntimeError):
@@ -75,7 +93,7 @@ class CapabilityProviderError(RuntimeError):
 
 
 class ProviderExecutor:
-    """Coordinate provider execution shared by reusable broker services."""
+    """Forward every backend request through shared policy, cache, and tracing."""
 
     def __init__(
         self,
@@ -236,31 +254,29 @@ class ProviderExecutor:
             )
         return contextualized
 
-    async def run(
+    async def execute[BackendT, ResultT](
         self,
         state: BrokerSession,
+        binding: BackendBinding[BackendT],
         *,
-        runtime: ProviderRuntime,
-        backend: Any,
-        component: str,
-        namespace: str,
-        resource_failures: bool = False,
         request_indexes: list[int],
         request_value: Any,
-        request: Callable[[], Awaitable[Any]],
+        request: Callable[[BackendT], Awaitable[ResultT]],
         preflight: Callable[[], None] | None = None,
         request_id: str | None = None,
         track_execution: bool = True,
-    ) -> Any:
+    ) -> ResultT:
         """Execute, account and trace one backend request."""
 
         request_id = request_id or f"req_{uuid.uuid4().hex}"
         request_fingerprint = self.fingerprint(request_value)
         context = current_call()
         if context is None:
-            raise RuntimeError("provider services require a capability call context")
+            raise RuntimeError("provider execution requires a capability call context")
         records = context.provider_attempts
         trace_buffer = context.provider_trace
+        backend = binding.backend
+        component = binding.component
         provider_name = self.provider_name(backend)
         trace_provider = str(getattr(backend, "name", "") or provider_name)
 
@@ -296,7 +312,7 @@ class ProviderExecutor:
         provider_identity = self.provider_identity(backend)
         cache = self.result_cache
         cache_enabled = cache.enabled and bool(getattr(backend, "result_cacheable", False))
-        cache_key = cache.key(namespace, provider_identity, request_fingerprint)
+        cache_key = cache.key(binding.namespace, provider_identity, request_fingerprint)
         if cache_enabled:
             hit, cached = await cache.get(cache_key)
             if hit:
@@ -306,10 +322,13 @@ class ProviderExecutor:
             state.policy.record_provider_cache(hit=False)
             context.provider_cache_misses += 1
 
-        async def execute_provider() -> Any:
+        async def execute_provider() -> ResultT:
+            async def call_backend() -> ResultT:
+                return await request(backend)
+
             task = asyncio.create_task(
-                runtime.run(
-                    request,
+                binding.runtime.run(
+                    call_backend,
                     provider_identity=provider_identity,
                     request_indexes=request_indexes,
                     preflight=preflight,
@@ -331,7 +350,7 @@ class ProviderExecutor:
                     exc,
                     provider=provider_name,
                     component=component,
-                    resource_failures=resource_failures,
+                    resource_failures=binding.resource_failures,
                 ) from exc
 
         if cache_enabled:

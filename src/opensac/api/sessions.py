@@ -41,9 +41,7 @@ class SessionRoutes:
             return self.get_session(session_id)
 
     def public(self, session: Session) -> PublicSession:
-        capabilities = session.mechanisms.capabilities()
-        if self.runtime.settings.backends.llm.provider == "none":
-            capabilities = [method for method in capabilities if not method.startswith("llm.")]
+        capabilities = list(self.runtime.broker.available_methods(session.mechanisms))
         features = [
             "capability_contract_v14",
             "external_failure_warnings_v1",

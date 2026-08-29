@@ -9,8 +9,7 @@ from opensac.backends.document import DocumentContent, DocumentHandle
 from opensac.backends.rerank import JinaReranker, LexicalReranker, RerankScore
 from opensac.backends.search import SearchHit
 from opensac.broker.call_context import call_scope
-from opensac.broker.service import BrokerService
-from opensac.broker.services import RerankItem
+from opensac.broker.service import BrokerService, RetrievalRoute
 from opensac.models import ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
 
@@ -18,11 +17,11 @@ from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRunti
 def _broker_service(search_backends, *, document_backends=None, **kwargs):
     if document_backends is None:
         document_backends = search_backends
-    return BrokerService(
-        search_backends,
-        document_backends=document_backends,
-        **kwargs,
-    )
+    routes = {
+        name: RetrievalRoute(search=backend, document=document_backends[name])
+        for name, backend in search_backends.items()
+    }
+    return BrokerService(routes, **kwargs)
 
 
 def _session() -> Session:
@@ -204,10 +203,10 @@ def test_broker_defaults_to_lexical_reranker_and_accepts_its_runtime() -> None:
 
     assert isinstance(broker.reranker, LexicalReranker)
     assert broker.rerank_runtime is runtime
-    assert broker.rerank_service.backend is broker.reranker
+    assert broker.rerank_binding.backend is broker.reranker
 
 
-async def test_shared_rerank_service_attributes_usage_to_the_calling_capability() -> None:
+async def test_shared_executor_attributes_reranking_to_the_calling_capability() -> None:
     class GenericReranker:
         name = "test:generic"
         provider_identity = "test:generic"
@@ -230,23 +229,23 @@ async def test_shared_rerank_service_attributes_usage_to_the_calling_capability(
         rerank_runtime=runtime,
     )
     state = broker.register_session(_session())
-    service = broker.rerank_service
+    content = broker.content
 
     with call_scope("token", None, capability_family="search") as search_context:
-        search_scores = await service.score(
+        search_scores = await content._score_reranker(
             state,
             "query",
-            [RerankItem(id="hit", text="search result")],
+            ["search result"],
         )
     with call_scope("token", None, capability_family="content"):
-        passage_scores = await service.score(
+        passage_scores = await content._score_reranker(
             state,
             "query",
-            [RerankItem(id="passage", text="content passage")],
+            ["content passage"],
         )
 
-    assert search_scores == {"hit": 13.0}
-    assert passage_scores == {"passage": 15.0}
+    assert search_scores == [13.0]
+    assert passage_scores == [15.0]
     assert state.policy.usage.provider_attempts_by_capability == {
         "content": 1,
         "search": 1,
@@ -255,7 +254,7 @@ async def test_shared_rerank_service_attributes_usage_to_the_calling_capability(
     assert len(runtime._governors) == 1
 
 
-async def test_rerank_service_rejects_invalid_backend_output() -> None:
+async def test_rerank_capability_rejects_invalid_backend_output() -> None:
     class InvalidReranker:
         name = "test:invalid"
         provider_identity = "test:invalid"
@@ -278,10 +277,10 @@ async def test_rerank_service_rejects_invalid_backend_output() -> None:
         call_scope("token", None, capability_family="content"),
         pytest.raises(ProviderRequestError) as failed,
     ):
-        await broker.rerank_service.score(
+        await broker.content._score_reranker(
             state,
             "query",
-            [RerankItem(id="passage", text="content passage")],
+            ["content passage"],
         )
 
     assert failed.value.code == "provider_invalid_response"

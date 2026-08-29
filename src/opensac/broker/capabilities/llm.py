@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
+
+from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from jsonschema import Draft202012Validator
 
+    from opensac.broker.capabilities.catalog import CapabilityBuildContext
+
+from opensac.backends.llm import LLMBackend, LLMResponse
 from opensac.broker.call_context import current_call, trace_error_message
 from opensac.broker.failures import CapabilityFailure
-from opensac.broker.services.llm import LLMService
+from opensac.broker.registry import BaseCapabilities, CapabilityRequest, capability_method
 from opensac.broker.session import BrokerSession
 from opensac.broker.validation import (
     finite_number,
@@ -21,7 +27,33 @@ from opensac.broker.validation import (
 )
 from opensac.tracing import ModelAttemptRecord
 
-from ..providers.execution import CapabilityProviderError
+from ..providers.execution import BackendBinding, CapabilityProviderError, ProviderExecutor
+
+
+class LLMLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    max_completion_tokens: int = Field(default=32_000, ge=1)
+    extract_max_instruction_bytes: int = Field(default=16_384, ge=1)
+    extract_max_schema_bytes: int = Field(default=65_536, ge=1)
+    extract_max_item_bytes: int = Field(default=65_536, ge=1)
+    extract_max_schema_depth: int = Field(default=8, ge=1)
+    extract_max_repair_attempts: int = Field(default=1, ge=0)
+
+
+class LLMCompleteRequest(CapabilityRequest):
+    prompt: str = ""
+    system: str | None = None
+    temperature: int | float = 0.2
+    max_tokens: int | None = None
+
+
+class LLMExtractRequest(CapabilityRequest):
+    item: Any
+    instruction: str = ""
+    schema_: Any = Field(default_factory=dict, alias="schema")
+    max_tokens: int | None = None
+    repair_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -31,25 +63,60 @@ class _ModelOutput:
     duration_seconds: float
 
 
-class LLMCapabilities:
+class LLMCapabilities(BaseCapabilities):
     """Implement bounded completion and schema-checked extraction calls."""
+
+    name = "llm"
 
     def __init__(
         self,
-        service: LLMService | None,
+        providers: ProviderExecutor,
+        binding: BackendBinding[LLMBackend] | None,
         *,
-        max_instruction_bytes: int,
-        max_schema_bytes: int,
-        max_item_bytes: int,
-        max_schema_depth: int,
-        max_repair_attempts: int,
+        limits: LLMLimits,
+        default_concurrency: int,
     ) -> None:
-        self.service = service
-        self.max_extract_instruction_bytes = max_instruction_bytes
-        self.max_extract_schema_bytes = max_schema_bytes
-        self.max_extract_item_bytes = max_item_bytes
-        self.max_extract_schema_depth = max_schema_depth
-        self.max_extract_repair_attempts = max_repair_attempts
+        self.providers = providers
+        self.binding = binding
+        self.limits = limits
+        self.default_concurrency = default_concurrency
+        self.max_extract_instruction_bytes = limits.extract_max_instruction_bytes
+        self.max_extract_schema_bytes = limits.extract_max_schema_bytes
+        self.max_extract_item_bytes = limits.extract_max_item_bytes
+        self.max_extract_schema_depth = limits.extract_max_schema_depth
+        self.max_extract_repair_attempts = limits.extract_max_repair_attempts
+
+    @classmethod
+    def from_context(cls, context: CapabilityBuildContext) -> Self:
+        return cls(
+            context.providers,
+            context.llm_binding,
+            limits=context.config.llm,
+            default_concurrency=context.default_provider_concurrency,
+        )
+
+    @property
+    def available(self) -> bool:
+        return self.binding is not None
+
+    def manifest(self, *, backend_name: str) -> dict[str, Any]:
+        del backend_name
+        return {
+            "available": self.binding is not None,
+            "limits": {
+                "max_concurrency": (
+                    self.binding.runtime.policy.concurrency
+                    if self.binding is not None
+                    else self.default_concurrency
+                ),
+                "max_completion_tokens": self.limits.max_completion_tokens,
+                "extract_max_instruction_bytes": self.limits.extract_max_instruction_bytes,
+                "extract_max_schema_bytes": self.limits.extract_max_schema_bytes,
+                "extract_max_item_bytes": self.limits.extract_max_item_bytes,
+                "extract_max_schema_depth": self.limits.extract_max_schema_depth,
+                "extract_max_repair_attempts": self.limits.extract_max_repair_attempts,
+            },
+        }
 
     async def _chat(
         self,
@@ -62,42 +129,65 @@ class LLMCapabilities:
         json_object: bool = False,
         request_index: int = 0,
     ) -> tuple[str, int]:
-        service = self._require_service()
-        response = await service.complete(
+        binding = self._require_binding()
+
+        async def complete(backend: LLMBackend) -> LLMResponse:
+            return LLMResponse.model_validate(
+                await backend.complete(
+                    prompt,
+                    system=system,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_object=json_object,
+                )
+            )
+
+        preflight = getattr(binding.backend, "preflight", None)
+        response = await self.providers.execute(
             state,
-            prompt,
-            system=system,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            json_object=json_object,
-            request_index=request_index,
+            binding,
+            request_indexes=[request_index],
+            request_value={
+                "model": binding.backend.name,
+                "prompt": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "system": (
+                    hashlib.sha256(system.encode("utf-8")).hexdigest()
+                    if system is not None
+                    else None
+                ),
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "json_object": json_object,
+            },
+            request=complete,
+            preflight=preflight if callable(preflight) else None,
         )
         return response.content, response.tokens
 
-    def _require_service(self) -> LLMService:
-        if self.service is None:
+    def _require_binding(self) -> BackendBinding[LLMBackend]:
+        if self.binding is None:
             raise RuntimeError("LLM access is not configured")
-        return self.service
+        return self.binding
 
     @staticmethod
     def _validate_temperature(value: Any) -> float:
         return finite_number(value, "temperature", minimum=0.0, maximum=2.0)
 
-    @staticmethod
-    def _validate_max_tokens(value: Any) -> int | None:
+    def _validate_max_tokens(self, value: Any) -> int | None:
         return optional_integer(
             value,
             "max_tokens",
             minimum=1,
-            maximum=32_000,
+            maximum=self.limits.max_completion_tokens,
         )
 
-    async def complete(self, state: BrokerSession, params: dict[str, Any]) -> str:
-        prompt = string(params.get("prompt", ""), "prompt")
-        system = optional_string(params.get("system"), "system")
-        temperature = self._validate_temperature(params.get("temperature", 0.2))
-        requested_max_tokens = self._validate_max_tokens(params.get("max_tokens"))
-        self._require_service()
+    @capability_method("llm.complete", LLMCompleteRequest)
+    async def complete(self, state: BrokerSession, request: LLMCompleteRequest) -> str:
+        prompt = string(request.prompt, "prompt")
+        system = optional_string(request.system, "system")
+        temperature = self._validate_temperature(request.temperature)
+        requested_max_tokens = self._validate_max_tokens(request.max_tokens)
+        self._require_binding()
         max_tokens = await state.policy.reserve_llm(
             1,
             max_tokens=requested_max_tokens,
@@ -236,12 +326,10 @@ class LLMCapabilities:
 
     def _prepare_extraction(
         self,
-        params: dict[str, Any],
+        request: LLMExtractRequest,
     ) -> tuple[str, str, str, Draft202012Validator, int]:
-        if "item" not in params:
-            raise ValueError("extract must provide item")
         instruction = string(
-            params.get("instruction", ""),
+            request.instruction,
             "instruction",
             nonempty=False,
         )
@@ -252,7 +340,7 @@ class LLMCapabilities:
                 f"of {self.max_extract_instruction_bytes}"
             )
 
-        schema = params.get("schema", {})
+        schema = request.schema_
         schema_json = self._json_payload(schema, "schema")
         schema_bytes = len(schema_json.encode("utf-8"))
         if schema_bytes > self.max_extract_schema_bytes:
@@ -262,7 +350,7 @@ class LLMCapabilities:
             )
         validator = self._validate_schema_subset(schema)
 
-        item_json = self._json_payload(params["item"], "item")
+        item_json = self._json_payload(request.item, "item")
         item_bytes = len(item_json.encode("utf-8"))
         if item_bytes > self.max_extract_item_bytes:
             raise ValueError(
@@ -270,9 +358,7 @@ class LLMCapabilities:
                 f"of {self.max_extract_item_bytes}"
             )
 
-        repair_attempts = params.get("repair_attempts", 0)
-        if isinstance(repair_attempts, bool) or not isinstance(repair_attempts, int):
-            raise ValueError("repair_attempts must be a non-negative integer")
+        repair_attempts = request.repair_attempts
         if repair_attempts < 0:
             raise ValueError("repair_attempts must be a non-negative integer")
         if repair_attempts > self.max_extract_repair_attempts:
@@ -410,10 +496,11 @@ class LLMCapabilities:
             )
         )
 
+    @capability_method("llm.extract", LLMExtractRequest)
     async def extract(
         self,
         state: BrokerSession,
-        params: dict[str, Any],
+        request: LLMExtractRequest,
     ) -> dict[str, Any]:
         (
             item_json,
@@ -421,9 +508,9 @@ class LLMCapabilities:
             schema_json,
             validator,
             repair_attempts,
-        ) = self._prepare_extraction(params)
-        requested_max_tokens = self._validate_max_tokens(params.get("max_tokens"))
-        self._require_service()
+        ) = self._prepare_extraction(request)
+        requested_max_tokens = self._validate_max_tokens(request.max_tokens)
+        self._require_binding()
         max_tokens = await state.policy.reserve_llm(
             1,
             max_tokens=requested_max_tokens,

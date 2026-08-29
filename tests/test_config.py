@@ -291,12 +291,49 @@ def test_rerank_backend_requires_a_model_only_for_jina() -> None:
         Settings(backends={"rerank": {"provider": "jina"}})
     with pytest.raises(ValueError, match="supported only by the jina provider"):
         Settings(backends={"rerank": {"provider": "lexical", "model": "rerank-model"}})
-    with pytest.raises(ValueError, match="literal_error"):
-        Settings(backends={"rerank": {"provider": "none"}})
+    custom = Settings(backends={"rerank": {"provider": "custom"}})
+    assert custom.backends.rerank.provider == "custom"
 
     settings = Settings(backends={"rerank": {"provider": "jina", "model": "rerank-model"}})
     assert settings.backends.rerank.provider == "jina"
     assert settings.backends.rerank.model == "rerank-model"
+
+
+def test_backend_plugin_options_are_loaded_but_secrets_stay_out_of_yaml(tmp_path: Path) -> None:
+    config = tmp_path / "opensac.yaml"
+    config.write_text(
+        """
+backends:
+  search:
+    provider: custom
+    options:
+      endpoint: https://search.example.test
+      tuning:
+        depth: 25
+""",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config)
+
+    assert settings.backends.search.options == {
+        "endpoint": "https://search.example.test",
+        "tuning": {"depth": 25},
+    }
+
+    config.write_text(
+        """
+backends:
+  search:
+    provider: custom
+    options:
+      nested:
+        api_key: do-not-store-this
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="not allowed in YAML"):
+        load_settings(config)
 
 
 @pytest.mark.parametrize(

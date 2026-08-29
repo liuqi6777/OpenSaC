@@ -6,16 +6,16 @@ import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-from opensac.backends.document import DocumentHandle
-from opensac.backends.rerank import bm25_scores
+from opensac.backends.document import DocumentBackend, DocumentContent, DocumentHandle
+from opensac.backends.rerank import RerankScore, TextReranker, bm25_scores
 from opensac.broker.call_context import current_call
 from opensac.broker.failures import CapabilityFailure
-from opensac.broker.services import DocumentService, RerankItem, RerankService
+from opensac.broker.registry import BaseCapabilities, CapabilityRequest, capability_method
 from opensac.broker.session import BrokerSession, FlightGroup
 from opensac.broker.sources import (
     document_identity,
@@ -23,11 +23,11 @@ from opensac.broker.sources import (
     normalize_web_source,
     public_web_url,
 )
-from opensac.broker.validation import boolean, integer, string
-from opensac.provider import ProviderRequestError
+from opensac.broker.validation import integer, string
+from opensac.provider import ProviderRequestError, invalid_provider_response
 from opensac.tracing import HitRecord, PassageTraceRecord, ProviderAttemptRecord
 
-from ..providers.execution import CapabilityProviderError
+from ..providers.execution import BackendBinding, CapabilityProviderError, ProviderExecutor
 from .passages import (
     PassageCandidate,
     PassageCoordinates,
@@ -37,6 +37,112 @@ from .passages import (
     segment_passages,
     select_passage_candidates,
 )
+from .search import SearchLimits
+
+if TYPE_CHECKING:
+    from opensac.broker.capabilities.catalog import CapabilityBuildContext
+
+type ContentSources = str | list[str]
+
+_DOCUMENT_HANDLES = TypeAdapter(list[DocumentHandle])
+_RERANK_SCORES = TypeAdapter(list[RerankScore])
+
+
+class ContentLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    max_sources_per_request: int = Field(default=256, ge=1)
+    url_admission: Literal["searched_only", "searched_or_public_web"] = "searched_or_public_web"
+    batch_deadline_seconds: float = Field(default=60.0, gt=0.0)
+    session_cache_bytes: int = Field(default=32_000_000, ge=0)
+
+    read_max_line_count: int = Field(default=5_000, ge=1)
+    read_max_chars: int = Field(default=400_000, ge=1)
+    grep_max_pattern_chars: int = Field(default=4_096, ge=1)
+    grep_max_context_lines: int = Field(default=20, ge=0)
+    grep_max_limit_per_source: int = Field(default=200, ge=1)
+    passage_limit: int = Field(default=100, ge=1)
+    passage_limit_per_source: int = Field(default=10, ge=1)
+
+    passage_chunk_chars: int = Field(default=2_000, ge=1)
+    passage_chunk_overlap_chars: int = Field(default=200, ge=0)
+    passage_prefilter_limit: int = Field(default=100, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def validate_passage_window(self) -> Self:
+        if self.passage_chunk_overlap_chars >= self.passage_chunk_chars:
+            raise ValueError("passage_chunk_overlap_chars must be smaller than chunk size")
+        return self
+
+
+class _ContentRequest(CapabilityRequest):
+    @staticmethod
+    def reject_legacy(data: Any, *names: str) -> Any:
+        if not isinstance(data, dict):
+            return data
+        legacy = sorted(name for name in names if name in data)
+        if legacy:
+            raise ValueError(f"Unsupported legacy content parameter(s): {', '.join(legacy)}")
+        return data
+
+
+class ContentFetchRequest(_ContentRequest):
+    source: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_parameters(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "sources" in data:
+            raise ValueError("this content operation accepts one source")
+        return cls.reject_legacy(data, "refs")
+
+
+class ContentPassagesRequest(_ContentRequest):
+    query: str = ""
+    sources: ContentSources
+    limit: int = 20
+    limit_per_source: int = 3
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_parameters(cls, data: Any) -> Any:
+        return cls.reject_legacy(data, "refs", "max_per_ref")
+
+
+class ContentReadRequest(_ContentRequest):
+    source: str
+    start_line: int = 1
+    start_character: int = 0
+    line_count: int = 200
+    max_chars: int = 100_000
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_parameters(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "sources" in data:
+            raise ValueError("this content operation accepts one source")
+        return cls.reject_legacy(data, "refs")
+
+
+class ContentGrepRequest(_ContentRequest):
+    sources: ContentSources
+    pattern: str = ""
+    mode: str = "regex"
+    case_sensitive: bool = False
+    start_line: int = 1
+    context_lines: int = 0
+    limit_per_source: int = 20
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_parameters(cls, data: Any) -> Any:
+        return cls.reject_legacy(
+            data,
+            "refs",
+            "max_matches_per_ref",
+            "context",
+            "max_matches_per_source",
+        )
 
 
 class ContentDocument(BaseModel):
@@ -225,47 +331,100 @@ type _SourceOutcome = _ResolvedSource | ContentFailure
 type _FetchOutcome = ContentDocument | ContentFailure
 
 
-class ContentCapabilities:
+class ContentCapabilities(BaseCapabilities):
     """Fetch admitted documents and derive bounded passages."""
+
+    name = "content"
+    available = True
 
     def __init__(
         self,
-        document_services: dict[str, DocumentService],
+        providers: ProviderExecutor,
+        document_bindings: dict[str, BackendBinding[DocumentBackend]],
         *,
-        rerank_service: RerankService,
-        passage_chunk_chars: int,
-        passage_chunk_overlap_chars: int,
-        passage_prefilter_limit: int,
-        max_query_chars: int,
-        max_sources_per_request: int,
-        session_content_cache_bytes: int,
-        content_url_admission: str,
-        content_batch_deadline_seconds: float,
+        rerank_binding: BackendBinding[TextReranker],
+        limits: ContentLimits,
+        search_limits: SearchLimits,
     ) -> None:
-        if not document_services:
-            raise ValueError("at least one document service must be configured")
-        self.document_services = document_services
-        self.rerank_service = rerank_service
-        self.passage_chunk_chars = passage_chunk_chars
-        self.passage_chunk_overlap_chars = passage_chunk_overlap_chars
-        self.passage_prefilter_limit = passage_prefilter_limit
-        self.max_search_query_chars = max_query_chars
-        self.max_content_sources_per_request = max_sources_per_request
-        self.session_content_cache_bytes = session_content_cache_bytes
-        if content_url_admission not in {"searched_only", "searched_or_public_web"}:
-            raise ValueError("content_url_admission is invalid")
-        self.content_url_admission = content_url_admission
-        if float(content_batch_deadline_seconds) <= 0:
-            raise ValueError("content_batch_deadline_seconds must be positive")
-        self.content_batch_deadline_seconds = float(content_batch_deadline_seconds)
-        self.inflight_coalescing = next(iter(document_services.values())).inflight_coalescing
+        if not document_bindings:
+            raise ValueError("at least one document backend must be configured")
+        self.providers = providers
+        self.document_bindings = document_bindings
+        self.rerank_binding = rerank_binding
+        self.limits = limits
+        self.passage_chunk_chars = limits.passage_chunk_chars
+        self.passage_chunk_overlap_chars = limits.passage_chunk_overlap_chars
+        self.passage_prefilter_limit = limits.passage_prefilter_limit
+        self.max_search_query_chars = search_limits.max_query_chars
+        self.max_content_sources_per_request = limits.max_sources_per_request
+        self.session_content_cache_bytes = limits.session_cache_bytes
+        self.content_url_admission = limits.url_admission
+        self.content_batch_deadline_seconds = limits.batch_deadline_seconds
+        self.inflight_coalescing = providers.flights.enabled
 
-    def _document_service(self, state: BrokerSession) -> tuple[str, DocumentService]:
-        backend_names = sorted(state.policy.allowed_backends & set(self.document_services))
+    @classmethod
+    def from_context(cls, context: CapabilityBuildContext) -> Self:
+        return cls(
+            context.providers,
+            context.document_bindings,
+            rerank_binding=context.rerank_binding,
+            limits=context.config.content,
+            search_limits=context.config.search,
+        )
+
+    def _passage_queries(self, request: ContentPassagesRequest) -> list[str]:
+        query = request.query
+        return [query[: self.max_search_query_chars]] if query else []
+
+    @staticmethod
+    def _source_count(request: ContentPassagesRequest | ContentGrepRequest) -> int:
+        return 1 if isinstance(request.sources, str) else len(request.sources)
+
+    @staticmethod
+    def _passage_count(result: Any) -> int:
+        return len(result.get("passages", [])) if isinstance(result, dict) else 0
+
+    @staticmethod
+    def _match_count(result: Any) -> int:
+        return len(result.get("matches", [])) if isinstance(result, dict) else 0
+
+    def manifest(self, *, backend_name: str) -> dict[str, Any]:
+        if backend_name not in self.document_bindings:
+            raise ValueError(f"Backend {backend_name!r} is not configured for content")
+        return {
+            "url_admission": self.limits.url_admission,
+            "limits": {
+                "max_sources_per_request": self.limits.max_sources_per_request,
+                "read_max_line_count": self.limits.read_max_line_count,
+                "read_max_chars": self.limits.read_max_chars,
+                "grep_max_context_lines": self.limits.grep_max_context_lines,
+                "grep_max_limit_per_source": self.limits.grep_max_limit_per_source,
+                "passage_limit": self.limits.passage_limit,
+                "passage_limit_per_source": self.limits.passage_limit_per_source,
+            },
+        }
+
+    def _document_binding(
+        self,
+        state: BrokerSession,
+    ) -> tuple[str, BackendBinding[DocumentBackend]]:
+        backend_names = sorted(state.policy.allowed_backends & set(self.document_bindings))
         if len(backend_names) != 1:
             raise RuntimeError("A session must have exactly one configured document backend")
         backend_name = backend_names[0]
-        return backend_name, self.document_services[backend_name]
+        return backend_name, self.document_bindings[backend_name]
+
+    def _contextualize_document_failure(
+        self,
+        binding: BackendBinding[DocumentBackend],
+        failure: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self.providers.contextualize_failure(
+            failure,
+            backend=binding.backend,
+            component=binding.component,
+            resource_failures=binding.resource_failures,
+        )
 
     def _resolve_content_sources(
         self,
@@ -284,17 +443,18 @@ class ContentCapabilities:
                 f"broker maximum of {self.max_content_sources_per_request}"
             )
         resolved: list[_SourceOutcome] = []
-        backend_name, service = self._document_service(state)
-        accepts_public_urls = service.source_kind == "public_url"
+        backend_name, binding = self._document_binding(state)
+        accepts_public_urls = binding.backend.source_kind == "public_url"
 
         def failure(input_index: int, source: str, code: str, message: str) -> ContentFailure:
-            detail = service.contextualize_failure(
+            detail = self._contextualize_document_failure(
+                binding,
                 {
                     "code": code,
                     "message": message,
                     "retryable": False,
                     "attempts": 0,
-                }
+                },
             )
             return ContentFailure(
                 input_index=input_index,
@@ -402,41 +562,13 @@ class ContentCapabilities:
             trace(backend_name, handle, admission="direct_url")
         return resolved
 
-    @staticmethod
-    def _content_sources_argument(
-        params: dict[str, Any],
-        *,
-        legacy_options: tuple[str, ...] = (),
-    ) -> Any:
-        legacy = [key for key in ("refs", *legacy_options) if key in params]
-        if legacy:
-            raise ValueError(
-                f"Unsupported legacy content parameter(s): {', '.join(sorted(legacy))}"
-            )
-        if "sources" not in params:
-            raise ValueError("content requests must provide sources")
-        return params["sources"]
-
-    @staticmethod
-    def _content_source_argument(params: dict[str, Any]) -> str:
-        if "refs" in params:
-            raise ValueError("Unsupported legacy content parameter: refs")
-        if "sources" in params:
-            raise ValueError("this content operation accepts one source")
-        if "source" not in params:
-            raise ValueError("content request must provide source")
-        source = params["source"]
-        if not isinstance(source, str):
-            raise ValueError("content source must be a string")
-        return source
-
+    @capability_method("content.fetch", ContentFetchRequest)
     async def fetch(
         self,
         state: BrokerSession,
-        params: dict[str, Any],
+        request: ContentFetchRequest,
     ) -> dict[str, Any]:
-        source = self._content_source_argument(params)
-        resolved = self._resolve_content_sources(state, [source])
+        resolved = self._resolve_content_sources(state, [request.source])
         outcomes = await self._fetch_content(state, resolved, query=None)
         outcome = outcomes[0]
         if isinstance(outcome, ContentFailure):
@@ -452,9 +584,10 @@ class ContentCapabilities:
         query: str,
         candidates: list[PassageCandidate],
     ) -> tuple[str, list[tuple[PassageCandidate, float]], list[dict[str, Any]]]:
-        service = self.rerank_service
+        binding = self.rerank_binding
+        ranker_name = binding.backend.name
         if not candidates:
-            return service.name, [], []
+            return ranker_name, [], []
 
         def lexical_fallback(
             failure: dict[str, Any],
@@ -471,31 +604,77 @@ class ContentCapabilities:
             )
 
         try:
-            scores = await service.score(
+            scores = await self._score_reranker(
                 state,
                 query,
-                [
-                    RerankItem(id=str(index), text=candidate.text)
-                    for index, candidate in enumerate(candidates)
-                ],
+                [candidate.text for candidate in candidates],
             )
         except ProviderRequestError as exc:
-            return lexical_fallback(service.provider_failure(exc))
+            return lexical_fallback(self.providers.provider_failure(exc))
         return (
-            service.name,
-            [(candidate, scores[str(index)]) for index, candidate in enumerate(candidates)],
+            ranker_name,
+            list(zip(candidates, scores, strict=True)),
             [],
         )
 
+    async def _score_reranker(
+        self,
+        state: BrokerSession,
+        query: str,
+        texts: list[str],
+    ) -> list[float]:
+        if not texts:
+            return []
+        binding = self.rerank_binding
+
+        async def rerank(backend: TextReranker) -> list[float]:
+            results = _RERANK_SCORES.validate_python(
+                await backend.rerank(query, texts),
+                strict=True,
+            )
+            indexed_scores: dict[int, float] = {}
+            for result in results:
+                if result.index >= len(texts) or result.index in indexed_scores:
+                    raise self._invalid_rerank_response("Reranker returned invalid indexed scores.")
+                indexed_scores[result.index] = result.score
+            if set(indexed_scores) != set(range(len(texts))):
+                raise self._invalid_rerank_response("Reranker returned an incomplete score set.")
+            return [indexed_scores[index] for index in range(len(texts))]
+
+        return await self.providers.execute(
+            state,
+            binding,
+            request_indexes=list(range(len(texts))),
+            request_value={
+                "ranker": binding.backend.name,
+                "query": query,
+                "items": [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts],
+            },
+            request=rerank,
+            preflight=binding.backend.preflight,
+        )
+
+    @staticmethod
+    def _invalid_rerank_response(message: str) -> ProviderRequestError:
+        return ProviderRequestError(
+            "provider_invalid_response",
+            message,
+            retryable=False,
+        )
+
+    @capability_method(
+        "content.passages",
+        ContentPassagesRequest,
+        trace_queries="_passage_queries",
+        trace_input_count="_source_count",
+        trace_result_count="_passage_count",
+    )
     async def passages(
         self,
         state: BrokerSession,
-        params: dict[str, Any],
+        request: ContentPassagesRequest,
     ) -> dict[str, Any]:
-        raw_query = params.get("query", "")
-        if not isinstance(raw_query, str):
-            raise ValueError("query must be a string")
-        query = raw_query.strip()
+        query = request.query.strip()
         if not query:
             raise ValueError("query must not be empty")
         if len(query) > self.max_search_query_chars:
@@ -503,26 +682,16 @@ class ContentCapabilities:
                 f"query has {len(query)} characters, exceeding the broker maximum "
                 f"of {self.max_search_query_chars}"
             )
-        raw_limit = params.get("limit", 20)
-        raw_limit_per_source = params.get("limit_per_source", 3)
-        if (
-            isinstance(raw_limit, bool)
-            or not isinstance(raw_limit, int)
-            or isinstance(raw_limit_per_source, bool)
-            or not isinstance(raw_limit_per_source, int)
-        ):
-            raise ValueError("limit and limit_per_source must be integers")
-        limit = raw_limit
-        limit_per_source = raw_limit_per_source
-        if not 1 <= limit <= 100:
-            raise ValueError("limit must be between 1 and 100")
-        if not 1 <= limit_per_source <= 10:
-            raise ValueError("limit_per_source must be between 1 and 10")
+        limit = request.limit
+        limit_per_source = request.limit_per_source
+        if not 1 <= limit <= self.limits.passage_limit:
+            raise ValueError(f"limit must be between 1 and {self.limits.passage_limit}")
+        if not 1 <= limit_per_source <= self.limits.passage_limit_per_source:
+            raise ValueError(
+                f"limit_per_source must be between 1 and {self.limits.passage_limit_per_source}"
+            )
 
-        raw_sources = self._content_sources_argument(
-            params,
-            legacy_options=("max_per_ref",),
-        )
+        raw_sources = request.sources
         input_count = (
             1
             if isinstance(raw_sources, str)
@@ -531,7 +700,6 @@ class ContentCapabilities:
             else 0
         )
         resolved_sources = self._resolve_content_sources(state, raw_sources)
-        _route, document_service = self._document_service(state)
         unique: list[_SourceOutcome] = []
         leader_by_source: dict[str, int] = {}
         for item in resolved_sources:
@@ -542,8 +710,8 @@ class ContentCapabilities:
                 leader_by_source[source] = input_index
                 unique.append(item)
                 continue
-            fingerprint = document_service.fingerprint({"source": source})
-            document_service.record_deduplicated_request(
+            fingerprint = self.providers.fingerprint({"source": source})
+            self.providers.record_deduplicated_request(
                 request_index=input_index,
                 leader_index=leader_index,
                 request_fingerprint=fingerprint,
@@ -650,31 +818,31 @@ class ContentCapabilities:
         text = normalize_document_text(document.text)
         return [] if not text else text.split("\n")
 
+    @capability_method("content.read", ContentReadRequest)
     async def read(
         self,
         state: BrokerSession,
-        params: dict[str, Any],
+        request: ContentReadRequest,
     ) -> dict[str, Any]:
-        source = self._content_source_argument(params)
-        start_line = integer(params.get("start_line", 1), "start_line", minimum=1)
+        start_line = integer(request.start_line, "start_line", minimum=1)
         start_character = integer(
-            params.get("start_character", 0),
+            request.start_character,
             "start_character",
             minimum=0,
         )
         line_count = integer(
-            params.get("line_count", 200),
+            request.line_count,
             "line_count",
             minimum=1,
-            maximum=5_000,
+            maximum=self.limits.read_max_line_count,
         )
         max_chars = integer(
-            params.get("max_chars", 100_000),
+            request.max_chars,
             "max_chars",
             minimum=1,
-            maximum=400_000,
+            maximum=self.limits.read_max_chars,
         )
-        resolved = self._resolve_content_sources(state, [source])
+        resolved = self._resolve_content_sources(state, [request.source])
         outcomes = await self._fetch_content(state, resolved, query=None)
         outcome = outcomes[0]
         if isinstance(outcome, ContentFailure):
@@ -828,38 +996,45 @@ class ContentCapabilities:
         except re.error as exc:
             raise ValueError(f"pattern is not a valid regular expression: {exc}") from None
 
+    @capability_method(
+        "content.grep",
+        ContentGrepRequest,
+        trace_input_count="_source_count",
+        trace_result_count="_match_count",
+    )
     async def grep(
         self,
         state: BrokerSession,
-        params: dict[str, Any],
+        request: ContentGrepRequest,
     ) -> dict[str, Any]:
-        pattern = string(params.get("pattern", ""), "pattern", max_chars=4_096)
-        mode = params.get("mode", "regex")
+        pattern = string(
+            request.pattern,
+            "pattern",
+            max_chars=self.limits.grep_max_pattern_chars,
+        )
+        mode = request.mode
         if mode not in {"regex", "literal"}:
             raise ValueError("mode must be 'regex' or 'literal'")
-        case_sensitive = boolean(params.get("case_sensitive", False), "case_sensitive")
-        start_line = integer(params.get("start_line", 1), "start_line", minimum=1)
+        case_sensitive = request.case_sensitive
+        start_line = integer(request.start_line, "start_line", minimum=1)
         context_lines = integer(
-            params.get("context_lines", 0),
+            request.context_lines,
             "context_lines",
             minimum=0,
-            maximum=20,
+            maximum=self.limits.grep_max_context_lines,
         )
         limit_per_source = integer(
-            params.get("limit_per_source", 20),
+            request.limit_per_source,
             "limit_per_source",
             minimum=1,
-            maximum=200,
+            maximum=self.limits.grep_max_limit_per_source,
         )
         regex = self._compile_pattern(
             pattern,
             mode=mode,
             case_sensitive=case_sensitive,
         )
-        sources = self._content_sources_argument(
-            params,
-            legacy_options=("max_matches_per_ref", "context", "max_matches_per_source"),
-        )
+        sources = request.sources
         resolved = self._resolve_content_sources(state, sources)
         outcomes = await self._fetch_content(
             state,
@@ -930,6 +1105,80 @@ class ContentCapabilities:
             input_count=1 if isinstance(sources, str) else len(sources),
         ).model_dump(mode="json")
 
+    def _document_fingerprint(
+        self,
+        binding: BackendBinding[DocumentBackend],
+        handle: DocumentHandle,
+    ) -> str:
+        """Identify one logical document independently of provider fallbacks."""
+
+        return self.providers.fingerprint(
+            {
+                "backend": binding.route,
+                "revision": binding.revision,
+                "identity": document_identity(binding.route, handle),
+            }
+        )
+
+    @staticmethod
+    def _fetch_candidates(
+        binding: BackendBinding[DocumentBackend],
+        handle: DocumentHandle,
+    ) -> list[DocumentHandle]:
+        try:
+            candidates = _DOCUMENT_HANDLES.validate_python(
+                binding.backend.fetch_candidates(handle),
+                strict=True,
+            )
+        except ProviderRequestError:
+            raise
+        except Exception as exc:
+            raise invalid_provider_response() from exc
+        if not candidates or any(candidate.source != handle.source for candidate in candidates):
+            raise invalid_provider_response()
+        return candidates
+
+    async def _fetch_document(
+        self,
+        state: BrokerSession,
+        binding: BackendBinding[DocumentBackend],
+        handle: DocumentHandle,
+        candidate: DocumentHandle,
+        *,
+        query: str | None,
+        request_index: int,
+        request_id: str | None,
+        track_execution: bool,
+    ) -> DocumentContent:
+        async def fetch(backend: DocumentBackend) -> DocumentContent:
+            content = DocumentContent.model_validate(await backend.fetch(candidate, query=query))
+            if content.source != handle.source:
+                raise ValueError("backend changed the requested content source")
+            return content
+
+        validate_fetch = getattr(binding.backend, "preflight_fetch", None)
+
+        def preflight() -> None:
+            if callable(validate_fetch):
+                validate_fetch(candidate)
+            state.policy.record_content_backend_fetches(1)
+
+        return await self.providers.execute(
+            state,
+            binding,
+            request_indexes=[request_index],
+            request_value={
+                "backend": binding.route,
+                "revision": binding.revision,
+                "identity": document_identity(binding.route, handle),
+                "representation": candidate.representation,
+            },
+            request=fetch,
+            preflight=preflight,
+            request_id=request_id,
+            track_execution=track_execution,
+        )
+
     async def _fetch_content(
         self,
         state: BrokerSession,
@@ -938,7 +1187,7 @@ class ContentCapabilities:
         query: str | None,
     ) -> list[_FetchOutcome]:
         """Fetch every admitted source and preserve failures as separate outcomes."""
-        _route, document_service = self._document_service(state)
+        _route, document_binding = self._document_binding(state)
 
         def identity(item: _ResolvedSource) -> str:
             return document_identity(item.route, item.handle)
@@ -948,14 +1197,14 @@ class ContentCapabilities:
         leaders: dict[str, tuple[int, _ResolvedSource]] = {}
         for item in resolved_sources:
             state.policy.require_backend(item.route)
-            service = self.document_services[item.route]
-            fingerprint = service.document_fingerprint(item.handle)
+            binding = self.document_bindings[item.route]
+            fingerprint = self._document_fingerprint(binding, item.handle)
             keys_by_input[item.input_index] = fingerprint
             leader = leaders.get(fingerprint)
             if leader is None:
                 leaders[fingerprint] = (item.input_index, item)
                 continue
-            service.record_deduplicated_request(
+            self.providers.record_deduplicated_request(
                 request_index=item.input_index,
                 leader_index=leader[0],
                 request_fingerprint=fingerprint,
@@ -989,8 +1238,8 @@ class ContentCapabilities:
             request_id: str | None = None,
             track_execution: bool = True,
         ) -> tuple[str, _FetchOutcome]:
-            service = self.document_services.get(item.route)
-            if service is None:
+            binding = self.document_bindings.get(item.route)
+            if binding is None:
                 return key, self._content_failure(
                     item,
                     {
@@ -1001,9 +1250,12 @@ class ContentCapabilities:
                     },
                 )
             try:
-                candidates = service.fetch_candidates(item.handle)
+                candidates = self._fetch_candidates(binding, item.handle)
             except ProviderRequestError as exc:
-                failure = service.contextualize_failure(service.provider_failure(exc))
+                failure = self._contextualize_document_failure(
+                    binding,
+                    self.providers.provider_failure(exc),
+                )
                 return key, self._content_failure(item, failure)
             total_attempts = 0
             document: ContentDocument | None = None
@@ -1017,8 +1269,9 @@ class ContentCapabilities:
                     f"{request_id}:{candidate_index}" if request_id is not None else None
                 )
                 try:
-                    snippet = await service.fetch(
+                    snippet = await self._fetch_document(
                         state,
+                        binding,
                         item.handle,
                         candidate,
                         query=query,
@@ -1027,7 +1280,7 @@ class ContentCapabilities:
                         track_execution=track_execution,
                     )
                 except ProviderRequestError as exc:
-                    failure = service.provider_failure(exc)
+                    failure = self.providers.provider_failure(exc)
                     total_attempts += int(failure.get("attempts") or 0)
                     has_fallback = candidate_index + 1 < len(candidates)
                     if has_fallback and failure["code"] in fallback_codes:
@@ -1101,9 +1354,13 @@ class ContentCapabilities:
 
         if self.inflight_coalescing and misses:
             flight_key_for_fingerprint = {
-                fingerprint: document_service.flight_key(fingerprint) for fingerprint in misses
+                fingerprint: self.providers.flights.key(
+                    document_binding.namespace,
+                    fingerprint,
+                )
+                for fingerprint in misses
             }
-            admission = await document_service.flights.admit(
+            admission = await self.providers.flights.admit(
                 state,
                 {
                     flight_key_for_fingerprint[fingerprint]: (
@@ -1139,7 +1396,7 @@ class ContentCapabilities:
                         # second provider request.
                         return {flight_key: ContentDocument.model_validate(copy.deepcopy(cached))}
 
-                    document_service.flights.start(state, group, execute_cached_content)
+                    self.providers.flights.start(state, group, execute_cached_content)
                     continue
 
                 async def execute_content(
@@ -1169,12 +1426,12 @@ class ContentCapabilities:
                         )
                     return {flight_key: outcome}
 
-                document_service.flights.start(state, group, execute_content)
+                self.providers.flights.start(state, group, execute_content)
 
             async def await_content_flight(
                 fingerprint: str,
             ) -> tuple[str, _FetchOutcome]:
-                outcome = await document_service.flights.wait(
+                outcome = await self.providers.flights.wait(
                     state,
                     admission.waiters[flight_key_for_fingerprint[fingerprint]],
                 )
@@ -1268,9 +1525,9 @@ class ContentCapabilities:
         item: _ResolvedSource,
         failure: dict[str, Any],
     ) -> ContentFailure:
-        service = self.document_services.get(item.route)
-        if service is not None:
-            failure = service.contextualize_failure(failure)
+        binding = self.document_bindings.get(item.route)
+        if binding is not None:
+            failure = self._contextualize_document_failure(binding, failure)
         return ContentFailure(
             input_index=item.input_index,
             source=item.handle.source,

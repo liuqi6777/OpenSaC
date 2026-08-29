@@ -19,13 +19,17 @@ from opensac.backends.rerank.jina import JinaReranker
 from opensac.backends.search import SearchHit
 from opensac.broker.app import RpcResponse
 from opensac.broker.call_context import trace_error_message
+from opensac.broker.capabilities.content import ContentLimits
+from opensac.broker.capabilities.llm import LLMLimits
+from opensac.broker.capabilities.search import SearchLimits
+from opensac.broker.config import BrokerConfig
 from opensac.broker.failures import CapabilityFailure
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
 from opensac.broker.providers import (
     CapabilityProviderError,
     ProviderExecutionConfig,
 )
-from opensac.broker.service import BrokerService
+from opensac.broker.service import BrokerService, RetrievalRoute
 from opensac.broker.sources import canonical_url, normalize_web_source
 from opensac.models import (
     CAPABILITY_METHODS,
@@ -65,14 +69,24 @@ class _LocalBackendTraits:
         return [hit]
 
 
-def _broker_service(search_backends, *, document_backends=None, **kwargs):
+def _broker_service(
+    search_backends,
+    *,
+    document_backends=None,
+    backend_revision="",
+    **kwargs,
+):
     if document_backends is None:
         document_backends = search_backends
-    return BrokerService(
-        search_backends,
-        document_backends=document_backends,
-        **kwargs,
-    )
+    routes = {
+        name: RetrievalRoute(
+            search=backend,
+            document=document_backends[name],
+            revision=backend_revision,
+        )
+        for name, backend in search_backends.items()
+    }
+    return BrokerService(routes, **kwargs)
 
 
 class FakeBackend:
@@ -202,15 +216,9 @@ def make_session(*, backends=None, mechanisms=None, budget=None):
     )
 
 
-def test_broker_requires_explicit_matching_document_backends() -> None:
-    with pytest.raises(TypeError, match="document_backends"):
-        BrokerService({"web": FakeBackend("web")})  # type: ignore[call-arg]
-
-    with pytest.raises(ValueError, match="must match exactly"):
-        BrokerService(
-            {"web": FakeBackend("web")},
-            document_backends={"local": FakeBackend("local")},
-        )
+def test_broker_requires_a_retrieval_route() -> None:
+    with pytest.raises(ValueError, match="at least one retrieval route"):
+        BrokerService({})
 
 
 def test_broker_rejects_unsupported_source_kinds_at_startup() -> None:
@@ -262,8 +270,7 @@ async def test_search_and_content_use_distinct_backend_objects() -> None:
     search_backend = SearchOnly()
     document_backend = DocumentOnly()
     service = BrokerService(
-        {"web": search_backend},
-        document_backends={"web": document_backend},
+        {"web": RetrievalRoute(search=search_backend, document=document_backend)},
     )
     service.register_session(make_session())
 
@@ -498,8 +505,7 @@ async def test_search_rejects_query_and_depth_budgets_before_backend_call() -> N
     backend = Counting()
     service = _broker_service(
         {"web": backend},
-        max_search_query_chars=4,
-        max_search_top_k=20,
+        config=BrokerConfig(search=SearchLimits(max_query_chars=4, max_top_k=20)),
     )
     state = service.register_session(make_session())
 
@@ -611,13 +617,13 @@ def make_scripted_llm_service(
     outcomes: list[str | BaseException],
     *,
     budget: ResourceBudget | None = None,
-    **limits,
+    limits: LLMLimits | None = None,
 ) -> tuple[BrokerService, ScriptedModelClient]:
     client = ScriptedModelClient(outcomes)
     service = _broker_service(
         {"web": FakeBackend("web")},
         llm_backend=OpenAICompatibleBackend(model="test-model", client=client),
-        **limits,
+        config=BrokerConfig(llm=limits or LLMLimits()),
     )
     service.register_session(make_session(budget=budget))
     return service, client
@@ -656,7 +662,7 @@ async def test_llm_complete_passes_system_prompt_and_charges_one_call() -> None:
     assert service.sessions["token"].policy.usage.llm_calls == 1
     assert service.sessions["token"].policy.usage.pipeline_model_tokens == 11
     assert service.sessions["token"].policy.usage.provider_attempts_by_capability == {"llm": 1}
-    assert service.llm.service is service.llm_service
+    assert service.llm.binding is service.llm_binding
     trace = service.take_trace("token", "llm-complete")[0]
     assert [
         (attempt.component, attempt.request_indexes) for attempt in trace.provider_attempts
@@ -859,7 +865,10 @@ async def test_passages_empty_sources_and_exact_duplicates_are_successful() -> N
 
 async def test_passages_apply_source_limit_before_deduplication() -> None:
     backend = PassageCorpusBackend(["alpha"])
-    service = _broker_service({"web": backend}, max_content_sources_per_request=2)
+    service = _broker_service(
+        {"web": backend},
+        config=BrokerConfig(content=ContentLimits(max_sources_per_request=2)),
+    )
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "seed"}))[0]["source"]
 
@@ -912,8 +921,12 @@ async def test_passages_stably_break_ties_and_apply_limit_per_source_after_ranki
     backend = PassageCorpusBackend(["a" * 180, "b" * 180])
     service = _broker_service(
         {"web": backend},
-        passage_chunk_chars=50,
-        passage_chunk_overlap_chars=10,
+        config=BrokerConfig(
+            content=ContentLimits(
+                passage_chunk_chars=50,
+                passage_chunk_overlap_chars=10,
+            )
+        ),
     )
     service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "seed", "limit": 2})
@@ -1063,8 +1076,12 @@ async def test_passage_prefilter_keeps_eight_per_source_then_caps_globally_at_10
     service = _broker_service(
         {"web": backend},
         reranker=reranker,
-        passage_chunk_chars=20,
-        passage_chunk_overlap_chars=0,
+        config=BrokerConfig(
+            content=ContentLimits(
+                passage_chunk_chars=20,
+                passage_chunk_overlap_chars=0,
+            )
+        ),
     )
     service.register_session(make_session())
     hits = await service.call("token", "search.query", {"query": "seed", "limit": 13})
@@ -1205,10 +1222,12 @@ async def test_extract_promotes_invalid_model_output_to_top_level_error(
 async def test_extract_validates_schema_and_limits_before_charging() -> None:
     service, client = make_scripted_llm_service(
         ['{"ok":true}'],
-        max_extract_instruction_bytes=3,
-        max_extract_schema_bytes=50,
-        max_extract_item_bytes=4,
-        max_extract_schema_depth=2,
+        limits=LLMLimits(
+            extract_max_instruction_bytes=3,
+            extract_max_schema_bytes=50,
+            extract_max_item_bytes=4,
+            extract_max_schema_depth=2,
+        ),
     )
     state = service.sessions["token"]
     cases = [
@@ -1288,7 +1307,7 @@ async def test_extract_repairs_once_and_returns_repaired_object() -> None:
 async def test_extract_supports_multiple_broker_configured_repairs() -> None:
     service, client = make_scripted_llm_service(
         ["not json", '{"value":"wrong"}', '{"value":1}'],
-        max_extract_repair_attempts=2,
+        limits=LLMLimits(extract_max_repair_attempts=2),
     )
 
     result = await service.call(
@@ -2190,7 +2209,7 @@ async def test_web_content_directly_admits_a_public_url_without_a_scheme() -> No
 async def test_schemeless_web_source_matches_a_search_admission() -> None:
     service = _broker_service(
         {"web": RankedBackend(["https://example.com/searched"])},
-        content_url_admission="searched_only",
+        config=BrokerConfig(content=ContentLimits(url_admission="searched_only")),
     )
     state = service.register_session(make_session())
     await service.call("token", "search.query", {"query": "q"})
@@ -2212,7 +2231,7 @@ async def test_schemeless_web_source_matches_a_search_admission() -> None:
 async def test_strict_content_admission_returns_a_typed_refusal() -> None:
     service = _broker_service(
         {"web": RankedBackend([])},
-        content_url_admission="searched_only",
+        config=BrokerConfig(content=ContentLimits(url_admission="searched_only")),
     )
     state = service.register_session(make_session())
 
@@ -2384,7 +2403,7 @@ async def test_default_sessions_keep_results_out_of_the_trace() -> None:
 async def test_oversized_payload_is_capped_and_says_so() -> None:
     service = _broker_service(
         {"web": RankedBackend([f"https://example.com/{index}" for index in range(50)])},
-        max_context_payload_bytes=200,
+        config=BrokerConfig(max_context_payload_bytes=200),
     )
     service.register_session(make_session(mechanisms=Mechanisms(context_decoupling=False)))
     await service.call(
@@ -2395,15 +2414,16 @@ async def test_oversized_payload_is_capped_and_says_so() -> None:
     assert len(event.result_payload) == 200
 
 
-async def test_capability_methods_stay_in_step_with_the_handler_table() -> None:
+async def test_capability_methods_stay_in_step_with_the_registry() -> None:
     """CAPABILITY_METHODS drives the session manifest and so the skill text.
 
     A capability added on one side only is either invisible to the model or
     advertised to it without an implementation, and both cost a turn to find
-    out. The assertion lives on the dispatch path, so any call exercises it.
+    out. The default catalog therefore assembles the complete core contract.
     """
     service = _broker_service({"web": RankedBackend(["https://example.com/a"])})
     service.register_session(make_session())
+    assert service.registry.methods == CAPABILITY_METHODS
     with pytest.raises(ValueError, match="Unsupported capability"):
         await service.call("token", "search.nope", {})
     for removed in (
@@ -2415,6 +2435,105 @@ async def test_capability_methods_stay_in_step_with_the_handler_table() -> None:
     ):
         with pytest.raises(ValueError, match="Unsupported capability"):
             await service.call("token", removed, {})
+
+
+async def test_capability_modules_can_be_assembled_as_a_core_contract_subset() -> None:
+    service = _broker_service(
+        {"web": FakeBackend("web")},
+        enabled_capabilities=("search", "session"),
+    )
+    service.register_session(make_session())
+
+    assert service.registry.module_names == ("search", "session")
+    assert service.registry.methods == (
+        "search.query",
+        "session.usage",
+        "session.capabilities",
+    )
+    assert service.available_methods(Mechanisms()) == service.registry.methods
+    manifest = await service.call("token", "session.capabilities", {})
+    assert set(manifest) == {"contracts", "search", "mechanisms"}
+    with pytest.raises(ValueError, match="Unsupported capability"):
+        await service.call("token", "content.fetch", {"source": "source"})
+
+
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [
+        ("search.query", {"query": "q", "include_domain": ["example.com"]}),
+        ("content.fetch", {"source": "source", "unexpected": True}),
+        ("content.passages", {"query": "q", "sources": [], "unexpected": True}),
+        ("content.read", {"source": "source", "unexpected": True}),
+        ("content.grep", {"pattern": "q", "sources": [], "unexpected": True}),
+        ("session.usage", {"unexpected": True}),
+        ("session.capabilities", {"unexpected": True}),
+        ("llm.complete", {"prompt": "q", "temprature": 0.5}),
+        (
+            "llm.extract",
+            {
+                "item": {},
+                "instruction": "",
+                "schema": {"type": "object"},
+                "unexpected": True,
+            },
+        ),
+    ],
+)
+async def test_capabilities_reject_unknown_parameters(method, params) -> None:
+    service = _broker_service({"web": FakeBackend("web")})
+    service.register_session(make_session())
+
+    with pytest.raises(ValidationError) as raised:
+        await service.call("token", method, params)
+
+    assert raised.value.errors()[0]["type"] == "extra_forbidden"
+
+
+async def test_limits_drive_validation_and_capability_manifest() -> None:
+    backend = FakeBackend("web")
+    config = BrokerConfig(
+        search=SearchLimits(max_limit=2, max_offset=3, max_concurrency=4),
+        content=ContentLimits(
+            read_max_line_count=2,
+            read_max_chars=30,
+            grep_max_context_lines=1,
+            grep_max_limit_per_source=2,
+            passage_limit=3,
+            passage_limit_per_source=2,
+        ),
+        llm=LLMLimits(max_completion_tokens=5),
+    )
+    service = BrokerService(
+        {"web": RetrievalRoute(search=backend, document=backend)},
+        config=config,
+    )
+    service.register_session(make_session())
+
+    manifest = await service.call("token", "session.capabilities", {})
+    assert manifest["search"]["limits"]["max_limit"] == 2
+    assert manifest["search"]["limits"]["max_offset"] == 3
+    assert manifest["search"]["limits"]["max_concurrency"] == 4
+    assert manifest["content"]["limits"] == {
+        "max_sources_per_request": 256,
+        "read_max_line_count": 2,
+        "read_max_chars": 30,
+        "grep_max_context_lines": 1,
+        "grep_max_limit_per_source": 2,
+        "passage_limit": 3,
+        "passage_limit_per_source": 2,
+    }
+    assert manifest["llm"]["limits"]["max_completion_tokens"] == 5
+
+    with pytest.raises(ValueError, match="limit must be between 1 and 2"):
+        await service.call("token", "search.query", {"query": "q", "limit": 3})
+    with pytest.raises(ValueError, match="line_count must be at most 2"):
+        await service.call(
+            "token",
+            "content.read",
+            {"source": "source", "line_count": 3},
+        )
+    with pytest.raises(ValueError, match="max_tokens must be at most 5"):
+        await service.call("token", "llm.complete", {"prompt": "q", "max_tokens": 6})
 
 
 def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
@@ -2433,11 +2552,17 @@ def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
 async def test_session_capabilities_reflect_backend_limits_and_mechanisms() -> None:
     service = _broker_service(
         {"local": FakeBackend("local", depth=5)},
-        max_search_queries_per_request=7,
-        max_search_query_chars=123,
-        max_search_top_k=50,
-        max_content_sources_per_request=9,
-        content_url_admission="searched_only",
+        config=BrokerConfig(
+            search=SearchLimits(
+                max_queries_per_request=7,
+                max_query_chars=123,
+                max_top_k=50,
+            ),
+            content=ContentLimits(
+                max_sources_per_request=9,
+                url_admission="searched_only",
+            ),
+        ),
     )
     service.register_session(
         make_session(

@@ -416,7 +416,7 @@ class _ProviderGovernor:
 
 
 class ProviderRuntime:
-    """Execute one reusable provider service under a bound host-owned policy."""
+    """Execute backend requests under a reusable host-owned policy."""
 
     def __init__(
         self,

@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import yaml
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from opensac._version import __version__
@@ -80,10 +80,10 @@ _YAML_FIELDS = {
 }
 
 _BACKEND_YAML_FIELDS = {
-    "search": {"provider", "base_url"},
-    "document": {"provider", "base_url"},
-    "rerank": {"provider", "model"},
-    "llm": {"provider", "model", "base_url"},
+    "search": {"provider", "base_url", "options"},
+    "document": {"provider", "base_url", "options"},
+    "rerank": {"provider", "model", "options"},
+    "llm": {"provider", "model", "base_url", "options"},
 }
 
 _CAPABILITY_YAML_FIELDS = {
@@ -125,6 +125,33 @@ _SECRET_BACKEND_YAML_FIELDS = {
     ("llm", "api_key"): "OPENSAC_MODEL_API_KEY",
 }
 
+_SECRET_OPTION_NAMES = {
+    "api_key",
+    "credential",
+    "credentials",
+    "key",
+    "password",
+    "secret",
+    "token",
+}
+
+
+def _reject_backend_option_secrets(value: Any, *, path: str) -> None:
+    if isinstance(value, Mapping):
+        for name, nested in value.items():
+            if not isinstance(name, str):
+                raise ConfigurationError(f"Backend options must use string keys: {path}")
+            normalized = name.strip().lower().replace("-", "_")
+            nested_path = f"{path}.{name}"
+            if normalized in _SECRET_OPTION_NAMES:
+                raise ConfigurationError(
+                    f"Secret '{nested_path}' is not allowed in YAML; use an environment variable"
+                )
+            _reject_backend_option_secrets(nested, path=nested_path)
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            _reject_backend_option_secrets(nested, path=f"{path}[{index}]")
+
 
 class ConfigurationError(ValueError):
     """Raised when deployment configuration cannot be loaded safely."""
@@ -133,8 +160,17 @@ class ConfigurationError(ValueError):
 class SearchBackendSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["local", "serper"] = "local"
+    provider: str = "local"
     base_url: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("backend provider must not be empty")
+        return value
 
     @model_validator(mode="after")
     def validate_connection(self) -> SearchBackendSettings:
@@ -146,8 +182,17 @@ class SearchBackendSettings(BaseModel):
 class DocumentBackendSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["local", "jina"] = "local"
+    provider: str = "local"
     base_url: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("backend provider must not be empty")
+        return value
 
     @model_validator(mode="after")
     def validate_connection(self) -> DocumentBackendSettings:
@@ -159,8 +204,17 @@ class DocumentBackendSettings(BaseModel):
 class RerankBackendSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["lexical", "jina"] = "lexical"
+    provider: str = "lexical"
     model: str = ""
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("backend provider must not be empty")
+        return value
 
     @model_validator(mode="after")
     def validate_provider(self) -> RerankBackendSettings:
@@ -174,9 +228,18 @@ class RerankBackendSettings(BaseModel):
 class LLMBackendSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["none", "openai_compatible"] = "none"
+    provider: str = "none"
     model: str = ""
     base_url: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("backend provider must not be empty")
+        return value
 
     @model_validator(mode="after")
     def validate_provider(self) -> LLMBackendSettings:
@@ -390,13 +453,22 @@ class Settings(BaseSettings):
     provider_result_cache_max_bytes: int = Field(default=128_000_000, ge=1)
 
     @property
-    def backend_name(self) -> Literal["local", "web"]:
-        return "local" if self.backends.search.provider == "local" else "web"
+    def backend_name(self) -> str:
+        return {"local": "local", "serper": "web"}.get(
+            self.backends.search.provider,
+            self.backends.search.provider,
+        )
 
     @model_validator(mode="after")
     def validate_backend_pair(self) -> Settings:
         pair = (self.backends.search.provider, self.backends.document.provider)
-        if pair not in {("local", "local"), ("serper", "jina")}:
+        built_in_search = {"local", "serper"}
+        built_in_document = {"local", "jina"}
+        if (
+            pair[0] in built_in_search
+            and pair[1] in built_in_document
+            and pair not in {("local", "local"), ("serper", "jina")}
+        ):
             raise ValueError(
                 "backends.search and backends.document must use local + local or serper + jina"
             )
@@ -584,6 +656,11 @@ def _load_yaml(path: Path) -> dict[str, Any]:
                     if name not in nested_schema[item_kind]:
                         raise ConfigurationError(
                             f"Unknown OpenSAC configuration field: {section}.{item_kind}.{name}"
+                        )
+                    if section == "backends" and name == "options":
+                        _reject_backend_option_secrets(
+                            value,
+                            path=f"{section}.{item_kind}.options",
                         )
                     parsed_item[name] = value
                 nested_values[item_kind] = parsed_item

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -12,24 +13,36 @@ from opensac.backends.document.local_http import LocalDocumentBackend
 from opensac.backends.search import SearchHit
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
+from opensac.broker.capabilities.content import ContentLimits
+from opensac.broker.config import BrokerConfig
 from opensac.broker.providers import ProviderExecutionConfig, ProviderExecutor
 from opensac.broker.providers.cache import ProviderResultCache
 from opensac.broker.providers.execution import CapabilityProviderError
 from opensac.broker.providers.serialization import canonical_json_bytes
-from opensac.broker.service import BrokerService
+from opensac.broker.service import BrokerService, RetrievalRoute
 from opensac.broker.sources import document_identity
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
 
 
-def _broker_service(search_backends, *, document_backends=None, **kwargs):
+def _broker_service(
+    search_backends,
+    *,
+    document_backends=None,
+    backend_revision="",
+    **kwargs,
+):
     if document_backends is None:
         document_backends = search_backends
-    return BrokerService(
-        search_backends,
-        document_backends=document_backends,
-        **kwargs,
-    )
+    routes = {
+        name: RetrievalRoute(
+            search=backend,
+            document=document_backends[name],
+            revision=backend_revision,
+        )
+        for name, backend in search_backends.items()
+    }
+    return BrokerService(routes, **kwargs)
 
 
 def make_session(
@@ -702,7 +715,7 @@ async def test_content_deadline_returns_a_typed_timeout() -> None:
     backend = HangingBackend(documents={"1": "one"})
     service = _broker_service(
         {"local": backend},
-        content_batch_deadline_seconds=0.01,
+        config=BrokerConfig(content=ContentLimits(batch_deadline_seconds=0.01)),
     )
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
@@ -780,7 +793,10 @@ async def test_internet_archive_text_fallback_is_separately_accounted() -> None:
 
 async def test_content_source_limit_rejects_before_usage_or_provider_side_effect() -> None:
     backend = LocalBackend()
-    service = _broker_service({"local": backend}, max_content_sources_per_request=2)
+    service = _broker_service(
+        {"local": backend},
+        config=BrokerConfig(content=ContentLimits(max_sources_per_request=2)),
+    )
     state = service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
@@ -798,7 +814,10 @@ async def test_content_source_limit_rejects_before_usage_or_provider_side_effect
 
 async def test_content_cache_budget_counts_utf8_bytes() -> None:
     backend = LocalBackend(documents={"1": "é"})
-    service = _broker_service({"local": backend}, session_content_cache_bytes=1)
+    service = _broker_service(
+        {"local": backend},
+        config=BrokerConfig(content=ContentLimits(session_cache_bytes=1)),
+    )
     service.register_session(make_session())
     source = (await service.call("token", "search.query", {"query": "q"}))[0]["source"]
 
@@ -911,7 +930,10 @@ async def test_provider_cache_key_includes_backend_revision() -> None:
     service.register_session(make_session(backend="web", session_id="b", token="b"))
     try:
         await service.call("a", "search.query", {"query": "revision"})
-        service.search_services["web"].backend_revision = "revision-b"
+        service.search_bindings["web"] = replace(
+            service.search_bindings["web"],
+            revision="revision-b",
+        )
         await service.call("b", "search.query", {"query": "revision"})
     finally:
         await service.aclose()

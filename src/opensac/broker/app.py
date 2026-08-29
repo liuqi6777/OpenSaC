@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Self
 
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from opensac.broker.failures import CapabilityFailure
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
@@ -12,6 +12,8 @@ from opensac.models import CAPABILITY_CONTRACT
 
 
 class RpcRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     method: str
     params: dict[str, Any] = Field(default_factory=dict)
 

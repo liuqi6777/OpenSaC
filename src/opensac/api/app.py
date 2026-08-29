@@ -9,12 +9,20 @@ from opensac.api.dashboard import create_dashboard_router
 from opensac.api.errors import install_exception_handlers
 from opensac.api.routes import create_api_router
 from opensac.api.runtime import ApplicationRuntime
+from opensac.broker import BrokerBuilder
 from opensac.config import Settings, load_settings
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    broker_builder: BrokerBuilder | None = None,
+) -> FastAPI:
     settings = settings or load_settings()
-    runtime = ApplicationRuntime(settings)
+    runtime = ApplicationRuntime(
+        settings,
+        broker_builder=broker_builder,
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

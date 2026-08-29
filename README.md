@@ -295,6 +295,7 @@ service also exposes the live runtime dashboard at `http://127.0.0.1:8000/dashbo
 | Upgrade to v0.8.2 | [v0.8.2 release notes](docs/opensac-0.8.2.md) |
 | Choose a YAML configuration profile | [Configuration profiles](docs/deployment.md#configuration-profiles) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
+| Add broker backends or capability modules | [Broker plugins](docs/broker-plugins.md) |
 | Connect Codex, Claude Code, CLI, or a custom agent | [Agent integrations](docs/agent-integrations.md) |
 | Configure the optional local retriever | [Local dense search](docs/local-search.md) |
 | Operate rollout workers | [RL environment workers](docs/rl-environment-workers.md) |

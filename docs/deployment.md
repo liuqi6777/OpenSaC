@@ -252,9 +252,88 @@ backends:
 The document backend uses its configured value unchanged as the Jina Reader prefix and appends
 `/{document_url}` for each fetch.
 
-Search and document providers are configured independently but must currently use one supported
-source-family pair: `local` + `local`, or `serper` + `jina`. The public session contract continues
-to identify those source families as `local` and `web`.
+The built-in search and document providers support the source-family pairs `local` + `local` and
+`serper` + `jina`. The public session contract identifies those source families as `local` and
+`web`. Installed broker plugins may add other provider names; their search and document factories
+must return the same non-empty logical route name.
+
+### Custom broker plugins
+
+Broker plugins are installed Python packages running inside the trusted OpenSAC host process. They
+can access host credentials and are not sandboxed, so install only reviewed packages. A package
+registers one decorated module through the unified `opensac.broker_plugins` entry-point group.
+
+For the complete provider interfaces, discovery rules, capability limitations, and compatibility
+policy, see [Broker plugin development](broker-plugins.md). A single-module plugin can use this
+entry point directly:
+
+```toml
+[project.entry-points."opensac.broker_plugins"]
+example = "example_opensac.plugin"
+```
+
+Backend factories in that module opt into discovery with `@backend_provider`; constructor
+reflection and class-name conventions are not used:
+
+```python
+from opensac.backends import BackendBuildContext, backend_provider
+
+
+@backend_provider(role="search", name="example_search")
+def build_search(context: BackendBuildContext):
+    options = context.settings.backends.search.options
+    return ExampleSearchBackend(
+        endpoint=options["endpoint"],
+        timeout=context.timeout("search"),
+    )
+```
+
+Every concrete `BaseCapabilities` subclass declared in the loaded module is also discovered, and
+its `@capability_method` methods are wrapped into broker `CapabilitySpec` objects automatically.
+Imported classes, undecorated backend factories, and abstract capability bases are ignored. An
+entry point may instead load a `BrokerPlugin` object or a zero-argument function returning one when
+registrations span several modules.
+
+OpenSAC validates plugin API versions, duplicate provider/module names, backend role protocols,
+capability method ownership, the fixed core capability contract, and matching search/document
+route names during startup. A plugin cannot add a new public capability method without a release
+that updates the core contract.
+
+Provider-specific non-secret settings belong under `options`:
+
+```yaml
+backends:
+  search:
+    provider: example_search
+    options:
+      endpoint: https://search.example.test
+```
+
+Factories read non-secret values from `BackendBuildContext.settings`. Secrets are rejected
+anywhere inside YAML `options`; pass them through environment variables owned by the plugin
+instead. The built-in providers continue to use their documented `base_url` and `model` fields and
+reject non-empty `options` so configuration mistakes cannot be silently ignored.
+
+OpenSAC's API runtime delegates provider-policy, backend, and capability wiring to
+`opensac.broker.BrokerBuilder`. Embedded deployments can supply a configured builder explicitly;
+for example, this assembles the built-in broker without its optional LLM capability module:
+
+```python
+from opensac.api import create_app
+from opensac.broker import BrokerBuilder
+
+app = create_app(
+    settings,
+    broker_builder=BrokerBuilder(
+        enabled_capabilities=("search", "content", "session"),
+    ),
+)
+```
+
+Capability modules may be composed only from methods in the fixed core capability contract, and
+the session module remains required. Changing which built-in modules are assembled does not alter
+the wire schema or require a capability-contract revision; the session manifest advertises the
+effective subset.
 
 ### Rerank service
 

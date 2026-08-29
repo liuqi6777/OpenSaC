@@ -5,18 +5,18 @@ from pathlib import Path
 
 from opensac.backends.document import DocumentContent, DocumentHandle
 from opensac.backends.search import SearchHit
-from opensac.broker.service import BrokerService
+from opensac.broker.service import BrokerService, RetrievalRoute
 from opensac.models import ResourceBudget, Session
 
 
 def _broker_service(search_backends, *, document_backends=None, **kwargs):
     if document_backends is None:
         document_backends = search_backends
-    return BrokerService(
-        search_backends,
-        document_backends=document_backends,
-        **kwargs,
-    )
+    routes = {
+        name: RetrievalRoute(search=backend, document=document_backends[name])
+        for name, backend in search_backends.items()
+    }
+    return BrokerService(routes, **kwargs)
 
 
 class FrozenPageBackend:

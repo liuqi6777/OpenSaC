@@ -28,7 +28,7 @@ from opensac.backends.document.jina import JinaReaderBackend
 from opensac.backends.document.local_http import LocalDocumentBackend
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
-from opensac.broker import BrokerRuntime, BrokerService
+from opensac.broker import BrokerRuntime, BrokerService, RetrievalRoute
 from opensac.config import Settings, load_settings
 from opensac.models import Session
 from opensac.sandbox import DockerSandbox, UnsafeCodeError
@@ -63,8 +63,7 @@ async def main() -> int:
         search_backend = SerperBackend(settings.serper_api_key)
         document_backend = JinaReaderBackend(settings.jina_api_key)
     service = BrokerService(
-        {backend: search_backend},
-        document_backends={backend: document_backend},
+        {backend: RetrievalRoute(search=search_backend, document=document_backend)},
         llm_backend=None,
         max_concurrency=settings.max_concurrency,
     )

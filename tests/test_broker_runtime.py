@@ -12,7 +12,7 @@ from opensac_sdk.transport import BrokerError, UnixSocketTransport
 from opensac.backends.document import DocumentContent, DocumentHandle
 from opensac.backends.llm import OpenAICompatibleBackend
 from opensac.backends.search import SearchHit
-from opensac.broker import BrokerAlreadyRunning, BrokerRuntime, BrokerService
+from opensac.broker import BrokerAlreadyRunning, BrokerRuntime, BrokerService, RetrievalRoute
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderRequestError
 
@@ -20,11 +20,11 @@ from opensac.provider import ProviderRequestError
 def _broker_service(search_backends, *, document_backends=None, **kwargs):
     if document_backends is None:
         document_backends = search_backends
-    return BrokerService(
-        search_backends,
-        document_backends=document_backends,
-        **kwargs,
-    )
+    routes = {
+        name: RetrievalRoute(search=backend, document=document_backends[name])
+        for name, backend in search_backends.items()
+    }
+    return BrokerService(routes, **kwargs)
 
 
 class SocketBackend:
@@ -408,6 +408,15 @@ async def test_broker_round_trip_returns_contract_v2_errors(tmp_path) -> None:
         assert raised.value.code == "invalid_request"
         assert raised.value.retryable is False
         assert raised.value.attempts == 0
+
+        with pytest.raises(BrokerError, match="include_domain") as raised:
+            await asyncio.to_thread(
+                transport.call,
+                "search.query",
+                {"query": "q", "include_domain": ["example.com"]},
+            )
+        assert raised.value.code == "invalid_request"
+        assert raised.value.retryable is False
 
         denied = UnixSocketTransport(str(runtime.socket_path), "unknown-token")
         with pytest.raises(BrokerError, match="Unknown or expired") as raised:

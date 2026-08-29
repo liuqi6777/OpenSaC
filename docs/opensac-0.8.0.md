@@ -1,5 +1,9 @@
 # OpenSAC v0.8.0
 
+> This is a historical v0.8.0 architecture note. The current broker has since collapsed the four
+> service wrappers below into typed backend bindings plus one shared `ProviderExecutor`; see
+> [Broker plugin development](broker-plugins.md#backend-execution-model).
+
 OpenSAC v0.8.0 replaces backend-specific operation dispatch with a capability-oriented execution
 architecture. Capabilities now compose reusable services, services bind deployment policy to one
 backend role, and backend adapters contain only provider I/O plus traits that represent real
