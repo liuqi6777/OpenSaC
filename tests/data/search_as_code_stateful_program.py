@@ -38,11 +38,11 @@ CONTENT_BATCH = 40
 SCAN_LIMIT_PER_CONSTRAINT = 80
 READ_LIMIT_PER_CONSTRAINT = 6
 
-artifacts = set(sdk.state.list(f"{root}/"))
-sdk.state.write_json(manifest_path, research_manifest)
+artifacts = set(sdk.workspace.list(f"{root}/"))
+sdk.workspace.write_json(manifest_path, research_manifest)
 pool = {
     row.source: dict(row)
-    for row in (sdk.state.read_jsonl(pool_path) if pool_path in artifacts else [])
+    for row in (sdk.workspace.read_jsonl(pool_path) if pool_path in artifacts else [])
 }
 
 # Use 2-4 focused variants for a known entity; expand only when discovery is ambiguous.
@@ -98,8 +98,8 @@ for candidate in fusion:
     row["score"] = max(float(row.get("score") or 0.0), candidate.fused_score)
 
 # Merge first, then prune. Current-stage rank wins; historical score is only a fallback.
-sdk.state.upsert_jsonl(pool_path, list(pool.values()))
-merged = [dict(row) for row in sdk.state.read_jsonl(pool_path)]
+sdk.workspace.upsert_jsonl(pool_path, list(pool.values()))
+merged = [dict(row) for row in sdk.workspace.read_jsonl(pool_path)]
 ordered = sorted(
     merged,
     key=lambda row: (
@@ -119,7 +119,7 @@ for row in ordered:
         selected_sources.append(row["source"])
 selected = set(selected_sources)
 bounded_pool = [row for row in ordered if row["source"] in selected]
-sdk.state.write_jsonl(pool_path, bounded_pool)
+sdk.workspace.write_jsonl(pool_path, bounded_pool)
 ordered_sources = [row["source"] for row in bounded_pool]
 pool_by_source = {row["source"]: row for row in bounded_pool}
 
@@ -134,13 +134,13 @@ fingerprints = {
     name: hashlib.sha256(json.dumps(spec, ensure_ascii=True, sort_keys=True).encode()).hexdigest()
     for name, spec in constraints.items()
 }
-loaded_evidence = sdk.state.read_json(evidence_path) if evidence_path in artifacts else {}
+loaded_evidence = sdk.workspace.read_json(evidence_path) if evidence_path in artifacts else {}
 evidence = {
     name: dict(row)
     for name, row in loaded_evidence.items()
     if name in fingerprints and row.get("fingerprint") == fingerprints[name]
 }
-loaded_attempts = sdk.state.read_json(attempts_path) if attempts_path in artifacts else {}
+loaded_attempts = sdk.workspace.read_json(attempts_path) if attempts_path in artifacts else {}
 attempted = {}
 for name in constraints:
     row = loaded_attempts.get(name, {})
@@ -214,8 +214,8 @@ for name, spec in constraints.items():
             break
 
 if evidence:
-    sdk.state.write_json(evidence_path, evidence)
-sdk.state.write_json(
+    sdk.workspace.write_json(evidence_path, evidence)
+sdk.workspace.write_json(
     attempts_path,
     {
         name: {"fingerprint": fingerprints[name], "sources": sorted(sources)}

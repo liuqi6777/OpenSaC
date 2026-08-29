@@ -202,7 +202,7 @@ PY
 | `sdk.search` | `search`、`many`、`fuse_rrf` | 检索并融合候选，同时保留 provenance |
 | `sdk.content` | `fetch`、`fetch_many`、`read`、`grep`、`passages` | 抓取、定位和检查证据，并提供明确 cursor |
 | `sdk.llm` | `extract`、`extract_many`、`complete` | 可选模型调用与 schema 校验抽取 |
-| `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
+| `sdk.workspace` | JSON/JSONL artifact 辅助方法 | 在同一 session 的多次执行间持久化结构化 artifact |
 | 顶层 | `capabilities` | 查看当前契约、部署限制与机制 |
 
 `search.many`、`content.fetch_many`、`llm.extract_many` 和 `content.grep` 返回与输入对齐的
@@ -213,7 +213,7 @@ outcome。搜索、抓取和抽取 status 严格为 `"success"` 或 `"failure"`�
 本地文档 ID。Content 只接收
 URL/本地 ID 字符串；Web 部署可直接读取受限的公开 HTTP(S) URL，本地
 ID 仍需搜索准入。生成程序通过 `print(...)` 返回有界、带精确来源的结果；更大的结构化数据应
-保存在 `sdk.state` 中。所有公共方法、参数与返回形态见完整 SDK API 参考：
+保存在 `sdk.workspace` 中。所有公共方法、参数与返回形态见完整 SDK API 参考：
 [中文](docs/sdk-reference.zh-CN.md) / [English](docs/sdk-reference.md)。
 
 ### 智能体集成

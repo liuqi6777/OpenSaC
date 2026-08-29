@@ -2,7 +2,7 @@
 
 These programs are independent, adaptable examples, not a required pipeline. Combine, split, skip,
 or reorder them when the task calls for a different strategy. Only the final optional pattern uses
-state, for a result that a later program will reuse.
+workspace artifacts, for a result that a later program will reuse.
 
 ## Example building blocks
 
@@ -294,12 +294,14 @@ def cache_row(requested_source, status, *, document=None, error=None):
     }
 
 
-cached_rows = sdk.state.read_jsonl(cache_path) if sdk.state.exists(cache_path) else []
+cached_rows = (
+    sdk.workspace.read_jsonl(cache_path) if sdk.workspace.exists(cache_path) else []
+)
 cached = {row["requested_source"]: dict(row) for row in cached_rows}
 pending = [source for source in selected_sources if source not in cached]
 
 if pending:
-    sdk.state.upsert_jsonl(
+    sdk.workspace.upsert_jsonl(
         cache_path,
         [cache_row(source, "started") for source in pending],
         key="requested_source",
@@ -334,7 +336,7 @@ if pending:
                 )
 
     # Make every external-call outcome durable before local parsing or other transformations.
-    sdk.state.upsert_jsonl(cache_path, terminal_rows, key="requested_source")
+    sdk.workspace.upsert_jsonl(cache_path, terminal_rows, key="requested_source")
     cached.update({row["requested_source"]: row for row in terminal_rows})
 
 for requested_source in selected_sources:
@@ -349,4 +351,4 @@ for requested_source in selected_sources:
 The example stores full text because cross-program reuse is its premise; store only the bounded data
 the later program needs when full text is unnecessary. `requested_source` prevents unchanged replay,
 while `source` records the canonical value returned by fetch. A surviving `started` row has an
-unknown outcome. Retry only when durable state proves the operation is missing.
+unknown outcome. Retry only when durable workspace data proves the operation is missing.

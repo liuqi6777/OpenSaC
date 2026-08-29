@@ -233,9 +233,9 @@
               <p role="cell">Optional schema-checked extraction and model calls.</p>
             </div>
             <div class="sdk-row" role="row">
-              <code role="cell">sdk.state</code>
-              <span role="cell">JSON · JSONL · workspace</span>
-              <p role="cell">Persist explicit state across executions in one session.</p>
+              <code role="cell">sdk.workspace</code>
+              <span role="cell">JSON · JSONL · artifacts</span>
+              <p role="cell">Persist structured artifacts across executions in one session.</p>
             </div>
             <div class="sdk-row" role="row">
               <code role="cell">sdk.capabilities()</code>
@@ -267,7 +267,7 @@ results = sdk.search.many(queries)
 evidence = sdk.search.fuse_rrf(results)
 
 selected = [hit <span class="kw">for</span> hit <span class="kw">in</span> evidence <span class="kw">if</span> hit.score &gt; <span class="num">0.1</span>]
-sdk.state.write_json(<span class="str">"evidence.json"</span>, selected)
+sdk.workspace.write_json(<span class="str">"evidence.json"</span>, selected)
 <span class="kw">for</span> hit <span class="kw">in</span> selected[:<span class="num">8</span>]:
     print(<span class="str">f"EVIDENCE source={hit.source!r} title={hit.title!r}"</span>)</code></pre>
         </div>

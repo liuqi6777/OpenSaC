@@ -37,7 +37,7 @@ SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 
 | Content | `content.fetch`、`content.fetch_many`、`content.read`、`content.grep`、`content.passages` |
 | LLM | `llm.complete`、`llm.extract`、`llm.extract_many` |
 | 顶层 | `capabilities` |
-| State | JSON/JSONL 操作，包括 `state.upsert_jsonl` |
+| Workspace | JSON/JSONL 操作，包括 `workspace.upsert_jsonl` |
 
 ## Search
 
@@ -352,25 +352,25 @@ outcome；若所有项目都因 transport、protocol、contract 或 permission �
 返回 contract 版本、search backend 支持、content/LLM 上限和机制开关。生成程序应读取它，
 不要硬编码部署上限。
 
-## State
+## Workspace
 
-State 路径相对 session workspace，不能逃逸：
+Artifact 路径相对 session workspace，不能逃逸：
 
 ```python
-sdk.state.write_json(path, value)
-sdk.state.read_json(path)
-sdk.state.write_jsonl(path, rows)
-sdk.state.append_jsonl(path, rows)
-sdk.state.upsert_jsonl(path, rows, key="source") -> int
-sdk.state.read_jsonl(path)
-sdk.state.exists(path) -> bool
-sdk.state.list(prefix="") -> list[str]
+sdk.workspace.write_json(path, value)
+sdk.workspace.read_json(path)
+sdk.workspace.write_jsonl(path, rows)
+sdk.workspace.append_jsonl(path, rows)
+sdk.workspace.upsert_jsonl(path, rows, key="source") -> int
+sdk.workspace.read_jsonl(path)
+sdk.workspace.exists(path) -> bool
+sdk.workspace.list(prefix="") -> list[str]
 ```
 
 `upsert_jsonl` 保留首次出现顺序，并按 key 替换整个旧行，不做字段级 merge。
 
 使用 Python `print(...)` 返回有界结果，并把精确 source 字符串与对应证据一起输出。更大的
-结构化数据应保存到 `sdk.state`，不要打印完整文档或 ledger。
+结构化数据应保存到 `sdk.workspace`，不要打印完整文档或 ledger。
 
 ## 0.8.2 Breaking 迁移
 
@@ -402,4 +402,4 @@ sdk.state.list(prefix="") -> list[str]
 | `content.passages(query, sources, max_per_source)` | keyword `sources=...`、`limit_per_source=...` |
 | `llm.complete_many(...)` | 循环调用 `llm.complete(...)` |
 | 旧 broker `llm.extract_many(...)` | SDK `llm.extract_many(...)` 组合 unary `llm.extract` |
-| `state.merge_jsonl(...)` | `state.upsert_jsonl(...)` |
+| `state.merge_jsonl(...)` | `workspace.upsert_jsonl(...)` |

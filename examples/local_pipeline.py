@@ -36,7 +36,7 @@ report = sdk.content.passages(
     limit_per_source=3,
 )
 
-sdk.state.write_jsonl(
+sdk.workspace.write_jsonl(
     "evidence.jsonl",
     [dict(item) for item in report.passages],
 )

@@ -88,12 +88,18 @@ def test_built_image_exposes_contract_14_and_compact_sdk(sandbox_image: str) -> 
     script = (
         "import importlib.util, json; "
         "from opensac_sdk import __version__; "
-        "from opensac_sdk._resources import SearchResource; "
+        "from opensac_sdk import _resources; "
+        "from opensac_sdk._resources import SearchResource, WorkspaceResource; "
+        "from opensac_sdk._surface import SDK_SURFACE; "
         "hit = {'source': 'doc_a', 'backend': 'local', 'rank': 1}; "
         "report = [{'query': 'q', 'status': 'success', 'hits': [hit]}]; "
         "result = SearchResource(None).fuse_rrf(report); "
         "print(json.dumps({'version': __version__, "
         "'fusion': result, "
+        "'workspace_resource': WorkspaceResource.__name__, "
+        "'has_state_resource': hasattr(_resources, 'StateResource'), "
+        "'workspace_surface': sum(item.resource == 'workspace' for item in SDK_SURFACE), "
+        "'state_surface': sum(item.resource == 'state' for item in SDK_SURFACE), "
         "'types_module': importlib.util.find_spec('opensac_sdk.types') is not None, "
         "'models_module': importlib.util.find_spec('opensac_sdk.models') is not None, "
         "'search_module': importlib.util.find_spec('opensac_sdk.search') is not None}, "
@@ -119,6 +125,10 @@ def test_built_image_exposes_contract_14_and_compact_sdk(sandbox_image: str) -> 
     assert payload["version"] == __version__
     assert payload["fusion"][0]["source"] == "doc_a"
     assert payload["fusion"][0]["fused_rank"] == 1
+    assert payload["workspace_resource"] == "WorkspaceResource"
+    assert payload["has_state_resource"] is False
+    assert payload["workspace_surface"] == 9
+    assert payload["state_surface"] == 0
     assert payload["types_module"] is False
     assert payload["models_module"] is False
     assert payload["search_module"] is False

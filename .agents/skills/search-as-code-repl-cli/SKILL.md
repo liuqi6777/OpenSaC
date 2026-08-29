@@ -75,18 +75,18 @@ failure types, or lifecycle semantics. Inspect one exact method's `__doc__` when
 - Reuse, replace, or delete live values as useful. Avoid accumulating parallel copies of raw reports
   or mirroring every live object to disk.
 
-## Use live and durable state selectively
+## Use live memory and the durable workspace selectively
 
 Python variables, functions, imports, and assignments completed before an ordinary exception survive
 later cells while the interpreter remains ready. This live namespace is the default working memory.
 
-Treat interpreter memory and filesystem persistence as independent mechanisms. Use `sdk.state` only
-when a durable recovery cache or later program reuse saves meaningful external work, and only when
-`sdk.capabilities()["mechanisms"]["persistence"]` is enabled. Prefer a small cumulative data cache
-over per-cell logs, stage files, a final ledger, or a disk copy of the whole namespace.
+Treat interpreter memory and filesystem persistence as independent mechanisms. Use `sdk.workspace`
+only when a durable recovery cache or later program reuse saves meaningful external work, and only
+when `sdk.capabilities()["mechanisms"]["persistence"]` is enabled. Prefer a small cumulative data
+cache over per-cell logs, stage files, a final ledger, or a disk copy of the whole namespace.
 
 Keep durable caches cumulative by stable source or window keys. A cell that fetches content should
-also print bounded evidence, no-match, blocked, and failure summaries; do not require a state-only
+also print bounded evidence, no-match, blocked, and failure summaries; do not require a workspace-only
 cell merely to display what the fetching cell already had.
 
 For recoverable external work, persist an input as `started` before the call when avoiding blind
@@ -109,9 +109,10 @@ when a later cell or recovery path will reuse the fetched text.
 - Agent completion is the final response to the user. Once printed evidence covers the request and no
   unresolved `NEXT:` remains, answer directly without a separate finalization cell.
 - Material claims, status, evidence, and source strings in stdout must derive from inspected rows or
-  trustworthy loaded state. Preserve conflicts and compute completeness from requirement coverage.
+  trustworthy loaded workspace data. Preserve conflicts and compute completeness from requirement
+  coverage.
 - Do not run a finalization cell merely to turn already visible evidence into prose. Answer directly
-  unless recovery requires loading state.
+  unless recovery requires loading workspace data.
 
 Warnings, stdout, and stderr share one observation budget; keep each bounded.
 

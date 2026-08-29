@@ -632,7 +632,7 @@ class ContentResource:
         Returns:
             A document containing ``source``, ``title``, ``date``, ``text``, and
             provider-owned ``metadata``. Reuse it locally for several checks, optionally persist
-            one copy with ``sdk.state``, and never print the complete text.
+            one copy with ``sdk.workspace``, and never print the complete text.
 
         Raises:
             BrokerError: The source could not be fetched.
@@ -1109,12 +1109,13 @@ class CapabilitiesResource:
         return self._transport.call("session.capabilities", {})
 
 
-class StateResource:
-    """Persist JSON and JSONL artifacts across executions in one live session.
+class WorkspaceResource:
+    """Persist structured artifacts across executions in one live session.
 
-    Paths are workspace-relative and cannot escape the session workspace. State is
-    program memory, not a database; local document sources become invalid if the
-    host reports ``state_lost``. Public web URLs remain meaningful across sessions.
+    Paths are workspace-relative and cannot escape the session workspace. The
+    workspace is program memory, not a database; local document sources become
+    invalid if the host reports ``state_lost``. Public web URLs remain meaningful
+    across sessions.
     """
 
     def __init__(self, workspace: str | None) -> None:
@@ -1129,7 +1130,7 @@ class StateResource:
         workspace = self._workspace_path()
         path = (workspace / relative_path).resolve()
         if not path.is_relative_to(workspace):
-            raise ValueError("State path must remain inside the session workspace")
+            raise ValueError("Workspace path must remain inside the session workspace")
         return path
 
     @staticmethod
@@ -1152,7 +1153,7 @@ class StateResource:
         """Append rows to a JSONL artifact without reading or rewriting it.
 
         The file and parent directories are created when absent. This operation does
-        not deduplicate rows; use ``upsert_jsonl`` for keyed state.
+        not deduplicate rows; use ``upsert_jsonl`` for keyed rows.
 
         Raises:
             ValueError: The path escapes the workspace.
@@ -1199,7 +1200,7 @@ class StateResource:
         return len(merged)
 
     def exists(self, relative_path: str) -> bool:
-        """Return whether a workspace-relative state file exists.
+        """Return whether a workspace-relative artifact exists.
 
         Raises:
             ValueError: The path escapes the workspace.
@@ -1258,5 +1259,5 @@ class StateResource:
         return wrap(json.loads(self._path(relative_path).read_text(encoding="utf-8")))
 
     @classmethod
-    def from_environment(cls) -> StateResource:
+    def from_environment(cls) -> WorkspaceResource:
         return cls(None)

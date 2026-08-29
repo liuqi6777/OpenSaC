@@ -285,7 +285,7 @@ class _LLMResource(Protocol):
 class _CapabilitiesResource(Protocol):
     def __call__(self) -> _CapabilitiesRecord: ...
 
-class _StateResource(Protocol):
+class _WorkspaceResource(Protocol):
     def write_jsonl(self, relative_path: str, rows: list[Any]) -> None: ...
     def append_jsonl(self, relative_path: str, rows: list[Any]) -> None: ...
     def upsert_jsonl(
@@ -305,7 +305,7 @@ class _SDK(Protocol):
     content: _ContentResource
     capabilities: _CapabilitiesResource
     llm: _LLMResource
-    state: _StateResource
+    workspace: _WorkspaceResource
     def close(self) -> None: ...
 
 sdk: _SDK

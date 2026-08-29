@@ -62,9 +62,10 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "Agent completion is the final response to the user" in flat_skill
     assert "Once printed evidence covers the request" in flat_skill
     assert "source strings in stdout" in flat_skill
-    assert "program-to-program memory" in skill
+    assert "persists structured artifacts between programs" in flat_skill
+    assert "sdk.workspace" in flat_skill
+    assert "sdk.state" not in flat_skill
     assert "sdk.output" not in flat_skill
-    assert "sdk.workspace" not in flat_skill
     assert "shell-capable environments" in description
     assert "Codex" not in description
     assert "Claude" not in description
@@ -157,8 +158,8 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
         "python",
         heading="## Optionally cache selected fetches across calls",
     )
-    assert cache.index("sdk.state.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
-    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.state.upsert_jsonl(")
+    assert cache.index("sdk.workspace.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
+    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.workspace.upsert_jsonl(")
     assert "concurrency=" not in cache
 
     contract = CONTRACT_PATH.read_text(encoding="utf-8")
@@ -166,7 +167,8 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
     assert "llm.complete" not in contract
     assert "sdk.session" not in contract
     assert "sdk.output" not in contract
-    assert "sdk.workspace" not in contract
+    assert "sdk.workspace" in contract
+    assert "sdk.state" not in contract
 
 
 def test_cli_skill_has_codex_catalog_metadata() -> None:

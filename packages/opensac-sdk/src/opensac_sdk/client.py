@@ -7,7 +7,7 @@ from ._resources import (
     ContentResource,
     LLMResource,
     SearchResource,
-    StateResource,
+    WorkspaceResource,
 )
 from .transport import UnixSocketTransport
 
@@ -18,21 +18,21 @@ class OpenSACClient:
     def __init__(
         self,
         transport: UnixSocketTransport,
-        state: StateResource,
+        workspace: WorkspaceResource,
     ) -> None:
         self._transport = transport
         self.search = SearchResource(transport)
         self.content = ContentResource(transport)
         self.capabilities = CapabilitiesResource(transport)
         self.llm = LLMResource(transport)
-        self.state = state
+        self.workspace = workspace
 
     @classmethod
     def from_environment(cls) -> OpenSACClient:
         transport = UnixSocketTransport.from_environment()
         return cls(
             transport,
-            StateResource.from_environment(),
+            WorkspaceResource.from_environment(),
         )
 
     def close(self) -> None:
@@ -48,7 +48,7 @@ class OpenSACClient:
 class LazyOpenSACClient:
     """OpenSAC sandbox entry point, available as ``opensac_sdk.sdk``.
 
-    Namespaces are ``search``, ``content``, ``llm``, and ``state``;
+    Namespaces are ``search``, ``content``, ``llm``, and ``workspace``;
     ``capabilities()`` inspects the active deployment. Print bounded results for
     the calling agent. Reading one namespace or method ``.__doc__`` does not call
     the broker.

@@ -24,7 +24,7 @@ from opensac_sdk._resources import (
     ContentResource,
     LLMResource,
     SearchResource,
-    StateResource,
+    WorkspaceResource,
 )
 from opensac_sdk._surface import (
     SDK_SURFACE,
@@ -38,7 +38,7 @@ RESOURCE_TYPES = {
     "content": ContentResource,
     "llm": LLMResource,
     "search": SearchResource,
-    "state": StateResource,
+    "workspace": WorkspaceResource,
 }
 
 
@@ -57,6 +57,7 @@ def test_package_root_exposes_only_runtime_entrypoints() -> None:
         "session",
         "state",
         "types",
+        "workspace",
     ]
     for module in removed_modules:
         with pytest.raises(ModuleNotFoundError):
@@ -77,8 +78,10 @@ def test_sdk_package_publishes_typing_metadata() -> None:
     assert "def usage(" not in text
     assert "def submit(" not in text
     assert "capabilities: _CapabilitiesResource" in text
+    assert "workspace: _WorkspaceResource" in text
     assert "output: _" not in text
     assert "session: _" not in text
+    assert "state: _" not in text
 
 
 def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
@@ -138,6 +141,12 @@ def test_surface_manifest_keeps_model_core_small() -> None:
     assert any(operation.public_name == "sdk.capabilities" for operation in model_core)
     assert any(operation.public_name == "sdk.llm.extract_many" for operation in model_core)
     assert all(operation.resource != "session" for operation in SDK_SURFACE)
+    assert all(operation.resource != "state" for operation in SDK_SURFACE)
+    workspace_operations = [
+        operation for operation in SDK_SURFACE if operation.resource == "workspace"
+    ]
+    assert len(workspace_operations) == 9
+    assert all(operation.transport_method is None for operation in workspace_operations)
     assert not hasattr(ContentResource, "snippets")
     assert hasattr(ContentResource, "grep")
     assert not hasattr(ContentResource, "grep_report")
@@ -164,7 +173,8 @@ def test_public_resources_and_operations_have_bounded_runtime_docs() -> None:
 def test_sdk_entrypoint_doc_lists_runtime_namespaces_without_initializing() -> None:
     assert opensac_sdk.sdk.__doc__ is not None
     assert "search" in opensac_sdk.sdk.__doc__
-    assert "state" in opensac_sdk.sdk.__doc__
+    assert "workspace" in opensac_sdk.sdk.__doc__
+    assert "state" not in opensac_sdk.sdk.__doc__
     assert "output" not in opensac_sdk.sdk.__doc__
 
 
@@ -188,8 +198,10 @@ def test_lazy_sdk_exposes_resource_and_method_docs_without_a_broker_call() -> No
             assert '"failure"' in many_doc
             assert "structured failure details" in many_doc
             assert opensac_sdk.sdk.capabilities.__doc__ is not None
+            assert opensac_sdk.sdk.workspace.__doc__ is not None
             assert not hasattr(opensac_sdk.sdk, "output")
             assert not hasattr(opensac_sdk.sdk, "session")
+            assert not hasattr(opensac_sdk.sdk, "state")
     finally:
         opensac_sdk.sdk.close()
 
@@ -1955,47 +1967,47 @@ def test_extract_many_preserves_provider_failures_and_promotes_all_system_failur
     assert mixed_system.value.code == "broker_transport_error"
 
 
-def test_state_round_trip_and_path_confinement(tmp_path) -> None:
-    state = StateResource(str(tmp_path))
-    state.write_jsonl("nested/data.jsonl", [{"a": 1}, {"a": 2}])
-    assert state.read_jsonl("nested/data.jsonl") == [{"a": 1}, {"a": 2}]
+def test_workspace_round_trip_and_path_confinement(tmp_path) -> None:
+    workspace = WorkspaceResource(str(tmp_path))
+    workspace.write_jsonl("nested/data.jsonl", [{"a": 1}, {"a": 2}])
+    assert workspace.read_jsonl("nested/data.jsonl") == [{"a": 1}, {"a": 2}]
     with pytest.raises(ValueError, match="inside"):
-        state.write_json("../escape.json", {})
+        workspace.write_json("../escape.json", {})
 
 
-def test_state_rejects_non_json_without_replacing_existing_artifacts(tmp_path) -> None:
-    state = StateResource(str(tmp_path))
-    state.write_json("value.json", {"ok": "世界"})
-    state.write_jsonl("rows.jsonl", [{"ok": 1}])
+def test_workspace_rejects_non_json_without_replacing_existing_artifacts(tmp_path) -> None:
+    workspace = WorkspaceResource(str(tmp_path))
+    workspace.write_json("value.json", {"ok": "世界"})
+    workspace.write_jsonl("rows.jsonl", [{"ok": 1}])
 
     with pytest.raises(ValueError, match="strict JSON"):
-        state.write_json("value.json", {"bad": {1, 2}})
+        workspace.write_json("value.json", {"bad": {1, 2}})
     with pytest.raises(ValueError, match=r"rows\[1\]"):
-        state.write_jsonl("rows.jsonl", [{"ok": 2}, {"bad": float("nan")}])
+        workspace.write_jsonl("rows.jsonl", [{"ok": 2}, {"bad": float("nan")}])
     with pytest.raises(ValueError, match=r"rows\[0\]"):
-        state.append_jsonl("rows.jsonl", [{"bad": float("inf")}])
+        workspace.append_jsonl("rows.jsonl", [{"bad": float("inf")}])
 
-    assert state.read_json("value.json").ok == "世界"
-    assert state.read_jsonl("rows.jsonl") == [{"ok": 1}]
+    assert workspace.read_json("value.json").ok == "世界"
+    assert workspace.read_jsonl("rows.jsonl") == [{"ok": 1}]
 
 
-def test_state_accumulates_across_calls_without_rewriting(tmp_path) -> None:
+def test_workspace_accumulates_across_calls_without_rewriting(tmp_path) -> None:
     """Extending a record must not cost the whole file each time.
 
     The recommended shape saves a candidate pool in one turn and adds evidence
     to it in later ones. With only whole-file writes that is read-everything
     then write-everything, and a program that dies midway loses all of it.
     """
-    state = StateResource(str(tmp_path))
-    state.append_jsonl("evidence.jsonl", [{"n": 1}])
-    state.append_jsonl("evidence.jsonl", [{"n": 2}, {"n": 3}])
-    assert state.read_jsonl("evidence.jsonl") == [{"n": 1}, {"n": 2}, {"n": 3}]
+    workspace = WorkspaceResource(str(tmp_path))
+    workspace.append_jsonl("evidence.jsonl", [{"n": 1}])
+    workspace.append_jsonl("evidence.jsonl", [{"n": 2}, {"n": 3}])
+    assert workspace.read_jsonl("evidence.jsonl") == [{"n": 1}, {"n": 2}, {"n": 3}]
     # A whole-file write still replaces, so the two are distinguishable.
-    state.write_jsonl("evidence.jsonl", [{"n": 9}])
-    assert state.read_jsonl("evidence.jsonl") == [{"n": 9}]
+    workspace.write_jsonl("evidence.jsonl", [{"n": 9}])
+    assert workspace.read_jsonl("evidence.jsonl") == [{"n": 9}]
 
 
-def test_state_upsert_updates_a_pool_across_turns(tmp_path) -> None:
+def test_workspace_upsert_updates_a_pool_across_turns(tmp_path) -> None:
     """The same call on turn 1 and turn 20, which is the whole point.
 
     A pool kept with ``write_jsonl`` is a snapshot and a pool kept with
@@ -2004,23 +2016,29 @@ def test_state_upsert_updates_a_pool_across_turns(tmp_path) -> None:
     a write -- in a first turn that has nothing to read. Programs answered that
     by writing ``pool2.jsonl`` instead, which is why this exists.
     """
-    state = StateResource(str(tmp_path))
+    workspace = WorkspaceResource(str(tmp_path))
     # No file yet: an absent pool is an empty one, so nothing branches.
-    assert state.upsert_jsonl("pool.jsonl", [{"source": "a", "n": 1}, {"source": "b", "n": 1}]) == 2
+    assert (
+        workspace.upsert_jsonl("pool.jsonl", [{"source": "a", "n": 1}, {"source": "b", "n": 1}])
+        == 2
+    )
     # A document a second query returned replaces its row in place rather than
     # adding a second one, and does not move ahead of documents found later.
-    assert state.upsert_jsonl("pool.jsonl", [{"source": "c", "n": 1}, {"source": "a", "n": 2}]) == 3
-    assert state.read_jsonl("pool.jsonl") == [
+    assert (
+        workspace.upsert_jsonl("pool.jsonl", [{"source": "c", "n": 1}, {"source": "a", "n": 2}])
+        == 3
+    )
+    assert workspace.read_jsonl("pool.jsonl") == [
         {"source": "a", "n": 2},
         {"source": "b", "n": 1},
         {"source": "c", "n": 1},
     ]
     # Any field can be the identity; ``source`` is only the common one.
-    state.upsert_jsonl("docs.jsonl", [{"docid": "7", "seen": 1}], key="docid")
-    assert state.upsert_jsonl("docs.jsonl", [{"docid": "7", "seen": 2}], key="docid") == 1
+    workspace.upsert_jsonl("docs.jsonl", [{"docid": "7", "seen": 1}], key="docid")
+    assert workspace.upsert_jsonl("docs.jsonl", [{"docid": "7", "seen": 2}], key="docid") == 1
 
 
-def test_state_upsert_refuses_rows_it_cannot_deduplicate(tmp_path) -> None:
+def test_workspace_upsert_refuses_rows_it_cannot_deduplicate(tmp_path) -> None:
     """Silent duplication is the failure this call exists to prevent.
 
     Appending a keyless row would make the file grow exactly the way the
@@ -2028,26 +2046,26 @@ def test_state_upsert_refuses_rows_it_cannot_deduplicate(tmp_path) -> None:
     show it. The message names the field and the alternative because the
     program has one turn to fix it.
     """
-    state = StateResource(str(tmp_path))
+    workspace = WorkspaceResource(str(tmp_path))
     with pytest.raises(ValueError, match="append_jsonl"):
-        state.upsert_jsonl("pool.jsonl", [{"title": "no identity here"}])
-    assert state.exists("pool.jsonl") is False
+        workspace.upsert_jsonl("pool.jsonl", [{"title": "no identity here"}])
+    assert workspace.exists("pool.jsonl") is False
 
 
-def test_state_upsert_keeps_rows_it_did_not_write(tmp_path) -> None:
+def test_workspace_upsert_keeps_rows_it_did_not_write(tmp_path) -> None:
     """A file written by an earlier, differently-shaped program is not data to drop."""
-    state = StateResource(str(tmp_path))
-    state.write_jsonl("pool.jsonl", [{"note": "from an earlier turn"}, {"source": "a"}])
-    assert state.upsert_jsonl("pool.jsonl", [{"source": "a", "n": 2}]) == 2
-    assert state.read_jsonl("pool.jsonl") == [
+    workspace = WorkspaceResource(str(tmp_path))
+    workspace.write_jsonl("pool.jsonl", [{"note": "from an earlier turn"}, {"source": "a"}])
+    assert workspace.upsert_jsonl("pool.jsonl", [{"source": "a", "n": 2}]) == 2
+    assert workspace.read_jsonl("pool.jsonl") == [
         {"note": "from an earlier turn"},
         {"source": "a", "n": 2},
     ]
 
 
-def test_state_upsert_accepts_a_search_hit_directly(tmp_path) -> None:
+def test_workspace_upsert_accepts_a_search_hit_directly(tmp_path) -> None:
     """SDK results are ordinary mappings and need no conversion before persistence."""
-    state = StateResource(str(tmp_path))
+    workspace = WorkspaceResource(str(tmp_path))
     hit = record(
         {
             "source": "source_1",
@@ -2056,42 +2074,42 @@ def test_state_upsert_accepts_a_search_hit_directly(tmp_path) -> None:
             "rank": 1,
         }
     )
-    assert state.upsert_jsonl("pool.jsonl", [hit]) == 1
-    assert state.upsert_jsonl("pool.jsonl", [hit]) == 1
-    assert state.read_jsonl("pool.jsonl")[0].source == "source_1"
+    assert workspace.upsert_jsonl("pool.jsonl", [hit]) == 1
+    assert workspace.upsert_jsonl("pool.jsonl", [hit]) == 1
+    assert workspace.read_jsonl("pool.jsonl")[0].source == "source_1"
 
 
-def test_state_can_be_asked_what_is_there(tmp_path) -> None:
+def test_workspace_can_be_asked_what_is_there(tmp_path) -> None:
     """A later turn has to tell "saved nothing" from "never ran"."""
-    state = StateResource(str(tmp_path))
-    assert state.exists("pool.jsonl") is False
-    state.write_jsonl("pool.jsonl", [{"a": 1}])
-    state.write_json("notes/summary.json", {"b": 2})
-    assert state.exists("pool.jsonl") is True
+    workspace = WorkspaceResource(str(tmp_path))
+    assert workspace.exists("pool.jsonl") is False
+    workspace.write_jsonl("pool.jsonl", [{"a": 1}])
+    workspace.write_json("notes/summary.json", {"b": 2})
+    assert workspace.exists("pool.jsonl") is True
 
-    assert state.list() == ["notes/summary.json", "pool.jsonl"]
-    assert state.list("notes/") == ["notes/summary.json"]
+    assert workspace.list() == ["notes/summary.json", "pool.jsonl"]
+    assert workspace.list("notes/") == ["notes/summary.json"]
     # Runtime internals stay hidden: a program that read or rewrote them would
     # be editing the record of its own execution.
     (tmp_path / ".opensac-output.json").write_text("{}")
-    assert ".opensac-output.json" not in state.list()
+    assert ".opensac-output.json" not in workspace.list()
 
 
-def test_environment_state_follows_each_persistent_cell_context(
+def test_environment_workspace_follows_each_persistent_cell_context(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first_workspace = tmp_path / "first"
     second_workspace = tmp_path / "second"
-    state = StateResource.from_environment()
+    workspace = WorkspaceResource.from_environment()
 
     monkeypatch.setenv("OPENSAC_WORKSPACE", str(first_workspace))
-    state.write_json("state.json", {"cell": 1})
+    workspace.write_json("checkpoint.json", {"cell": 1})
 
     monkeypatch.setenv("OPENSAC_WORKSPACE", str(second_workspace))
-    state.write_json("state.json", {"cell": 2})
+    workspace.write_json("checkpoint.json", {"cell": 2})
 
-    assert json.loads((first_workspace / "state.json").read_text()) == {"cell": 1}
-    assert json.loads((second_workspace / "state.json").read_text()) == {"cell": 2}
+    assert json.loads((first_workspace / "checkpoint.json").read_text()) == {"cell": 1}
+    assert json.loads((second_workspace / "checkpoint.json").read_text()) == {"cell": 2}
 
 
 def test_environment_transport_refreshes_token_and_execution_id(
@@ -2176,15 +2194,15 @@ def test_a_result_written_to_the_workspace_comes_back_readable(tmp_path) -> None
     mapping in the next. Programs go on writing `row.source` because that is how
     every other line around it is written.
     """
-    state = StateResource(str(tmp_path))
+    workspace = WorkspaceResource(str(tmp_path))
     hit = SearchResource(FakeTransport())("query")[0]
 
     # Passed straight in: `default=str` would have written the repr instead,
     # and a later turn subscripting that string would get a character.
-    state.write_jsonl("pool.jsonl", [hit])
+    workspace.write_jsonl("pool.jsonl", [hit])
     assert json.loads((tmp_path / "pool.jsonl").read_text())["source"] == "source_1"
 
-    row = state.read_jsonl("pool.jsonl")[0]
+    row = workspace.read_jsonl("pool.jsonl")[0]
     assert row.source == row["source"] == "source_1"
     assert row.rank == 1
     # Still an ordinary dict: it survives json, unpacking and the dict methods.
@@ -2195,21 +2213,21 @@ def test_a_result_written_to_the_workspace_comes_back_readable(tmp_path) -> None
 
 
 def test_a_row_says_what_it_has_when_a_field_is_missing(tmp_path) -> None:
-    state = StateResource(str(tmp_path))
-    state.write_jsonl("pool.jsonl", [{"source": "source_1", "rank": 2}])
-    row = state.read_jsonl("pool.jsonl")[0]
+    workspace = WorkspaceResource(str(tmp_path))
+    workspace.write_jsonl("pool.jsonl", [{"source": "source_1", "rank": 2}])
+    row = workspace.read_jsonl("pool.jsonl")[0]
     with pytest.raises(AttributeError, match="rank"):
         _ = row.raank
 
 
 def test_nesting_reads_the_same_way_at_every_depth(tmp_path) -> None:
     """Eager, so that `row["metadata"].x` and `row.metadata.x` cannot differ."""
-    state = StateResource(str(tmp_path))
-    state.write_jsonl("pool.jsonl", [{"metadata": {"backend": "local"}, "runs": [{"n": 1}]}])
-    row = state.read_jsonl("pool.jsonl")[0]
+    workspace = WorkspaceResource(str(tmp_path))
+    workspace.write_jsonl("pool.jsonl", [{"metadata": {"backend": "local"}, "runs": [{"n": 1}]}])
+    row = workspace.read_jsonl("pool.jsonl")[0]
     assert row.metadata.backend == row["metadata"]["backend"] == "local"
     assert row["metadata"].backend == row.metadata["backend"] == "local"
     assert row.runs[0].n == 1
     # write_json / read_json are the same channel and must not diverge.
-    state.write_json("one.json", {"metadata": {"backend": "local"}})
-    assert state.read_json("one.json").metadata.backend == "local"
+    workspace.write_json("one.json", {"metadata": {"backend": "local"}})
+    assert workspace.read_json("one.json").metadata.backend == "local"

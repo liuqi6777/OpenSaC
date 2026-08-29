@@ -198,7 +198,7 @@ with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
 PY
 ```
 
-For multi-query fusion, document filtering, persistent JSONL state, and source-scoped evidence, see
+For multi-query fusion, document filtering, persistent JSONL artifacts, and source-scoped evidence, see
 [examples/research_pipeline.py](examples/research_pipeline.py).
 
 </details>
@@ -214,7 +214,7 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
 | `sdk.content` | `fetch`, `fetch_many`, `read`, `grep`, `passages` | Fetch, locate, and inspect evidence with explicit cursors |
 | `sdk.llm` | `extract`, `extract_many`, `complete` | Optional model calls and schema-checked extraction |
-| `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
+| `sdk.workspace` | JSON/JSONL artifact helpers | Persist structured artifacts across executions in one session |
 | Top level | `capabilities` | Inspect active contracts, deployment limits, and mechanisms |
 
 `search.many`, `content.fetch_many`, `llm.extract_many`, and `content.grep` return input-aligned
@@ -225,7 +225,7 @@ Each search hit has one
 `source`: a canonical web URL or local document ID. Empty search results are successful results.
 Content accepts URL/local-ID strings rather than result records. Web deployments can fetch bounded
 public HTTP(S) URLs directly; local IDs remain search-admitted. Generated programs return bounded,
-source-scoped results with `print(...)`; larger structured values belong in `sdk.state`. Core
+source-scoped results with `print(...)`; larger structured values belong in `sdk.workspace`. Core
 signatures and intentional advanced operations are split across the Search-as-Code Skill references.
 See the complete SDK API reference in
 [English](docs/sdk-reference.md) or [Chinese](docs/sdk-reference.zh-CN.md) for every public method and

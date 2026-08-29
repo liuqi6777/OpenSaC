@@ -40,7 +40,7 @@ sdk.content.grep(
 ) -> list[record]
 ```
 
-LLM, capabilities, and state:
+LLM, capabilities, and workspace:
 
 ```python
 sdk.llm.extract(
@@ -51,14 +51,14 @@ sdk.llm.extract_many(
 ) -> list[record]
 
 sdk.capabilities() -> record
-sdk.state.write_json(path, value)
-sdk.state.write_jsonl(path, rows)
-sdk.state.append_jsonl(path, rows)
-sdk.state.upsert_jsonl(path, rows, key="source") -> int
-sdk.state.read_json(path)
-sdk.state.read_jsonl(path)
-sdk.state.exists(path) -> bool
-sdk.state.list(prefix="") -> list[str]
+sdk.workspace.write_json(path, value)
+sdk.workspace.write_jsonl(path, rows)
+sdk.workspace.append_jsonl(path, rows)
+sdk.workspace.upsert_jsonl(path, rows, key="source") -> int
+sdk.workspace.read_json(path)
+sdk.workspace.read_jsonl(path)
+sdk.workspace.exists(path) -> bool
+sdk.workspace.list(prefix="") -> list[str]
 ```
 
 `search.many`, `content.fetch_many`, and `llm.extract_many` are public aligned fan-out helpers. Loop
@@ -142,7 +142,7 @@ Join capability results by `source`.
   entire result list or fused pool. Expand incrementally after inspecting the current subset.
 - For each promoted source, call `fetch` once before any other content method. Reuse the returned text
   for exact matching, regexes, slicing, and multiple checks in local Python. When later programs will
-  reuse the full text, optionally persist one copy with `sdk.state`; full-document artifacts consume
+  reuse the full text, optionally persist one copy with `sdk.workspace`; full-document artifacts consume
   workspace budget.
 - `grep` and `read` are usually replaceable by local Python after fetch. Do not call them just to
   rediscover or reformat a match already available in fetched text; call them only when a provider
@@ -156,21 +156,22 @@ Join capability results by `source`.
 - `sdk.capabilities()` reports contract versions, active mechanisms, backend support, and
   configured upper limits. Do not hard-code deployment maxima.
 
-## State, stdout, and lifecycle
+## Workspace, stdout, and lifecycle
 
-- `sdk.state` is the structured session-workspace interface.
-- State paths are workspace-relative and cannot escape it. `sdk.state.list(prefix)` hides internal
-  runtime files. The namespace shape is application state, not an SDK requirement.
+- `sdk.workspace` is the structured session-workspace interface.
+- Artifact paths are workspace-relative and cannot escape it. `sdk.workspace.list(prefix)` hides
+  internal runtime files. Applications choose their own artifact layout.
 - `upsert_jsonl` replaces whole rows by the chosen key; it does not merge object fields.
 - Use bounded `print(...)` calls for the agent-visible handoff, carrying each exact source string
   beside the evidence it supports.
-- Persist large structured values with `sdk.state` instead of printing full documents or ledgers.
+- Persist large structured values with `sdk.workspace` instead of printing full documents or
+  ledgers.
 - Process-per-call programs lose Python variables between calls. Persistent-interpreter variants
   retain completed assignments only while the observation reports `interpreter_state=ready`.
   Files and live variables remain independent; `mechanisms.persistence` controls files only.
 - On `state_lost` or `interpreter_state=lost`, the failed program is not replayed. Restore trusted
-  state, re-admit local IDs, and reuse public URLs only when their deployment permits it. A direct
-  persistent session may surface this terminal state as `interpreter_lost`.
+  workspace data, re-admit local IDs, and reuse public URLs only when their deployment permits it. A
+  direct persistent session may surface this terminal state as `interpreter_lost`.
 - Adapter failures occur outside the sandbox and are not `BrokerError`; their execution outcome may
   be unknown. Repeat external work only when durable progress proves it is missing.
 

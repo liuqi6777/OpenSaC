@@ -51,7 +51,7 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
         "or certify citation labels",
         "Even an Explore then Verify flow can remain stateless",
         "Passing five selected sources to the next stage needs no workspace",
-        "Upgrade to `sdk.state` only when",
+        "Upgrade to `sdk.workspace` only when",
         "candidate pool, evidence ledger, or attempted-source history",
         "do not replay blindly",
         "For `search.many`, branch on",
@@ -64,9 +64,10 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
     assert "For a known entity, start with" not in prompt
     assert "Print or submit" not in prompt
     assert "sdk.capabilities()" in prompt
+    assert "sdk.workspace" in prompt
+    assert "sdk.state" not in prompt
     assert "sdk.output" not in prompt
     assert "sdk.session" not in prompt
-    assert "sdk.workspace" not in prompt
 
     examples = [part.split("```", 1)[0] for part in prompt.split("```python")[1:]]
     assert len(examples) == 3

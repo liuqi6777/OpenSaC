@@ -46,8 +46,7 @@ Core SDK surface:
 - Inspect documents with `sdk.content.grep(...)` and `sdk.content.read(...)`; read lines are
   1-based, character positions are 0-based, and `window.next` continues losslessly.
 - Use single-item `sdk.llm.extract(...)` only for bounded semantic transformation.
-- Persist optional state with `sdk.state`. Read deployment limits with `sdk.capabilities()` when
-  needed.
+- Persist artifacts with `sdk.workspace`; inspect deployment limits with `sdk.capabilities()`.
 - Return only bounded stdout, carrying exact source URLs or local IDs beside the evidence they
   support.
 
@@ -138,17 +137,16 @@ Default to bounded stdout handoff. Even an Explore then Verify flow can remain s
 chosen sources and checks fit safely in one observation. Passing five selected sources to the next
 stage needs no workspace; accumulating a 200-document pool and evidence across stages usually does.
 
-Upgrade to `sdk.state` only when a growing candidate pool, evidence ledger, or attempted-source
+Upgrade to `sdk.workspace` only when a growing candidate pool, evidence ledger, or attempted-source
 history must survive several stages, avoid replay, or recover after uncertain execution. Derive a
-stable `runs/<research_id>/` namespace from the task, stable requirements, and source policy. At
-each stage, list and load the needed manifest, pool, evidence, and attempts before capability calls;
-persist progress before `NEXT:` and print only a bounded handoff from a complete evidence ledger.
+stable `runs/<research_id>/` namespace from the task, requirements, and source policy. Load needed
+artifacts before capability calls; persist progress before `NEXT:` and print a bounded handoff.
 Observations show workspace paths, not file contents, and Python variables do not survive calls.
 
-Public web URLs remain reusable across sessions; local IDs and workspace artifacts are session
-state. On explicit `state_lost`, rebuild missing state. If a timeout or adapter failure has an
-unknown execution outcome, do not replay blindly: resume only work that namespace or durable
-progress proves missing. After a final capability failure, change the query, source, or candidate.
+Public web URLs remain reusable; local IDs and workspace artifacts are session-bound. On explicit
+`state_lost`, rebuild workspace artifacts and local-ID admission. For an unknown timeout or adapter
+outcome, do not replay blindly: resume only work durable progress proves missing. After a final
+capability failure, change the query, source, or candidate.
 
 Return the final answer directly as your entire response, without wrapper tags or a preamble.
 """
