@@ -19,7 +19,7 @@ providers:
   result_cache_max_bytes: 128000000
 
 sandbox:
-  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.2
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.3
   mode: warm
   warm_idle_seconds: 300
   max_warm_containers: 8

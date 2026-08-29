@@ -372,6 +372,22 @@ sdk.workspace.list(prefix="") -> list[str]
 使用 Python `print(...)` 返回有界结果，并把精确 source 字符串与对应证据一起输出。更大的
 结构化数据应保存到 `sdk.workspace`，不要打印完整文档或 ledger。
 
+## 0.8.3 Breaking 迁移
+
+不提供 alias 或弃用 shim。Host usage 计量、execution 记录和 dashboard 指标继续保留在生成程序
+SDK 之外。
+
+| 0.8.2 生成程序 API | 0.8.3 替代 |
+| --- | --- |
+| `sdk.session.usage()` | Host REST、存储或 dashboard 观测 |
+| `sdk.session.capabilities()` | `sdk.capabilities()` |
+| `sdk.output.submit(...)` | 有界 `print(...)` 与 `sdk.workspace` artifact |
+| `sdk.state.*` | `sdk.workspace.*` |
+
+Capability contract 15 下 broker 会拒绝 `session.usage`。Workspace 与 capability namespace
+调整不会新增 broker operation；sandbox contract 14 保持不变。完整边界见
+[v0.8.3 版本说明](opensac-0.8.3.md)。
+
 ## 0.8.2 Breaking 迁移
 
 不提供 broker batch 兼容 handler 或 SDK 模式开关。

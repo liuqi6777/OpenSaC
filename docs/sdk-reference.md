@@ -383,6 +383,22 @@ Return bounded results with Python's `print(...)`, carrying exact source strings
 they support. Persist larger structured values with `sdk.workspace` instead of printing full documents
 or ledgers.
 
+## 0.8.3 breaking migration
+
+No aliases or deprecation shims are provided. Host usage accounting, execution records, and dashboard
+metrics remain available outside the generated-program SDK.
+
+| 0.8.2 generated-program API | 0.8.3 replacement |
+| --- | --- |
+| `sdk.session.usage()` | Host REST, storage, or dashboard observability |
+| `sdk.session.capabilities()` | `sdk.capabilities()` |
+| `sdk.output.submit(...)` | Bounded `print(...)` and `sdk.workspace` artifacts |
+| `sdk.state.*` | `sdk.workspace.*` |
+
+The broker rejects `session.usage` under capability contract 15. The workspace and capability
+namespace changes add no broker operations. Sandbox contract 14 is unchanged. See the
+[v0.8.3 release notes](opensac-0.8.3.md) for the full boundary.
+
 ## 0.8.2 breaking migration
 
 No broker batch compatibility handler or SDK mode switch is provided.

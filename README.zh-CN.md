@@ -104,7 +104,7 @@ mkdir -p "$OPENSAC_RUNTIME_DIR"
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.3/configs/docker.yaml
 ```
 
 启动已发布镜像：
@@ -277,7 +277,7 @@ Docker 模板都在 `configs/` 中；选择说明见[配置模板](docs/deployme
 
 | 目标 | 文档 |
 | --- | --- |
-| 升级到 v0.8.2 | [v0.8.2 版本说明](docs/opensac-0.8.2.md) |
+| 升级到 v0.8.3 | [v0.8.3 版本说明](docs/opensac-0.8.3.md) |
 | 选择 YAML 配置模板 | [配置模板](docs/deployment.md#configuration-profiles) |
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |

@@ -115,7 +115,7 @@ Download `configs/docker.yaml`, then set its two `storage` paths to `$OPENSAC_RU
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.3/configs/docker.yaml
 ```
 
 Start the published image:
@@ -294,7 +294,7 @@ service also exposes the live runtime dashboard at `http://127.0.0.1:8000/dashbo
 
 | Goal | Document |
 | --- | --- |
-| Upgrade to v0.8.2 | [v0.8.2 release notes](docs/opensac-0.8.2.md) |
+| Upgrade to v0.8.3 | [v0.8.3 release notes](docs/opensac-0.8.3.md) |
 | Choose a YAML configuration profile | [Configuration profiles](docs/deployment.md#configuration-profiles) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Add broker backends or capability modules | [Broker plugins](docs/broker-plugins.md) |

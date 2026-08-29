@@ -261,9 +261,7 @@ else:
         if not quote or quote not in item["text"]:
             failures.append({"source": item["source"], "code": "quote_not_in_input"})
             continue
-        verified.append(
-            {"source": item["source"], "claim": outcome.data["claim"], "quote": quote}
-        )
+        verified.append({"source": item["source"], "claim": outcome.data["claim"], "quote": quote})
 
     for row in verified:
         print(f"EXTRACTED source={row['source']!r} claim={row['claim']!r} quote={row['quote']!r}")
@@ -294,9 +292,7 @@ def cache_row(requested_source, status, *, document=None, error=None):
     }
 
 
-cached_rows = (
-    sdk.workspace.read_jsonl(cache_path) if sdk.workspace.exists(cache_path) else []
-)
+cached_rows = sdk.workspace.read_jsonl(cache_path) if sdk.workspace.exists(cache_path) else []
 cached = {row["requested_source"]: dict(row) for row in cached_rows}
 pending = [source for source in selected_sources if source not in cached]
 
@@ -331,9 +327,7 @@ if pending:
                     if outcome.error is not None
                     else {"code": "invalid_outcome"}
                 )
-                terminal_rows.append(
-                    cache_row(outcome.source, "failure", error=failure)
-                )
+                terminal_rows.append(cache_row(outcome.source, "failure", error=failure))
 
     # Make every external-call outcome durable before local parsing or other transformations.
     sdk.workspace.upsert_jsonl(cache_path, terminal_rows, key="requested_source")
