@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -116,9 +117,16 @@ class OpenSACMCP:
             registry_name="mcp_sessions.sqlite3",
         )
         self._codex = CodexContextResolver()
+        self._invocation_namespace = uuid.uuid4().hex
         self._closed = False
 
-    async def run_code(self, code: str, meta: Any = None) -> str:
+    async def run_code(
+        self,
+        code: str,
+        meta: Any = None,
+        *,
+        invocation_id: str | None = None,
+    ) -> str:
         if not isinstance(code, str) or not code.strip():
             return "[sac_run] Expected a non-empty string in the 'code' field."
         if self._closed:
@@ -126,7 +134,13 @@ class OpenSACMCP:
         context = self._codex.resolve(meta)
         if context is None:
             return _CONTEXT_UNAVAILABLE_OBSERVATION
-        return await self._sessions.run_code(code, context)
+        invocation = invocation_id if invocation_id is not None else uuid.uuid4().hex
+        namespaced_invocation = f"{self._invocation_namespace}:{invocation}"
+        return await self._sessions.run_code(
+            code,
+            context,
+            invocation_id=namespaced_invocation,
+        )
 
     async def aclose(self) -> None:
         if self._closed:
@@ -161,7 +175,11 @@ def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
 
     async def sac_run(code: str, ctx: Any) -> str:
         """Run Python code in this conversation's persistent OpenSAC workspace."""
-        return await adapter.run_code(code, ctx.request_context.meta)
+        return await adapter.run_code(
+            code,
+            ctx.request_context.meta,
+            invocation_id=ctx.request_id,
+        )
 
     sac_run.__annotations__["ctx"] = Context
     server.tool(name="sac_run")(sac_run)

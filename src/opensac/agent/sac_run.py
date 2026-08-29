@@ -43,11 +43,15 @@ class AsyncSessionClient:
         session_id: str,
         code: str,
         *,
+        exec_id: str | None = None,
         include_trace: bool = False,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"code": code, "include_trace": include_trace}
+        if exec_id is not None:
+            payload["exec_id"] = exec_id
         response = await self.http.post(
             f"/v1/sessions/{session_id}/exec",
-            json={"code": code, "include_trace": include_trace},
+            json=payload,
         )
         response.raise_for_status()
         return response.json()
@@ -60,18 +64,24 @@ class AsyncSessionClient:
         await self.http.aclose()
 
 
-def state_loss_code(response: httpx.Response) -> str | None:
-    """Return the stable OpenSAC loss code for a 410 response, if present."""
-    if response.status_code != 410:
-        return None
+def contract_error_code(response: httpx.Response) -> str | None:
+    """Return a stable OpenSAC error-contract code, if present."""
     try:
         payload = response.json()
         detail = payload.get("detail") if isinstance(payload, Mapping) else None
         detail = detail or {}
-        code = detail.get("code") if isinstance(detail, dict) else None
+        code = detail.get("code") if isinstance(detail, Mapping) else None
     except (TypeError, ValueError):
         return None
-    return str(code) if code in _STATE_LOSS_CODES else None
+    return str(code) if isinstance(code, str) and code else None
+
+
+def state_loss_code(response: httpx.Response) -> str | None:
+    """Return the stable OpenSAC loss code for a 410 response, if present."""
+    if response.status_code != 410:
+        return None
+    code = contract_error_code(response)
+    return code if code in _STATE_LOSS_CODES else None
 
 
 def render_observation(

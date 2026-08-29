@@ -19,6 +19,7 @@ import httpx
 from opensac.agent.sac_run import (
     DEFAULT_TIMEOUT_SECONDS,
     AsyncSessionClient,
+    contract_error_code,
     render_observation,
     state_loss_code,
 )
@@ -32,6 +33,24 @@ STATE_LOST_OBSERVATION = (
     "The submitted program was not replayed. The next sac_run call will start in a "
     "clean session."
 )
+EXEC_INDETERMINATE_OBSERVATION = (
+    "[sac_run] exec_indeterminate: OpenSAC found an unfinished record for this "
+    "execution. Its outcome is unknown, so the program was not replayed."
+)
+EXEC_ID_CONFLICT_OBSERVATION = (
+    "[sac_run] exec_id_conflict: The MCP request identifier was already used for a "
+    "different program. The submitted program was not run."
+)
+EXEC_OUTCOME_UNKNOWN_OBSERVATION = (
+    "[sac_run] execution_outcome_unknown: OpenSAC did not return a result after a "
+    "same-ID retry. The program may have completed, so it must not be rerun automatically."
+)
+IDEMPOTENT_EXEC_UNAVAILABLE_OBSERVATION = (
+    "[sac_run] idempotent_exec_unavailable: This OpenSAC server does not advertise "
+    "safe execution retries. The program was not run."
+)
+_IDEMPOTENT_EXEC_FEATURE = "idempotent_exec"
+_EXEC_TRANSPORT_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -176,6 +195,7 @@ class _SessionEntry:
     request_id: str
     client: AsyncSessionClient
     session_id: str | None = None
+    features: frozenset[str] = frozenset()
 
 
 class AgentSessionManager:
@@ -223,7 +243,34 @@ class AgentSessionManager:
             self._entries.pop(hashed_context)
         await entry.client.close()
 
-    async def run_code(self, code: str, context: AgentContext) -> str:
+    @staticmethod
+    def _exec_id(entry: _SessionEntry, invocation_id: str) -> str:
+        value = f"{entry.request_id}\0{invocation_id}".encode()
+        return f"mcp:{hashlib.sha256(value).hexdigest()}"
+
+    async def _exec_with_retry(
+        self,
+        entry: _SessionEntry,
+        code: str,
+        exec_id: str,
+    ) -> dict[str, object]:
+        if entry.session_id is None:  # pragma: no cover - guarded by run_code
+            raise RuntimeError("OpenSAC session was not created")
+        for attempt in range(_EXEC_TRANSPORT_ATTEMPTS):
+            try:
+                return await entry.client.exec_code(entry.session_id, code, exec_id=exec_id)
+            except httpx.TransportError:
+                if attempt + 1 == _EXEC_TRANSPORT_ATTEMPTS:
+                    raise
+        raise RuntimeError("execution retry loop exhausted")  # pragma: no cover
+
+    async def run_code(
+        self,
+        code: str,
+        context: AgentContext,
+        *,
+        invocation_id: str | None = None,
+    ) -> str:
         if not isinstance(code, str) or not code.strip():
             return "[sac_run] Expected a non-empty Python program."
         if self._closed:
@@ -240,6 +287,7 @@ class AgentSessionManager:
                 entry = self._new_entry(context.host, hashed_context, generation)
                 self._entries[hashed_context] = entry
 
+            exec_started = False
             try:
                 if entry.session_id is None:
                     session = await entry.client.create_session(
@@ -250,7 +298,20 @@ class AgentSessionManager:
                         }
                     )
                     entry.session_id = str(session["id"])
-                payload = await entry.client.exec_code(entry.session_id, code)
+                    entry.features = frozenset(str(item) for item in session.get("features", []))
+
+                if invocation_id is None:
+                    exec_started = True
+                    payload = await entry.client.exec_code(entry.session_id, code)
+                else:
+                    if _IDEMPOTENT_EXEC_FEATURE not in entry.features:
+                        return IDEMPOTENT_EXEC_UNAVAILABLE_OBSERVATION
+                    exec_started = True
+                    payload = await self._exec_with_retry(
+                        entry,
+                        code,
+                        self._exec_id(entry, invocation_id),
+                    )
                 observation = render_observation(payload)
                 if payload.get("interpreter_state") == "lost":
                     self._registry.advance(hashed_context, generation)
@@ -259,13 +320,24 @@ class AgentSessionManager:
                     await self._discard_entry(hashed_context, entry)
                 return observation
             except httpx.TimeoutException:
+                if invocation_id is not None and exec_started:
+                    return EXEC_OUTCOME_UNKNOWN_OBSERVATION
                 return f"[sac_run] Timed out after {DEFAULT_TIMEOUT_SECONDS:.0f}s."
             except httpx.HTTPStatusError as exc:
                 if state_loss_code(exc.response) is not None:
                     self._registry.advance(hashed_context, generation)
                     await self._discard_entry(hashed_context, entry)
                     return STATE_LOST_OBSERVATION
+                error_code = contract_error_code(exc.response)
+                if error_code == "exec_indeterminate":
+                    return EXEC_INDETERMINATE_OBSERVATION
+                if error_code == "exec_id_conflict":
+                    return EXEC_ID_CONFLICT_OBSERVATION
                 return f"[sac_run] OpenSAC request failed: HTTP {exc.response.status_code}."
+            except httpx.TransportError as exc:
+                if invocation_id is not None and exec_started:
+                    return EXEC_OUTCOME_UNKNOWN_OBSERVATION
+                return f"[sac_run] OpenSAC request failed: {type(exc).__name__}."
             except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
                 return f"[sac_run] OpenSAC request failed: {type(exc).__name__}."
 
