@@ -46,8 +46,8 @@ Core SDK surface:
 - Inspect documents with `sdk.content.grep(...)` and `sdk.content.read(...)`; read lines are
   1-based, character positions are 0-based, and `window.next` continues losslessly.
 - Use single-item `sdk.llm.extract(...)` only for bounded semantic transformation.
-- Persist optional research state with `sdk.state`—there is no `sdk.workspace` API. Inspect
-  recovery usage with `sdk.session.usage()`.
+- Persist optional state with `sdk.state`—there is no `sdk.workspace` API. Read deployment limits
+  with `sdk.session.capabilities()` when needed.
 - Finish with `sdk.output.submit(value, citations=[source_url])`.
 
 ## Work in deliberate stages
@@ -148,8 +148,8 @@ workspace paths, not file contents, and Python variables do not survive calls.
 
 Public web URLs remain reusable across sessions; local IDs and workspace artifacts are session
 state. On explicit `state_lost`, rebuild missing state. If a timeout or adapter failure has an
-unknown execution outcome, do not replay blindly: inspect the namespace and usage once, then resume
-only missing work. After a final capability failure, change the query, source, or candidate.
+unknown execution outcome, do not replay blindly: resume only work that namespace or durable
+progress proves missing. After a final capability failure, change the query, source, or candidate.
 
 Return the final answer directly as your entire response, without wrapper tags or a preamble.
 """

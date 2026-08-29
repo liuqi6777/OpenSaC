@@ -1096,22 +1096,10 @@ class LLMResource:
 
 
 class SessionResource:
-    """Inspect strategy usage and remaining hard allowances for this session."""
+    """Inspect session-visible deployment capabilities and contract versions."""
 
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
-
-    def usage(self) -> Record:
-        """Return current capability spend, remaining budgets, and terminal state.
-
-        Returns:
-            Core logical counters, reserved output tokens, sandbox/workspace use,
-            ``budget_remaining``, and ``terminal_reason``.
-
-        Raises:
-            BrokerError: Session usage cannot be read.
-        """
-        return self._transport.call("session.usage", {})
 
     def capabilities(self) -> Record:
         """Return session-visible capabilities, limits, and contract versions.

@@ -110,6 +110,8 @@ async def test_codex_cli_calls_resume_one_session_without_exposing_context(
 
     assert "exit_code=0" in first
     assert "persisted=True" in second
+    assert "search_calls" not in first
+    assert "docs_fetched" not in first
     assert len(server.create_payloads) == 2
     assert server.create_payloads[0]["request_id"] == server.create_payloads[1]["request_id"]
     assert server.create_payloads[0]["request_id"].startswith("agent:codex-cli:")

@@ -53,7 +53,8 @@ def test_repl_skills_are_explicit_and_use_separate_adapter_surfaces() -> None:
         flat_skill = " ".join(skill.split())
         assert "execution_mode=persistent_interpreter" in flat_skill
         assert "interpreter_state=ready" in flat_skill
-        assert "sdk.session.usage()" in flat_skill
+        assert "sdk.session.capabilities()" in flat_skill
+        assert "sdk.session.usage()" not in flat_skill
         assert "sdk.output.submit(...)" in flat_skill
         assert "not a prescribed workflow" in flat_skill
         assert "No fixed query count, capability sequence, cell split" in flat_skill
@@ -117,6 +118,7 @@ def test_repl_references_are_self_contained_and_synchronized() -> None:
     assert "sdk.state.upsert_jsonl" in combined
     assert "sdk.output.submit" in combined
     assert "interpreter_lost" in combined
+    assert "sdk.session.usage" not in combined
 
     flat_combined = " ".join(combined.split())
     assert "not a required pipeline" in flat_combined

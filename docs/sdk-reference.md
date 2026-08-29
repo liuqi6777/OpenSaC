@@ -1,8 +1,7 @@
 # OpenSAC SDK reference
 
-This reference covers the bundled `opensac_sdk` 0.8.2 interface. Version 0.8.2 is an intentional
-breaking pre-1.0 patch: capability contract 14 and sandbox contract 14 prevent older SDK,
-broker, and sandbox combinations from running together.
+This reference covers the current bundled `opensac_sdk` interface on `main`. Capability contract 15
+requires a matching SDK and broker; sandbox contract 14 remains unchanged.
 
 ## Conventions
 
@@ -39,7 +38,7 @@ enforced by the broker and reported by `sdk.session.capabilities()`.
 | Search | `search`, `search.many`, `search.fuse_rrf` |
 | Content | `content.fetch`, `content.fetch_many`, `content.read`, `content.grep`, `content.passages` |
 | LLM | `llm.complete`, `llm.extract`, `llm.extract_many` |
-| Session | `session.usage`, `session.capabilities` |
+| Session | `session.capabilities` |
 | State | JSON/JSONL operations including `state.upsert_jsonl` |
 | Output | `output.submit` |
 
@@ -356,35 +355,6 @@ deadline failures remain per-item outcomes. If every item fails with a transport
 contract, or permission error, the helper raises one representative `BrokerError`.
 
 ## Session
-
-### `sdk.session.usage()`
-
-Returns exactly:
-
-```python
-{
-    "exec_calls": int,
-    "search_calls": int,
-    "content_fetches": int,
-    "llm_calls": int,
-    "pipeline_output_tokens_reserved": int,
-    "sandbox_seconds": float,
-    "workspace_bytes": int,
-    "budget_remaining": {
-        "max_exec_calls": int | None,
-        "max_search_queries": int | None,
-        "max_content_fetches": int | None,
-        "max_pipeline_llm_calls": int | None,
-        "max_pipeline_output_tokens": int | None,
-        "max_sandbox_seconds": float | None,
-        "max_workspace_bytes": int | None,
-    },
-    "terminal_reason": str | None,
-}
-```
-
-`None` means unlimited. Provider attempts, cache behavior, queueing, retry detail, and actual model
-tokens remain host-side metrics rather than public strategy state.
 
 ### `sdk.session.capabilities()`
 

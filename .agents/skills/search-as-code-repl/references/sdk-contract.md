@@ -50,7 +50,6 @@ sdk.llm.extract_many(
     items, *, instruction, schema, concurrency=4, max_tokens=None, repair_attempts=0
 ) -> list[record]
 
-sdk.session.usage() -> record
 sdk.session.capabilities() -> record
 sdk.state.write_json(path, value)
 sdk.state.write_jsonl(path, rows)
@@ -153,9 +152,6 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   but every requested source remains another logical content-fetch charge. Never pass an unfetched
   source to them, and never print or submit a complete fetched document.
 - Treat snippets as triage. Inspect fetched, grep, or read text for material claims.
-- `sdk.session.usage()` exposes only `exec_calls`, `search_calls`, `content_fetches`, `llm_calls`,
-  `pipeline_output_tokens_reserved`, `sandbox_seconds`, `workspace_bytes`, `budget_remaining`, and
-  `terminal_reason`. `None` in `budget_remaining` means that budget is unlimited.
 - Resource budgets are enforced by the broker. Every initial or repair model attempt reserves one
   LLM call before dispatch.
 - `sdk.session.capabilities()` reports contract versions, active mechanisms, backend support, and
@@ -178,7 +174,7 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   state, re-admit local IDs, and reuse public URLs only when their deployment permits it. A direct
   persistent session may surface this terminal state as `interpreter_lost`.
 - Adapter failures occur outside the sandbox and are not `BrokerError`; their execution outcome may
-  be unknown. Inspect durable progress and usage before repeating external work.
+  be unknown. Repeat external work only when durable progress proves it is missing.
 
 ## Runtime documentation and sandbox constraints
 

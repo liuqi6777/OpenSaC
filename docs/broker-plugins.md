@@ -256,9 +256,6 @@ For a capability-contract change, update the host `CAPABILITY_METHODS` and
 `CAPABILITY_CONTRACT`, update the matching SDK transport and public method implementation, and add
 contract tests before releasing both sides together. The SDK requires an exact contract match.
 
-The current broker refactor changes implementation and composition only, so
-`CAPABILITY_CONTRACT` remains `14`.
-
 ## Embedded composition
 
 Applications embedding OpenSAC may supply plugins directly and optionally disable installed entry

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from opensac.tracing import CapabilityEvent as _CapabilityEvent
 
-CAPABILITY_CONTRACT = 14
+CAPABILITY_CONTRACT = 15
 
 ExecutionMode = Literal["program", "persistent_interpreter"]
 InterpreterState = Literal["not_applicable", "not_started", "ready", "lost"]
@@ -49,7 +49,6 @@ CAPABILITY_METHODS: tuple[str, ...] = (
     "content.passages",
     "content.read",
     "content.grep",
-    "session.usage",
     "session.capabilities",
     "llm.complete",
     "llm.extract",

@@ -64,6 +64,7 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
     assert "Core primitives:" not in prompt
     assert "For a known entity, start with" not in prompt
     assert "Print or submit" not in prompt
+    assert "sdk.session.usage" not in prompt
 
     examples = [part.split("```", 1)[0] for part in prompt.split("```python")[1:]]
     assert len(examples) == 3
@@ -213,6 +214,9 @@ def test_sac_observation_prioritizes_external_failure_warnings() -> None:
     assert "content.passages succeeded for 1 item(s); 1 failed" in rendered
     assert "provider_not_found" in rendered
     assert "successful passage" in rendered
+    assert "search_calls" not in rendered
+    assert "docs_fetched" not in rendered
+    assert "usage" not in rendered
 
 
 async def test_react_reuses_one_sac_session_and_closes_it() -> None:

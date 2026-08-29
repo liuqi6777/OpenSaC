@@ -1,7 +1,7 @@
 # OpenSAC SDK 参考
 
-本文档对应捆绑的 `opensac_sdk` 0.8.2。0.8.2 是有意破坏兼容性的 pre-1.0 patch：
-capability contract 为 14，sandbox contract 为 14，新旧 SDK、broker 与 sandbox 不能混用。
+本文档对应 `main` 分支当前捆绑的 `opensac_sdk`。capability contract 为 15，SDK 与 broker
+必须匹配；sandbox contract 仍为 14。
 
 ## 约定
 
@@ -36,7 +36,7 @@ SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 
 | Search | `search`、`search.many`、`search.fuse_rrf` |
 | Content | `content.fetch`、`content.fetch_many`、`content.read`、`content.grep`、`content.passages` |
 | LLM | `llm.complete`、`llm.extract`、`llm.extract_many` |
-| Session | `session.usage`、`session.capabilities` |
+| Session | `session.capabilities` |
 | State | JSON/JSONL 操作，包括 `state.upsert_jsonl` |
 | Output | `output.submit` |
 
@@ -346,34 +346,6 @@ outcome；若所有项目都因 transport、protocol、contract 或 permission �
 提升一个代表性的顶层 `BrokerError`。
 
 ## Session
-
-### `sdk.session.usage()`
-
-只返回：
-
-```python
-{
-    "exec_calls": int,
-    "search_calls": int,
-    "content_fetches": int,
-    "llm_calls": int,
-    "pipeline_output_tokens_reserved": int,
-    "sandbox_seconds": float,
-    "workspace_bytes": int,
-    "budget_remaining": {
-        "max_exec_calls": int | None,
-        "max_search_queries": int | None,
-        "max_content_fetches": int | None,
-        "max_pipeline_llm_calls": int | None,
-        "max_pipeline_output_tokens": int | None,
-        "max_sandbox_seconds": float | None,
-        "max_workspace_bytes": int | None,
-    },
-    "terminal_reason": str | None,
-}
-```
-
-`None` 表示无限制。provider 尝试、缓存、排队、retry 细节和实际模型 token 只保留为宿主侧指标。
 
 ### `sdk.session.capabilities()`
 

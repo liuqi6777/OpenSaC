@@ -39,7 +39,7 @@ abstraction. It is not a reconstruction of Perplexity's internal search engine.
 - **Programmable retrieval** — generated Python can batch, filter, join, rank, and select evidence
   with ordinary control flow.
 - **A compact record SDK** — `opensac_sdk` exposes search, content, state, optional structured LLM,
-  usage, and output primitives.
+  deployment-capability inspection, and output primitives.
 - **Hardened execution** — sandbox programs have no network, provider credentials, Docker socket,
   or unrestricted host filesystem access.
 - **Context decoupling** — large intermediate results remain in the workspace; only explicitly
@@ -214,7 +214,7 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.content` | `fetch`, `fetch_many`, `read`, `grep`, `passages` | Fetch, locate, and inspect evidence with explicit cursors |
 | `sdk.llm` | `extract`, `extract_many`, `complete` | Optional model calls and schema-checked extraction |
 | `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
-| `sdk.session` | `usage`, `capabilities` | Inspect usage, budgets, active contracts, limits, and mechanisms |
+| `sdk.session` | `capabilities` | Inspect active contracts, deployment limits, and mechanisms |
 | `sdk.output` | `submit` | Return structured output with optional URL/source labels |
 
 `search.many`, `content.fetch_many`, `llm.extract_many`, and `content.grep` return input-aligned

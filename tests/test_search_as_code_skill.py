@@ -412,13 +412,6 @@ def _run_pattern(
         content=content,
         output=output,
         state=StateResource(str(tmp_path)),
-        session=SimpleNamespace(
-            usage=lambda: {
-                "search_calls": 3,
-                "content_fetches": 4,
-                "terminal_reason": None,
-            }
-        ),
     )
     module = ModuleType("opensac_sdk")
     module.BrokerError = BrokerError
@@ -444,7 +437,8 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "MCP tool `sac_run(code)`" in flat_skill
     assert "REST sessions" not in flat_skill
     assert "request metadata" not in flat_skill
-    assert "Read usage or deployment capabilities with `sdk.session`" in flat_skill
+    assert "Read deployment capabilities with `sdk.session.capabilities()`" in flat_skill
+    assert "sdk.session.usage" not in flat_skill
     assert "state_lost" in flat_skill
     assert "submitted program was not replayed" in flat_skill
     assert "execution outcome may be" in flat_skill
@@ -536,6 +530,7 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
     assert "never print or submit a complete fetched document" in contract
     assert "failed rows use `outcome.error`" in contract
     assert "never display or parse search `status` as failure detail" in contract
+    assert "sdk.session.usage" not in contract
 
 
 def test_contract_omits_sdk_capabilities_not_taught_by_the_skill() -> None:

@@ -47,7 +47,6 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
         "content.grep",
         model_core=True,
     ),
-    OperationSpec("session", "usage", SurfaceTier.CORE, "session.usage", model_core=True),
     OperationSpec(
         "session",
         "capabilities",

@@ -21,8 +21,8 @@ context management, subagents, or backend-specific retrieval logic.
 2. The model writes a Python research program using `opensac_sdk`.
 3. `sac_run` lazily creates one OpenSAC session and executes the program in its
    sandbox.
-4. Compact stdout, stderr, submitted output, usage, citations, and workspace
-   filenames are returned to the model as a tool observation.
+4. Compact stdout, stderr, submitted output, citations, and workspace filenames are returned to the
+   model as a tool observation.
 5. Later tool calls reuse the same session, so local sources and workspace files survive across
    turns. Public web URLs can also be reused across sessions. The session is deleted when the run ends.
 

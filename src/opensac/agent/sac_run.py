@@ -90,21 +90,18 @@ def render_observation(
     if payload.get("error"):
         return f"[sac_run] {payload['error']}"
 
-    usage = payload.get("usage") or {}
     execution_mode = str(payload.get("execution_mode") or "program")
     interpreter_state = str(payload.get("interpreter_state") or "not_applicable")
     namespace_count = payload.get("namespace_symbol_count")
     namespace_summary = (
-        f"namespace_symbols={namespace_count} " if namespace_count is not None else ""
+        f" namespace_symbols={namespace_count}" if namespace_count is not None else ""
     )
     sections = [
         f"[sac_run] exit_code={payload.get('exit_code')} "
         f"duration={float(payload.get('duration_seconds', 0.0)):.1f}s "
         f"execution_mode={execution_mode} "
-        f"interpreter_state={interpreter_state} "
+        f"interpreter_state={interpreter_state}"
         f"{namespace_summary}"
-        f"search_calls={usage.get('search_calls', 0)} "
-        f"docs_fetched={usage.get('content_fetches', 0)}"
     ]
     if interpreter_state == "lost":
         reason = str(payload.get("interpreter_loss_reason") or "unknown")

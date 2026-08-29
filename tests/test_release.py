@@ -13,7 +13,7 @@ def test_release_metadata_is_consistent() -> None:
     metadata = validate_release()
 
     assert metadata.version == "0.8.2"
-    assert metadata.capability_contract == 14
+    assert metadata.capability_contract == 15
     assert metadata.sandbox_contract == 14
     assert validate_release(f"v{metadata.version}") == metadata
 

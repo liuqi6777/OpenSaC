@@ -95,7 +95,8 @@ def test_cli_skill_invocation_compiles_and_passes_sandbox_validation() -> None:
     compile(program, "<search-as-code-cli-invocation>", "exec")
     validate_code(program)
     assert "from opensac_sdk import" in program
-    assert "sdk.session.usage()" in program
+    assert "sdk.session.capabilities()" in program
+    assert "sdk.session.usage()" not in program
 
 
 def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
@@ -161,6 +162,7 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
     contract = CONTRACT_PATH.read_text(encoding="utf-8")
     assert "sdk.content.passages(" not in contract
     assert "llm.complete" not in contract
+    assert "sdk.session.usage" not in contract
 
 
 def test_cli_skill_has_codex_catalog_metadata() -> None:

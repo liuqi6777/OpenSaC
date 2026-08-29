@@ -186,26 +186,6 @@ class _SessionCapabilitiesRecord(_Record, Protocol):
     llm: _LLMCapabilitiesRecord
     mechanisms: _MechanismsRecord
 
-class _BudgetRemainingRecord(_Record, Protocol):
-    max_exec_calls: int | None
-    max_search_queries: int | None
-    max_content_fetches: int | None
-    max_pipeline_llm_calls: int | None
-    max_pipeline_output_tokens: int | None
-    max_sandbox_seconds: float | None
-    max_workspace_bytes: int | None
-
-class _SessionUsageRecord(_Record, Protocol):
-    exec_calls: int
-    search_calls: int
-    content_fetches: int
-    llm_calls: int
-    pipeline_output_tokens_reserved: int
-    sandbox_seconds: float
-    workspace_bytes: int
-    budget_remaining: _BudgetRemainingRecord
-    terminal_reason: str | None
-
 class _SearchResource(Protocol):
     def __call__(
         self,
@@ -303,7 +283,6 @@ class _LLMResource(Protocol):
     ) -> list[_ExtractOutcomeRecord]: ...
 
 class _SessionResource(Protocol):
-    def usage(self) -> _SessionUsageRecord: ...
     def capabilities(self) -> _SessionCapabilitiesRecord: ...
 
 class _StateResource(Protocol):

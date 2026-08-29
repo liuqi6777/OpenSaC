@@ -87,8 +87,8 @@ replay matters. Immediately after the call, persist its `success` or `failure` b
 transformations. A surviving `started` means the outcome may be unknown. Keep the requested source
 as an alias and the returned document source as the canonical content key.
 
-After an uncertain adapter failure, inspect relevant globals, durable rows, and
-`sdk.session.usage()` in a read-only cell before repeating an external operation.
+After an uncertain adapter failure, inspect relevant globals and durable rows in a read-only cell.
+Repeat an external operation only when that progress proves the work is missing.
 
 After confirming persistence, use the
 [optional durable fetch-cache pattern](references/patterns.md#optionally-cache-selected-fetches-across-calls)

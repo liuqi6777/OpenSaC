@@ -46,8 +46,6 @@ grep_exhaustive: bool = grep_outcomes[0].next_start_line is None
 
 capabilities = sdk.session.capabilities()
 capability_contract: int = capabilities.contracts.capability
-usage = sdk.session.usage()
-content_fetches: int = usage.content_fetches
 
 extraction = sdk.llm.extract(
     {"text": text},
@@ -85,7 +83,6 @@ sdk.output.submit(
         "match_line": match_line,
         "grep_exhaustive": grep_exhaustive,
         "capability_contract": capability_contract,
-        "content_fetches": content_fetches,
         "document_title": document_title,
         "fetch_status": fetch_status,
         "fetched_document_title": fetched_document_title,

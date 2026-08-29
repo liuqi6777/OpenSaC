@@ -35,7 +35,7 @@ OpenSAC 实现了公开的
 ## 为什么使用 OpenSAC
 
 - **可编程检索**：生成的 Python 可以用普通控制流完成批量查询、过滤、关联、排序和证据选择。
-- **紧凑的 record SDK**：`opensac_sdk` 提供搜索、正文、状态、可选结构化 LLM、用量和输出原语。
+- **紧凑的 record SDK**：`opensac_sdk` 提供搜索、正文、状态、可选结构化 LLM、部署能力检查和输出原语。
 - **强化隔离执行**：沙箱程序无法访问网络、服务商密钥、Docker socket 或不受限的宿主机文件系统。
 - **上下文解耦**：大规模中间结果保留在工作空间中，只有程序明确打印或提交的数据返回控制模型。
 - **可读来源**：Web 文档始终使用有语义的 URL；可选输出引用只是轻量、未经验证的来源标注。
@@ -202,7 +202,7 @@ PY
 | `sdk.content` | `fetch`、`fetch_many`、`read`、`grep`、`passages` | 抓取、定位和检查证据，并提供明确 cursor |
 | `sdk.llm` | `extract`、`extract_many`、`complete` | 可选模型调用与 schema 校验抽取 |
 | `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
-| `sdk.session` | `usage`、`capabilities` | 查看用量、预算、当前契约、限制与机制 |
+| `sdk.session` | `capabilities` | 查看当前契约、部署限制与机制 |
 | `sdk.output` | `submit` | 返回结构化输出和可选 URL/source 标注 |
 
 `search.many`、`content.fetch_many`、`llm.extract_many` 和 `content.grep` 返回与输入对齐的

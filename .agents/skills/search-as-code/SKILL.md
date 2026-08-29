@@ -18,8 +18,8 @@ count, capability sequence, stage split, or workspace schema is required.
 - Never print whole content documents.
 - Treat optional `sdk.llm.extract(...)` or aligned `sdk.llm.extract_many(...)` as transformation,
   not as new evidence. Validate quotes against their inputs.
-- Read usage or deployment capabilities with `sdk.session` when needed, and use `sdk.state` for
-  artifacts. Use `sdk.output.submit(...)` only for a complete runtime result needed through
+- Read deployment capabilities with `sdk.session.capabilities()` when needed, and use `sdk.state`
+  for artifacts. Use `sdk.output.submit(...)` only for a complete runtime result needed through
   `ExecResult.output`.
 
 Read [references/sdk-contract.md](references/sdk-contract.md) for unfamiliar methods, failures,
@@ -92,8 +92,8 @@ print it.
 For recoverable multi-call work, persist an operation as `started` before an expensive external call
 when avoiding blind replay matters. Immediately after the call, persist each input as `success` or
 `failure` before running further transformations. A surviving `started` status means the outcome may
-be unknown and must be reconciled from state and usage, not blindly replayed. Use the returned
-document source as the stable content key and retain requested URL variants only as aliases.
+be unknown and must be reconciled from durable state, not blindly replayed. Use the returned document
+source as the stable content key and retain requested URL variants only as aliases.
 
 For executable recovery ordering, read the
 [optional durable fetch-cache pattern](references/patterns.md#optionally-cache-selected-fetches-across-calls).
@@ -128,9 +128,9 @@ host policy own retries; do not retry blindly.
 
 Public web URLs remain reusable across sessions; local IDs remain session-bound. If `sac_run`
 returns `state_lost`, the submitted program was not replayed; rebuild state and local-ID admission.
-Adapter failures occur outside the sandbox, so their execution outcome may be unknown. Inspect state
-and usage instead of replaying the same program blindly; report OpenSAC unavailable after repeated
-inspection failure.
+Adapter failures occur outside the sandbox, so their execution outcome may be unknown. Inspect
+durable state instead of replaying the same program blindly; if it cannot prove the work is missing,
+report the outcome as unknown.
 
 ## Load examples only when useful
 

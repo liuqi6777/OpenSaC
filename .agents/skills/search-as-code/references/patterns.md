@@ -368,4 +368,4 @@ for requested_source in selected_sources:
 The example stores full text because cross-program reuse is its premise; store only the bounded data
 the later program needs when full text is unnecessary. `requested_source` prevents unchanged replay,
 while `source` records the canonical value returned by fetch. A surviving `started` row has an
-unknown outcome. Decide any retry explicitly after inspecting state and usage.
+unknown outcome. Retry only when durable state proves the operation is missing.

@@ -76,6 +76,7 @@ def test_sdk_package_publishes_typing_metadata() -> None:
     assert "def extract(" in text
     assert "def extract_many(" in text
     assert "def read_many(" not in text
+    assert "def usage(" not in text
 
 
 def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
@@ -126,9 +127,9 @@ def test_many_helpers_are_composed_locally_not_mapped_to_broker_batches() -> Non
 
 def test_surface_manifest_keeps_model_core_small() -> None:
     model_core = [operation for operation in SDK_SURFACE if operation.model_core]
-    assert len(SDK_SURFACE) == 24
-    assert len([item for item in SDK_SURFACE if item.tier is not SurfaceTier.INTERNAL]) == 22
-    assert len(model_core) == 13
+    assert len(SDK_SURFACE) == 23
+    assert len([item for item in SDK_SURFACE if item.tier is not SurfaceTier.INTERNAL]) == 21
+    assert len(model_core) == 12
     assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
     assert any(operation.public_name == "sdk.content.fetch" for operation in model_core)
     assert any(operation.public_name == "sdk.content.fetch_many" for operation in model_core)
@@ -211,7 +212,7 @@ def test_unix_transport_reuses_one_http_client_for_all_calls() -> None:
         200,
         request=httpx.Request("POST", "http://opensac/v1/call"),
         json={
-            "capability_contract": 14,
+            "capability_contract": 15,
             "ok": True,
             "result": {"value": 1},
             "error": None,
@@ -235,15 +236,15 @@ def test_unix_transport_reuses_one_http_client_for_all_calls() -> None:
     fake = FakeClient()
     with patch("opensac_sdk.transport.httpx.Client", return_value=fake) as client_type:
         transport = UnixSocketTransport("/tmp/broker.sock", "token")
-        assert transport.call("session.usage", {}) == {"value": 1}
-        assert transport.call("session.usage", {}) == {"value": 1}
+        assert transport.call("session.capabilities", {}) == {"value": 1}
+        assert transport.call("session.capabilities", {}) == {"value": 1}
         transport.close()
 
     assert client_type.call_count == 1
     assert client_type.call_args.kwargs["timeout"] is None
     assert fake.posts == 2
     assert fake.closed == 1
-    assert all(headers["X-OpenSAC-Capability-Contract"] == "14" for headers in fake.headers)
+    assert all(headers["X-OpenSAC-Capability-Contract"] == "15" for headers in fake.headers)
 
 
 def test_unix_transport_exposes_typed_broker_errors() -> None:
@@ -251,7 +252,7 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
         200,
         request=httpx.Request("POST", "http://opensac/v1/call"),
         json={
-            "capability_contract": 14,
+            "capability_contract": 15,
             "ok": False,
             "result": None,
             "error": {
@@ -287,7 +288,7 @@ def test_unix_transport_exposes_typed_broker_errors() -> None:
     assert raised.value.scope == "provider"
 
 
-@pytest.mark.parametrize("reported_contract", [None, 13])
+@pytest.mark.parametrize("reported_contract", [None, 14])
 def test_unix_transport_rejects_missing_or_mismatched_capability_contract(
     reported_contract: int | None,
 ) -> None:
@@ -307,7 +308,7 @@ def test_unix_transport_rejects_missing_or_mismatched_capability_contract(
     with patch("opensac_sdk.transport.httpx.Client", return_value=FakeClient()):
         transport = UnixSocketTransport("/tmp/broker.sock", "token")
         with pytest.raises(BrokerError, match="Capability contract mismatch") as raised:
-            transport.call("session.usage", {})
+            transport.call("session.capabilities", {})
 
     assert raised.value.code == "capability_contract_mismatch"
     assert raised.value.retryable is False
@@ -327,7 +328,7 @@ def test_unix_transport_rejects_invalid_json_as_a_protocol_error() -> None:
     with patch("opensac_sdk.transport.httpx.Client", return_value=FakeClient()):
         transport = UnixSocketTransport("/tmp/broker.sock", "token")
         with pytest.raises(BrokerError, match="invalid JSON") as raised:
-            transport.call("session.usage", {})
+            transport.call("session.capabilities", {})
 
     assert raised.value.code == "broker_protocol_error"
     assert raised.value.retryable is False
@@ -693,7 +694,7 @@ def _search_capabilities(
 ) -> Record:
     return record(
         {
-            "contracts": {"sandbox": 14, "capability": 14},
+            "contracts": {"sandbox": 14, "capability": 15},
             "search": {
                 "backend": "test",
                 "supports_include_domains": supports_domains,
@@ -1726,13 +1727,14 @@ def test_session_capabilities_is_a_broker_operation() -> None:
 
         def call(self, method, params):
             self.calls.append((method, params))
-            return record({"contracts": {"sandbox": 14, "capability": 14}})
+            return record({"contracts": {"sandbox": 14, "capability": 15}})
 
     transport = SessionTransport()
     capabilities = SessionResource(transport).capabilities()
 
+    assert not hasattr(SessionResource, "usage")
     assert capabilities.contracts.sandbox == 14
-    assert capabilities.contracts.capability == 14
+    assert capabilities.contracts.capability == 15
     assert transport.calls == [("session.capabilities", {})]
 
 
@@ -2109,7 +2111,7 @@ def test_environment_transport_refreshes_token_and_execution_id(
         )
         return httpx.Response(
             200,
-            json={"capability_contract": 14, "ok": True, "result": {}},
+            json={"capability_contract": 15, "ok": True, "result": {}},
         )
 
     monkeypatch.setenv("OPENSAC_BROKER_SOCKET", "/tmp/broker.sock")
@@ -2121,16 +2123,16 @@ def test_environment_transport_refreshes_token_and_execution_id(
     )
     try:
         monkeypatch.setenv("OPENSAC_EXECUTION_ID", "exec-1")
-        transport.call("session.usage", {})
+        transport.call("session.capabilities", {})
         monkeypatch.setenv("OPENSAC_SESSION_TOKEN", "token-2")
         monkeypatch.setenv("OPENSAC_EXECUTION_ID", "exec-2")
-        transport.call("session.usage", {})
+        transport.call("session.capabilities", {})
     finally:
         transport.close()
 
     assert observed == [
-        ("Bearer token-1", "exec-1", "14"),
-        ("Bearer token-2", "exec-2", "14"),
+        ("Bearer token-1", "exec-1", "15"),
+        ("Bearer token-2", "exec-2", "15"),
     ]
 
 
