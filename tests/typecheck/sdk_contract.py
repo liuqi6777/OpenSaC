@@ -75,8 +75,9 @@ many_extracted_label: object | None = (
 extract_error = extract_outcomes[0].error
 extract_error_code: str | None = extract_error.code if extract_error is not None else None
 
-sdk.output.submit(
+print(
     {
+        "source": source,
         "rank": rank,
         "fused_rank": fused_rank,
         "input_index": input_index,
@@ -99,6 +100,5 @@ sdk.output.submit(
         "broker_component": broker_component,
         "broker_scope": broker_scope,
         "next_line": next_line,
-    },
-    citations=[source],
+    }
 )

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import runpy
 import secrets
@@ -91,11 +90,6 @@ async def main() -> int:
 
     usage = service.sessions[token].policy.usage
     print(f"\nusage     search_calls={usage.search_calls} llm_calls={usage.llm_calls}")
-    output_path = workspace / ".opensac-output.json"
-    if output_path.exists():
-        payload = json.loads(output_path.read_text(encoding="utf-8"))
-        print(f"output    {json.dumps(payload.get('output'), ensure_ascii=False)[:400]}")
-        print(f"citations {len(payload.get('citations', []))}")
     print(f"files     {sorted(p.name for p in workspace.iterdir())}")
     return exit_code
 

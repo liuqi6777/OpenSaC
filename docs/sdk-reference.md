@@ -40,7 +40,6 @@ enforced by the broker and reported by `sdk.capabilities()`.
 | LLM | `llm.complete`, `llm.extract`, `llm.extract_many` |
 | Top level | `capabilities` |
 | State | JSON/JSONL operations including `state.upsert_jsonl` |
-| Output | `output.submit` |
 
 ## Search
 
@@ -362,7 +361,7 @@ contract, or permission error, the helper raises one representative `BrokerError
 Returns contract versions, search backend support, content/LLM upper limits, and active mechanism
 switches. Generated programs should inspect this record instead of hard-coding deployment maxima.
 
-## State and output
+## State
 
 State paths are workspace-relative and cannot escape the session workspace.
 
@@ -380,12 +379,9 @@ sdk.state.list(prefix="") -> list[str]
 `upsert_jsonl` preserves first-seen order and replaces the complete row for an existing key; it is
 not a field-level merge.
 
-```python
-sdk.output.submit(value, *, citations: list[str] | None = None) -> None
-```
-
-Submission atomically writes the current execution output. Citation strings are labels, not broker
-evidence validation. Repeated submissions replace the previous output.
+Return bounded results with Python's `print(...)`, carrying exact source strings beside the evidence
+they support. Persist larger structured values with `sdk.state` instead of printing full documents
+or ledgers.
 
 ## 0.8.2 breaking migration
 
@@ -418,4 +414,3 @@ No aliases or deprecation shims are provided.
 | `llm.complete_many(...)` | loop over `llm.complete(...)` |
 | legacy broker `llm.extract_many(...)` | SDK `llm.extract_many(...)` over unary `llm.extract` |
 | `state.merge_jsonl(...)` | `state.upsert_jsonl(...)` |
-| `output.submit(output, ...)` | `output.submit(value, ...)` |

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -107,7 +106,7 @@ def render_observation(
         reason = str(payload.get("interpreter_loss_reason") or "unknown")
         sections.append(
             "state_lost: The persistent interpreter was lost "
-            f"({reason}). The submitted cell will not be replayed."
+            f"({reason}). The cell will not be replayed."
         )
     remaining = output_limit
     warning_body = _render_warnings(payload.get("warnings"))
@@ -120,14 +119,6 @@ def render_observation(
         bodies.append(("stdout", str(payload["stdout"]).strip()))
     if str(payload.get("stderr") or "").strip():
         bodies.append(("stderr", str(payload["stderr"]).strip()))
-    if payload.get("output") is not None:
-        bodies.append(
-            (
-                "submitted output",
-                json.dumps(payload["output"], ensure_ascii=False, default=str),
-            )
-        )
-
     for label, body in bodies:
         if remaining <= 0:
             break
@@ -135,9 +126,6 @@ def render_observation(
         sections.append(f"{label}:\n{rendered}")
         remaining -= len(rendered)
 
-    citations = payload.get("citations") or []
-    if citations:
-        sections.append(f"source citations: {len(citations)}")
     artifacts = sorted(str(item) for item in (payload.get("artifacts") or []))
     sections.append(
         "workspace: empty"
@@ -145,7 +133,7 @@ def render_observation(
         else f"workspace: {len(artifacts)} file(s): {', '.join(artifacts[:40])}"
     )
     if len(sections) == 2 and not artifacts:
-        sections.insert(1, "The program printed and submitted nothing.")
+        sections.insert(1, "The program printed nothing.")
     return "\n\n".join(sections)
 
 

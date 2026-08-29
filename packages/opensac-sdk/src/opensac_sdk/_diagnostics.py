@@ -108,17 +108,6 @@ def _write_envelope(path: Path, envelope: dict[str, Any]) -> None:
     )
 
 
-def write_submission(path: Path, output: Any, citations: list[str]) -> None:
-    """Atomically replace submitted output while preserving SDK diagnostics."""
-    with _OUTPUT_LOCK:
-        envelope = _read_envelope(path)
-        warnings = envelope.get("warnings")
-        replacement: dict[str, Any] = {"output": output, "citations": citations}
-        if isinstance(warnings, list) and warnings:
-            replacement["warnings"] = warnings
-        _write_envelope(path, replacement)
-
-
 def failure_detail(
     failure: Mapping[str, Any],
     *,

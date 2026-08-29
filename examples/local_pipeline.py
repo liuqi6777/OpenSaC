@@ -40,14 +40,10 @@ sdk.state.write_jsonl(
     "evidence.jsonl",
     [dict(item) for item in report.passages],
 )
-sdk.output.submit(
-    {
-        "documents": [
-            {"source": hit.source, "score": hit.score, "snippet": hit.snippet[:200]}
-            for hit in ranked
-        ],
-        "evidence_chars": sum(len(item.text) for item in report.passages),
-        "fetch_failures": [dict(item) for item in report.failures],
-    },
-    citations=list(dict.fromkeys(item.source for item in report.passages)),
+for item in report.passages[:8]:
+    excerpt = " ".join(item.text.split())[:400]
+    print(f"EVIDENCE source={item.source!r} text={excerpt!r}")
+print(
+    f"READY: documents={len(ranked)} evidence={len(report.passages)} "
+    f"failures={len(report.failures)} artifact='evidence.jsonl'"
 )

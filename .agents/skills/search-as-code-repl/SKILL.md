@@ -47,7 +47,7 @@ name, cleanup convention, or checkpoint schema is required.
   verify a relation from entailing text or an explicit evidence-backed join.
 
 Read [references/sdk-contract.md](references/sdk-contract.md) for unfamiliar methods, limits,
-failure types, or citations. Inspect one exact method's `__doc__` when necessary.
+failure types, or lifecycle semantics. Inspect one exact method's `__doc__` when necessary.
 
 ## Compose cells around semantic checkpoints
 
@@ -94,19 +94,19 @@ After confirming persistence, use the
 [optional durable fetch-cache pattern](references/patterns.md#optionally-cache-selected-fetches-across-calls)
 when a later cell or recovery path will reuse the fetched text.
 
-## Return observations and optional structured output
+## Return bounded observations
 
 - Print compact progress and the bounded decision surface needed for the next judgment. A `NEXT:`
   line is useful when another semantic decision remains, but it is not a required cell protocol.
-- Agent completion is the final response to the user, not `sdk.output.submit(...)`.
-- `submit` is optional. Use it once only when the caller or downstream contract needs structured
-  runtime output. Do not submit partial progress or print the same final payload first.
-- Material claims, status, evidence, and citations in a submission must derive from inspected rows or
+  Include exact source strings beside bounded evidence.
+- Agent completion is the final response to the user. Once printed evidence covers the request and no
+  unresolved `NEXT:` remains, answer directly without a separate finalization cell.
+- Material claims, status, evidence, and source strings in stdout must derive from inspected rows or
   trustworthy loaded state. Preserve conflicts and compute completeness from requirement coverage.
 - Do not run a finalization cell merely to turn already visible evidence into prose. Answer directly
-  unless recovery requires loading state or structured runtime output was requested.
+  unless recovery requires loading state.
 
-Warnings, stdout, stderr, and submitted output share one observation budget; keep each bounded.
+Warnings, stdout, and stderr share one observation budget; keep each bounded.
 
 ## Handle interpreter and adapter failures
 
@@ -116,7 +116,7 @@ not be parsed. Empty hits or matches with success status are successful results.
 `BrokerError` must leave the checkpoint incomplete with a bounded error or next action. Let host
 policy own retries.
 
-If an observation reports `interpreter_state=lost` or `state_lost`, the submitted cell is never
+If an observation reports `interpreter_state=lost` or `state_lost`, the cell is never
 replayed and the next invocation starts clean. Restore a trustworthy checkpoint if one exists,
 re-admit local sources, and recompute only work not supported by saved evidence. Public URLs remain
 reusable.

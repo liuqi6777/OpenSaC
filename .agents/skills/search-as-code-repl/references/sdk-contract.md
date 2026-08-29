@@ -40,7 +40,7 @@ sdk.content.grep(
 ) -> list[record]
 ```
 
-LLM, session, state, and output:
+LLM, capabilities, and state:
 
 ```python
 sdk.llm.extract(
@@ -59,7 +59,6 @@ sdk.state.read_json(path)
 sdk.state.read_jsonl(path)
 sdk.state.exists(path) -> bool
 sdk.state.list(prefix="") -> list[str]
-sdk.output.submit(value, citations=[source_url])
 ```
 
 `search.many`, `content.fetch_many`, and `llm.extract_many` are public aligned fan-out helpers. Loop
@@ -102,7 +101,7 @@ Mapping access is canonical: use `row["field"]`, `get`, `keys`, `items`, `values
 `dict(row)`. Attribute access is only a convenience for known, non-colliding fields; access keys
 such as `items`, `values`, or `get` with brackets.
 
-There is no public SDK model hierarchy or `types` module. Join capability results by `source`.
+Join capability results by `source`.
 
 ## Failure and continuation semantics
 
@@ -150,23 +149,22 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   window or cursor is itself useful.
 - `grep` and `read` accept source strings and may reuse the session cache, avoiding backend retrieval,
   but every requested source remains another logical content-fetch charge. Never pass an unfetched
-  source to them, and never print or submit a complete fetched document.
+  source to them, and never print a complete fetched document.
 - Treat snippets as triage. Inspect fetched, grep, or read text for material claims.
 - Resource budgets are enforced by the broker. Every initial or repair model attempt reserves one
   LLM call before dispatch.
 - `sdk.capabilities()` reports contract versions, active mechanisms, backend support, and
   configured upper limits. Do not hard-code deployment maxima.
 
-## State, output, and lifecycle
+## State, stdout, and lifecycle
 
-- `sdk.state` is the structured session-workspace interface; there is no `sdk.workspace` resource.
+- `sdk.state` is the structured session-workspace interface.
 - State paths are workspace-relative and cannot escape it. `sdk.state.list(prefix)` hides internal
   runtime files. The namespace shape is application state, not an SDK requirement.
 - `upsert_jsonl` replaces whole rows by the chosen key; it does not merge object fields.
-- `citations` is an optional list of source strings. Submission records labels but does not validate
-  evidence.
-- `sdk.output.submit` atomically replaces the current execution's structured output artifact. It
-  does not call the broker, terminate the program, or complete the agent task.
+- Use bounded `print(...)` calls for the agent-visible handoff, carrying each exact source string
+  beside the evidence it supports.
+- Persist large structured values with `sdk.state` instead of printing full documents or ledgers.
 - Process-per-call programs lose Python variables between calls. Persistent-interpreter variants
   retain completed assignments only while the observation reports `interpreter_state=ready`.
   Files and live variables remain independent; `mechanisms.persistence` controls files only.

@@ -227,19 +227,8 @@ missing = [name for name in constraints if name not in evidence]
 print("unsupported:", missing or "none")
 
 if evidence and not missing:
-    sdk.output.submit(
-        {
-            "research_id": research_id,
-            "evidence": [
-                {
-                    "constraint": name,
-                    "requirement": row["requirement"],
-                    "source": row["source"],
-                    "title": pool_by_source.get(row["source"], {}).get("title"),
-                    "text": row["text"][:2_000],
-                }
-                for name, row in evidence.items()
-            ],
-        },
-        citations=list(dict.fromkeys(row["source"] for row in evidence.values())),
-    )
+    for name, row in evidence.items():
+        excerpt = " ".join(row["text"].split())[:500]
+        title = pool_by_source.get(row["source"], {}).get("title")
+        print(f"EVIDENCE {name}: source={row['source']!r} title={title!r} text={excerpt!r}")
+    print(f"READY: synthesize research_id={research_id}")

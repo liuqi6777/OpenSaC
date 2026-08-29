@@ -19,11 +19,10 @@ count, capability sequence, stage split, or workspace schema is required.
 - Treat optional `sdk.llm.extract(...)` or aligned `sdk.llm.extract_many(...)` as transformation,
   not as new evidence. Validate quotes against their inputs.
 - Read deployment capabilities with `sdk.capabilities()` when needed, and use `sdk.state` for
-  artifacts. Use `sdk.output.submit(...)` only for a complete runtime result needed through
-  `ExecResult.output`.
+  artifacts. Return bounded results with `print(...)`.
 
 Read [references/sdk-contract.md](references/sdk-contract.md) for unfamiliar methods, failures,
-limits, or citations. Inspect one method's `__doc__` when necessary.
+limits, or lifecycle semantics. Inspect one method's `__doc__` when necessary.
 
 ## Ground claims in inspected evidence
 
@@ -33,7 +32,7 @@ limits, or citations. Inspect one method's `__doc__` when necessary.
   supports only a discovery list.
 - Treat mirrors, repeated catalog records, and RRF agreement as one source family, not independent
   corroboration.
-- Generate optional citation labels from inspected evidence; submission does not validate them.
+- Carry exact source URLs or local IDs beside the printed evidence they support.
 - Treat search hits and fused results as candidates, not a fetch queue. From their titles, snippets,
   provenance, source quality, and the unresolved requirements, choose the smallest source-diverse
   set likely to add evidence. Do not fetch the whole result list; expand with another relevant batch
@@ -78,8 +77,8 @@ available to that program. Choose new inputs yourself.
 
 ## Use state as a lightweight reusable data layer
 
-Variables do not survive program mode. `sdk.state` is program-to-program memory; there is no
-`sdk.workspace` API. Prefer one composed program or a bounded visible decision surface when enough.
+Variables do not survive program mode. `sdk.state` is program-to-program memory. Prefer one composed
+program or a bounded visible decision surface when enough.
 
 Use `sdk.state` only when later programs benefit from reusing data. Prefer a small data cache over a
 workflow state machine. Load its rows to filter prior queries and fetched sources; observations show
@@ -98,21 +97,19 @@ source as the stable content key and retain requested URL variants only as alias
 For executable recovery ordering, read the
 [optional durable fetch-cache pattern](references/patterns.md#optionally-cache-selected-fetches-across-calls).
 
-## Return observations and optional structured output
+## Return bounded observations
 
 - Print compact progress, the bounded decision surface needed for the next judgment, and a `NEXT:`
-  action. Do not print raw result lists, full documents, or the ledger; persist them. Keep stdout under
-  about 4,000 characters across the whole program, not independently per query or loop. Prefer a few
-  nonredundant excerpts that together expose the remaining decision.
-- Agent completion is the final response to the user, not `sdk.output.submit(...)`.
-- `submit` is optional. Use it for requested or downstream-consumed structured runtime output.
-- Material claims, evidence, status, and citations in a submission must derive from capability
-  results or loaded state. Runtime metrics alone do not make hand-authored prose program-derived.
-  If the same substantive payload could be written before research ran, do not submit it.
-- Do not submit partial progress or run a separate program merely to reformat visible evidence.
+  action. Do not print raw result lists, full documents, or the ledger; persist them. Include exact
+  source strings beside evidence. Keep stdout under about 4,000 characters across the whole program,
+  not independently per query or loop. Prefer a few nonredundant excerpts that expose the decision.
+- Agent completion is the final response to the user. Once printed evidence covers the request and no
+  unresolved `NEXT:` remains, answer directly without a separate finalization program.
+- Material claims, evidence, status, and source strings in stdout must derive from capability results
+  or loaded state. Runtime metrics alone do not make hand-authored prose program-derived.
 
-Before answering or submitting, require inspected evidence for each material constraint, derive its
-citations, and preserve conflicts. Compute status from requirement coverage, not an expected answer;
+Before answering, require inspected evidence for each material constraint, retain its source, and
+preserve conflicts. Compute status from requirement coverage, not an expected answer;
 use answered, partial, inconclusive, or externally blocked as appropriate.
 
 ## Handle failures and state loss
@@ -127,7 +124,7 @@ An intermediate caught `BrokerError` must leave the stage incomplete with `ERROR
 host policy own retries; do not retry blindly.
 
 Public web URLs remain reusable across sessions; local IDs remain session-bound. If `sac_run`
-returns `state_lost`, the submitted program was not replayed; rebuild state and local-ID admission.
+returns `state_lost`, the program was not replayed; rebuild state and local-ID admission.
 Adapter failures occur outside the sandbox, so their execution outcome may be unknown. Inspect
 durable state instead of replaying the same program blindly; if it cannot prove the work is missing,
 report the outcome as unknown.

@@ -46,9 +46,10 @@ Core SDK surface:
 - Inspect documents with `sdk.content.grep(...)` and `sdk.content.read(...)`; read lines are
   1-based, character positions are 0-based, and `window.next` continues losslessly.
 - Use single-item `sdk.llm.extract(...)` only for bounded semantic transformation.
-- Persist optional state with `sdk.state`—there is no `sdk.workspace` API. Read deployment limits
-  with `sdk.capabilities()` when needed.
-- Finish with `sdk.output.submit(value, citations=[source_url])`.
+- Persist optional state with `sdk.state`. Read deployment limits with `sdk.capabilities()` when
+  needed.
+- Return only bounded stdout, carrying exact source URLs or local IDs beside the evidence they
+  support.
 
 ## Work in deliberate stages
 
@@ -99,10 +100,9 @@ for outcome in outcomes:
 if passage is None:
     print("NEXT: revise sources or pattern")
 else:
-    sdk.output.submit(
-        {"evidence": [{"source": passage.source, "text": passage.text}]},
-        citations=[passage.source],
-    )
+    excerpt = " ".join(passage.text.split())[:1000]
+    print(f"EVIDENCE source={passage.source!r} text={excerpt!r}")
+    print("READY: synthesize the user-facing answer")
 ```
 
 Use bounded comprehensions, `filter`, dicts, sets, `sorted`, `any`, and `all` to generate queries,
@@ -117,8 +117,8 @@ SDK calls. Loop explicitly and handle `BrokerError` per item when several extrac
   and reused across runs; local IDs remain search-admitted only.
 - Search metadata and snippets are for triage, or for a requested discovery list; they do not
   support claims about document content.
-- For every material document-content claim, inspect non-empty text. Output citations are optional,
-  unverified URL/source labels; prefer primary sources and corroborate disputed claims.
+- For every material document-content claim, inspect non-empty text and carry its exact source
+  string beside the printed evidence. Prefer primary sources and corroborate disputed claims.
 - `[sac_run]` renders structured failure warnings. For `search.many`, branch on
   `status == "success"` and read failure details from `outcome.error`; for `content.grep`, treat
   other statuses as displayable failure text and do not parse them. Empty hits or matches with
@@ -126,12 +126,11 @@ SDK calls. Loop explicitly and handle `BrokerError` per item when several extrac
 
 ## End each stage deliberately
 
-- `print` is intermediate scratch output for your next decision. Keep it bounded, avoid raw result
-  objects and whole pages, and end review stages with `NEXT:`.
-- `sdk.output.submit` is the terminal research result. Call it exactly once only after every
-  material claim has evidence and citations; do not print the payload first.
-- Stdout is not completion. After the observation contains `submitted output`, stop calling
-  `sac_run` and answer from that result.
+- `print` is the program result channel. Keep it bounded, avoid raw result objects and whole pages,
+  and end review stages with `NEXT:` plus the unresolved decision.
+- When stdout contains sufficient source-scoped evidence and no unresolved `NEXT:`, stop calling
+  `sac_run` and answer the user directly. A separate finalization program is unnecessary.
+- Agent completion is the final response to the user, not a special SDK call.
 
 ## Use workspace only when observation handoff is insufficient
 
@@ -143,8 +142,8 @@ Upgrade to `sdk.state` only when a growing candidate pool, evidence ledger, or a
 history must survive several stages, avoid replay, or recover after uncertain execution. Derive a
 stable `runs/<research_id>/` namespace from the task, stable requirements, and source policy. At
 each stage, list and load the needed manifest, pool, evidence, and attempts before capability calls;
-persist progress before `NEXT:` and submit only from a complete evidence ledger. Observations show
-workspace paths, not file contents, and Python variables do not survive calls.
+persist progress before `NEXT:` and print only a bounded handoff from a complete evidence ledger.
+Observations show workspace paths, not file contents, and Python variables do not survive calls.
 
 Public web URLs remain reusable across sessions; local IDs and workspace artifacts are session
 state. On explicit `state_lost`, rebuild missing state. If a timeout or adapter failure has an

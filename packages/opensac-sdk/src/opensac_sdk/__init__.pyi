@@ -300,16 +300,12 @@ class _StateResource(Protocol):
     def write_json(self, relative_path: str, value: Any) -> None: ...
     def read_json(self, relative_path: str) -> Any: ...
 
-class _OutputResource(Protocol):
-    def submit(self, value: Any, *, citations: list[str] | None = ...) -> None: ...
-
 class _SDK(Protocol):
     search: _SearchResource
     content: _ContentResource
     capabilities: _CapabilitiesResource
     llm: _LLMResource
     state: _StateResource
-    output: _OutputResource
     def close(self) -> None: ...
 
 sdk: _SDK

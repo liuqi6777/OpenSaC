@@ -23,7 +23,6 @@ from opensac_sdk._resources import (
     CapabilitiesResource,
     ContentResource,
     LLMResource,
-    OutputResource,
     SearchResource,
     StateResource,
 )
@@ -38,7 +37,6 @@ RESOURCE_TYPES = {
     "capabilities": CapabilitiesResource,
     "content": ContentResource,
     "llm": LLMResource,
-    "output": OutputResource,
     "search": SearchResource,
     "state": StateResource,
 }
@@ -77,7 +75,9 @@ def test_sdk_package_publishes_typing_metadata() -> None:
     assert "def extract_many(" in text
     assert "def read_many(" not in text
     assert "def usage(" not in text
+    assert "def submit(" not in text
     assert "capabilities: _CapabilitiesResource" in text
+    assert "output: _" not in text
     assert "session: _" not in text
 
 
@@ -129,9 +129,9 @@ def test_many_helpers_are_composed_locally_not_mapped_to_broker_batches() -> Non
 
 def test_surface_manifest_keeps_model_core_small() -> None:
     model_core = [operation for operation in SDK_SURFACE if operation.model_core]
-    assert len(SDK_SURFACE) == 23
-    assert len([item for item in SDK_SURFACE if item.tier is not SurfaceTier.INTERNAL]) == 21
-    assert len(model_core) == 12
+    assert len(SDK_SURFACE) == 21
+    assert len([item for item in SDK_SURFACE if item.tier is not SurfaceTier.INTERNAL]) == 20
+    assert len(model_core) == 11
     assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
     assert any(operation.public_name == "sdk.content.fetch" for operation in model_core)
     assert any(operation.public_name == "sdk.content.fetch_many" for operation in model_core)
@@ -164,7 +164,8 @@ def test_public_resources_and_operations_have_bounded_runtime_docs() -> None:
 def test_sdk_entrypoint_doc_lists_runtime_namespaces_without_initializing() -> None:
     assert opensac_sdk.sdk.__doc__ is not None
     assert "search" in opensac_sdk.sdk.__doc__
-    assert "output" in opensac_sdk.sdk.__doc__
+    assert "state" in opensac_sdk.sdk.__doc__
+    assert "output" not in opensac_sdk.sdk.__doc__
 
 
 def test_lazy_sdk_exposes_resource_and_method_docs_without_a_broker_call() -> None:
@@ -187,6 +188,7 @@ def test_lazy_sdk_exposes_resource_and_method_docs_without_a_broker_call() -> No
             assert '"failure"' in many_doc
             assert "structured failure details" in many_doc
             assert opensac_sdk.sdk.capabilities.__doc__ is not None
+            assert not hasattr(opensac_sdk.sdk, "output")
             assert not hasattr(opensac_sdk.sdk, "session")
     finally:
         opensac_sdk.sdk.close()
@@ -2075,30 +2077,21 @@ def test_state_can_be_asked_what_is_there(tmp_path) -> None:
     assert ".opensac-output.json" not in state.list()
 
 
-def test_environment_resources_follow_each_persistent_cell_context(
+def test_environment_state_follows_each_persistent_cell_context(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first_workspace = tmp_path / "first"
     second_workspace = tmp_path / "second"
-    first_output = tmp_path / "first-output.json"
-    second_output = tmp_path / "second-output.json"
     state = StateResource.from_environment()
-    output = OutputResource.from_environment()
 
     monkeypatch.setenv("OPENSAC_WORKSPACE", str(first_workspace))
-    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(first_output))
     state.write_json("state.json", {"cell": 1})
-    output.submit({"cell": 1})
 
     monkeypatch.setenv("OPENSAC_WORKSPACE", str(second_workspace))
-    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(second_output))
     state.write_json("state.json", {"cell": 2})
-    output.submit({"cell": 2})
 
     assert json.loads((first_workspace / "state.json").read_text()) == {"cell": 1}
     assert json.loads((second_workspace / "state.json").read_text()) == {"cell": 2}
-    assert json.loads(first_output.read_text())["output"] == {"cell": 1}
-    assert json.loads(second_output.read_text())["output"] == {"cell": 2}
 
 
 def test_environment_transport_refreshes_token_and_execution_id(
@@ -2139,54 +2132,6 @@ def test_environment_transport_refreshes_token_and_execution_id(
         ("Bearer token-1", "exec-1", "15"),
         ("Bearer token-2", "exec-2", "15"),
     ]
-
-
-def test_output_submission(tmp_path) -> None:
-    path = tmp_path / "output.json"
-    OutputResource(str(path)).submit(
-        {"answer": 42},
-        citations=["https://example.com/source"],
-    )
-    payload = json.loads(path.read_text())
-    assert payload["output"] == {"answer": 42}
-    assert payload["citations"] == ["https://example.com/source"]
-
-
-def test_output_citations_do_not_call_the_broker(tmp_path) -> None:
-    path = tmp_path / "output.json"
-    transport = FakeTransport()
-    OutputResource(str(path)).submit({"answer": 42}, citations=["source_1"])
-    assert json.loads(path.read_text())["citations"] == ["source_1"]
-    assert transport.calls == []
-
-
-def test_output_accepts_only_bounded_source_strings(tmp_path) -> None:
-    output = OutputResource(str(tmp_path / "output.json"))
-
-    with pytest.raises(ValueError, match="input index 0 must be a string"):
-        output.submit({}, citations=[{"source": "source_1"}])
-    with pytest.raises(ValueError, match="must not be empty"):
-        output.submit({}, citations=["  "])
-    with pytest.raises(ValueError, match="at most 4096"):
-        output.submit({}, citations=["x" * 4097])
-    with pytest.raises(ValueError, match="at most 256"):
-        output.submit({}, citations=["source"] * 257)
-
-    output.submit({}, citations=["source_1"])
-    assert json.loads((tmp_path / "output.json").read_text())["citations"] == ["source_1"]
-
-
-def test_output_submission_replaces_the_artifact_atomically(tmp_path) -> None:
-    path = tmp_path / "output.json"
-    path.write_text('{"previous": true}', encoding="utf-8")
-    circular: list[object] = []
-    circular.append(circular)
-
-    with pytest.raises(ValueError, match="Circular reference"):
-        OutputResource(str(path)).submit(circular, citations=["https://example.com/source"])
-
-    assert path.read_text(encoding="utf-8") == '{"previous": true}'
-    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_a_result_answers_to_either_spelling_of_a_field_read() -> None:

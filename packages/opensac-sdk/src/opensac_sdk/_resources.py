@@ -11,7 +11,6 @@ from ._diagnostics import (
     failure_detail,
     failure_status,
     record_external_failures,
-    write_submission,
 )
 from ._json import atomic_write_text, strict_json_dumps, strict_jsonl_dumps
 from ._many import _ManyFailure, _ManySuccess, _run_many
@@ -1260,54 +1259,4 @@ class StateResource:
 
     @classmethod
     def from_environment(cls) -> StateResource:
-        return cls(None)
-
-
-class OutputResource:
-    """Submit the final structured result and optional source strings."""
-
-    def __init__(self, output_path: str | None) -> None:
-        self._output_path = Path(output_path) if output_path is not None else None
-
-    def _path(self) -> Path:
-        if self._output_path is not None:
-            return self._output_path
-        return Path(os.environ.get("OPENSAC_OUTPUT_PATH", "/workspace/.opensac-output.json"))
-
-    def submit(
-        self,
-        value: Any,
-        *,
-        citations: list[str] | None = None,
-    ) -> None:
-        """Write the final output artifact with optional URL/source labels.
-
-        Citations are unverified source declarations. They are not resolved by the
-        broker and do not claim that OpenSAC validated a source against the answer.
-
-        Raises:
-            ValueError: Citations are malformed or exceed the local bound.
-        """
-        if citations is not None and not isinstance(citations, list):
-            raise ValueError("citations must be a list of source strings")
-        if citations is not None and len(citations) > 256:
-            raise ValueError("citations must contain at most 256 source strings")
-        sources = [self._citation(item, index) for index, item in enumerate(citations or [])]
-        write_submission(self._path(), value, sources)
-
-    @staticmethod
-    def _citation(item: Any, input_index: int) -> str:
-        if not isinstance(item, str):
-            raise ValueError(f"citation at input index {input_index} must be a string")
-        source = item.strip()
-        if not source:
-            raise ValueError(f"citation at input index {input_index} must not be empty")
-        if len(source) > 4096:
-            raise ValueError(
-                f"citation at input index {input_index} must be at most 4096 characters"
-            )
-        return source
-
-    @classmethod
-    def from_environment(cls) -> OutputResource:
         return cls(None)

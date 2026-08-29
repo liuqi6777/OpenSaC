@@ -63,8 +63,6 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
     OperationSpec("state", "write_json", SurfaceTier.HELPER),
     OperationSpec("state", "read_json", SurfaceTier.HELPER),
     OperationSpec("state", "from_environment", SurfaceTier.INTERNAL),
-    OperationSpec("output", "submit", SurfaceTier.CORE, model_core=True),
-    OperationSpec("output", "from_environment", SurfaceTier.INTERNAL),
     OperationSpec("llm", "complete", SurfaceTier.ADVANCED, "llm.complete"),
     OperationSpec(
         "llm",

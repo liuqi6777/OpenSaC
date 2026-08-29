@@ -38,7 +38,6 @@ SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 
 | LLM | `llm.complete`、`llm.extract`、`llm.extract_many` |
 | 顶层 | `capabilities` |
 | State | JSON/JSONL 操作，包括 `state.upsert_jsonl` |
-| Output | `output.submit` |
 
 ## Search
 
@@ -353,7 +352,7 @@ outcome；若所有项目都因 transport、protocol、contract 或 permission �
 返回 contract 版本、search backend 支持、content/LLM 上限和机制开关。生成程序应读取它，
 不要硬编码部署上限。
 
-## State 与 Output
+## State
 
 State 路径相对 session workspace，不能逃逸：
 
@@ -370,12 +369,8 @@ sdk.state.list(prefix="") -> list[str]
 
 `upsert_jsonl` 保留首次出现顺序，并按 key 替换整个旧行，不做字段级 merge。
 
-```python
-sdk.output.submit(value, *, citations: list[str] | None = None) -> None
-```
-
-`submit` 原子写入当前 execution 输出；citation 只是 source label，不代表 broker 做了证据校验。
-重复 submit 会覆盖先前输出。
+使用 Python `print(...)` 返回有界结果，并把精确 source 字符串与对应证据一起输出。更大的
+结构化数据应保存到 `sdk.state`，不要打印完整文档或 ledger。
 
 ## 0.8.2 Breaking 迁移
 
@@ -408,4 +403,3 @@ sdk.output.submit(value, *, citations: list[str] | None = None) -> None
 | `llm.complete_many(...)` | 循环调用 `llm.complete(...)` |
 | 旧 broker `llm.extract_many(...)` | SDK `llm.extract_many(...)` 组合 unary `llm.extract` |
 | `state.merge_jsonl(...)` | `state.upsert_jsonl(...)` |
-| `output.submit(output, ...)` | `output.submit(value, ...)` |

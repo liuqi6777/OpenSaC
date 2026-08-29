@@ -142,8 +142,7 @@ Use a small exact source set chosen from exploration. Fetch is always the first 
 each source: this example fetches each selected source once and runs all checks locally. Do not spend
 additional content operations merely to rediscover or reformat text already returned by fetch.
 Persist one full-text copy only when a later program will reuse it. Complete text stays local. The
-program returns bounded runtime evidence by default and submits it only when the caller or downstream
-contract needs `ExecResult.output`.
+program prints bounded, source-scoped runtime evidence for the calling agent.
 
 ```python
 import re
@@ -151,7 +150,6 @@ import re
 from opensac_sdk import BrokerError, sdk
 
 sources = ["selected-source-url-1", "selected-source-url-2"]
-structured_output_requested = False
 checks = {
     "phrase": r"(target phrase|other spelling)",
     "year": r"\b(1998|1999)\b",
@@ -206,29 +204,12 @@ if missing:
         )
     print(f"NEXT: revise sources/checks for missing={missing}; problems={problems[:4]}")
 else:
-    result = {
-        "evidence": [
-            {
-                "constraint": name,
-                "source": row["source"],
-                "text": row["text"],
-                "coordinates": row["coordinates"],
-            }
-            for name, row in evidence.items()
-        ]
-    }
-    if structured_output_requested:
-        sdk.output.submit(
-            result,
-            citations=list(dict.fromkeys(row["source"] for row in evidence.values())),
+    for name, row in evidence.items():
+        print(
+            f"EVIDENCE {name}: source={row['source']!r} "
+            f"coordinates={row['coordinates']!r} text={row['text']!r}"
         )
-    else:
-        for item in result["evidence"]:
-            print(
-                f"EVIDENCE {item['constraint']}: source={item['source']!r} "
-                f"coordinates={item['coordinates']!r} text={item['text']!r}"
-            )
-        print("NEXT: synthesize the user-facing answer from this verified evidence")
+    print("READY: synthesize the user-facing answer from this verified evidence")
 ```
 
 Use a relation-specific check. If text presence alone cannot verify the requested relationship,
