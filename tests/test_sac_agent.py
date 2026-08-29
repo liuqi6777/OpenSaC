@@ -39,20 +39,19 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
         "explicit Python rule can choose the next input",
         "requires language judgment",
         "A search-only stage is valid",
-        "`print` is intermediate scratch output",
-        "`sdk.output.submit` is the terminal research result",
-        "Stdout is not completion",
-        "submitted output",
+        "`print` is the program result channel",
+        "sufficient source-scoped evidence",
+        "A separate finalization program is unnecessary",
+        "Agent completion is the final response to the user",
         "Pass URL/local-ID strings, never result records",
         "Public web URLs can be read directly and reused across runs",
         "inspect non-empty text",
         "read lines are 1-based, character positions are 0-based",
         "`window.next` continues losslessly",
-        "there is no `sdk.workspace` API",
         "or certify citation labels",
         "Even an Explore then Verify flow can remain stateless",
         "Passing five selected sources to the next stage needs no workspace",
-        "Upgrade to `sdk.state` only when",
+        "Upgrade to `sdk.workspace` only when",
         "candidate pool, evidence ledger, or attempted-source history",
         "do not replay blindly",
         "For `search.many`, branch on",
@@ -64,6 +63,11 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
     assert "Core primitives:" not in prompt
     assert "For a known entity, start with" not in prompt
     assert "Print or submit" not in prompt
+    assert "sdk.capabilities()" in prompt
+    assert "sdk.workspace" in prompt
+    assert "sdk.state" not in prompt
+    assert "sdk.output" not in prompt
+    assert "sdk.session" not in prompt
 
     examples = [part.split("```", 1)[0] for part in prompt.split("```python")[1:]]
     assert len(examples) == 3
@@ -73,7 +77,7 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
     assert "sdk.search.many(" in examples[1]
     assert 'print("NEXT: choose sources and checks")' in examples[1]
     assert examples[2].index("sdk.content.grep(") < examples[2].index("sdk.content.read(")
-    assert examples[2].index("sdk.content.read(") < examples[2].index("sdk.output.submit(")
+    assert examples[2].index("sdk.content.read(") < examples[2].index("print(")
 
 
 class FakeModelClient:
@@ -188,6 +192,8 @@ def test_sac_observation_prioritizes_external_failure_warnings() -> None:
             "duration_seconds": 0.1,
             "stdout": "successful passage",
             "stderr": "",
+            "output": {"hidden": "structured result"},
+            "citations": ["https://example.com/hidden"],
             "warnings": [
                 {
                     "code": "external_result_failure",
@@ -213,6 +219,13 @@ def test_sac_observation_prioritizes_external_failure_warnings() -> None:
     assert "content.passages succeeded for 1 item(s); 1 failed" in rendered
     assert "provider_not_found" in rendered
     assert "successful passage" in rendered
+    assert "search_calls" not in rendered
+    assert "docs_fetched" not in rendered
+    assert "usage" not in rendered
+    assert "structured result" not in rendered
+    assert "submitted output" not in rendered
+    assert "source citations" not in rendered
+    assert "example.com/hidden" not in rendered
 
 
 async def test_react_reuses_one_sac_session_and_closes_it() -> None:

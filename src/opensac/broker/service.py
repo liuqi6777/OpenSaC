@@ -175,7 +175,7 @@ class BrokerService:
                 "Capability registry contains methods outside the core contract: "
                 f"{sorted(unknown_methods)}"
             )
-        required_session_methods = {"session.usage", "session.capabilities"}
+        required_session_methods = {"session.capabilities"}
         missing_session_methods = required_session_methods - set(self.registry.methods)
         if missing_session_methods:
             raise RuntimeError(

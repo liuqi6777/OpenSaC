@@ -51,7 +51,7 @@ def test_rpc_response_separates_result_and_error() -> None:
 
     successful = RpcResponse(ok=True, result={"value": 1})
     assert successful.error is None
-    assert successful.capability_contract == 14
+    assert successful.capability_contract == 15
     assert RpcResponse(ok=False, error=failure).result is None
     with pytest.raises(ValidationError, match="cannot contain an error"):
         RpcResponse(ok=True, result={}, error=failure)
@@ -2056,8 +2056,7 @@ async def test_read_is_bounded_by_characters_as_well_as_lines() -> None:
     assert row["text"] + tail["text"] == "\n".join(["x" * 500] * 20)
 
 
-async def test_a_program_can_read_what_it_has_spent() -> None:
-    """The compact public view exposes counters and remaining enforced quota."""
+async def test_session_usage_remains_internal_and_is_not_a_capability() -> None:
     service = _broker_service({"local": FakeBackend("local", depth=5)})
     service.register_session(
         make_session(
@@ -2068,26 +2067,15 @@ async def test_a_program_can_read_what_it_has_spent() -> None:
     await service.call("token", "search.query", {"query": "q", "limit": 2})
     await service.call("token", "content.fetch", {"source": "1"})
 
-    usage = await service.call("token", "session.usage", {})
-
-    assert usage["search_calls"] == 1
-    assert usage["content_fetches"] == 1
-    assert usage["budget_remaining"]["max_search_queries"] == 2
-    assert usage["budget_remaining"]["max_content_fetches"] == 3
-    assert set(usage) == {
-        "exec_calls",
-        "search_calls",
-        "content_fetches",
-        "llm_calls",
-        "pipeline_output_tokens_reserved",
-        "sandbox_seconds",
-        "workspace_bytes",
-        "budget_remaining",
-        "terminal_reason",
-    }
     state = service.sessions["token"]
+    assert state.policy.usage.search_calls == 1
+    assert state.policy.usage.content_fetches == 1
+    assert state.policy.remaining()["max_search_queries"] == 2
+    assert state.policy.remaining()["max_content_fetches"] == 3
     assert state.policy.usage.content_backend_fetches == 1
     assert state.policy.usage.provider_attempts_by_capability == {"content": 1, "search": 1}
+    with pytest.raises(ValueError, match="Unsupported capability"):
+        await service.call("token", "session.usage", {})
 
 
 def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:
@@ -2447,7 +2435,6 @@ async def test_capability_modules_can_be_assembled_as_a_core_contract_subset() -
     assert service.registry.module_names == ("search", "session")
     assert service.registry.methods == (
         "search.query",
-        "session.usage",
         "session.capabilities",
     )
     assert service.available_methods(Mechanisms()) == service.registry.methods
@@ -2465,7 +2452,6 @@ async def test_capability_modules_can_be_assembled_as_a_core_contract_subset() -
         ("content.passages", {"query": "q", "sources": [], "unexpected": True}),
         ("content.read", {"source": "source", "unexpected": True}),
         ("content.grep", {"pattern": "q", "sources": [], "unexpected": True}),
-        ("session.usage", {"unexpected": True}),
         ("session.capabilities", {"unexpected": True}),
         ("llm.complete", {"prompt": "q", "temprature": 0.5}),
         (
@@ -2573,7 +2559,7 @@ async def test_session_capabilities_reflect_backend_limits_and_mechanisms() -> N
 
     capabilities = await service.call("token", "session.capabilities", {})
 
-    assert capabilities["contracts"] == {"sandbox": 14, "capability": 14}
+    assert capabilities["contracts"] == {"sandbox": 14, "capability": 15}
     assert capabilities["search"] == {
         "backend": "local",
         "supports_include_domains": False,

@@ -17,7 +17,7 @@
 - [许可证](#许可证)
 
 OpenSAC 让外部智能体用 Python 程序表达搜索策略，而不是连续调用一组固定工具。程序可以批量检索、阅读
-正文、过滤与融合候选、结构化抽取、持久化中间状态并提交带引用的输出。OpenSAC 在隔离的 Docker 沙箱
+正文、过滤与融合候选、结构化抽取、持久化中间状态，并打印带精确来源的结果。OpenSAC 在隔离的 Docker 沙箱
 中执行程序，所有特权操作统一由 capability broker 代理。
 
 OpenSAC 实现了公开的
@@ -35,10 +35,10 @@ OpenSAC 实现了公开的
 ## 为什么使用 OpenSAC
 
 - **可编程检索**：生成的 Python 可以用普通控制流完成批量查询、过滤、关联、排序和证据选择。
-- **紧凑的 record SDK**：`opensac_sdk` 提供搜索、正文、状态、可选结构化 LLM、用量和输出原语。
+- **紧凑的 record SDK**：`opensac_sdk` 提供搜索、正文、状态、可选结构化 LLM 和部署能力检查。
 - **强化隔离执行**：沙箱程序无法访问网络、服务商密钥、Docker socket 或不受限的宿主机文件系统。
-- **上下文解耦**：大规模中间结果保留在工作空间中，只有程序明确打印或提交的数据返回控制模型。
-- **可读来源**：Web 文档始终使用有语义的 URL；可选输出引用只是轻量、未经验证的来源标注。
+- **上下文解耦**：大规模中间结果保留在工作空间中，只有程序明确打印的有界数据返回控制模型。
+- **可读来源**：Web 文档始终使用有语义的 URL，打印证据可直接携带精确来源。
 - **研究级观测**：预算、结构化局部失败、trace、阶段耗时、幂等执行和 worker 生命周期支持可复现 rollout。
 
 ## 架构
@@ -104,7 +104,7 @@ mkdir -p "$OPENSAC_RUNTIME_DIR"
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.3/configs/docker.yaml
 ```
 
 启动已发布镜像：
@@ -172,20 +172,21 @@ program = """
 from opensac_sdk import sdk
 
 hits = sdk.search("谁提出了 ReAct prompting 方法？", limit=5)
-sdk.output.submit({"hits": [dict(hit) for hit in hits]})
+for hit in hits:
+    print(f"CANDIDATE source={hit.source!r} title={hit.title!r}")
 """
 
 with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
     session = client.create_session()
     try:
         result = client.exec_code(session["id"], program)
-        print(result["output"])
+        print(result["stdout"])
     finally:
         client.delete_session(session["id"])
 PY
 ```
 
-包含多查询融合、正文过滤、JSONL 持久化状态和来源 URL 引用的完整示例见
+包含多查询融合、正文过滤、JSONL 持久化状态和来源化证据的完整示例见
 [examples/research_pipeline.py](examples/research_pipeline.py)。
 
 </details>
@@ -201,9 +202,8 @@ PY
 | `sdk.search` | `search`、`many`、`fuse_rrf` | 检索并融合候选，同时保留 provenance |
 | `sdk.content` | `fetch`、`fetch_many`、`read`、`grep`、`passages` | 抓取、定位和检查证据，并提供明确 cursor |
 | `sdk.llm` | `extract`、`extract_many`、`complete` | 可选模型调用与 schema 校验抽取 |
-| `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
-| `sdk.session` | `usage`、`capabilities` | 查看用量、预算、当前契约、限制与机制 |
-| `sdk.output` | `submit` | 返回结构化输出和可选 URL/source 标注 |
+| `sdk.workspace` | JSON/JSONL artifact 辅助方法 | 在同一 session 的多次执行间持久化结构化 artifact |
+| 顶层 | `capabilities` | 查看当前契约、部署限制与机制 |
 
 `search.many`、`content.fetch_many`、`llm.extract_many` 和 `content.grep` 返回与输入对齐的
 outcome。搜索、抓取和抽取 status 严格为 `"success"` 或 `"failure"`，失败详情从结构化
@@ -212,8 +212,9 @@ outcome。搜索、抓取和抽取 status 严格为 `"success"` 或 `"failure"`�
 `source`：规范化后的网页 URL 或
 本地文档 ID。Content 只接收
 URL/本地 ID 字符串；Web 部署可直接读取受限的公开 HTTP(S) URL，本地
-ID 仍需搜索准入。Output citations 是可选来源字符串，不代表证据验证。所有公共方法、参数与返回
-形态见完整 SDK API 参考：[中文](docs/sdk-reference.zh-CN.md) / [English](docs/sdk-reference.md)。
+ID 仍需搜索准入。生成程序通过 `print(...)` 返回有界、带精确来源的结果；更大的结构化数据应
+保存在 `sdk.workspace` 中。所有公共方法、参数与返回形态见完整 SDK API 参考：
+[中文](docs/sdk-reference.zh-CN.md) / [English](docs/sdk-reference.md)。
 
 ### 智能体集成
 
@@ -276,7 +277,7 @@ Docker 模板都在 `configs/` 中；选择说明见[配置模板](docs/deployme
 
 | 目标 | 文档 |
 | --- | --- |
-| 升级到 v0.8.2 | [v0.8.2 版本说明](docs/opensac-0.8.2.md) |
+| 升级到 v0.8.3 | [v0.8.3 版本说明](docs/opensac-0.8.3.md) |
 | 选择 YAML 配置模板 | [配置模板](docs/deployment.md#configuration-profiles) |
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |

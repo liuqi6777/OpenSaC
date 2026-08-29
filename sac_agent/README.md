@@ -21,8 +21,8 @@ context management, subagents, or backend-specific retrieval logic.
 2. The model writes a Python research program using `opensac_sdk`.
 3. `sac_run` lazily creates one OpenSAC session and executes the program in its
    sandbox.
-4. Compact stdout, stderr, submitted output, usage, citations, and workspace
-   filenames are returned to the model as a tool observation.
+4. Compact stdout, stderr, warnings, and workspace filenames are returned to the model as a tool
+   observation.
 5. Later tool calls reuse the same session, so local sources and workspace files survive across
    turns. Public web URLs can also be reused across sessions. The session is deleted when the run ends.
 
@@ -208,10 +208,10 @@ other values include `timeout`, `max_turns`, and `invalid_response`.
 - The session is deleted in a `finally` block when the run ends. A deletion
   failure is recorded as `SacRunTool.close_error` and does not replace an
   answer already produced.
-- Raw search results and page bodies stay inside the sandbox. Only what the
-  generated program prints or submits is returned to the control model.
-- The observation renderer gives one 32000-character pool to stdout, stderr,
-  and submitted output, and keeps both ends when truncation is necessary.
+- Raw search results and page bodies stay inside the sandbox. Only bounded stdout from the generated
+  program is returned as its result; exact source strings should travel beside printed evidence.
+- The observation renderer gives one 32000-character pool to stdout and stderr, and keeps both ends
+  when truncation is necessary. Warnings use a separate bounded prefix within that pool.
 
 For the SDK surface and recommended program shape, see the
 [Search-as-Code skill](../.agents/skills/search-as-code/SKILL.md).

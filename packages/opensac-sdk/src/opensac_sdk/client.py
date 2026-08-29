@@ -3,12 +3,11 @@ from __future__ import annotations
 import threading
 
 from ._resources import (
+    CapabilitiesResource,
     ContentResource,
     LLMResource,
-    OutputResource,
     SearchResource,
-    SessionResource,
-    StateResource,
+    WorkspaceResource,
 )
 from .transport import UnixSocketTransport
 
@@ -19,24 +18,21 @@ class OpenSACClient:
     def __init__(
         self,
         transport: UnixSocketTransport,
-        state: StateResource,
-        output: OutputResource,
+        workspace: WorkspaceResource,
     ) -> None:
         self._transport = transport
         self.search = SearchResource(transport)
         self.content = ContentResource(transport)
-        self.session = SessionResource(transport)
+        self.capabilities = CapabilitiesResource(transport)
         self.llm = LLMResource(transport)
-        self.state = state
-        self.output = output
+        self.workspace = workspace
 
     @classmethod
     def from_environment(cls) -> OpenSACClient:
         transport = UnixSocketTransport.from_environment()
         return cls(
             transport,
-            StateResource.from_environment(),
-            OutputResource.from_environment(),
+            WorkspaceResource.from_environment(),
         )
 
     def close(self) -> None:
@@ -52,9 +48,10 @@ class OpenSACClient:
 class LazyOpenSACClient:
     """OpenSAC sandbox entry point, available as ``opensac_sdk.sdk``.
 
-    Namespaces are ``search``, ``content``, ``session``, ``llm``, ``state``, and
-    ``output``. Read one namespace or method ``.__doc__`` when exact
-    runtime behavior is needed; doing so does not call the broker.
+    Namespaces are ``search``, ``content``, ``llm``, and ``workspace``;
+    ``capabilities()`` inspects the active deployment. Print bounded results for
+    the calling agent. Reading one namespace or method ``.__doc__`` does not call
+    the broker.
     """
 
     def __init__(self) -> None:

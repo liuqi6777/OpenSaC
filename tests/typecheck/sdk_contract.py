@@ -44,10 +44,11 @@ grep_status: str = grep_outcomes[0].status
 match_line: int = grep_outcomes[0].matches[0].line
 grep_exhaustive: bool = grep_outcomes[0].next_start_line is None
 
-capabilities = sdk.session.capabilities()
+capabilities = sdk.capabilities()
 capability_contract: int = capabilities.contracts.capability
-usage = sdk.session.usage()
-content_fetches: int = usage.content_fetches
+sdk.workspace.write_json("checkpoint.json", {"source": source})
+workspace_files: list[str] = sdk.workspace.list()
+checkpoint_source: object = sdk.workspace.read_json("checkpoint.json")["source"]
 
 extraction = sdk.llm.extract(
     {"text": text},
@@ -77,15 +78,17 @@ many_extracted_label: object | None = (
 extract_error = extract_outcomes[0].error
 extract_error_code: str | None = extract_error.code if extract_error is not None else None
 
-sdk.output.submit(
+print(
     {
+        "source": source,
         "rank": rank,
         "fused_rank": fused_rank,
         "input_index": input_index,
         "match_line": match_line,
         "grep_exhaustive": grep_exhaustive,
         "capability_contract": capability_contract,
-        "content_fetches": content_fetches,
+        "workspace_files": workspace_files,
+        "checkpoint_source": checkpoint_source,
         "document_title": document_title,
         "fetch_status": fetch_status,
         "fetched_document_title": fetched_document_title,
@@ -102,6 +105,5 @@ sdk.output.submit(
         "broker_component": broker_component,
         "broker_scope": broker_scope,
         "next_line": next_line,
-    },
-    citations=[source],
+    }
 )

@@ -12,8 +12,8 @@ from scripts.release import ReleaseValidationError, _dependency_names, validate_
 def test_release_metadata_is_consistent() -> None:
     metadata = validate_release()
 
-    assert metadata.version == "0.8.2"
-    assert metadata.capability_contract == 14
+    assert metadata.version == "0.8.3"
+    assert metadata.capability_contract == 15
     assert metadata.sandbox_contract == 14
     assert validate_release(f"v{metadata.version}") == metadata
 
@@ -87,4 +87,4 @@ def test_release_publishes_service_and_sandbox_images() -> None:
     assert "  local_search:" not in compose
     assert "  local-search:" not in compose
     assert configuration_profiles
-    assert all("ghcr.io/liuqi6777/opensac-sandbox:0.8.2" in text for text in configuration_profiles)
+    assert all("ghcr.io/liuqi6777/opensac-sandbox:0.8.3" in text for text in configuration_profiles)

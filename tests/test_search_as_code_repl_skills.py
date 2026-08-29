@@ -53,8 +53,11 @@ def test_repl_skills_are_explicit_and_use_separate_adapter_surfaces() -> None:
         flat_skill = " ".join(skill.split())
         assert "execution_mode=persistent_interpreter" in flat_skill
         assert "interpreter_state=ready" in flat_skill
-        assert "sdk.session.usage()" in flat_skill
-        assert "sdk.output.submit(...)" in flat_skill
+        assert "sdk.capabilities()" in flat_skill
+        assert "sdk.workspace" in flat_skill
+        assert "sdk.state" not in flat_skill
+        assert "sdk.session" not in flat_skill
+        assert "sdk.output" not in flat_skill
         assert "not a prescribed workflow" in flat_skill
         assert "No fixed query count, capability sequence, cell split" in flat_skill
         assert "Treat one cell as one semantic checkpoint" in flat_skill
@@ -71,7 +74,7 @@ def test_repl_skills_are_explicit_and_use_separate_adapter_surfaces() -> None:
         assert "persist its `success` or `failure`" in flat_skill
         assert "not a required cell protocol" in flat_skill
         assert "Agent completion is the final response to the user" in flat_skill
-        assert "`submit` is optional" in flat_skill
+        assert "Once printed evidence covers the request" in flat_skill
         assert "starting point rather than a required pipeline" in flat_skill
         assert "Prefer `search.many` ->" not in flat_skill
         assert "never" in flat_skill.lower() and "replay" in flat_skill.lower()
@@ -114,16 +117,18 @@ def test_repl_references_are_self_contained_and_synchronized() -> None:
     assert "sdk.content.fetch_many" in combined
     assert "sdk.content.passages" not in combined
     assert "llm.complete" not in combined
-    assert "sdk.state.upsert_jsonl" in combined
-    assert "sdk.output.submit" in combined
+    assert "sdk.workspace.upsert_jsonl" in combined
+    assert "sdk.state" not in combined
+    assert "sdk.output" not in combined
     assert "interpreter_lost" in combined
+    assert "sdk.session" not in combined
 
     flat_combined = " ".join(combined.split())
     assert "not a required pipeline" in flat_combined
     assert "requested_source" in flat_combined
     assert "quote is found verbatim in that input" in flat_combined
     assert "fetch-cache.jsonl" in flat_combined
-    assert "namespace shape is application state, not an SDK requirement" in flat_combined
+    assert "Applications choose their own artifact layout" in combined
 
 
 def test_repl_examples_compile_and_pass_sandbox_validation() -> None:
@@ -145,7 +150,9 @@ def test_repl_examples_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.content.read(" not in composed
 
     verify = _python_block(patterns_path, "## Verify selected sources and return evidence")
-    assert "structured_output_requested = False" in verify
+    assert "structured_output_requested" not in verify
+    assert "sdk.output" not in verify
+    assert "READY: synthesize" in verify
 
     extraction = _python_block(
         patterns_path,
@@ -156,8 +163,8 @@ def test_repl_examples_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.search." not in extraction
 
     cache = _python_block(patterns_path, "## Optionally cache selected fetches across calls")
-    assert cache.index("sdk.state.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
-    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.state.upsert_jsonl(")
+    assert cache.index("sdk.workspace.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
+    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.workspace.upsert_jsonl(")
 
 
 def test_baseline_skill_catalog_metadata_remains_implicit() -> None:

@@ -37,7 +37,7 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "uv run opensac agent-run" in skill
     assert "Never expose or override its identity, manage REST sessions" in flat_skill
     assert "state_lost" in skill
-    assert "submitted program was not replayed" in skill
+    assert "program was not replayed" in skill
     assert "`HTTP 401` or `HTTP 403`" in skill
     assert "without printing or embedding any credential" in flat_skill
     assert "references/sdk-contract.md" in skill
@@ -60,11 +60,12 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "persist an operation as `started`" in flat_skill
     assert "persist each input as `success` or `failure`" in flat_skill
     assert "Agent completion is the final response to the user" in flat_skill
-    assert "`submit` is optional" in flat_skill
-    assert "same substantive payload could be written before research ran" in flat_skill
-    assert "A final research result must use `submit`" not in skill
-    assert "program-to-program memory" in skill
-    assert "no `sdk.workspace` API" in flat_skill
+    assert "Once printed evidence covers the request" in flat_skill
+    assert "source strings in stdout" in flat_skill
+    assert "persists structured artifacts between programs" in flat_skill
+    assert "sdk.workspace" in flat_skill
+    assert "sdk.state" not in flat_skill
+    assert "sdk.output" not in flat_skill
     assert "shell-capable environments" in description
     assert "Codex" not in description
     assert "Claude" not in description
@@ -95,7 +96,8 @@ def test_cli_skill_invocation_compiles_and_passes_sandbox_validation() -> None:
     compile(program, "<search-as-code-cli-invocation>", "exec")
     validate_code(program)
     assert "from opensac_sdk import" in program
-    assert "sdk.session.usage()" in program
+    assert "sdk.capabilities()" in program
+    assert "sdk.session" not in program
 
 
 def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
@@ -136,7 +138,9 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
         "python",
         heading="## Verify selected sources and return evidence",
     )
-    assert "structured_output_requested = False" in verify
+    assert "structured_output_requested" not in verify
+    assert "sdk.output" not in verify
+    assert "READY: synthesize" in verify
 
     extraction = _fenced_block(
         PATTERNS_PATH,
@@ -147,20 +151,24 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
     assert "zip(evidence_items, outcomes, strict=True)" in extraction
     assert 'quote not in item["text"]' in extraction
     assert "sdk.search." not in extraction
-    assert "sdk.output.submit(" not in extraction
+    assert "sdk.output" not in extraction
 
     cache = _fenced_block(
         PATTERNS_PATH,
         "python",
         heading="## Optionally cache selected fetches across calls",
     )
-    assert cache.index("sdk.state.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
-    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.state.upsert_jsonl(")
+    assert cache.index("sdk.workspace.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
+    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.workspace.upsert_jsonl(")
     assert "concurrency=" not in cache
 
     contract = CONTRACT_PATH.read_text(encoding="utf-8")
     assert "sdk.content.passages(" not in contract
     assert "llm.complete" not in contract
+    assert "sdk.session" not in contract
+    assert "sdk.output" not in contract
+    assert "sdk.workspace" in contract
+    assert "sdk.state" not in contract
 
 
 def test_cli_skill_has_codex_catalog_metadata() -> None:

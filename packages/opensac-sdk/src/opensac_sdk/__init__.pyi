@@ -179,32 +179,12 @@ class _MechanismsRecord(_Record, Protocol):
     llm_subroutine: bool
     context_decoupling: bool
 
-class _SessionCapabilitiesRecord(_Record, Protocol):
+class _CapabilitiesRecord(_Record, Protocol):
     contracts: _ContractsRecord
     search: _SearchCapabilitiesRecord
     content: _ContentCapabilitiesRecord
     llm: _LLMCapabilitiesRecord
     mechanisms: _MechanismsRecord
-
-class _BudgetRemainingRecord(_Record, Protocol):
-    max_exec_calls: int | None
-    max_search_queries: int | None
-    max_content_fetches: int | None
-    max_pipeline_llm_calls: int | None
-    max_pipeline_output_tokens: int | None
-    max_sandbox_seconds: float | None
-    max_workspace_bytes: int | None
-
-class _SessionUsageRecord(_Record, Protocol):
-    exec_calls: int
-    search_calls: int
-    content_fetches: int
-    llm_calls: int
-    pipeline_output_tokens_reserved: int
-    sandbox_seconds: float
-    workspace_bytes: int
-    budget_remaining: _BudgetRemainingRecord
-    terminal_reason: str | None
 
 class _SearchResource(Protocol):
     def __call__(
@@ -302,11 +282,10 @@ class _LLMResource(Protocol):
         repair_attempts: int = ...,
     ) -> list[_ExtractOutcomeRecord]: ...
 
-class _SessionResource(Protocol):
-    def usage(self) -> _SessionUsageRecord: ...
-    def capabilities(self) -> _SessionCapabilitiesRecord: ...
+class _CapabilitiesResource(Protocol):
+    def __call__(self) -> _CapabilitiesRecord: ...
 
-class _StateResource(Protocol):
+class _WorkspaceResource(Protocol):
     def write_jsonl(self, relative_path: str, rows: list[Any]) -> None: ...
     def append_jsonl(self, relative_path: str, rows: list[Any]) -> None: ...
     def upsert_jsonl(
@@ -321,16 +300,12 @@ class _StateResource(Protocol):
     def write_json(self, relative_path: str, value: Any) -> None: ...
     def read_json(self, relative_path: str) -> Any: ...
 
-class _OutputResource(Protocol):
-    def submit(self, value: Any, *, citations: list[str] | None = ...) -> None: ...
-
 class _SDK(Protocol):
     search: _SearchResource
     content: _ContentResource
-    session: _SessionResource
+    capabilities: _CapabilitiesResource
     llm: _LLMResource
-    state: _StateResource
-    output: _OutputResource
+    workspace: _WorkspaceResource
     def close(self) -> None: ...
 
 sdk: _SDK

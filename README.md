@@ -18,7 +18,7 @@
 
 OpenSAC lets an external agent express search as a Python program instead of a sequence of fixed
 tool calls. The program can batch queries, inspect documents, filter and fuse candidates, extract
-structured data, persist intermediate state, and submit cited output. OpenSAC executes it in an
+structured data, persist intermediate state, and print source-scoped results. OpenSAC executes it in an
 isolated Docker sandbox and mediates every privileged operation through a capability broker.
 
 OpenSAC implements the public
@@ -39,13 +39,13 @@ abstraction. It is not a reconstruction of Perplexity's internal search engine.
 - **Programmable retrieval** — generated Python can batch, filter, join, rank, and select evidence
   with ordinary control flow.
 - **A compact record SDK** — `opensac_sdk` exposes search, content, state, optional structured LLM,
-  usage, and output primitives.
+  and deployment-capability inspection.
 - **Hardened execution** — sandbox programs have no network, provider credentials, Docker socket,
   or unrestricted host filesystem access.
-- **Context decoupling** — large intermediate results remain in the workspace; only explicitly
-  printed or submitted data returns to the control model.
-- **Readable sources** — web documents use semantic URLs end to end; optional output citations are
-  lightweight, unverified source labels.
+- **Context decoupling** — large intermediate results remain in the workspace; only bounded data
+  explicitly printed by the program returns to the control model.
+- **Readable sources** — web documents use semantic URLs end to end, so printed evidence can carry
+  exact source labels without a separate citation protocol.
 - **Research instrumentation** — budgets, structured partial failures, traces, phase timings, idempotent
   execution, and worker lifecycle controls support reproducible rollouts.
 
@@ -115,7 +115,7 @@ Download `configs/docker.yaml`, then set its two `storage` paths to `$OPENSAC_RU
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.3/configs/docker.yaml
 ```
 
 Start the published image:
@@ -184,20 +184,21 @@ program = """
 from opensac_sdk import sdk
 
 hits = sdk.search("Who introduced the ReAct prompting method?", limit=5)
-sdk.output.submit({"hits": [dict(hit) for hit in hits]})
+for hit in hits:
+    print(f"CANDIDATE source={hit.source!r} title={hit.title!r}")
 """
 
 with OpenSAC(api_key=os.environ["OPENSAC_API_KEY"]) as client:
     session = client.create_session()
     try:
         result = client.exec_code(session["id"], program)
-        print(result["output"])
+        print(result["stdout"])
     finally:
         client.delete_session(session["id"])
 PY
 ```
 
-For multi-query fusion, document filtering, persistent JSONL state, and source URL citations, see
+For multi-query fusion, document filtering, persistent JSONL artifacts, and source-scoped evidence, see
 [examples/research_pipeline.py](examples/research_pipeline.py).
 
 </details>
@@ -213,9 +214,8 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
 | `sdk.content` | `fetch`, `fetch_many`, `read`, `grep`, `passages` | Fetch, locate, and inspect evidence with explicit cursors |
 | `sdk.llm` | `extract`, `extract_many`, `complete` | Optional model calls and schema-checked extraction |
-| `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
-| `sdk.session` | `usage`, `capabilities` | Inspect usage, budgets, active contracts, limits, and mechanisms |
-| `sdk.output` | `submit` | Return structured output with optional URL/source labels |
+| `sdk.workspace` | JSON/JSONL artifact helpers | Persist structured artifacts across executions in one session |
+| Top level | `capabilities` | Inspect active contracts, deployment limits, and mechanisms |
 
 `search.many`, `content.fetch_many`, `llm.extract_many`, and `content.grep` return input-aligned
 outcomes. Search, fetch, and extraction status is exactly `"success"` or `"failure"`; failed rows
@@ -224,9 +224,10 @@ Independent reads and free-form completions use explicit Python loops and per-ca
 Each search hit has one
 `source`: a canonical web URL or local document ID. Empty search results are successful results.
 Content accepts URL/local-ID strings rather than result records. Web deployments can fetch bounded
-public HTTP(S) URLs directly; local IDs remain search-admitted. Output citations are optional
-source strings and are not evidence validation. Core signatures and intentional advanced operations
-are split across the Search-as-Code Skill references. See the complete SDK API reference in
+public HTTP(S) URLs directly; local IDs remain search-admitted. Generated programs return bounded,
+source-scoped results with `print(...)`; larger structured values belong in `sdk.workspace`. Core
+signatures and intentional advanced operations are split across the Search-as-Code Skill references.
+See the complete SDK API reference in
 [English](docs/sdk-reference.md) or [Chinese](docs/sdk-reference.zh-CN.md) for every public method and
 return shape.
 
@@ -293,7 +294,7 @@ service also exposes the live runtime dashboard at `http://127.0.0.1:8000/dashbo
 
 | Goal | Document |
 | --- | --- |
-| Upgrade to v0.8.2 | [v0.8.2 release notes](docs/opensac-0.8.2.md) |
+| Upgrade to v0.8.3 | [v0.8.3 release notes](docs/opensac-0.8.3.md) |
 | Choose a YAML configuration profile | [Configuration profiles](docs/deployment.md#configuration-profiles) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Add broker backends or capability modules | [Broker plugins](docs/broker-plugins.md) |

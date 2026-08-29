@@ -1,8 +1,7 @@
 # OpenSAC SDK reference
 
-This reference covers the bundled `opensac_sdk` 0.8.2 interface. Version 0.8.2 is an intentional
-breaking pre-1.0 patch: capability contract 14 and sandbox contract 14 prevent older SDK,
-broker, and sandbox combinations from running together.
+This reference covers the current bundled `opensac_sdk` interface on `main`. Capability contract 15
+requires a matching SDK and broker; sandbox contract 14 remains unchanged.
 
 ## Conventions
 
@@ -24,7 +23,7 @@ plain = dict(row)
 Use `row["items"]`, `row["values"]`, or `row["get"]` when a JSON field collides with a dict method.
 
 The SDK validates types, strict JSON, and basic lower bounds. Deployment-specific upper bounds are
-enforced by the broker and reported by `sdk.session.capabilities()`.
+enforced by the broker and reported by `sdk.capabilities()`.
 
 - Local argument errors raise `ValueError`.
 - Provider, quota, transport, extraction JSON/schema, and repair failures raise `BrokerError` with
@@ -39,9 +38,8 @@ enforced by the broker and reported by `sdk.session.capabilities()`.
 | Search | `search`, `search.many`, `search.fuse_rrf` |
 | Content | `content.fetch`, `content.fetch_many`, `content.read`, `content.grep`, `content.passages` |
 | LLM | `llm.complete`, `llm.extract`, `llm.extract_many` |
-| Session | `session.usage`, `session.capabilities` |
-| State | JSON/JSONL operations including `state.upsert_jsonl` |
-| Output | `output.submit` |
+| Top level | `capabilities` |
+| Workspace | JSON/JSONL operations including `workspace.upsert_jsonl` |
 
 ## Search
 
@@ -111,9 +109,10 @@ protocol, contract, or permission error, `many` raises one representative top-le
 `Mechanisms.batching` controls this operation only. When batching is disabled, one query is still
 accepted but a wider fan-out is rejected.
 
-The implementation is a single bounded SDK thread-pool path. It checks `session.capabilities` for
-admission and then issues one `search.query` call per input; there is no environment variable or
-broker/client mode switch. Its concurrency value is helper admission, not the provider semaphore.
+The implementation is a single bounded SDK thread-pool path. It checks the deployment manifest
+returned by `sdk.capabilities()` for admission and then issues one `search.query` call per input;
+there is no environment variable or broker/client mode switch. Its concurrency value is helper
+admission, not the provider semaphore.
 The broker still owns budgets, rate limits, retries, cache/coalescing, and actual provider
 concurrency. The SDK does not deduplicate, and the broker exposes no batch search RPC. The
 [release notes](opensac-0.8.2.md) describe the migration boundaries.
@@ -355,66 +354,50 @@ The returned list is input-aligned. Each outcome contains `input_index`, `status
 deadline failures remain per-item outcomes. If every item fails with a transport, protocol,
 contract, or permission error, the helper raises one representative `BrokerError`.
 
-## Session
+## Capabilities
 
-### `sdk.session.usage()`
-
-Returns exactly:
-
-```python
-{
-    "exec_calls": int,
-    "search_calls": int,
-    "content_fetches": int,
-    "llm_calls": int,
-    "pipeline_output_tokens_reserved": int,
-    "sandbox_seconds": float,
-    "workspace_bytes": int,
-    "budget_remaining": {
-        "max_exec_calls": int | None,
-        "max_search_queries": int | None,
-        "max_content_fetches": int | None,
-        "max_pipeline_llm_calls": int | None,
-        "max_pipeline_output_tokens": int | None,
-        "max_sandbox_seconds": float | None,
-        "max_workspace_bytes": int | None,
-    },
-    "terminal_reason": str | None,
-}
-```
-
-`None` means unlimited. Provider attempts, cache behavior, queueing, retry detail, and actual model
-tokens remain host-side metrics rather than public strategy state.
-
-### `sdk.session.capabilities()`
+### `sdk.capabilities()`
 
 Returns contract versions, search backend support, content/LLM upper limits, and active mechanism
 switches. Generated programs should inspect this record instead of hard-coding deployment maxima.
 
-## State and output
+## Workspace
 
-State paths are workspace-relative and cannot escape the session workspace.
+Artifact paths are workspace-relative and cannot escape the session workspace.
 
 ```python
-sdk.state.write_json(path, value)
-sdk.state.read_json(path)
-sdk.state.write_jsonl(path, rows)
-sdk.state.append_jsonl(path, rows)
-sdk.state.upsert_jsonl(path, rows, key="source") -> int
-sdk.state.read_jsonl(path)
-sdk.state.exists(path) -> bool
-sdk.state.list(prefix="") -> list[str]
+sdk.workspace.write_json(path, value)
+sdk.workspace.read_json(path)
+sdk.workspace.write_jsonl(path, rows)
+sdk.workspace.append_jsonl(path, rows)
+sdk.workspace.upsert_jsonl(path, rows, key="source") -> int
+sdk.workspace.read_jsonl(path)
+sdk.workspace.exists(path) -> bool
+sdk.workspace.list(prefix="") -> list[str]
 ```
 
 `upsert_jsonl` preserves first-seen order and replaces the complete row for an existing key; it is
 not a field-level merge.
 
-```python
-sdk.output.submit(value, *, citations: list[str] | None = None) -> None
-```
+Return bounded results with Python's `print(...)`, carrying exact source strings beside the evidence
+they support. Persist larger structured values with `sdk.workspace` instead of printing full documents
+or ledgers.
 
-Submission atomically writes the current execution output. Citation strings are labels, not broker
-evidence validation. Repeated submissions replace the previous output.
+## 0.8.3 breaking migration
+
+No aliases or deprecation shims are provided. Host usage accounting, execution records, and dashboard
+metrics remain available outside the generated-program SDK.
+
+| 0.8.2 generated-program API | 0.8.3 replacement |
+| --- | --- |
+| `sdk.session.usage()` | Host REST, storage, or dashboard observability |
+| `sdk.session.capabilities()` | `sdk.capabilities()` |
+| `sdk.output.submit(...)` | Bounded `print(...)` and `sdk.workspace` artifacts |
+| `sdk.state.*` | `sdk.workspace.*` |
+
+The broker rejects `session.usage` under capability contract 15. The workspace and capability
+namespace changes add no broker operations. Sandbox contract 14 is unchanged. See the
+[v0.8.3 release notes](opensac-0.8.3.md) for the full boundary.
 
 ## 0.8.2 breaking migration
 
@@ -446,5 +429,4 @@ No aliases or deprecation shims are provided.
 | `content.passages(query, sources, max_per_source)` | keyword `sources=...`, `limit_per_source=...` |
 | `llm.complete_many(...)` | loop over `llm.complete(...)` |
 | legacy broker `llm.extract_many(...)` | SDK `llm.extract_many(...)` over unary `llm.extract` |
-| `state.merge_jsonl(...)` | `state.upsert_jsonl(...)` |
-| `output.submit(output, ...)` | `output.submit(value, ...)` |
+| `state.merge_jsonl(...)` | `workspace.upsert_jsonl(...)` |

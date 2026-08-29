@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from opensac_sdk import BrokerError
 from opensac_sdk._record import Record, record
-from opensac_sdk._resources import SearchResource, StateResource
+from opensac_sdk._resources import SearchResource, WorkspaceResource
 from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 
 from opensac.backends.search import SearchHit
@@ -57,8 +57,8 @@ def _stateful_pattern() -> str:
     return STATEFUL_PROGRAM_PATH.read_text(encoding="utf-8")
 
 
-def _artifact(state: StateResource, name: str) -> str:
-    matches = [path for path in state.list() if path.endswith(f"/{name}")]
+def _artifact(workspace: WorkspaceResource, name: str) -> str:
+    matches = [path for path in workspace.list() if path.endswith(f"/{name}")]
     assert len(matches) == 1
     return matches[0]
 
@@ -370,14 +370,6 @@ class FakeContent:
         )
 
 
-class FakeOutput:
-    def __init__(self) -> None:
-        self.submissions: list[tuple[object, list[str]]] = []
-
-    def submit(self, value: object, *, citations: list[str]) -> None:
-        self.submissions.append((value, citations))
-
-
 def _run_pattern(
     tmp_path: Path,
     *,
@@ -406,19 +398,10 @@ def _run_pattern(
         grep_error=grep_error,
         long_documents=long_documents,
     )
-    output = FakeOutput()
     sdk = SimpleNamespace(
         search=search,
         content=content,
-        output=output,
-        state=StateResource(str(tmp_path)),
-        session=SimpleNamespace(
-            usage=lambda: {
-                "search_calls": 3,
-                "content_fetches": 4,
-                "terminal_reason": None,
-            }
-        ),
+        workspace=WorkspaceResource(str(tmp_path)),
     )
     module = ModuleType("opensac_sdk")
     module.BrokerError = BrokerError
@@ -430,7 +413,7 @@ def _run_pattern(
             search.turn = turn
             content.turn = turn
             exec(compile(source, "<search-as-code-pattern>", "exec"), {})
-    return sdk, content, output, printed.getvalue()
+    return sdk, content, printed.getvalue()
 
 
 def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None:
@@ -444,9 +427,13 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "MCP tool `sac_run(code)`" in flat_skill
     assert "REST sessions" not in flat_skill
     assert "request metadata" not in flat_skill
-    assert "Read usage or deployment capabilities with `sdk.session`" in flat_skill
+    assert "Read deployment capabilities with `sdk.capabilities()`" in flat_skill
+    assert "sdk.session" not in flat_skill
+    assert "sdk.output" not in flat_skill
+    assert "sdk.workspace" in flat_skill
+    assert "sdk.state" not in flat_skill
     assert "state_lost" in flat_skill
-    assert "submitted program was not replayed" in flat_skill
+    assert "program was not replayed" in flat_skill
     assert "execution outcome may be" in flat_skill
     assert "same program blindly" in flat_skill
     assert "Public web URLs" in flat_skill
@@ -465,18 +452,16 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "Issue another search batch only" not in flat_skill
     assert "Once useful authoritative candidates exist" not in flat_skill
     assert "Agent completion is the final response to the user" in flat_skill
-    assert "`submit` is optional" in flat_skill
-    assert "Material claims, evidence, status, and citations" in flat_skill
+    assert "Once printed evidence covers the request" in flat_skill
+    assert "Material claims, evidence, status, and source strings in stdout" in flat_skill
     assert "Prefer a small data cache over a workflow state machine" in flat_skill
     assert "filter repeated queries or sources" in flat_skill
     assert "Keep each cache cumulative" in flat_skill
     assert "Do not print raw result lists, full documents, or the ledger" in flat_skill
     assert "Runtime metrics alone" in flat_skill
-    assert "A final research result must use `submit`" not in flat_skill
     assert "not as new evidence" in flat_skill
-    assert "program-to-program memory" in flat_skill
+    assert "persists structured artifacts between programs" in flat_skill
     assert "observations show artifact paths, not their" in flat_skill
-    assert "no `sdk.workspace` API" in flat_skill
     assert "sdk.content.passages" not in flat_skill
     assert "sdk.content.grep" in flat_skill
     assert "sdk.content.read" in flat_skill
@@ -514,17 +499,18 @@ def test_skill_has_codex_catalog_metadata() -> None:
     assert "$search-as-code" in metadata
 
 
-def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
+def test_contract_documents_mapping_records_and_workspace() -> None:
     contract = CONTRACT_PATH.read_text(encoding="utf-8")
 
     assert "opensac_sdk.types" not in contract
-    assert "There is no public SDK model hierarchy" in contract
     assert "Mapping access is canonical" in contract
     assert "non-colliding fields" in contract
     assert "Fused candidate" in contract
     assert "sdk.content.passages(" not in contract
     assert "structured session-workspace interface" in contract
-    assert "there is no `sdk.workspace` resource" in contract
+    assert "sdk.workspace" in contract
+    assert "sdk.state" not in contract
+    assert "sdk.output" not in contract
     assert "Adapter failures occur outside the sandbox" in contract
     assert "0-based, end-exclusive" in contract
     assert "`read.window.next`" in contract
@@ -533,9 +519,10 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
     assert "sdk.content.fetch(source)" in contract
     assert "sdk.content.fetch_many(sources, *, concurrency=5)" in contract
     assert "Fetch outcome list" in contract
-    assert "never print or submit a complete fetched document" in contract
+    assert "never print a complete fetched document" in contract
     assert "failed rows use `outcome.error`" in contract
     assert "never display or parse search `status` as failure detail" in contract
+    assert "sdk.session" not in contract
 
 
 def test_contract_omits_sdk_capabilities_not_taught_by_the_skill() -> None:
@@ -588,7 +575,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "fuse_rrf(outcomes, k=60)[:8]" in explore
     assert "NEXT:" in explore
     assert "sdk.content.grep(" not in explore
-    assert "sdk.output.submit(" not in explore
+    assert "sdk.output" not in explore
 
     assert "sdk.search.many(" in rank
     assert "sdk.search.fuse_rrf(" in rank
@@ -597,7 +584,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.content.read(" not in rank
     assert "for outcome in fetch_outcomes:" in rank
     assert "for document in documents.values():" in rank
-    assert "sdk.output.submit(" not in rank
+    assert "sdk.output" not in rank
     assert "NEXT:" in rank
     assert "local_evidence" in rank
     assert "[:500]" in rank
@@ -606,16 +593,16 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.search.many(" not in verify
     assert "NEXT:" in verify
     assert '"source": document.source' in verify
-    assert verify.index("sdk.content.fetch_many(") < verify.index("sdk.output.submit(")
+    assert verify.index("sdk.content.fetch_many(") < verify.index("print(")
     assert "sdk.content.grep(" not in verify
     assert "sdk.content.read(" not in verify
     assert "for outcome in fetch_outcomes:" in verify
-    assert verify.count("sdk.output.submit(") == 1
-    assert "structured_output_requested = False" in verify
-    assert "NEXT: synthesize the user-facing answer" in verify
+    assert "sdk.output" not in verify
+    assert "structured_output_requested" not in verify
+    assert "READY: synthesize the user-facing answer" in verify
 
-    assert "sdk.state." not in explore
-    assert "sdk.state." not in verify
+    assert "sdk.workspace." not in explore
+    assert "sdk.workspace." not in verify
 
     assert len(cache.splitlines()) <= 80
     assert "sdk.search." not in cache
@@ -624,52 +611,52 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert '"requested_source": requested_source' in cache
     assert "document.source" in cache
     assert 'cache_row(source, "started")' in cache
-    assert cache.index("sdk.state.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
-    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.state.upsert_jsonl(")
+    assert cache.index("sdk.workspace.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
+    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.workspace.upsert_jsonl(")
 
     assert len(extract.splitlines()) <= 55
     assert "sdk.llm.extract_many(" in extract
     assert "zip(evidence_items, outcomes, strict=True)" in extract
     assert 'quote not in item["text"]' in extract
     assert "sdk.search." not in extract
-    assert "sdk.output.submit(" not in extract
+    assert "sdk.output" not in extract
     assert "followup" not in extract
 
     assert 'root = f"runs/{research_id}"' in stateful
     assert "POOL_LIMIT = 200" in stateful
     assert "CONTENT_BATCH = 40" in stateful
     assert "READ_LIMIT_PER_CONSTRAINT = 6" in stateful
-    assert "sdk.state.upsert_jsonl(pool_path" in stateful
-    assert 'sdk.state.list(f"{root}/")' in stateful
-    assert "sdk.state.write_jsonl(pool_path, bounded_pool)" in stateful
+    assert "sdk.workspace.upsert_jsonl(pool_path" in stateful
+    assert 'sdk.workspace.list(f"{root}/")' in stateful
+    assert "sdk.workspace.write_jsonl(pool_path, bounded_pool)" in stateful
     assert '"requirements": {name: spec["requirement"]' in stateful
     assert '"source_policy": source_policy' in stateful
     assert "ordered_sources" in stateful
     assert "attempted[name]" in stateful
     assert "grep(list(pool)" not in stateful
-    assert "sdk.output.submit(" in stateful
+    assert "sdk.output" not in stateful
+    assert "READY: synthesize" in stateful
 
 
 def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> None:
     program = _cache_pattern()
 
-    sdk, content, output, first = _run_pattern(tmp_path, program=program)
+    sdk, content, first = _run_pattern(tmp_path, program=program)
 
     assert not sdk.search.many_calls
     assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
     assert not content.passage_calls
     assert not content.read_sources
     assert first.count("CACHE status=success") == 2
-    artifact_names = {Path(path).name for path in sdk.state.list()}
+    artifact_names = {Path(path).name for path in sdk.workspace.list()}
     assert artifact_names == {"fetch-cache.jsonl"}
-    cached_content = sdk.state.read_jsonl("fetch-cache.jsonl")
+    cached_content = sdk.workspace.read_jsonl("fetch-cache.jsonl")
     assert {row.requested_source for row in cached_content} == set(content.fetch_sources)
     assert all(row.status == "success" for row in cached_content)
     assert all(row.source == row.requested_source for row in cached_content)
     assert all(row.text for row in cached_content)
-    assert not output.submissions
 
-    resumed_sdk, resumed_content, resumed_output, second = _run_pattern(
+    resumed_sdk, resumed_content, second = _run_pattern(
         tmp_path,
         program=program,
     )
@@ -679,28 +666,26 @@ def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> N
     assert not resumed_content.passage_calls
     assert not resumed_content.read_sources
     assert second.count("CACHE status=success") == 2
-    assert {Path(path).name for path in resumed_sdk.state.list()} == artifact_names
-    assert not resumed_output.submissions
+    assert {Path(path).name for path in resumed_sdk.workspace.list()} == artifact_names
 
 
 def test_stateful_cache_example_persists_item_failures_without_replay(tmp_path: Path) -> None:
     program = _cache_pattern()
 
-    sdk, content, output, first = _run_pattern(
+    sdk, content, first = _run_pattern(
         tmp_path,
         program=program,
         partial_failure=True,
     )
 
     assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
-    cached = {row.requested_source: row for row in sdk.state.read_jsonl("fetch-cache.jsonl")}
+    cached = {row.requested_source: row for row in sdk.workspace.read_jsonl("fetch-cache.jsonl")}
     assert cached["selected-source-url-1"].status == "success"
     assert cached["selected-source-url-2"].status == "failure"
     assert cached["selected-source-url-2"].error.code == "provider_timeout"
     assert "error=provider_timeout" in first
-    assert not output.submissions
 
-    _, resumed_content, _, second = _run_pattern(tmp_path, program=program)
+    _, resumed_content, second = _run_pattern(tmp_path, program=program)
 
     assert not resumed_content.fetch_sources
     assert "status=failure" in second
@@ -709,28 +694,26 @@ def test_stateful_cache_example_persists_item_failures_without_replay(tmp_path: 
 def test_composed_pattern_fetches_only_its_selected_subset_for_local_inspection(
     tmp_path: Path,
 ) -> None:
-    _, content, output, printed = _run_pattern(tmp_path, program=_rank_pattern())
+    _, content, printed = _run_pattern(tmp_path, program=_rank_pattern())
 
     assert 1 <= len(content.fetch_sources) <= 4
     assert not content.passage_calls
     assert not content.grep_calls
     assert not content.read_sources
     assert "select another small relevant batch" in printed
-    assert not output.submissions
 
 
 def test_explore_pattern_stops_for_model_judgment(tmp_path: Path) -> None:
-    _, content, output, printed = _run_pattern(tmp_path, program=_explore_pattern())
+    _, content, printed = _run_pattern(tmp_path, program=_explore_pattern())
 
     lines = printed.strip().splitlines()
     assert 1 <= sum(line.startswith("CANDIDATE ") for line in lines) <= 8
     assert lines[-1].startswith("NEXT: choose a small relevant subset")
     assert not content.grep_calls
-    assert not output.submissions
 
 
 def test_verify_pattern_returns_runtime_evidence_for_model_synthesis(tmp_path: Path) -> None:
-    _, content, output, printed = _run_pattern(tmp_path, program=_verify_pattern())
+    sdk, content, printed = _run_pattern(tmp_path, program=_verify_pattern())
 
     assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
     assert not content.grep_calls
@@ -738,31 +721,13 @@ def test_verify_pattern_returns_runtime_evidence_for_model_synthesis(tmp_path: P
     assert "EVIDENCE phrase:" in printed
     assert "EVIDENCE year:" in printed
     assert printed.strip().endswith(
-        "NEXT: synthesize the user-facing answer from this verified evidence"
+        "READY: synthesize the user-facing answer from this verified evidence"
     )
-    assert not output.submissions
-
-
-def test_verify_pattern_submits_runtime_evidence_when_requested(tmp_path: Path) -> None:
-    program = _verify_pattern().replace(
-        "structured_output_requested = False",
-        "structured_output_requested = True",
-    )
-    _, content, output, printed = _run_pattern(tmp_path, program=program)
-
-    assert printed == ""
-    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
-    assert not content.grep_calls
-    assert not content.read_sources
-    assert len(output.submissions) == 1
-    submitted, citations = output.submissions[0]
-    assert {row["constraint"] for row in submitted["evidence"]} == {"phrase", "year"}
-    assert citations
-    assert all(isinstance(citation, str) for citation in citations)
+    assert not hasattr(sdk, "output")
 
 
 def test_verify_pattern_ends_in_next_when_model_judgment_is_needed(tmp_path: Path) -> None:
-    _, _, output, printed = _run_pattern(
+    _, _, printed = _run_pattern(
         tmp_path,
         program=_verify_pattern(),
         missing_year=True,
@@ -772,11 +737,10 @@ def test_verify_pattern_ends_in_next_when_model_judgment_is_needed(tmp_path: Pat
     assert lines[0].startswith("EVIDENCE phrase:")
     assert lines[-1].startswith("NEXT:")
     assert "missing=['year']" in lines[-1]
-    assert not output.submissions
 
 
 def test_verify_pattern_keeps_evidence_after_one_fetch_fails(tmp_path: Path) -> None:
-    _, content, output, printed = _run_pattern(
+    _, content, printed = _run_pattern(
         tmp_path,
         program=_verify_pattern(),
         partial_failure=True,
@@ -786,11 +750,10 @@ def test_verify_pattern_keeps_evidence_after_one_fetch_fails(tmp_path: Path) -> 
     assert "EVIDENCE phrase:" in printed
     assert "selected-source-url-2:fetch:provider_timeout" in printed
     assert "missing=['year']" in printed
-    assert not output.submissions
 
 
 def test_verify_pattern_bounds_whole_document_output(tmp_path: Path) -> None:
-    _, content, output, printed = _run_pattern(
+    _, content, printed = _run_pattern(
         tmp_path,
         program=_verify_pattern(),
         long_documents=True,
@@ -802,13 +765,14 @@ def test_verify_pattern_bounds_whole_document_output(tmp_path: Path) -> None:
     assert len(printed) < 4_000
     assert "x" * 1_000 not in printed
     assert "y" * 1_000 not in printed
-    assert not output.submissions
 
 
-def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -> None:
-    sdk, content, output, printed = _run_pattern(tmp_path)
+def test_pattern_keeps_one_ranked_pool_and_prints_sources_for_read_passages(
+    tmp_path: Path,
+) -> None:
+    sdk, content, printed = _run_pattern(tmp_path)
 
-    pool = sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
+    pool = sdk.workspace.read_jsonl(_artifact(sdk.workspace, "pool.jsonl"))
     assert len(pool) == 4
     assert pool[0].source == "doc_consensus"
     assert set(pool[0]) == {
@@ -821,55 +785,53 @@ def test_pattern_keeps_one_ranked_pool_and_cites_read_passages(tmp_path: Path) -
     }
     assert content.grep_widths == [4, 4]
     assert "pool=4" in printed
-    assert "doc_" not in printed
 
-    evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
+    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
     assert set(evidence) == {"phrase", "year"}
-    assert len(output.submissions) == 1
-    _, citations = output.submissions[0]
-    assert citations == list(dict.fromkeys(row.source for row in evidence.values()))
+    assert all(row.source in printed for row in evidence.values())
+    assert "READY: synthesize" in printed
 
 
 def test_pattern_pool_score_is_idempotent_across_replayed_stages(tmp_path: Path) -> None:
-    sdk, _, _, _ = _run_pattern(tmp_path)
-    pool_path = _artifact(sdk.state, "pool.jsonl")
-    first = {row.source: row.score for row in sdk.state.read_jsonl(pool_path)}
+    sdk, _, _ = _run_pattern(tmp_path)
+    pool_path = _artifact(sdk.workspace, "pool.jsonl")
+    first = {row.source: row.score for row in sdk.workspace.read_jsonl(pool_path)}
 
-    sdk, _, _, _ = _run_pattern(tmp_path, turns=2)
+    sdk, _, _ = _run_pattern(tmp_path, turns=2)
     replayed = {
-        row.source: row.score for row in sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
+        row.source: row.score
+        for row in sdk.workspace.read_jsonl(_artifact(sdk.workspace, "pool.jsonl"))
     }
 
     assert replayed == first
 
 
-def test_pattern_does_not_submit_with_an_unsupported_constraint(tmp_path: Path) -> None:
-    sdk, _, output, printed = _run_pattern(tmp_path, missing_year=True)
+def test_pattern_does_not_emit_ready_with_an_unsupported_constraint(tmp_path: Path) -> None:
+    sdk, _, printed = _run_pattern(tmp_path, missing_year=True)
 
     assert "unsupported: ['year']" in printed
-    assert not output.submissions
-    evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
+    assert "READY:" not in printed
+    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
     assert set(evidence) == {"phrase"}
-    attempts = sdk.state.read_json(_artifact(sdk.state, "attempts.json"))
+    attempts = sdk.workspace.read_json(_artifact(sdk.workspace, "attempts.json"))
     assert attempts.year.fingerprint
     assert attempts.year.sources
 
 
 def test_pattern_verifies_far_apart_constraints_in_the_same_document(tmp_path: Path) -> None:
-    sdk, _, output, _ = _run_pattern(tmp_path, same_source=True)
+    sdk, _, printed = _run_pattern(tmp_path, same_source=True)
 
-    evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
+    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
     assert {row.source for row in evidence.values()} == {"doc_consensus"}
     assert all(
         set(row) == {"fingerprint", "requirement", "source", "text"} for row in evidence.values()
     )
-    assert len(output.submissions) == 1
-    _, citations = output.submissions[0]
-    assert citations == ["doc_consensus"]
+    assert "source='doc_consensus'" in printed
+    assert "READY: synthesize" in printed
 
 
 def test_pattern_unions_new_evidence_across_turns(tmp_path: Path) -> None:
-    sdk, _, output, printed = _run_pattern(
+    sdk, _, printed = _run_pattern(
         tmp_path,
         year_from_turn=2,
         turns=2,
@@ -877,25 +839,24 @@ def test_pattern_unions_new_evidence_across_turns(tmp_path: Path) -> None:
     )
 
     assert "unsupported: ['year']" in printed
-    assert len(output.submissions) == 1
-    submitted, citations = output.submissions[0]
-    assert {row["constraint"] for row in submitted["evidence"]} == {"phrase", "year"}
-    assert len(citations) == 2
-    evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
+    assert "EVIDENCE phrase:" in printed
+    assert "EVIDENCE year:" in printed
+    assert "READY: synthesize" in printed
+    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
     assert set(evidence) == {"phrase", "year"}
     assert evidence.phrase.source.startswith("doc_turn_1_")
     assert evidence.year.source.startswith("doc_turn_2_")
 
 
 def test_pattern_reports_partial_fetch_failure_and_keeps_matches(tmp_path: Path) -> None:
-    _, _, output, printed = _run_pattern(tmp_path, partial_failure=True)
+    _, _, printed = _run_pattern(tmp_path, partial_failure=True)
 
     assert "failure[provider_timeout]" in printed
-    assert len(output.submissions) == 1
+    assert "READY: synthesize" in printed
 
 
 def test_pattern_bounds_pool_and_content_batches(tmp_path: Path) -> None:
-    sdk, content, output, _ = _run_pattern(
+    sdk, content, _ = _run_pattern(
         tmp_path,
         turns=9,
         no_matches=True,
@@ -903,15 +864,14 @@ def test_pattern_bounds_pool_and_content_batches(tmp_path: Path) -> None:
         hits_per_query=10,
     )
 
-    pool = sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
+    pool = sdk.workspace.read_jsonl(_artifact(sdk.workspace, "pool.jsonl"))
     assert len(pool) == 200
     assert content.grep_widths
     assert max(content.grep_widths) <= 40
-    assert not output.submissions
 
 
 def test_pattern_does_not_rescan_attempted_sources(tmp_path: Path) -> None:
-    _, content, output, printed = _run_pattern(
+    _, content, printed = _run_pattern(
         tmp_path,
         turns=2,
         missing_year=True,
@@ -920,11 +880,10 @@ def test_pattern_does_not_rescan_attempted_sources(tmp_path: Path) -> None:
     year_calls = [sources for pattern, sources in content.grep_calls if "1998" in pattern]
     assert len(year_calls) == 1
     assert "year: no untried candidates; change the queries" in printed
-    assert not output.submissions
 
 
 def test_pattern_does_not_replay_sources_after_call_wide_content_failure(tmp_path: Path) -> None:
-    _, content, output, printed = _run_pattern(
+    _, content, printed = _run_pattern(
         tmp_path,
         turns=2,
         grep_error=True,
@@ -933,10 +892,9 @@ def test_pattern_does_not_replay_sources_after_call_wide_content_failure(tmp_pat
     assert len(content.grep_calls) == 2
     assert printed.count("code=provider_unavailable") == 2
     assert printed.count("no untried candidates; change the queries") == 2
-    assert not output.submissions
 
 
-def test_pattern_isolates_a_changed_task_in_a_new_state_namespace(tmp_path: Path) -> None:
+def test_pattern_isolates_a_changed_task_in_a_new_workspace_namespace(tmp_path: Path) -> None:
     original = _stateful_pattern()
     changed = original.replace(
         "Identify the target entity and verify the requested phrase and year.",
@@ -945,10 +903,10 @@ def test_pattern_isolates_a_changed_task_in_a_new_state_namespace(tmp_path: Path
     assert changed != original
 
     _run_pattern(tmp_path, program=original)
-    sdk, _, _, _ = _run_pattern(tmp_path, program=changed)
+    sdk, _, _ = _run_pattern(tmp_path, program=changed)
 
-    pools = [path for path in sdk.state.list() if path.endswith("/pool.jsonl")]
-    manifests = [path for path in sdk.state.list() if path.endswith("/manifest.json")]
+    pools = [path for path in sdk.workspace.list() if path.endswith("/pool.jsonl")]
+    manifests = [path for path in sdk.workspace.list() if path.endswith("/manifest.json")]
     assert len(pools) == 2
     assert len(manifests) == 2
 
@@ -962,11 +920,11 @@ def test_pattern_revalidates_changed_regex_in_the_same_namespace(tmp_path: Path)
     assert changed != original
 
     _run_pattern(tmp_path, program=original)
-    sdk, content, output, _ = _run_pattern(tmp_path, program=changed)
+    sdk, content, printed = _run_pattern(tmp_path, program=changed)
 
-    assert len([path for path in sdk.state.list() if path.endswith("/pool.jsonl")]) == 1
-    assert len([path for path in sdk.state.list() if path.endswith("/manifest.json")]) == 1
+    assert len([path for path in sdk.workspace.list() if path.endswith("/pool.jsonl")]) == 1
+    assert len([path for path in sdk.workspace.list() if path.endswith("/manifest.json")]) == 1
     assert any(pattern == "target phrase" for pattern, _ in content.grep_calls)
-    evidence = sdk.state.read_json(_artifact(sdk.state, "evidence.json"))
+    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
     assert set(evidence) == {"phrase", "year"}
-    assert len(output.submissions) == 1
+    assert "READY: synthesize" in printed

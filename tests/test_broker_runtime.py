@@ -368,19 +368,19 @@ async def test_broker_rejects_missing_or_mismatched_capability_contract(tmp_path
         with httpx.Client(transport=transport, base_url="http://opensac") as client:
             return client.post(
                 "/v1/call",
-                json={"method": "session.usage", "params": {}},
+                json={"method": "session.capabilities", "params": {}},
                 headers=headers,
             )
 
     try:
-        for reported_contract in (None, "13"):
+        for reported_contract in (None, "14"):
             response = await asyncio.to_thread(raw_call, reported_contract)
             assert response.status_code == 200
             payload = response.json()
-            assert payload["capability_contract"] == 14
+            assert payload["capability_contract"] == 15
             assert payload["ok"] is False
             assert payload["error"]["code"] == "capability_contract_mismatch"
-            assert "broker requires 14" in payload["error"]["message"]
+            assert "broker requires 15" in payload["error"]["message"]
     finally:
         await runtime.stop()
 
@@ -418,9 +418,14 @@ async def test_broker_round_trip_returns_contract_v2_errors(tmp_path) -> None:
         assert raised.value.code == "invalid_request"
         assert raised.value.retryable is False
 
+        with pytest.raises(BrokerError, match="Unsupported capability") as raised:
+            await asyncio.to_thread(transport.call, "session.usage", {})
+        assert raised.value.code == "invalid_request"
+        assert raised.value.retryable is False
+
         denied = UnixSocketTransport(str(runtime.socket_path), "unknown-token")
         with pytest.raises(BrokerError, match="Unknown or expired") as raised:
-            await asyncio.to_thread(denied.call, "session.usage", {})
+            await asyncio.to_thread(denied.call, "session.capabilities", {})
         assert raised.value.code == "permission_denied"
         assert raised.value.retryable is False
         assert raised.value.attempts == 0

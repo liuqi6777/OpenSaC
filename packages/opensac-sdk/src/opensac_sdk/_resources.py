@@ -11,7 +11,6 @@ from ._diagnostics import (
     failure_detail,
     failure_status,
     record_external_failures,
-    write_submission,
 )
 from ._json import atomic_write_text, strict_json_dumps, strict_jsonl_dumps
 from ._many import _ManyFailure, _ManySuccess, _run_many
@@ -633,7 +632,7 @@ class ContentResource:
         Returns:
             A document containing ``source``, ``title``, ``date``, ``text``, and
             provider-owned ``metadata``. Reuse it locally for several checks, optionally persist
-            one copy with ``sdk.state``, and never print the complete text.
+            one copy with ``sdk.workspace``, and never print the complete text.
 
         Raises:
             BrokerError: The source could not be fetched.
@@ -1095,25 +1094,13 @@ class LLMResource:
         strict_json_dumps(value, field=field)
 
 
-class SessionResource:
-    """Inspect strategy usage and remaining hard allowances for this session."""
+class CapabilitiesResource:
+    """Inspect session-visible deployment capabilities and contract versions."""
 
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
-    def usage(self) -> Record:
-        """Return current capability spend, remaining budgets, and terminal state.
-
-        Returns:
-            Core logical counters, reserved output tokens, sandbox/workspace use,
-            ``budget_remaining``, and ``terminal_reason``.
-
-        Raises:
-            BrokerError: Session usage cannot be read.
-        """
-        return self._transport.call("session.usage", {})
-
-    def capabilities(self) -> Record:
+    def __call__(self) -> Record:
         """Return session-visible capabilities, limits, and contract versions.
 
         The record reflects the active backend and this session's mechanism
@@ -1122,12 +1109,13 @@ class SessionResource:
         return self._transport.call("session.capabilities", {})
 
 
-class StateResource:
-    """Persist JSON and JSONL artifacts across executions in one live session.
+class WorkspaceResource:
+    """Persist structured artifacts across executions in one live session.
 
-    Paths are workspace-relative and cannot escape the session workspace. State is
-    program memory, not a database; local document sources become invalid if the
-    host reports ``state_lost``. Public web URLs remain meaningful across sessions.
+    Paths are workspace-relative and cannot escape the session workspace. The
+    workspace is program memory, not a database; local document sources become
+    invalid if the host reports ``state_lost``. Public web URLs remain meaningful
+    across sessions.
     """
 
     def __init__(self, workspace: str | None) -> None:
@@ -1142,7 +1130,7 @@ class StateResource:
         workspace = self._workspace_path()
         path = (workspace / relative_path).resolve()
         if not path.is_relative_to(workspace):
-            raise ValueError("State path must remain inside the session workspace")
+            raise ValueError("Workspace path must remain inside the session workspace")
         return path
 
     @staticmethod
@@ -1165,7 +1153,7 @@ class StateResource:
         """Append rows to a JSONL artifact without reading or rewriting it.
 
         The file and parent directories are created when absent. This operation does
-        not deduplicate rows; use ``upsert_jsonl`` for keyed state.
+        not deduplicate rows; use ``upsert_jsonl`` for keyed rows.
 
         Raises:
             ValueError: The path escapes the workspace.
@@ -1212,7 +1200,7 @@ class StateResource:
         return len(merged)
 
     def exists(self, relative_path: str) -> bool:
-        """Return whether a workspace-relative state file exists.
+        """Return whether a workspace-relative artifact exists.
 
         Raises:
             ValueError: The path escapes the workspace.
@@ -1271,55 +1259,5 @@ class StateResource:
         return wrap(json.loads(self._path(relative_path).read_text(encoding="utf-8")))
 
     @classmethod
-    def from_environment(cls) -> StateResource:
-        return cls(None)
-
-
-class OutputResource:
-    """Submit the final structured result and optional source strings."""
-
-    def __init__(self, output_path: str | None) -> None:
-        self._output_path = Path(output_path) if output_path is not None else None
-
-    def _path(self) -> Path:
-        if self._output_path is not None:
-            return self._output_path
-        return Path(os.environ.get("OPENSAC_OUTPUT_PATH", "/workspace/.opensac-output.json"))
-
-    def submit(
-        self,
-        value: Any,
-        *,
-        citations: list[str] | None = None,
-    ) -> None:
-        """Write the final output artifact with optional URL/source labels.
-
-        Citations are unverified source declarations. They are not resolved by the
-        broker and do not claim that OpenSAC validated a source against the answer.
-
-        Raises:
-            ValueError: Citations are malformed or exceed the local bound.
-        """
-        if citations is not None and not isinstance(citations, list):
-            raise ValueError("citations must be a list of source strings")
-        if citations is not None and len(citations) > 256:
-            raise ValueError("citations must contain at most 256 source strings")
-        sources = [self._citation(item, index) for index, item in enumerate(citations or [])]
-        write_submission(self._path(), value, sources)
-
-    @staticmethod
-    def _citation(item: Any, input_index: int) -> str:
-        if not isinstance(item, str):
-            raise ValueError(f"citation at input index {input_index} must be a string")
-        source = item.strip()
-        if not source:
-            raise ValueError(f"citation at input index {input_index} must not be empty")
-        if len(source) > 4096:
-            raise ValueError(
-                f"citation at input index {input_index} must be at most 4096 characters"
-            )
-        return source
-
-    @classmethod
-    def from_environment(cls) -> OutputResource:
+    def from_environment(cls) -> WorkspaceResource:
         return cls(None)

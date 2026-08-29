@@ -31,7 +31,7 @@ EXECUTION_MODES = frozenset({"program", "persistent_interpreter"})
 STATE_LOST_OBSERVATION = (
     "[sac_run] state_lost: The OpenSAC session expired, its worker restarted, or its "
     "persistent interpreter was lost. "
-    "The submitted program was not replayed. The next sac_run call will start in a "
+    "The program was not replayed. The next sac_run call will start in a "
     "clean session."
 )
 EXEC_INDETERMINATE_OBSERVATION = (
@@ -40,7 +40,7 @@ EXEC_INDETERMINATE_OBSERVATION = (
 )
 EXEC_ID_CONFLICT_OBSERVATION = (
     "[sac_run] exec_id_conflict: The MCP request identifier was already used for a "
-    "different program. The submitted program was not run."
+    "different program. The program was not run."
 )
 EXEC_OUTCOME_UNKNOWN_OBSERVATION = (
     "[sac_run] execution_outcome_unknown: OpenSAC did not return a result after a "

@@ -53,7 +53,7 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert "workspace" not in payload
         assert "limits" not in payload
         assert set(payload["features"]) == {
-            "capability_contract_v14",
+            "capability_contract_v15",
             "external_failure_warnings_v1",
             "content_passages_v1",
             "provider_reliability_v1",
@@ -78,9 +78,9 @@ def test_public_session_api_hides_capability_token(tmp_path) -> None:
         assert payload["environment"]["backend_metadata_hash"] == "sha256:index-manifest"
         assert payload["environment"]["search_backend"] == "local"
         assert payload["environment"]["sandbox_contract"] == 14
-        assert payload["environment"]["capability_contract"] == 14
+        assert payload["environment"]["capability_contract"] == 15
         sdk_capabilities = payload["environment"]["sdk_capabilities"]
-        assert sdk_capabilities["contracts"] == {"sandbox": 14, "capability": 14}
+        assert sdk_capabilities["contracts"] == {"sandbox": 14, "capability": 15}
         assert sdk_capabilities["search"]["backend"] == "local"
         assert sdk_capabilities["search"]["supports_include_domains"] is False
         assert sdk_capabilities["llm"]["available"] is False
@@ -245,7 +245,7 @@ def test_openapi_exposes_exec_but_no_internal_run_routes(tmp_path) -> None:
         schema = client.get("/openapi.json").json()
         paths = schema["paths"]
 
-    assert schema["info"]["version"] == "0.8.2"
+    assert schema["info"]["version"] == "0.8.3"
     assert "/v1/sessions/{session_id}/exec" in paths
     assert all("/runs" not in path for path in paths)
 

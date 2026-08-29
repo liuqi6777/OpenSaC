@@ -43,7 +43,7 @@ class SessionRoutes:
     def public(self, session: Session) -> PublicSession:
         capabilities = list(self.runtime.broker.available_methods(session.mechanisms))
         features = [
-            "capability_contract_v14",
+            "capability_contract_v15",
             "external_failure_warnings_v1",
             "content_passages_v1",
             "provider_reliability_v1",

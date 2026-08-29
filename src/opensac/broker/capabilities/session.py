@@ -25,25 +25,6 @@ class SessionCapabilities(BaseCapabilities):
     def from_context(cls, context: CapabilityBuildContext) -> Self:
         return cls(context.session_manifest)
 
-    @capability_method("session.usage", EmptyRequest)
-    async def usage(
-        self,
-        state: BrokerSession,
-        _request: EmptyRequest,
-    ) -> dict[str, Any]:
-        usage = state.policy.usage
-        return {
-            "exec_calls": usage.exec_calls,
-            "search_calls": usage.search_calls,
-            "content_fetches": usage.content_fetches,
-            "llm_calls": usage.llm_calls,
-            "pipeline_output_tokens_reserved": usage.pipeline_output_tokens_reserved,
-            "sandbox_seconds": usage.sandbox_seconds,
-            "workspace_bytes": usage.workspace_bytes,
-            "budget_remaining": state.policy.remaining(),
-            "terminal_reason": state.policy.terminal_reason,
-        }
-
     @capability_method("session.capabilities", EmptyRequest)
     async def capabilities(
         self,

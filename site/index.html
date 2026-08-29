@@ -81,7 +81,7 @@
           OpenSAC lets an external research agent express search as a Python program instead of a
           sequence of fixed tool calls. A generated program can batch queries, inspect documents,
           filter and fuse candidates, extract structured data, persist intermediate state, and
-          submit cited output. OpenSAC executes the program in an isolated Docker sandbox and
+          print source-scoped results. OpenSAC executes the program in an isolated Docker sandbox and
           mediates every privileged operation through a capability broker. The system implements
           the public <em>Search as Code</em> abstraction as an open, inspectable runtime for
           controlled research; it does not attempt to reconstruct any proprietary search engine.
@@ -156,7 +156,7 @@
           <figcaption>
             <strong>Figure 1.</strong> The external agent generates an ordinary Python program.
             OpenSAC runs it without network access or provider credentials; privileged operations
-            cross an authenticated broker boundary, and only explicitly submitted output returns.
+            cross an authenticated broker boundary, and only bounded stdout returns to the agent.
           </figcaption>
         </figure>
       </section>
@@ -174,8 +174,8 @@
           </p>
           <p>
             Generated code provides ordinary control flow and a local workspace. Large intermediate
-            results can stay off-context while the final output remains explicit, structured, and
-            attributable to readable source URLs.
+            results can stay off-context while the bounded handoff remains explicit and attributable
+            to readable source URLs.
           </p>
         </div>
 
@@ -233,19 +233,14 @@
               <p role="cell">Optional schema-checked extraction and model calls.</p>
             </div>
             <div class="sdk-row" role="row">
-              <code role="cell">sdk.state</code>
-              <span role="cell">JSON · JSONL · workspace</span>
-              <p role="cell">Persist explicit state across executions in one session.</p>
+              <code role="cell">sdk.workspace</code>
+              <span role="cell">JSON · JSONL · artifacts</span>
+              <p role="cell">Persist structured artifacts across executions in one session.</p>
             </div>
             <div class="sdk-row" role="row">
-              <code role="cell">sdk.session</code>
-              <span role="cell">usage · capabilities</span>
-              <p role="cell">Inspect usage, active contracts, budgets, and limits.</p>
-            </div>
-            <div class="sdk-row" role="row">
-              <code role="cell">sdk.output</code>
-              <span role="cell">submit</span>
-              <p role="cell">Return structured output with optional source labels.</p>
+              <code role="cell">sdk.capabilities()</code>
+              <span role="cell">top-level call</span>
+              <p role="cell">Inspect active contracts, mechanisms, and deployment limits.</p>
             </div>
           </div>
         </div>
@@ -272,8 +267,9 @@ results = sdk.search.many(queries)
 evidence = sdk.search.fuse_rrf(results)
 
 selected = [hit <span class="kw">for</span> hit <span class="kw">in</span> evidence <span class="kw">if</span> hit.score &gt; <span class="num">0.1</span>]
-sdk.state.write_json(<span class="str">"evidence.json"</span>, selected)
-sdk.output.submit({<span class="str">"evidence"</span>: selected[:<span class="num">8</span>]})</code></pre>
+sdk.workspace.write_json(<span class="str">"evidence.json"</span>, selected)
+<span class="kw">for</span> hit <span class="kw">in</span> selected[:<span class="num">8</span>]:
+    print(<span class="str">f"EVIDENCE source={hit.source!r} title={hit.title!r}"</span>)</code></pre>
         </div>
         <div class="example-links">
           <a href="https://github.com/liuqi6777/OpenSaC/blob/main/docs/deployment.md">Deployment guide <span>↗</span></a>

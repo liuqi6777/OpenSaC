@@ -1,6 +1,6 @@
 ---
 name: search-as-code
-description: Run evidence-grounded research with OpenSAC through the sac_run MCP tool. Use when sac_run is available for programmable search, source discovery, document inspection, fact checking, structured extraction, stateful multi-call research, or URL-cited structured results.
+description: Run evidence-grounded research with OpenSAC through the sac_run MCP tool. Use when sac_run is available for programmable search, source discovery, document inspection, fact checking, structured extraction, persistent multi-call research, or URL-cited structured results.
 ---
 
 # Search as Code
@@ -18,12 +18,11 @@ count, capability sequence, stage split, or workspace schema is required.
 - Never print whole content documents.
 - Treat optional `sdk.llm.extract(...)` or aligned `sdk.llm.extract_many(...)` as transformation,
   not as new evidence. Validate quotes against their inputs.
-- Read usage or deployment capabilities with `sdk.session` when needed, and use `sdk.state` for
-  artifacts. Use `sdk.output.submit(...)` only for a complete runtime result needed through
-  `ExecResult.output`.
+- Read deployment capabilities with `sdk.capabilities()` when needed, and use `sdk.workspace` for
+  artifacts. Return bounded results with `print(...)`.
 
 Read [references/sdk-contract.md](references/sdk-contract.md) for unfamiliar methods, failures,
-limits, or citations. Inspect one method's `__doc__` when necessary.
+limits, or lifecycle semantics. Inspect one method's `__doc__` when necessary.
 
 ## Ground claims in inspected evidence
 
@@ -33,7 +32,7 @@ limits, or citations. Inspect one method's `__doc__` when necessary.
   supports only a discovery list.
 - Treat mirrors, repeated catalog records, and RRF agreement as one source family, not independent
   corroboration.
-- Generate optional citation labels from inspected evidence; submission does not validate them.
+- Carry exact source URLs or local IDs beside the printed evidence they support.
 - Treat search hits and fused results as candidates, not a fetch queue. From their titles, snippets,
   provenance, source quality, and the unresolved requirements, choose the smallest source-diverse
   set likely to add evidence. Do not fetch the whole result list; expand with another relevant batch
@@ -76,14 +75,15 @@ available to that program. Choose new inputs yourself.
   than `None` where a mapping is expected. Capture excerpts and coordinates while handling the
   content result instead of rediscovering them later with formatting-sensitive regexes.
 
-## Use state as a lightweight reusable data layer
+## Use the workspace as a lightweight reusable data layer
 
-Variables do not survive program mode. `sdk.state` is program-to-program memory; there is no
-`sdk.workspace` API. Prefer one composed program or a bounded visible decision surface when enough.
+Variables do not survive program mode. `sdk.workspace` persists structured artifacts between
+programs. Prefer one composed program or a bounded visible decision surface when enough.
 
-Use `sdk.state` only when later programs benefit from reusing data. Prefer a small data cache over a
-workflow state machine. Load its rows to filter prior queries and fetched sources; observations show
-artifact paths, not their contents. Avoid duplicate raw reports and per-stage ledgers.
+Use `sdk.workspace` only when later programs benefit from reusing data. Prefer a small data cache
+over a workflow state machine. Load its rows to filter prior queries and fetched sources;
+observations show artifact paths, not their contents. Avoid duplicate raw reports and per-stage
+ledgers.
 
 Keep each cache cumulative and update its rows by stable keys. Print bounded target excerpts or
 explicit no-match/failure summaries when storing content; do not add a program merely to reload and
@@ -92,27 +92,25 @@ print it.
 For recoverable multi-call work, persist an operation as `started` before an expensive external call
 when avoiding blind replay matters. Immediately after the call, persist each input as `success` or
 `failure` before running further transformations. A surviving `started` status means the outcome may
-be unknown and must be reconciled from state and usage, not blindly replayed. Use the returned
-document source as the stable content key and retain requested URL variants only as aliases.
+be unknown and must be reconciled from durable workspace data, not blindly replayed. Use the
+returned document source as the stable content key and retain requested URL variants only as aliases.
 
 For executable recovery ordering, read the
 [optional durable fetch-cache pattern](references/patterns.md#optionally-cache-selected-fetches-across-calls).
 
-## Return observations and optional structured output
+## Return bounded observations
 
 - Print compact progress, the bounded decision surface needed for the next judgment, and a `NEXT:`
-  action. Do not print raw result lists, full documents, or the ledger; persist them. Keep stdout under
-  about 4,000 characters across the whole program, not independently per query or loop. Prefer a few
-  nonredundant excerpts that together expose the remaining decision.
-- Agent completion is the final response to the user, not `sdk.output.submit(...)`.
-- `submit` is optional. Use it for requested or downstream-consumed structured runtime output.
-- Material claims, evidence, status, and citations in a submission must derive from capability
-  results or loaded state. Runtime metrics alone do not make hand-authored prose program-derived.
-  If the same substantive payload could be written before research ran, do not submit it.
-- Do not submit partial progress or run a separate program merely to reformat visible evidence.
+  action. Do not print raw result lists, full documents, or the ledger; persist them. Include exact
+  source strings beside evidence. Keep stdout under about 4,000 characters across the whole program,
+  not independently per query or loop. Prefer a few nonredundant excerpts that expose the decision.
+- Agent completion is the final response to the user. Once printed evidence covers the request and no
+  unresolved `NEXT:` remains, answer directly without a separate finalization program.
+- Material claims, evidence, status, and source strings in stdout must derive from capability results
+  or loaded workspace data. Runtime metrics alone do not make hand-authored prose program-derived.
 
-Before answering or submitting, require inspected evidence for each material constraint, derive its
-citations, and preserve conflicts. Compute status from requirement coverage, not an expected answer;
+Before answering, require inspected evidence for each material constraint, retain its source, and
+preserve conflicts. Compute status from requirement coverage, not an expected answer;
 use answered, partial, inconclusive, or externally blocked as appropriate.
 
 ## Handle failures and state loss
@@ -127,10 +125,11 @@ An intermediate caught `BrokerError` must leave the stage incomplete with `ERROR
 host policy own retries; do not retry blindly.
 
 Public web URLs remain reusable across sessions; local IDs remain session-bound. If `sac_run`
-returns `state_lost`, the submitted program was not replayed; rebuild state and local-ID admission.
-Adapter failures occur outside the sandbox, so their execution outcome may be unknown. Inspect state
-and usage instead of replaying the same program blindly; report OpenSAC unavailable after repeated
-inspection failure.
+returns `state_lost`, the program was not replayed; rebuild workspace artifacts and local-ID
+admission.
+Adapter failures occur outside the sandbox, so their execution outcome may be unknown. Inspect
+durable workspace data instead of replaying the same program blindly; if it cannot prove the work
+is missing, report the outcome as unknown.
 
 ## Load examples only when useful
 

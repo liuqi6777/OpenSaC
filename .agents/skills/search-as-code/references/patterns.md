@@ -2,7 +2,7 @@
 
 These programs are independent, adaptable examples, not a required pipeline. Combine, split, skip,
 or reorder them when the task calls for a different strategy. Only the final optional pattern uses
-state, for a result that a later program will reuse.
+workspace artifacts, for a result that a later program will reuse.
 
 ## Example building blocks
 
@@ -142,8 +142,7 @@ Use a small exact source set chosen from exploration. Fetch is always the first 
 each source: this example fetches each selected source once and runs all checks locally. Do not spend
 additional content operations merely to rediscover or reformat text already returned by fetch.
 Persist one full-text copy only when a later program will reuse it. Complete text stays local. The
-program returns bounded runtime evidence by default and submits it only when the caller or downstream
-contract needs `ExecResult.output`.
+program prints bounded, source-scoped runtime evidence for the calling agent.
 
 ```python
 import re
@@ -151,7 +150,6 @@ import re
 from opensac_sdk import BrokerError, sdk
 
 sources = ["selected-source-url-1", "selected-source-url-2"]
-structured_output_requested = False
 checks = {
     "phrase": r"(target phrase|other spelling)",
     "year": r"\b(1998|1999)\b",
@@ -206,29 +204,12 @@ if missing:
         )
     print(f"NEXT: revise sources/checks for missing={missing}; problems={problems[:4]}")
 else:
-    result = {
-        "evidence": [
-            {
-                "constraint": name,
-                "source": row["source"],
-                "text": row["text"],
-                "coordinates": row["coordinates"],
-            }
-            for name, row in evidence.items()
-        ]
-    }
-    if structured_output_requested:
-        sdk.output.submit(
-            result,
-            citations=list(dict.fromkeys(row["source"] for row in evidence.values())),
+    for name, row in evidence.items():
+        print(
+            f"EVIDENCE {name}: source={row['source']!r} "
+            f"coordinates={row['coordinates']!r} text={row['text']!r}"
         )
-    else:
-        for item in result["evidence"]:
-            print(
-                f"EVIDENCE {item['constraint']}: source={item['source']!r} "
-                f"coordinates={item['coordinates']!r} text={item['text']!r}"
-            )
-        print("NEXT: synthesize the user-facing answer from this verified evidence")
+    print("READY: synthesize the user-facing answer from this verified evidence")
 ```
 
 Use a relation-specific check. If text presence alone cannot verify the requested relationship,
@@ -280,9 +261,7 @@ else:
         if not quote or quote not in item["text"]:
             failures.append({"source": item["source"], "code": "quote_not_in_input"})
             continue
-        verified.append(
-            {"source": item["source"], "claim": outcome.data["claim"], "quote": quote}
-        )
+        verified.append({"source": item["source"], "claim": outcome.data["claim"], "quote": quote})
 
     for row in verified:
         print(f"EXTRACTED source={row['source']!r} claim={row['claim']!r} quote={row['quote']!r}")
@@ -313,12 +292,12 @@ def cache_row(requested_source, status, *, document=None, error=None):
     }
 
 
-cached_rows = sdk.state.read_jsonl(cache_path) if sdk.state.exists(cache_path) else []
+cached_rows = sdk.workspace.read_jsonl(cache_path) if sdk.workspace.exists(cache_path) else []
 cached = {row["requested_source"]: dict(row) for row in cached_rows}
 pending = [source for source in selected_sources if source not in cached]
 
 if pending:
-    sdk.state.upsert_jsonl(
+    sdk.workspace.upsert_jsonl(
         cache_path,
         [cache_row(source, "started") for source in pending],
         key="requested_source",
@@ -348,12 +327,10 @@ if pending:
                     if outcome.error is not None
                     else {"code": "invalid_outcome"}
                 )
-                terminal_rows.append(
-                    cache_row(outcome.source, "failure", error=failure)
-                )
+                terminal_rows.append(cache_row(outcome.source, "failure", error=failure))
 
     # Make every external-call outcome durable before local parsing or other transformations.
-    sdk.state.upsert_jsonl(cache_path, terminal_rows, key="requested_source")
+    sdk.workspace.upsert_jsonl(cache_path, terminal_rows, key="requested_source")
     cached.update({row["requested_source"]: row for row in terminal_rows})
 
 for requested_source in selected_sources:
@@ -368,4 +345,4 @@ for requested_source in selected_sources:
 The example stores full text because cross-program reuse is its premise; store only the bounded data
 the later program needs when full text is unnecessary. `requested_source` prevents unchanged replay,
 while `source` records the canonical value returned by fetch. A surviving `started` row has an
-unknown outcome. Decide any retry explicitly after inspecting state and usage.
+unknown outcome. Retry only when durable workspace data proves the operation is missing.

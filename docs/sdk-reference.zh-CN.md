@@ -1,7 +1,7 @@
 # OpenSAC SDK 参考
 
-本文档对应捆绑的 `opensac_sdk` 0.8.2。0.8.2 是有意破坏兼容性的 pre-1.0 patch：
-capability contract 为 14，sandbox contract 为 14，新旧 SDK、broker 与 sandbox 不能混用。
+本文档对应 `main` 分支当前捆绑的 `opensac_sdk`。capability contract 为 15，SDK 与 broker
+必须匹配；sandbox contract 仍为 14。
 
 ## 约定
 
@@ -21,7 +21,7 @@ plain = dict(row)
 JSON 字段名为 `items`、`values` 或 `get` 时必须使用 `row["..."]`，避免与 dict 方法冲突。
 
 SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 broker 强制，并通过
-`sdk.session.capabilities()` 报告。
+`sdk.capabilities()` 报告。
 
 - 本地参数错误抛 `ValueError`。
 - provider、quota、transport、抽取 JSON/schema/repair 失败抛 `BrokerError`，尽可能保留
@@ -36,9 +36,8 @@ SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 
 | Search | `search`、`search.many`、`search.fuse_rrf` |
 | Content | `content.fetch`、`content.fetch_many`、`content.read`、`content.grep`、`content.passages` |
 | LLM | `llm.complete`、`llm.extract`、`llm.extract_many` |
-| Session | `session.usage`、`session.capabilities` |
-| State | JSON/JSONL 操作，包括 `state.upsert_jsonl` |
-| Output | `output.submit` |
+| 顶层 | `capabilities` |
+| Workspace | JSON/JSONL 操作，包括 `workspace.upsert_jsonl` |
 
 ## Search
 
@@ -107,10 +106,11 @@ contract 或 permission 错误失败，`many` 会提升一个代表性的顶层 
 
 `Mechanisms.batching` 只控制这个操作。关闭时仍允许单个 query，但拒绝更宽的 fan-out。
 
-实现固定为 SDK 有界线程池路径：先通过 `session.capabilities` 做 admission，再为每个输入发出
-单项 `search.query`，没有环境变量或 broker/client 模式开关。这里的 concurrency 是 helper
-admission，不是 provider semaphore；预算、rate limit、retry、cache/coalescing 和实际 provider
-并发仍由 broker 控制。SDK 不去重，broker 也不再暴露 batch search RPC。迁移边界见
+实现固定为 SDK 有界线程池路径：先通过 `sdk.capabilities()` 返回的部署 manifest 做 admission，
+再为每个输入发出单项 `search.query`，没有环境变量或 broker/client 模式开关。这里的
+concurrency 是 helper admission，不是 provider semaphore；预算、rate limit、retry、
+cache/coalescing 和实际 provider 并发仍由 broker 控制。SDK 不去重，broker 也不再暴露 batch
+search RPC。迁移边界见
 [版本说明](opensac-0.8.2.md)。
 
 ### `sdk.search.fuse_rrf(...)`
@@ -345,64 +345,48 @@ sdk.llm.extract_many(
 outcome；若所有项目都因 transport、protocol、contract 或 permission 错误失败，helper 会
 提升一个代表性的顶层 `BrokerError`。
 
-## Session
+## Capabilities
 
-### `sdk.session.usage()`
-
-只返回：
-
-```python
-{
-    "exec_calls": int,
-    "search_calls": int,
-    "content_fetches": int,
-    "llm_calls": int,
-    "pipeline_output_tokens_reserved": int,
-    "sandbox_seconds": float,
-    "workspace_bytes": int,
-    "budget_remaining": {
-        "max_exec_calls": int | None,
-        "max_search_queries": int | None,
-        "max_content_fetches": int | None,
-        "max_pipeline_llm_calls": int | None,
-        "max_pipeline_output_tokens": int | None,
-        "max_sandbox_seconds": float | None,
-        "max_workspace_bytes": int | None,
-    },
-    "terminal_reason": str | None,
-}
-```
-
-`None` 表示无限制。provider 尝试、缓存、排队、retry 细节和实际模型 token 只保留为宿主侧指标。
-
-### `sdk.session.capabilities()`
+### `sdk.capabilities()`
 
 返回 contract 版本、search backend 支持、content/LLM 上限和机制开关。生成程序应读取它，
 不要硬编码部署上限。
 
-## State 与 Output
+## Workspace
 
-State 路径相对 session workspace，不能逃逸：
+Artifact 路径相对 session workspace，不能逃逸：
 
 ```python
-sdk.state.write_json(path, value)
-sdk.state.read_json(path)
-sdk.state.write_jsonl(path, rows)
-sdk.state.append_jsonl(path, rows)
-sdk.state.upsert_jsonl(path, rows, key="source") -> int
-sdk.state.read_jsonl(path)
-sdk.state.exists(path) -> bool
-sdk.state.list(prefix="") -> list[str]
+sdk.workspace.write_json(path, value)
+sdk.workspace.read_json(path)
+sdk.workspace.write_jsonl(path, rows)
+sdk.workspace.append_jsonl(path, rows)
+sdk.workspace.upsert_jsonl(path, rows, key="source") -> int
+sdk.workspace.read_jsonl(path)
+sdk.workspace.exists(path) -> bool
+sdk.workspace.list(prefix="") -> list[str]
 ```
 
 `upsert_jsonl` 保留首次出现顺序，并按 key 替换整个旧行，不做字段级 merge。
 
-```python
-sdk.output.submit(value, *, citations: list[str] | None = None) -> None
-```
+使用 Python `print(...)` 返回有界结果，并把精确 source 字符串与对应证据一起输出。更大的
+结构化数据应保存到 `sdk.workspace`，不要打印完整文档或 ledger。
 
-`submit` 原子写入当前 execution 输出；citation 只是 source label，不代表 broker 做了证据校验。
-重复 submit 会覆盖先前输出。
+## 0.8.3 Breaking 迁移
+
+不提供 alias 或弃用 shim。Host usage 计量、execution 记录和 dashboard 指标继续保留在生成程序
+SDK 之外。
+
+| 0.8.2 生成程序 API | 0.8.3 替代 |
+| --- | --- |
+| `sdk.session.usage()` | Host REST、存储或 dashboard 观测 |
+| `sdk.session.capabilities()` | `sdk.capabilities()` |
+| `sdk.output.submit(...)` | 有界 `print(...)` 与 `sdk.workspace` artifact |
+| `sdk.state.*` | `sdk.workspace.*` |
+
+Capability contract 15 下 broker 会拒绝 `session.usage`。Workspace 与 capability namespace
+调整不会新增 broker operation；sandbox contract 14 保持不变。完整边界见
+[v0.8.3 版本说明](opensac-0.8.3.md)。
 
 ## 0.8.2 Breaking 迁移
 
@@ -434,5 +418,4 @@ sdk.output.submit(value, *, citations: list[str] | None = None) -> None
 | `content.passages(query, sources, max_per_source)` | keyword `sources=...`、`limit_per_source=...` |
 | `llm.complete_many(...)` | 循环调用 `llm.complete(...)` |
 | 旧 broker `llm.extract_many(...)` | SDK `llm.extract_many(...)` 组合 unary `llm.extract` |
-| `state.merge_jsonl(...)` | `state.upsert_jsonl(...)` |
-| `output.submit(output, ...)` | `output.submit(value, ...)` |
+| `state.merge_jsonl(...)` | `workspace.upsert_jsonl(...)` |
