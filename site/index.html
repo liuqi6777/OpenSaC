@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="OpenSAC is an open, inspectable Search-as-Code runtime for deep research agents."
+    />
+    <meta name="theme-color" content="#f2f0e9" />
+    <meta name="color-scheme" content="light" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="OpenSAC" />
+    <meta property="og:title" content="OpenSAC — Search as Code for Research Agents" />
+    <meta
+      property="og:description"
+      content="An open, inspectable runtime where agents express search strategies as Python programs."
+    />
+    <meta property="og:url" content="https://liuqi6777.github.io/OpenSaC/" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="OpenSAC — Search as Code for Research Agents" />
+    <meta
+      name="twitter:description"
+      content="An open, inspectable runtime where agents express search strategies as Python programs."
+    />
+    <link rel="canonical" href="https://liuqi6777.github.io/OpenSaC/" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script>
+      document.documentElement.classList.add("js");
+    </script>
+    <title>OpenSAC — Search as Code for Research Agents</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header" data-header>
+      <a class="brand" href="#top" aria-label="OpenSAC home">
+        <span class="brand-mark" aria-hidden="true"><span>&gt;_</span></span>
+        <span class="brand-name">OpenSAC</span>
+      </a>
+
+      <button
+        class="menu-toggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="site-nav"
+        data-menu-toggle
+      >
+        <span class="menu-label">Menu</span>
+        <span class="menu-lines" aria-hidden="true"><i></i><i></i></span>
+      </button>
+
+      <nav class="site-nav" id="site-nav" aria-label="Primary navigation" data-menu>
+        <a href="#method">Method</a>
+        <a href="#system">System</a>
+        <a href="#toolkit">Toolkit</a>
+        <a href="#start">Get started</a>
+        <a
+          class="nav-github"
+          href="https://github.com/liuqi6777/OpenSaC"
+          target="_blank"
+          rel="noreferrer"
+        >
+          GitHub <span aria-hidden="true">↗</span>
+        </a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-grid" aria-hidden="true"></div>
+        <div class="hero-copy reveal">
+          <p class="eyebrow"><span>Open research infrastructure</span><span>2026</span></p>
+          <h1>
+            Search is better<br />
+            when agents can<br />
+            <em>write the plan.</em>
+          </h1>
+          <p class="hero-summary">
+            OpenSAC is an open, inspectable runtime that lets research agents express search as a
+            Python program—not a fixed sequence of tool calls.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#start">Run your first search <span>↓</span></a>
+            <a
+              class="button button-secondary"
+              href="https://github.com/liuqi6777/OpenSaC"
+              target="_blank"
+              rel="noreferrer"
+            >
+              View source <span>↗</span>
+            </a>
+          </div>
+          <div class="hero-meta">
+            <p><strong>Qi Liu</strong> · <strong>Jiaxin Mao</strong></p>
+            <p>Open source · MIT licensed · Active research</p>
+          </div>
+        </div>
+
+        <div class="hero-demo reveal" data-delay="1">
+          <div class="demo-label">
+            <span>Generated research program</span>
+            <span class="live-dot">isolated</span>
+          </div>
+          <div class="code-window">
+            <div class="window-bar">
+              <span class="window-title">research.py</span>
+              <span class="window-id">SAC / 001</span>
+            </div>
+            <pre aria-label="Search-as-Code Python example"><code><span class="code-muted">from</span> opensac_sdk <span class="code-muted">import</span> sdk
+
+queries = [
+  <span class="code-string">"Search as Code agents"</span>,
+  <span class="code-string">"programmatic retrieval"</span>,
+]
+
+results = sdk.search.many(queries)
+evidence = sdk.search.fuse_rrf(results)
+
+<span class="code-muted">for</span> hit <span class="code-muted">in</span> evidence[:<span class="code-number">8</span>]:
+  text = sdk.content.fetch(hit.source)
+  <span class="code-muted">if</span> <span class="code-string">"agent"</span> <span class="code-muted">in</span> text.lower():
+    sdk.state.append_jsonl(
+      <span class="code-string">"evidence.jsonl"</span>, hit
+    )
+
+sdk.output.submit({<span class="code-string">"evidence"</span>: evidence})</code></pre>
+            <div class="execution-path" aria-label="Execution path">
+              <div><span>01</span> Agent</div>
+              <i aria-hidden="true">→</i>
+              <div><span>02</span> Sandbox</div>
+              <i aria-hidden="true">→</i>
+              <div><span>03</span> Evidence</div>
+            </div>
+          </div>
+          <p class="margin-note">Ordinary Python control flow.<br />Brokered capabilities.<br />Cited output.</p>
+        </div>
+
+        <a class="scroll-cue" href="#thesis"><span>Explore the system</span><i aria-hidden="true"></i></a>
+      </section>
+
+      <section class="thesis section" id="thesis">
+        <div class="section-index reveal">01 / Thesis</div>
+        <div class="thesis-copy reveal">
+          <p class="kicker">The core idea</p>
+          <h2>Retrieval should be a <em>programming problem</em>, not a prompt bottleneck.</h2>
+          <p>
+            A fixed tool interface forces the model to expose every intermediate step to its own
+            context. OpenSAC moves orchestration into generated code, where queries can be batched,
+            documents filtered, candidates fused, and state persisted before the useful evidence
+            returns to the control model.
+          </p>
+        </div>
+        <aside class="thesis-aside reveal" data-delay="1">
+          <span class="aside-number">∞</span>
+          <p>Flexible composition with a deliberately small, inspectable capability surface.</p>
+        </aside>
+      </section>
+
+      <section class="method section section-dark" id="method">
+        <div class="section-heading reveal">
+          <div>
+            <p class="kicker">From intent to evidence</p>
+            <h2>One program.<br />A complete research pass.</h2>
+          </div>
+          <p>
+            The agent writes the strategy. OpenSAC executes it inside a hardened boundary and
+            returns only what the program explicitly submits.
+          </p>
+        </div>
+
+        <div class="method-steps">
+          <article class="method-card reveal">
+            <div class="method-card-head"><span>01</span><span class="method-symbol">⌘</span></div>
+            <h3>Compose</h3>
+            <p>Use Python to express multi-query search, filtering, ranking, extraction, and joins.</p>
+            <code>queries → search.many()</code>
+          </article>
+          <article class="method-card reveal" data-delay="1">
+            <div class="method-card-head"><span>02</span><span class="method-symbol">◇</span></div>
+            <h3>Execute</h3>
+            <p>Run without network access or provider credentials in a short-lived Docker sandbox.</p>
+            <code>code → isolated runtime</code>
+          </article>
+          <article class="method-card reveal" data-delay="2">
+            <div class="method-card-head"><span>03</span><span class="method-symbol">↗</span></div>
+            <h3>Submit</h3>
+            <p>Keep large intermediate results off-context and return only structured, cited output.</p>
+            <code>evidence → output.submit()</code>
+          </article>
+        </div>
+      </section>
+
+      <section class="system section" id="system">
+        <div class="section-index reveal">02 / System</div>
+        <div class="system-heading reveal">
+          <p class="kicker">Inspectable by design</p>
+          <h2>Privilege stays outside the program.</h2>
+          <p>
+            Generated code gets useful research primitives—not raw credentials, host networking,
+            the Docker socket, or unrestricted filesystem access.
+          </p>
+        </div>
+
+        <div class="architecture reveal">
+          <div class="arch-lane arch-control">
+            <span class="lane-label">Control plane</span>
+            <div class="arch-node node-agent">
+              <span class="node-id">A</span>
+              <div><strong>External agent</strong><small>generates Python</small></div>
+            </div>
+          </div>
+          <div class="arch-connector">
+            <span>POST /exec</span>
+            <i aria-hidden="true"></i>
+          </div>
+          <div class="arch-lane arch-runtime">
+            <span class="lane-label">OpenSAC runtime</span>
+            <div class="runtime-nodes">
+              <div class="arch-node">
+                <span class="node-id">B</span>
+                <div><strong>API</strong><small>sessions + budgets</small></div>
+              </div>
+              <i aria-hidden="true">→</i>
+              <div class="arch-node node-sandbox">
+                <span class="node-id">C</span>
+                <div><strong>Sandbox</strong><small>network disabled</small></div>
+              </div>
+              <i aria-hidden="true">⇄</i>
+              <div class="arch-node">
+                <span class="node-id">D</span>
+                <div><strong>Broker</strong><small>policy boundary</small></div>
+              </div>
+            </div>
+          </div>
+          <div class="arch-connector">
+            <span>capability RPC</span>
+            <i aria-hidden="true"></i>
+          </div>
+          <div class="arch-lane arch-providers">
+            <span class="lane-label">Providers</span>
+            <div class="provider-stack">
+              <span>Web search</span>
+              <span>Document content</span>
+              <span>Optional LLM</span>
+              <span>Local retrieval</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="system-notes">
+          <p class="reveal"><span>01</span> Short-lived, network-disabled execution containers</p>
+          <p class="reveal" data-delay="1"><span>02</span> Authenticated Unix-socket RPC</p>
+          <p class="reveal" data-delay="2"><span>03</span> Explicit budgets, traces, and partial failures</p>
+        </div>
+      </section>
+
+      <section class="toolkit section" id="toolkit">
+        <div class="section-heading reveal">
+          <div>
+            <p class="kicker">Compact record SDK</p>
+            <h2>Small surface.<br />Rich composition.</h2>
+          </div>
+          <p>
+            The SDK gives generated programs enough structure to perform serious research while
+            keeping behavior readable and measurable.
+          </p>
+        </div>
+
+        <div class="capability-grid">
+          <article class="capability-card card-wide card-accent reveal">
+            <span class="capability-path">sdk.search</span>
+            <h3>Retrieve once.<br />Compose freely.</h3>
+            <p>Search in parallel, then merge evidence with reciprocal-rank fusion.</p>
+            <div class="mini-code"><span>many</span><i>→</i><span>filter</span><i>→</i><span>fuse_rrf</span></div>
+          </article>
+          <article class="capability-card reveal" data-delay="1">
+            <span class="capability-path">sdk.content</span>
+            <h3>Read with intent.</h3>
+            <p>Fetch, inspect, grep, and extract bounded passages with explicit cursors.</p>
+            <div class="line-stack" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+          </article>
+          <article class="capability-card reveal">
+            <span class="capability-path">sdk.state</span>
+            <h3>State that survives the turn.</h3>
+            <p>Persist JSON, JSONL, and workspace files across executions in one session.</p>
+            <div class="state-files" aria-hidden="true"><span>01</span><span>02</span><span>03</span></div>
+          </article>
+          <article class="capability-card card-dark reveal" data-delay="1">
+            <span class="capability-path">sdk.session</span>
+            <h3>Measure every run.</h3>
+            <p>Inspect capabilities, budgets, usage, traces, and phase timings.</p>
+            <dl class="metrics">
+              <div><dt>calls</dt><dd>12</dd></div>
+              <div><dt>sources</dt><dd>27</dd></div>
+              <div><dt>failures</dt><dd>02</dd></div>
+            </dl>
+          </article>
+          <article class="capability-card card-wide reveal">
+            <span class="capability-path">sdk.output</span>
+            <h3>Return the answer—not the scratchpad.</h3>
+            <p>
+              Large intermediate results remain in the workspace. Only explicitly submitted data
+              returns to the control model, with optional source labels.
+            </p>
+            <div class="output-flow" aria-hidden="true">
+              <span>8.4 MB workspace</span><i>→</i><strong>12 KB output</strong>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="question section">
+        <div class="question-mark" aria-hidden="true">?</div>
+        <div class="question-copy reveal">
+          <p class="kicker">The research question</p>
+          <blockquote>
+            When the model, retrieval backend, and evaluation protocol are held constant, does
+            composing search primitives in generated code improve quality, context efficiency, or
+            the latency–cost trade-off over model-visible tool calls?
+          </blockquote>
+          <p>OpenSAC is the controlled runtime built to investigate that question.</p>
+        </div>
+      </section>
+
+      <section class="start section section-dark" id="start">
+        <div class="start-intro reveal">
+          <p class="kicker">Start exploring</p>
+          <h2>From zero to a sandboxed search program.</h2>
+          <p>
+            Use the published, version-matched service and sandbox images for the shortest path.
+            Full configuration and security notes live in the deployment guide.
+          </p>
+          <div class="start-links">
+            <a href="https://github.com/liuqi6777/OpenSaC/blob/main/docs/deployment.md">Deployment guide ↗</a>
+            <a href="https://github.com/liuqi6777/OpenSaC/blob/main/docs/agent-integrations.md">Agent integrations ↗</a>
+            <a href="https://github.com/liuqi6777/OpenSaC/blob/main/docs/sdk-reference.md">SDK reference ↗</a>
+          </div>
+        </div>
+
+        <div class="install-card reveal" data-delay="1">
+          <div class="install-tabs" role="presentation">
+            <span class="active">Docker</span><span>Source</span>
+          </div>
+          <button class="copy-button" type="button" data-copy="#install-code" aria-label="Copy install command">
+            <span data-copy-label>Copy</span>
+          </button>
+          <pre id="install-code"><code><span class="prompt">$</span> docker pull ghcr.io/liuqi6777/opensac:latest
+<span class="prompt">$</span> docker pull ghcr.io/liuqi6777/opensac-sandbox:latest
+
+<span class="comment"># Clone the repository for configs and examples</span>
+<span class="prompt">$</span> git clone https://github.com/liuqi6777/OpenSaC.git
+<span class="prompt">$</span> cd OpenSaC</code></pre>
+          <p>Requires Docker and configured search/content provider credentials.</p>
+        </div>
+      </section>
+
+      <section class="citation section" id="citation">
+        <div class="citation-heading reveal">
+          <div class="section-index">03 / Citation</div>
+          <div>
+            <p class="kicker">Use OpenSAC in your research</p>
+            <h2>Open systems make<br />better questions possible.</h2>
+          </div>
+        </div>
+        <div class="citation-card reveal" data-delay="1">
+          <button class="copy-button copy-button-light" type="button" data-copy="#bibtex" aria-label="Copy BibTeX citation">
+            <span data-copy-label>Copy BibTeX</span>
+          </button>
+          <pre id="bibtex"><code>@misc{opensac,
+  author       = {Qi Liu, Jiaxin Mao},
+  title        = {OpenSAC: An Open Search-as-Code System
+                  for Deep Research Agents},
+  year         = {2026},
+  howpublished = {\url{https://github.com/liuqi6777/OpenSaC}},
+  note         = {GitHub repository. Corresponding author: Jiaxin Mao}
+}</code></pre>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-brand">
+        <span class="brand-mark" aria-hidden="true"><span>&gt;_</span></span>
+        <div><strong>OpenSAC</strong><small>Search as Code, in the open.</small></div>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/liuqi6777/OpenSaC">GitHub ↗</a>
+        <a href="https://github.com/liuqi6777/OpenSaC/releases/latest">Releases ↗</a>
+        <a href="https://github.com/liuqi6777/OpenSaC/blob/main/README.zh-CN.md">简体中文 ↗</a>
+      </div>
+      <p>© <span data-year>2026</span> OpenSAC · MIT License</p>
+    </footer>
+
+    <div class="toast" role="status" aria-live="polite" data-toast>Copied to clipboard</div>
+    <script src="./app.js" defer></script>
+  </body>
+</html>

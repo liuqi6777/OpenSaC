@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://liuqi6777.github.io/OpenSaC/sitemap.xml
