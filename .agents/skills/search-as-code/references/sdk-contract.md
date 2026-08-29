@@ -1,9 +1,10 @@
-# OpenSAC SDK contract
+# OpenSAC SDK contract used by this skill
 
-Use this reference when exact signatures, fields, limits, or failure semantics matter. Import only
-`BrokerError` and `sdk` from `opensac_sdk`. Structured results are mapping-backed records. Mapping
-access is canonical; known non-colliding fields also support `row.source`, and `dict(row)`
-serializes the record. Use key access for fields such as `items`, `values`, or `get`.
+Use this reference when exact signatures, fields, limits, or failure semantics matter. It documents
+the SDK subset used by this skill, not every SDK capability. Import only `BrokerError` and `sdk` from
+`opensac_sdk`. Structured results are mapping-backed records. Mapping access is canonical; known
+non-colliding fields also support `row.source`, and `dict(row)` serializes the record. Use key access
+for fields such as `items`, `values`, or `get`.
 
 ## Capability surface
 
@@ -37,9 +38,6 @@ sdk.content.grep(
     pattern, *, sources, mode="regex", case_sensitive=False,
     start_line=1, context_lines=0, limit_per_source=20
 ) -> list[record]
-sdk.content.passages(
-    query, *, sources, limit=20, limit_per_source=3
-) -> record
 ```
 
 LLM, session, state, and output:
@@ -90,17 +88,12 @@ occurs.
   and `next_start_line`. Failed rows have `title=None`, empty `matches`, and no continuation.
 - Grep match: `line`, `text`, `before`, `after`, and `spans`. Its source and title come from the
   owning outcome. Each span has 0-based, end-exclusive `start_character` and `end_character`.
-- Passage report: `query`, `passages`, `failures`, `warnings`, `input_count`, and
-  `unique_source_count`. A passage contains source metadata, exact `text`, `coordinates`, `rank`,
-  `score`, and `ranker`.
 - Coordinates use 1-based lines and 0-based, end-exclusive character positions.
 - Search outcome error: `code`, `message`, `retryable`, `attempts`, `provider_status`,
   `retry_after_seconds`, `provider`, `component`, and `scope`. Read these fields from
   `outcome.error`; never display or parse search `status` as failure detail.
 - Grep outcome status is exactly `"success"` or a bounded human-readable failure string. Only
   compare it with `"success"`; do not parse failure text.
-- Passage failure: `code`, `message`, `retryable`, `attempts`, `provider_status`,
-  `retry_after_seconds`, `provider`, `component`, `scope`, `input_index`, and `source`.
 - `llm.extract` returns the schema-validated JSON object directly.
 - Extract outcome list: one input-aligned row per item with `input_index`, `status`, `data`, and
   `error`, without the original item. Successful rows have validated `data` and `error=None`; failed
@@ -127,17 +120,14 @@ There is no public SDK model hierarchy or `types` module. Join capability result
 - `llm.extract_many` also uses those rules, validates every item before fan-out, and never copies
   the original item into results or diagnostics.
 - `content.grep` preserves partial success as input-aligned outcomes; other statuses are displayable
-  failure text. `content.passages` retains structured fetch failures beside successful passages.
-- `content.fetch`, `content.read`, `llm.complete`, and `llm.extract` are single operations. A
-  failure is a top-level `BrokerError`; Python loops decide whether to continue with later items.
+  failure text.
+- `content.fetch`, `content.read`, and `llm.extract` are single operations. A failure is a top-level
+  `BrokerError`; Python loops decide whether to continue with later items.
 - `read.window.next` is either `None` at EOF or the exact `start_line`/`start_character` for an
   unlossy follow-up call. This matters when `max_chars` stops within one long line.
 - For capped grep scans, continue each successful outcome from non-null `next_start_line`.
   `next_start_line=None` means that successful source was scanned to EOF.
-- Empty search hits or grep matches with success status, and zero passages without a structured
-  failure, are successful results.
-- `content.passages` deduplicates sources in first-seen order. A failed configured reranker falls
-  back to `lexical:bm25` and appears in `warnings`.
+- Empty search hits or grep matches with success status are successful results.
 - Let host policy own provider retries, rate limits, caching, and in-flight coalescing.
 
 ## Retrieval, quota, and content boundaries
@@ -147,7 +137,7 @@ There is no public SDK model hierarchy or `types` module. Join capability result
 - Search `offset` is depth into the full ranking. Local document IDs are readable only after search
   returned them; supported web deployments may also admit bounded public HTTP(S) URLs directly.
 - Pass source strings, not search-hit or content-result records, to content methods.
-- Every source requested through `fetch`, `read`, `grep`, or `passages` consumes public
+- Every source requested through `fetch`, `read`, or `grep` consumes public
   content-fetch budget even when session caching avoids backend work.
 - Search results are a candidate pool, not a content batch. Promote only a small, high-relevance,
   source-diverse subset whose metadata suggests it can close a current evidence gap; do not fetch an
@@ -156,18 +146,13 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   for exact matching, regexes, slicing, and multiple checks in local Python. When later programs will
   reuse the full text, optionally persist one copy with `sdk.state`; full-document artifacts consume
   workspace budget.
-- `passages` is the distinct semantic-localization option: after fetch, use it when relevance cannot
-  be captured reliably by lexical checks or when passages must be ranked across long or multiple
-  selected documents. It can complement local inspection and is not mandatory. Scope each passage
-  query to the fetched sources plausibly relevant to that question instead of crossing every query
-  with the whole selected set.
 - `grep` and `read` are usually replaceable by local Python after fetch. Do not call them just to
   rediscover or reformat a match already available in fetched text; call them only when a provider
   window or cursor is itself useful.
-- `passages`, `grep`, and `read` accept source strings and may reuse the session cache, avoiding
-  backend retrieval, but every requested source remains another logical content-fetch charge. Never
-  pass an unfetched source to them, and never print or submit a complete fetched document.
-- Treat snippets as triage. Inspect fetched, passage, grep, or read text for material claims.
+- `grep` and `read` accept source strings and may reuse the session cache, avoiding backend retrieval,
+  but every requested source remains another logical content-fetch charge. Never pass an unfetched
+  source to them, and never print or submit a complete fetched document.
+- Treat snippets as triage. Inspect fetched, grep, or read text for material claims.
 - `sdk.session.usage()` exposes only `exec_calls`, `search_calls`, `content_fetches`, `llm_calls`,
   `pipeline_output_tokens_reserved`, `sandbox_seconds`, `workspace_bytes`, `budget_remaining`, and
   `terminal_reason`. `None` in `budget_remaining` means that budget is unlimited.

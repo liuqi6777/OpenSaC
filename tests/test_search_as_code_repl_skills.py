@@ -1,24 +1,14 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
-
-from opensac_sdk._resources import StateResource
 
 from opensac.sandbox.validator import validate_code
 
 ROOT = Path(__file__).parents[1]
+BASELINE_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 MCP_DIR = ROOT / ".agents" / "skills" / "search-as-code-repl"
 CLI_DIR = ROOT / ".agents" / "skills" / "search-as-code-repl-cli"
-REFERENCE_NAMES = (
-    "advanced.md",
-    "patterns.md",
-    "python-recipes.md",
-    "sdk-contract.md",
-    "stateful-research.md",
-)
+REFERENCE_NAMES = ("patterns.md", "sdk-contract.md")
 
 
 def _python_blocks(path: Path) -> list[str]:
@@ -68,9 +58,17 @@ def test_repl_skills_are_explicit_and_use_separate_adapter_surfaces() -> None:
         assert "not a prescribed workflow" in flat_skill
         assert "No fixed query count, capability sequence, cell split" in flat_skill
         assert "Treat one cell as one semantic checkpoint" in flat_skill
-        assert "search -> fuse -> passages or grep -> focused reads -> normalize" in flat_skill
+        assert (
+            "search -> select a relevant subset -> fetch -> local inspect -> normalize"
+            in flat_skill
+        )
+        assert "sdk.content.passages" not in flat_skill
+        assert "Use ordinary Python freely for deterministic orchestration" in flat_skill
+        assert "not a required sequence or policy" in flat_skill
         assert "live namespace is the default working memory" in flat_skill
-        assert "small cumulative cache" in flat_skill
+        assert "small cumulative data cache" in flat_skill
+        assert "persist an input as `started`" in flat_skill
+        assert "persist its `success` or `failure`" in flat_skill
         assert "not a required cell protocol" in flat_skill
         assert "Agent completion is the final response to the user" in flat_skill
         assert "`submit` is optional" in flat_skill
@@ -78,6 +76,11 @@ def test_repl_skills_are_explicit_and_use_separate_adapter_surfaces() -> None:
         assert "Prefer `search.many` ->" not in flat_skill
         assert "never" in flat_skill.lower() and "replay" in flat_skill.lower()
         assert "/v1/sessions" not in flat_skill
+        assert "references/patterns.md" in flat_skill
+        assert "references/sdk-contract.md" in flat_skill
+        assert "references/advanced.md" not in flat_skill
+        assert "references/python-recipes.md" not in flat_skill
+        assert "references/stateful-research.md" not in flat_skill
 
 
 def test_repl_skill_metadata_disables_implicit_invocation() -> None:
@@ -96,30 +99,31 @@ def test_repl_references_are_self_contained_and_synchronized() -> None:
     for name in REFERENCE_NAMES:
         mcp_reference = MCP_DIR / "references" / name
         cli_reference = CLI_DIR / "references" / name
+        baseline_reference = BASELINE_DIR / "references" / name
         assert mcp_reference.is_file()
         assert mcp_reference.read_bytes() == cli_reference.read_bytes()
+        assert mcp_reference.read_bytes() == baseline_reference.read_bytes()
+    for skill_dir in (MCP_DIR, CLI_DIR):
+        for name in ("advanced.md", "python-recipes.md", "stateful-research.md"):
+            assert not (skill_dir / "references" / name).exists()
 
     combined = "\n".join(
         (MCP_DIR / "references" / name).read_text(encoding="utf-8") for name in REFERENCE_NAMES
     )
     assert "sdk.search.many" in combined
-    assert "sdk.content.passages" in combined
-    assert "sdk.state.write_json" in combined
+    assert "sdk.content.fetch_many" in combined
+    assert "sdk.content.passages" not in combined
+    assert "llm.complete" not in combined
+    assert "sdk.state.upsert_jsonl" in combined
     assert "sdk.output.submit" in combined
     assert "interpreter_lost" in combined
-    assert "Python variables do not survive calls" not in combined
 
     flat_combined = " ".join(combined.split())
-    assert "not a required research pipeline" in flat_combined
-    assert "persistent namespace is the default working memory" in flat_combined
-    assert "not a workflow state machine" in flat_combined
-    assert "`meta.json`" in flat_combined
-    assert "`pool.jsonl`" in flat_combined
-    assert "`content.jsonl`" in flat_combined
-    assert "Do not create per-cell logs" in flat_combined
+    assert "not a required pipeline" in flat_combined
+    assert "requested_source" in flat_combined
+    assert "quote is found verbatim in that input" in flat_combined
+    assert "fetch-cache.jsonl" in flat_combined
     assert "namespace shape is application state, not an SDK requirement" in flat_combined
-    assert "Persist a constraint fingerprint" not in flat_combined
-    assert "Use one task-derived namespace" not in flat_combined
 
 
 def test_repl_examples_compile_and_pass_sandbox_validation() -> None:
@@ -127,97 +131,33 @@ def test_repl_examples_compile_and_pass_sandbox_validation() -> None:
     compile(invocation, "<search-as-code-repl-cli-invocation>", "exec")
     validate_code(invocation)
 
-    for reference_name in ("patterns.md", "python-recipes.md", "stateful-research.md"):
-        blocks = _python_blocks(MCP_DIR / "references" / reference_name)
-        assert blocks
-        for index, program in enumerate(blocks):
-            compile(program, f"<{reference_name}:{index}>", "exec")
-            validate_code(program)
-
     patterns_path = MCP_DIR / "references" / "patterns.md"
+    blocks = _python_blocks(patterns_path)
+    assert len(blocks) == 5
+    for index, program in enumerate(blocks):
+        compile(program, f"<patterns.md:{index}>", "exec")
+        validate_code(program)
+
     composed = _python_block(patterns_path, "## Compose retrieval and focused inspection")
     assert composed.index("sdk.search.many(") < composed.index("sdk.search.fuse_rrf(")
-    assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.passages(")
-    assert composed.index("sdk.content.passages(") < composed.index("sdk.content.read(")
+    assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.fetch_many(")
+    assert "sdk.content.passages(" not in composed
+    assert "sdk.content.read(" not in composed
 
     verify = _python_block(patterns_path, "## Verify selected sources and return evidence")
     assert "structured_output_requested = False" in verify
 
-    stateful_blocks = _python_blocks(MCP_DIR / "references" / "stateful-research.md")
-    assert len(stateful_blocks) == 2
-
-
-def test_repl_checkpoint_example_updates_one_cumulative_cache(tmp_path: Path) -> None:
-    program = _python_blocks(MCP_DIR / "references" / "stateful-research.md")[0]
-    state = StateResource(str(tmp_path))
-    sdk = SimpleNamespace(
-        state=state,
-        session=SimpleNamespace(
-            capabilities=lambda: {"mechanisms": {"persistence": True}},
-        ),
+    extraction = _python_block(
+        patterns_path,
+        "## Optionally extract structured fields from inspected evidence",
     )
-    module = ModuleType("opensac_sdk")
-    module.sdk = sdk
-    namespace = {
-        "research_goal": "verify the relation",
-        "queries": ["first query"],
-        "candidate_pool": [
-            SimpleNamespace(
-                source="doc_1",
-                title="First",
-                domain="example.test",
-                date="1998",
-                snippet="first snippet",
-                fused_rank=1,
-                fused_score=1.0,
-            )
-        ],
-        "evidence_windows": [
-            {
-                "source": "doc_1",
-                "title": "First",
-                "text": "first evidence",
-                "coordinates": {"start_line": 10, "end_line": 20},
-            }
-        ],
-    }
+    assert "sdk.llm.extract_many(" in extraction
+    assert "zip(evidence_items, outcomes, strict=True)" in extraction
+    assert "sdk.search." not in extraction
 
-    with patch.dict(sys.modules, {"opensac_sdk": module}):
-        exec(compile(program, "<repl-checkpoint:first>", "exec"), namespace)
-        namespace["queries"] = ["first query", "second query"]
-        namespace["candidate_pool"].append(
-            SimpleNamespace(
-                source="doc_2",
-                title="Second",
-                domain="example.test",
-                date="1999",
-                snippet="second snippet",
-                fused_rank=2,
-                fused_score=0.5,
-            )
-        )
-        namespace["evidence_windows"].append(
-            {
-                "source": "doc_2",
-                "title": "Second",
-                "text": "second evidence",
-                "coordinates": {"start_line": 30, "end_line": 40},
-            }
-        )
-        exec(compile(program, "<repl-checkpoint:second>", "exec"), namespace)
-
-    artifacts = state.list()
-    assert {Path(path).name for path in artifacts} == {
-        "meta.json",
-        "pool.jsonl",
-        "content.jsonl",
-    }
-    meta_path = next(path for path in artifacts if path.endswith("/meta.json"))
-    pool_path = next(path for path in artifacts if path.endswith("/pool.jsonl"))
-    content_path = next(path for path in artifacts if path.endswith("/content.jsonl"))
-    assert state.read_json(meta_path).queries == ["first query", "second query"]
-    assert {row.source for row in state.read_jsonl(pool_path)} == {"doc_1", "doc_2"}
-    assert {row.source for row in state.read_jsonl(content_path)} == {"doc_1", "doc_2"}
+    cache = _python_block(patterns_path, "## Optionally cache selected fetches across calls")
+    assert cache.index("sdk.state.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
+    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.state.upsert_jsonl(")
 
 
 def test_baseline_skill_catalog_metadata_remains_implicit() -> None:

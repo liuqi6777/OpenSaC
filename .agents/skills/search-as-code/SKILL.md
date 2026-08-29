@@ -42,13 +42,11 @@ limits, or citations. Inspect one method's `__doc__` when necessary.
   batch, `sdk.content.fetch_many(...)` its first content call. Reuse successful returned documents
   for all ordinary exact or regex matching, slicing, and cross-checks in local Python; persist one
   copy only when later programs will reuse it.
-- `sdk.content.passages(...)` adds semantic passage ranking that ordinary local matching does not.
-  Use it after fetch when semantic localization across long or multiple selected documents is useful,
-  alone or after local checks. For each semantic question, pass only the fetched sources plausibly
-  relevant to it; avoid running every question over every selected source. Do not use
-  `sdk.content.grep(...)` or `sdk.content.read(...)` merely to relocate text already present in a
-  fetched document—compute matches, coordinates, and excerpts locally. Reserve them for a genuinely
-  useful service-side window or cursor. Never pass an unfetched source to a content method.
+- Inspect successful fetched documents with local Python for exact matching, regexes, slicing,
+  relation checks, and bounded evidence extraction. Do not use `sdk.content.grep(...)` or
+  `sdk.content.read(...)` merely to relocate text already present in a fetched document. Reserve them
+  for a genuinely useful service-side window or cursor. Never pass an unfetched source to a content
+  method.
 - Keep evidence source-scoped. For each requirement, record the inspected source, a bounded exact
   excerpt, whether it directly proves or only supports the claim, and any limitation. Verify a
   relation from one entailing excerpt or an explicit evidence-backed join; never concatenate
@@ -61,11 +59,14 @@ available to that program. Choose new inputs yourself.
 
 - Treat one program as one semantic checkpoint, not one SDK method. When outputs mechanically
   determine the next inputs, compose the useful chain in the same program, such as
-  `search -> select a relevant subset -> fetch -> local inspect and/or passages -> normalize`.
+  `search -> select a relevant subset -> fetch -> local inspect -> normalize`.
 - Split into another `sac_run` only when the control model must make a new semantic choice, the next
   work needs a separate budget, or durable recovery is useful. Do not round-trip through stdout just
   to pass sources, offsets, or other values Python can derive directly.
-- Normalize statuses, passage failures, provenance, and bounded evidence immediately. Derive later
+- Use ordinary Python freely for deterministic orchestration: comprehensions, functions, data
+  structures, regexes, sorting or grouping, source-scoped joins, deduplication, and validation.
+  Choose the techniques that fit the task; this is not a required sequence or policy.
+- Normalize statuses, content failures, provenance, and bounded evidence immediately. Derive later
   inputs from source-scoped rows, not concatenated text or printed observations.
 - Persist compact artifacts needed by the next checkpoint. Avoid copying the same raw search hits or
   full documents into several ledger fields.
@@ -84,17 +85,23 @@ Use `sdk.state` only when later programs benefit from reusing data. Prefer a sma
 workflow state machine. Load its rows to filter prior queries and fetched sources; observations show
 artifact paths, not their contents. Avoid duplicate raw reports and per-stage ledgers.
 
-Keep each cache cumulative: update the same pool and content artifacts by stable keys. Print bounded
-target excerpts or explicit no-match/failure summaries when storing content; do not add a program
-merely to reload and print it.
+Keep each cache cumulative and update its rows by stable keys. Print bounded target excerpts or
+explicit no-match/failure summaries when storing content; do not add a program merely to reload and
+print it.
 
-Read [references/stateful-research.md](references/stateful-research.md) when a reusable multi-call
-cache is justified.
+For recoverable multi-call work, persist an operation as `started` before an expensive external call
+when avoiding blind replay matters. Immediately after the call, persist each input as `success` or
+`failure` before running further transformations. A surviving `started` status means the outcome may
+be unknown and must be reconciled from state and usage, not blindly replayed. Use the returned
+document source as the stable content key and retain requested URL variants only as aliases.
+
+For executable recovery ordering, read the
+[optional durable fetch-cache pattern](references/patterns.md#optionally-cache-selected-fetches-across-calls).
 
 ## Return observations and optional structured output
 
 - Print compact progress, the bounded decision surface needed for the next judgment, and a `NEXT:`
-  action. Do not print raw result lists, full passages, or the ledger; persist them. Keep stdout under
+  action. Do not print raw result lists, full documents, or the ledger; persist them. Keep stdout under
   about 4,000 characters across the whole program, not independently per query or loop. Prefer a few
   nonredundant excerpts that together expose the remaining decision.
 - Agent completion is the final response to the user, not `sdk.output.submit(...)`.
@@ -113,8 +120,8 @@ use answered, partial, inconclusive, or externally blocked as appropriate.
 `sac_run` renders bounded structured item-failure warnings while preserving successes. For
 `search.many`, branch on `status == "success"` and read failed rows from `outcome.error`; status is
 only `"success"` or `"failure"`. For `content.grep`, other statuses are human-readable and must not
-be parsed. Passage failures remain structured records. Empty hits or matches with success status
-are successful results. Never hard-code zero failures.
+be parsed. Empty hits or matches with success status are successful results. Never hard-code zero
+failures.
 
 An intermediate caught `BrokerError` must leave the stage incomplete with `ERROR:` or `NEXT:`. Let
 host policy own retries; do not retry blindly.
@@ -127,12 +134,8 @@ inspection failure.
 
 ## Load examples only when useful
 
-- Read [references/patterns.md](references/patterns.md) for the default stateless composition patterns.
-- Read [references/stateful-research.md](references/stateful-research.md) only for a chosen
-  workspace-backed multi-call design.
-- Read [references/python-recipes.md](references/python-recipes.md) for bounded query generation,
-  aggregation, or extraction-driven actions.
-- Read [references/advanced.md](references/advanced.md) only when core workflows are insufficient.
+- Read [references/patterns.md](references/patterns.md) for composition, optional structured
+  extraction, and durable-cache patterns.
 
 Treat every example as a starting point rather than a required pipeline. Adapt or ignore its query
 count, ordering, boundaries, source policy, and artifact schema.

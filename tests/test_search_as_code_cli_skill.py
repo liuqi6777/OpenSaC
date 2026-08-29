@@ -9,10 +9,8 @@ SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code-cli"
 MCP_SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
-ADVANCED_PATH = SKILL_DIR / "references" / "advanced.md"
 PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
-RECIPES_PATH = SKILL_DIR / "references" / "python-recipes.md"
-STATEFUL_PATH = SKILL_DIR / "references" / "stateful-research.md"
+REFERENCE_NAMES = ("patterns.md", "sdk-contract.md")
 
 
 def _fenced_block(path: Path, fence: str, *, heading: str | None = None) -> str:
@@ -20,10 +18,6 @@ def _fenced_block(path: Path, fence: str, *, heading: str | None = None) -> str:
     if heading is not None:
         text = text.split(heading, 1)[1]
     return text.split(f"```{fence}", 1)[1].split("```", 1)[0].strip()
-
-
-def _fenced_blocks(path: Path, fence: str) -> list[str]:
-    return [part.split("```", 1)[0].strip() for part in path.read_text().split(f"```{fence}")[1:]]
 
 
 def _posix_program() -> str:
@@ -47,21 +41,24 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "`HTTP 401` or `HTTP 403`" in skill
     assert "without printing or embedding any credential" in flat_skill
     assert "references/sdk-contract.md" in skill
-    assert "references/advanced.md" in skill
     assert "references/patterns.md" in skill
-    assert "references/python-recipes.md" in skill
-    assert "references/stateful-research.md" in skill
+    assert "references/advanced.md" not in skill
+    assert "references/python-recipes.md" not in skill
+    assert "references/stateful-research.md" not in skill
     assert "Treat one program as one semantic checkpoint" in flat_skill
     assert "search -> select a relevant subset -> fetch" in flat_skill
     assert "candidates, not a fetch queue" in flat_skill
     assert "Do not fetch the whole result list" in flat_skill
-    assert "semantic passage ranking that ordinary local matching does not" in flat_skill
-    assert "avoid running every question over every selected source" in flat_skill
+    assert "sdk.content.passages" not in flat_skill
     assert "merely to relocate text already present" in flat_skill
+    assert "Use ordinary Python freely for deterministic orchestration" in flat_skill
+    assert "not a required sequence or policy" in flat_skill
     assert "across the whole program" in flat_skill
     assert "Make normalized row schemas total" in flat_skill
     assert "small data cache over a workflow state machine" in flat_skill
     assert "Keep each cache cumulative" in flat_skill
+    assert "persist an operation as `started`" in flat_skill
+    assert "persist each input as `success` or `failure`" in flat_skill
     assert "Agent completion is the final response to the user" in flat_skill
     assert "`submit` is optional" in flat_skill
     assert "same substantive payload could be written before research ran" in flat_skill
@@ -102,27 +99,20 @@ def test_cli_skill_invocation_compiles_and_passes_sandbox_validation() -> None:
 
 
 def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
-    assert (
-        CONTRACT_PATH.read_bytes()
-        == (MCP_SKILL_DIR / "references" / "sdk-contract.md").read_bytes()
-    )
-    assert ADVANCED_PATH.read_bytes() == (MCP_SKILL_DIR / "references" / "advanced.md").read_bytes()
-    assert PATTERNS_PATH.read_bytes() == (MCP_SKILL_DIR / "references" / "patterns.md").read_bytes()
-    assert (
-        RECIPES_PATH.read_bytes()
-        == (MCP_SKILL_DIR / "references" / "python-recipes.md").read_bytes()
-    )
-    expected_stateful = (
-        (MCP_SKILL_DIR / "references" / "stateful-research.md")
-        .read_text(encoding="utf-8")
-        .replace("Multiple `sac_run` calls", "Multiple `agent-run` calls")
-    )
-    assert STATEFUL_PATH.read_text(encoding="utf-8") == expected_stateful
+    for name in REFERENCE_NAMES:
+        cli_reference = SKILL_DIR / "references" / name
+        mcp_reference = MCP_SKILL_DIR / "references" / name
+        assert cli_reference.is_file()
+        assert cli_reference.read_bytes() == mcp_reference.read_bytes()
+    for name in ("advanced.md", "python-recipes.md", "stateful-research.md"):
+        assert not (SKILL_DIR / "references" / name).exists()
 
     pattern_headings = (
         "## Explore candidates",
         "## Compose retrieval and focused inspection",
         "## Verify selected sources and return evidence",
+        "## Optionally extract structured fields from inspected evidence",
+        "## Optionally cache selected fetches across calls",
     )
     for heading in pattern_headings:
         path = PATTERNS_PATH
@@ -137,9 +127,8 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
     )
     assert composed.index("sdk.search.many(") < composed.index("sdk.search.fuse_rrf(")
     assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.fetch_many(")
-    assert composed.index("sdk.content.fetch_many(") < composed.index("sdk.content.passages(")
+    assert "sdk.content.passages(" not in composed
     assert "sdk.content.read(" not in composed
-    assert "fetch_batch = 4" in composed
     assert "for outcome in fetch_outcomes:" in composed
 
     verify = _fenced_block(
@@ -149,17 +138,29 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
     )
     assert "structured_output_requested = False" in verify
 
-    stateful_stages = _fenced_blocks(STATEFUL_PATH, "python")
-    assert len(stateful_stages) == 1
-    for program in stateful_stages:
-        compile(program, "<search-as-code-cli-stateful-stage>", "exec")
-        validate_code(program)
+    extraction = _fenced_block(
+        PATTERNS_PATH,
+        "python",
+        heading="## Optionally extract structured fields from inspected evidence",
+    )
+    assert "sdk.llm.extract_many(" in extraction
+    assert "zip(evidence_items, outcomes, strict=True)" in extraction
+    assert 'quote not in item["text"]' in extraction
+    assert "sdk.search." not in extraction
+    assert "sdk.output.submit(" not in extraction
 
-    recipes = _fenced_blocks(RECIPES_PATH, "python")
-    assert len(recipes) == 4
-    for program in recipes:
-        compile(program, "<search-as-code-cli-recipe>", "exec")
-        validate_code(program)
+    cache = _fenced_block(
+        PATTERNS_PATH,
+        "python",
+        heading="## Optionally cache selected fetches across calls",
+    )
+    assert cache.index("sdk.state.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
+    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.state.upsert_jsonl(")
+    assert "concurrency=" not in cache
+
+    contract = CONTRACT_PATH.read_text(encoding="utf-8")
+    assert "sdk.content.passages(" not in contract
+    assert "llm.complete" not in contract
 
 
 def test_cli_skill_has_codex_catalog_metadata() -> None:

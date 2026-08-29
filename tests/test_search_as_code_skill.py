@@ -20,10 +20,7 @@ ROOT = Path(__file__).parents[1]
 SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
-ADVANCED_PATH = SKILL_DIR / "references" / "advanced.md"
 PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
-RECIPES_PATH = SKILL_DIR / "references" / "python-recipes.md"
-STATEFUL_PATH = SKILL_DIR / "references" / "stateful-research.md"
 STATEFUL_PROGRAM_PATH = ROOT / "tests" / "data" / "search_as_code_stateful_program.py"
 
 
@@ -45,12 +42,19 @@ def _rank_pattern() -> str:
     return _code_block(PATTERNS_PATH, "## Compose retrieval and focused inspection")
 
 
+def _cache_pattern() -> str:
+    return _code_block(PATTERNS_PATH, "## Optionally cache selected fetches across calls")
+
+
+def _extract_pattern() -> str:
+    return _code_block(
+        PATTERNS_PATH,
+        "## Optionally extract structured fields from inspected evidence",
+    )
+
+
 def _stateful_pattern() -> str:
     return STATEFUL_PROGRAM_PATH.read_text(encoding="utf-8")
-
-
-def _python_blocks(path: Path) -> list[str]:
-    return [part.split("```", 1)[0] for part in path.read_text().split("```python")[1:]]
 
 
 def _artifact(state: StateResource, name: str) -> str:
@@ -447,14 +451,17 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "same program blindly" in flat_skill
     assert "Public web URLs" in flat_skill
     assert "references/sdk-contract.md" in flat_skill
-    assert "references/advanced.md" in flat_skill
     assert "references/patterns.md" in flat_skill
-    assert "references/python-recipes.md" in flat_skill
-    assert "references/stateful-research.md" in flat_skill
+    assert "references/advanced.md" not in flat_skill
+    assert "references/python-recipes.md" not in flat_skill
+    assert "references/stateful-research.md" not in flat_skill
+    assert "optionally-cache-selected-fetches-across-calls" in flat_skill
     assert "Choose the strategy yourself" in flat_skill
     assert "teaches how to encode it as OpenSAC code" in flat_skill
     assert "No fixed query count, capability" in flat_skill
     assert "stage split, or workspace schema is required" in flat_skill
+    assert "Use ordinary Python freely for deterministic orchestration" in flat_skill
+    assert "this is not a required sequence or policy" in flat_skill
     assert "Issue another search batch only" not in flat_skill
     assert "Once useful authoritative candidates exist" not in flat_skill
     assert "Agent completion is the final response to the user" in flat_skill
@@ -463,22 +470,20 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "Prefer a small data cache over a workflow state machine" in flat_skill
     assert "filter repeated queries or sources" in flat_skill
     assert "Keep each cache cumulative" in flat_skill
-    assert "Do not print raw result lists, full passages, or the ledger" in flat_skill
+    assert "Do not print raw result lists, full documents, or the ledger" in flat_skill
     assert "Runtime metrics alone" in flat_skill
     assert "A final research result must use `submit`" not in flat_skill
     assert "not as new evidence" in flat_skill
     assert "program-to-program memory" in flat_skill
     assert "observations show artifact paths, not their" in flat_skill
     assert "no `sdk.workspace` API" in flat_skill
-    assert "sdk.content.passages" in flat_skill
+    assert "sdk.content.passages" not in flat_skill
     assert "sdk.content.grep" in flat_skill
     assert "sdk.content.read" in flat_skill
     assert "candidates, not a fetch queue" in flat_skill
     assert "smallest source-diverse set" in flat_skill
     assert "Do not fetch the whole result list" in flat_skill
     assert "`sdk.content.fetch_many(...)` its first content call" in flat_skill
-    assert "semantic passage ranking that ordinary local matching does not" in flat_skill
-    assert "avoid running every question over every selected source" in flat_skill
     assert "merely to relocate text already present" in flat_skill
     assert "across the whole program" in flat_skill
     assert "Never pass an unfetched source" in flat_skill
@@ -493,14 +498,12 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
 
 def test_example_references_are_explicitly_non_prescriptive() -> None:
     patterns = PATTERNS_PATH.read_text(encoding="utf-8")
-    stateful = STATEFUL_PATH.read_text(encoding="utf-8")
     flat_patterns = " ".join(patterns.split())
-    flat_stateful = " ".join(stateful.split())
 
     assert "not a required pipeline" in flat_patterns
     assert "query count, bounds, call grouping, and stopping point are examples" in flat_patterns
-    assert "Multiple `sac_run` calls alone do not require state" in flat_stateful
-    assert "Adapt its inputs and bounds; they are not a required strategy" in flat_stateful
+    assert "selected sources are inputs" in flat_patterns
+    assert "not a search or stopping policy" in flat_patterns
 
 
 def test_skill_has_codex_catalog_metadata() -> None:
@@ -517,9 +520,9 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
     assert "opensac_sdk.types" not in contract
     assert "There is no public SDK model hierarchy" in contract
     assert "Mapping access is canonical" in contract
-    assert "known non-colliding fields" in contract
+    assert "non-colliding fields" in contract
     assert "Fused candidate" in contract
-    assert "Passage report" in contract
+    assert "sdk.content.passages(" not in contract
     assert "structured session-workspace interface" in contract
     assert "there is no `sdk.workspace` resource" in contract
     assert "Adapter failures occur outside the sandbox" in contract
@@ -535,20 +538,11 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
     assert "never display or parse search `status` as failure detail" in contract
 
 
-def test_surface_tiers_route_exact_signatures_to_the_right_reference() -> None:
+def test_contract_omits_sdk_capabilities_not_taught_by_the_skill() -> None:
     contract = CONTRACT_PATH.read_text(encoding="utf-8")
-    advanced = ADVANCED_PATH.read_text(encoding="utf-8")
 
-    for operation in SDK_SURFACE:
-        signature = f"{operation.public_name}("
-        if operation.tier is SurfaceTier.INTERNAL:
-            assert signature not in contract
-            assert signature not in advanced
-        elif operation.tier is SurfaceTier.ADVANCED:
-            assert signature not in contract
-            assert signature in advanced
-        else:
-            assert signature in contract
+    assert "sdk.content.passages(" not in contract
+    assert "llm.complete" not in contract
 
 
 def test_core_patterns_only_call_core_or_helper_operations() -> None:
@@ -573,17 +567,17 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     explore = _explore_pattern()
     rank = _rank_pattern()
     verify = _verify_pattern()
+    extract = _extract_pattern()
+    cache = _cache_pattern()
     stateful = _stateful_pattern()
-    stateful_stages = _python_blocks(STATEFUL_PATH)
-    recipes = _python_blocks(RECIPES_PATH)
 
     for name, program in (
         ("explore", explore),
         ("rank", rank),
         ("verify", verify),
+        ("extract", extract),
+        ("cache", cache),
         ("stateful-fixture", stateful),
-        *((f"stateful-cache-{index}", program) for index, program in enumerate(stateful_stages, 1)),
-        *((f"recipe-{index}", program) for index, program in enumerate(recipes, 1)),
     ):
         compile(program, f"<search-as-code-{name}-pattern>", "exec")
         validate_code(program)
@@ -599,15 +593,13 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.search.many(" in rank
     assert "sdk.search.fuse_rrf(" in rank
     assert "sdk.content.fetch_many(" in rank
-    assert "sdk.content.passages(" in rank
+    assert "sdk.content.passages(" not in rank
     assert "sdk.content.read(" not in rank
-    assert rank.index("sdk.content.fetch_many(") < rank.index("sdk.content.passages(")
-    assert "fetch_batch = 4" in rank
     assert "for outcome in fetch_outcomes:" in rank
     assert "for document in documents.values():" in rank
     assert "sdk.output.submit(" not in rank
     assert "NEXT:" in rank
-    assert "for passage in passage_report.passages[:4]:" in rank
+    assert "local_evidence" in rank
     assert "[:500]" in rank
 
     assert len(verify.splitlines()) <= 90
@@ -625,6 +617,24 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.state." not in explore
     assert "sdk.state." not in verify
 
+    assert len(cache.splitlines()) <= 80
+    assert "sdk.search." not in cache
+    assert "sdk.content.passages(" not in cache
+    assert "concurrency=" not in cache
+    assert '"requested_source": requested_source' in cache
+    assert "document.source" in cache
+    assert 'cache_row(source, "started")' in cache
+    assert cache.index("sdk.state.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
+    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.state.upsert_jsonl(")
+
+    assert len(extract.splitlines()) <= 55
+    assert "sdk.llm.extract_many(" in extract
+    assert "zip(evidence_items, outcomes, strict=True)" in extract
+    assert 'quote not in item["text"]' in extract
+    assert "sdk.search." not in extract
+    assert "sdk.output.submit(" not in extract
+    assert "followup" not in extract
+
     assert 'root = f"runs/{research_id}"' in stateful
     assert "POOL_LIMIT = 200" in stateful
     assert "CONTENT_BATCH = 40" in stateful
@@ -639,76 +649,24 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "grep(list(pool)" not in stateful
     assert "sdk.output.submit(" in stateful
 
-    stateful_reference = STATEFUL_PATH.read_text(encoding="utf-8")
-    assert len(stateful_reference.splitlines()) <= 230
-    assert len(stateful_stages) == 1
-    assert "Multiple `sac_run` calls alone do not require state" in stateful_reference
-    assert "Adapt its inputs and bounds; they are not a required strategy" in stateful_reference
-    assert "## Canonical stateful pattern" not in stateful_reference
-    assert "## Small data model" in stateful_reference
-    assert "| `meta.json` |" in stateful_reference
-    assert "| `pool.jsonl` |" in stateful_reference
-    assert "| `content.jsonl` |" in stateful_reference
-    assert "not a workflow state machine" in stateful_reference
-    assert "Keep one cumulative file for each role" in stateful_reference
-    assert "do not create `pool_round2.jsonl` or `content_stage3.jsonl`" in stateful_reference
-    assert "sdk.state.write_jsonl(pool_path, pool)" in stateful_reference
-    assert "sdk.state.write_jsonl(content_path, content)" in stateful_reference
-    stateful_cache = stateful_stages[0]
-    assert stateful_cache.index("sdk.content.fetch_many(") < stateful_cache.index(
-        "sdk.content.passages("
-    )
-    assert "sdk.content.read(" not in stateful_cache
-    assert "fetch_batch = 4" in stateful_cache
-    assert "for candidate in new_candidates:" in stateful_cache
-
-    assert len(recipes) == 4
-    recipe_text = "\n".join(recipes)
-    assert "for year in years" in recipe_text
-    assert "list(filter(keep, candidates))" in recipe_text
-    assert "sdk.llm.extract_many(" in recipe_text
-    assert "for passage, item, outcome in zip(" in recipe_text
-    assert 'quote in item["text"]' in recipe_text
-    assert "sdk.search.many(followup_queries" in recipe_text
-    assert "MAX_FOLLOWUPS = 6" in recipe_text
-    assert "while " not in recipe_text
-
-
-def test_query_recipe_builds_a_bounded_unique_year_matrix() -> None:
-    namespace: dict[str, object] = {}
-    exec(compile(_python_blocks(RECIPES_PATH)[0], "<query-grid-recipe>", "exec"), namespace)
-
-    queries = namespace["queries"]
-    assert isinstance(queries, list)
-    assert len(queries) == 20
-    assert len(set(queries)) == len(queries)
-    assert all(any(str(year) in query for query in queries) for year in range(2019, 2024))
-
 
 def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> None:
-    program = _python_blocks(STATEFUL_PATH)[0]
+    program = _cache_pattern()
 
     sdk, content, output, first = _run_pattern(tmp_path, program=program)
 
-    assert sdk.search.many_calls
-    assert 1 <= len(content.fetch_sources) <= 4
-    assert content.passage_calls
+    assert not sdk.search.many_calls
+    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
+    assert not content.passage_calls
     assert not content.read_sources
-    assert list(content.passage_calls[0][1]) == content.fetch_sources
-    assert "new_queries=2" in first
-    assert "EVIDENCE source=" in first
-    assert first.strip().endswith(
-        "NEXT: judge these rows, answer if complete, or extend unresolved requirements"
-    )
+    assert first.count("CACHE status=success") == 2
     artifact_names = {Path(path).name for path in sdk.state.list()}
-    assert artifact_names == {"meta.json", "pool.jsonl", "content.jsonl"}
-    meta = sdk.state.read_json(_artifact(sdk.state, "meta.json"))
-    pool = sdk.state.read_jsonl(_artifact(sdk.state, "pool.jsonl"))
-    cached_content = sdk.state.read_jsonl(_artifact(sdk.state, "content.jsonl"))
-    assert len(meta.queries) == 2
-    assert pool
-    assert cached_content
-    assert all(row.key.startswith(f"{row.source}#L") for row in cached_content)
+    assert artifact_names == {"fetch-cache.jsonl"}
+    cached_content = sdk.state.read_jsonl("fetch-cache.jsonl")
+    assert {row.requested_source for row in cached_content} == set(content.fetch_sources)
+    assert all(row.status == "success" for row in cached_content)
+    assert all(row.source == row.requested_source for row in cached_content)
+    assert all(row.text for row in cached_content)
     assert not output.submissions
 
     resumed_sdk, resumed_content, resumed_output, second = _run_pattern(
@@ -720,19 +678,41 @@ def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> N
     assert not resumed_content.fetch_sources
     assert not resumed_content.passage_calls
     assert not resumed_content.read_sources
-    assert "new_queries=0" in second
+    assert second.count("CACHE status=success") == 2
     assert {Path(path).name for path in resumed_sdk.state.list()} == artifact_names
     assert not resumed_output.submissions
 
 
-def test_composed_pattern_fetches_only_its_selected_subset_before_passages(
+def test_stateful_cache_example_persists_item_failures_without_replay(tmp_path: Path) -> None:
+    program = _cache_pattern()
+
+    sdk, content, output, first = _run_pattern(
+        tmp_path,
+        program=program,
+        partial_failure=True,
+    )
+
+    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
+    cached = {row.requested_source: row for row in sdk.state.read_jsonl("fetch-cache.jsonl")}
+    assert cached["selected-source-url-1"].status == "success"
+    assert cached["selected-source-url-2"].status == "failure"
+    assert cached["selected-source-url-2"].error.code == "provider_timeout"
+    assert "error=provider_timeout" in first
+    assert not output.submissions
+
+    _, resumed_content, _, second = _run_pattern(tmp_path, program=program)
+
+    assert not resumed_content.fetch_sources
+    assert "status=failure" in second
+
+
+def test_composed_pattern_fetches_only_its_selected_subset_for_local_inspection(
     tmp_path: Path,
 ) -> None:
     _, content, output, printed = _run_pattern(tmp_path, program=_rank_pattern())
 
     assert 1 <= len(content.fetch_sources) <= 4
-    assert len(content.passage_calls) == 1
-    assert list(content.passage_calls[0][1]) == content.fetch_sources
+    assert not content.passage_calls
     assert not content.grep_calls
     assert not content.read_sources
     assert "select another small relevant batch" in printed
