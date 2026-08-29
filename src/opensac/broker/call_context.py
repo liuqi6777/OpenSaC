@@ -83,6 +83,11 @@ def current_call() -> CallContext | None:
     return _CURRENT_CALL.get()
 
 
+def current_provider_attempts() -> list[ProviderAttemptRecord]:
+    context = current_call()
+    return context.provider_attempts if context is not None else []
+
+
 _ERROR_MESSAGE_CHARS = 400
 
 

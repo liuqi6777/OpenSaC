@@ -5,14 +5,19 @@ from typing import TYPE_CHECKING, Any, Self
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from opensac.backends.search import SearchBackend, SearchHit
-from opensac.broker.call_context import current_call
+from opensac.broker._utils import (
+    document_handle_for_hit,
+    document_identity,
+    optional_string_list,
+    source_for,
+    string,
+)
+from opensac.broker.call_context import current_call, current_provider_attempts
 from opensac.broker.failures import CapabilityFailure
 from opensac.broker.registry import BaseCapabilities, CapabilityRequest, capability_method
 from opensac.broker.session import BrokerSession, FlightGroup
-from opensac.broker.sources import document_handle_for_hit, document_identity, source_for
-from opensac.broker.validation import optional_string_list, string
 from opensac.provider import ProviderRequestError
-from opensac.tracing import HitRecord, ProviderAttemptRecord
+from opensac.tracing import HitRecord
 
 from ..providers.execution import BackendBinding, CapabilityProviderError, ProviderExecutor
 
@@ -47,11 +52,6 @@ class SearchQueryRequest(CapabilityRequest):
         if value is not None and not isinstance(value, list):
             raise ValueError("include_domains must be a list of strings")
         return value
-
-
-def _provider_attempts() -> list[ProviderAttemptRecord]:
-    context = current_call()
-    return context.provider_attempts if context is not None else []
 
 
 class SearchCapabilities(BaseCapabilities):
@@ -379,7 +379,7 @@ class SearchCapabilities(BaseCapabilities):
         if isinstance(outcome, CapabilityFailure):
             raise CapabilityProviderError.from_failure(
                 outcome.model_dump(mode="json"),
-                attempts=len(_provider_attempts()),
+                attempts=len(current_provider_attempts()),
             )
         if not isinstance(outcome, list) or not all(isinstance(hit, SearchHit) for hit in outcome):
             raise RuntimeError("Search flight returned an invalid outcome.")

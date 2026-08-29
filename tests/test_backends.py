@@ -7,7 +7,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from opensac.backends._response import json_object
+from opensac.backends._utils import json_object
 from opensac.backends.document import DocumentContent, DocumentHandle
 from opensac.backends.document import jina as jina_module
 from opensac.backends.document import local_http as local_document_module

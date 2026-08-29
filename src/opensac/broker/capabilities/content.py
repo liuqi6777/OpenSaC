@@ -13,19 +13,20 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from opensac.backends.document import DocumentBackend, DocumentContent, DocumentHandle
 from opensac.backends.rerank import RerankScore, TextReranker, bm25_scores
-from opensac.broker.call_context import current_call
-from opensac.broker.failures import CapabilityFailure
-from opensac.broker.registry import BaseCapabilities, CapabilityRequest, capability_method
-from opensac.broker.session import BrokerSession, FlightGroup
-from opensac.broker.sources import (
+from opensac.broker._utils import (
     document_identity,
+    integer,
     normalize_source,
     normalize_web_source,
     public_web_url,
+    string,
 )
-from opensac.broker.validation import integer, string
+from opensac.broker.call_context import current_call, current_provider_attempts
+from opensac.broker.failures import CapabilityFailure
+from opensac.broker.registry import BaseCapabilities, CapabilityRequest, capability_method
+from opensac.broker.session import BrokerSession, FlightGroup
 from opensac.provider import ProviderRequestError, invalid_provider_response
-from opensac.tracing import HitRecord, PassageTraceRecord, ProviderAttemptRecord
+from opensac.tracing import HitRecord, PassageTraceRecord
 
 from ..providers.execution import BackendBinding, CapabilityProviderError, ProviderExecutor
 from .passages import (
@@ -307,11 +308,6 @@ class ContentPassageReport(BaseModel):
         if self.unique_source_count > self.input_count:
             raise ValueError("unique_source_count cannot exceed input_count")
         return self
-
-
-def _provider_attempts() -> list[ProviderAttemptRecord]:
-    context = current_call()
-    return context.provider_attempts if context is not None else []
 
 
 @dataclass(frozen=True, slots=True)
@@ -1335,7 +1331,7 @@ class ContentCapabilities(BaseCapabilities):
                     input_index, item = misses[fingerprint]
                     attempts = sum(
                         1
-                        for record in _provider_attempts()
+                        for record in current_provider_attempts()
                         if input_index in record.request_indexes
                     )
                     results[fingerprint] = self._content_failure(

@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 
 import httpx
 
-from opensac.backends._response import json_object
+from opensac.backends._utils import json_object
 from opensac.backends.search.base import RetrievalMetadata, SearchHit
 from opensac.provider import invalid_provider_response
 

@@ -5,7 +5,7 @@ import math
 
 import httpx
 
-from opensac.backends._response import json_object
+from opensac.backends._utils import json_object
 from opensac.backends.rerank.base import RerankScore
 from opensac.provider import ProviderRequestError, invalid_provider_response
 

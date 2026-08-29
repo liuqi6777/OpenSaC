@@ -13,14 +13,14 @@ from opensac.backends.document.local_http import LocalDocumentBackend
 from opensac.backends.search import SearchHit
 from opensac.backends.search.local_http import LocalSearchBackend
 from opensac.backends.search.serper import SerperBackend
+from opensac.broker._utils import document_identity
 from opensac.broker.capabilities.content import ContentLimits
 from opensac.broker.config import BrokerConfig
 from opensac.broker.providers import ProviderExecutionConfig, ProviderExecutor
+from opensac.broker.providers._utils import canonical_json_bytes
 from opensac.broker.providers.cache import ProviderResultCache
 from opensac.broker.providers.execution import CapabilityProviderError
-from opensac.broker.providers.serialization import canonical_json_bytes
 from opensac.broker.service import BrokerService, RetrievalRoute
-from opensac.broker.sources import document_identity
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderPolicy, ProviderRequestError, ProviderRuntime
 

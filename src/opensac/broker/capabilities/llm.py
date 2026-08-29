@@ -15,16 +15,16 @@ if TYPE_CHECKING:
     from opensac.broker.capabilities.catalog import CapabilityBuildContext
 
 from opensac.backends.llm import LLMBackend, LLMResponse
-from opensac.broker.call_context import current_call, trace_error_message
-from opensac.broker.failures import CapabilityFailure
-from opensac.broker.registry import BaseCapabilities, CapabilityRequest, capability_method
-from opensac.broker.session import BrokerSession
-from opensac.broker.validation import (
+from opensac.broker._utils import (
     finite_number,
     optional_integer,
     optional_string,
     string,
 )
+from opensac.broker.call_context import current_call, trace_error_message
+from opensac.broker.failures import CapabilityFailure
+from opensac.broker.registry import BaseCapabilities, CapabilityRequest, capability_method
+from opensac.broker.session import BrokerSession
 from opensac.tracing import ModelAttemptRecord
 
 from ..providers.execution import BackendBinding, CapabilityProviderError, ProviderExecutor

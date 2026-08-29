@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from .serialization import canonical_json_bytes
+from ._utils import canonical_json_bytes
 
 
 @dataclass(slots=True)

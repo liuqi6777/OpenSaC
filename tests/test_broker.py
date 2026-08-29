@@ -17,6 +17,7 @@ from opensac.backends.llm import OpenAICompatibleBackend
 from opensac.backends.rerank.base import RerankScore
 from opensac.backends.rerank.jina import JinaReranker
 from opensac.backends.search import SearchHit
+from opensac.broker._utils import canonical_url, normalize_web_source
 from opensac.broker.app import RpcResponse
 from opensac.broker.call_context import trace_error_message
 from opensac.broker.capabilities.content import ContentLimits
@@ -30,7 +31,6 @@ from opensac.broker.providers import (
     ProviderExecutionConfig,
 )
 from opensac.broker.service import BrokerService, RetrievalRoute
-from opensac.broker.sources import canonical_url, normalize_web_source
 from opensac.models import (
     CAPABILITY_METHODS,
     Mechanisms,

@@ -23,10 +23,10 @@ from opensac.tracing import (
     ProviderAttemptRecord,
 )
 
+from ._utils import canonical_json_bytes
 from .cache import ProviderResultCache
 from .config import ProviderExecutionConfig
 from .flights import ProviderFlightCoordinator
-from .serialization import canonical_json_bytes
 
 
 @dataclass(frozen=True, slots=True)
