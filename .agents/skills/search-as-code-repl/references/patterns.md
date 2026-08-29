@@ -119,7 +119,9 @@ else:
             f"coordinates={row['coordinates']!r} text={excerpt!r}"
         )
     retrieval_failures = [
-        outcome.status for outcome in search_outcomes if outcome.status != "success"
+        outcome.error.code if outcome.error is not None else "unknown"
+        for outcome in search_outcomes
+        if outcome.status != "success"
     ]
     retrieval_failures.extend(item.code for item in passage_report.failures)
     retrieval_failures.extend(read_failures)

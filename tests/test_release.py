@@ -12,7 +12,8 @@ from scripts.release import ReleaseValidationError, _dependency_names, validate_
 def test_release_metadata_is_consistent() -> None:
     metadata = validate_release()
 
-    assert metadata.capability_contract == 13
+    assert metadata.version == "0.8.2"
+    assert metadata.capability_contract == 14
     assert metadata.sandbox_contract == 14
     assert validate_release(f"v{metadata.version}") == metadata
 
@@ -31,10 +32,10 @@ def test_release_rejects_sandbox_contract_drift(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    write("src/opensac/_version.py", '__version__ = "0.8.1"\n')
+    write("src/opensac/_version.py", '__version__ = "0.8.2"\n')
     write(
         "packages/opensac-sdk/src/opensac_sdk/_version.py",
-        '__version__ = "0.8.1"\nCAPABILITY_CONTRACT = 13\n',
+        '__version__ = "0.8.2"\nCAPABILITY_CONTRACT = 13\n',
     )
     write("src/opensac/models.py", "CAPABILITY_CONTRACT = 13\n")
     write("src/opensac/sandbox/docker_core.py", "SANDBOX_CONTRACT = 14\n")
@@ -86,4 +87,4 @@ def test_release_publishes_service_and_sandbox_images() -> None:
     assert "  local_search:" not in compose
     assert "  local-search:" not in compose
     assert configuration_profiles
-    assert all("ghcr.io/liuqi6777/opensac-sandbox:0.8.1" in text for text in configuration_profiles)
+    assert all("ghcr.io/liuqi6777/opensac-sandbox:0.8.2" in text for text in configuration_profiles)

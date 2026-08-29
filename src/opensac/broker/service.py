@@ -203,7 +203,6 @@ class BrokerService:
         )
         self.search = SearchCapabilities(
             self.search_services,
-            max_queries_per_request=self.max_search_queries_per_request,
             max_query_chars=self.max_search_query_chars,
             max_top_k=self.max_search_top_k,
         )
@@ -229,7 +228,6 @@ class BrokerService:
         )
         self._handlers: dict[str, CapabilityHandler] = {
             "search.query": self.search.query,
-            "search.query_many": self.search.query_many,
             "content.fetch": self.content.fetch,
             "content.passages": self.content.passages,
             "content.read": self.content.read,
@@ -455,9 +453,7 @@ class BrokerService:
             capability_family=capability_family,
         ) as context:
             try:
-                blocked = state.mechanisms.blocked_reason(method) or state.mechanisms.fanout_reason(
-                    method, params
-                )
+                blocked = state.mechanisms.blocked_reason(method)
                 if blocked:
                     raise MechanismDisabled(blocked)
                 result = await handler(state, params)
@@ -619,21 +615,13 @@ class BrokerService:
             return [query[: self.max_search_query_chars]] if query else []
         if not method.startswith("search."):
             return []
-        if method.endswith("_many"):
-            raw_queries = params.get("queries", [])
-            if not isinstance(raw_queries, list):
-                return []
-            return [
-                str(item)[: self.max_search_query_chars]
-                for item in raw_queries[: self.max_search_queries_per_request]
-            ]
         query = str(params.get("query", ""))
         return [query[: self.max_search_query_chars]] if query else []
 
     @staticmethod
     def _trace_input_count(method: str, params: dict[str, Any]) -> int:
         if method.startswith("search."):
-            return len(params.get("queries", [])) if method.endswith("_many") else 1
+            return 1
         if method.startswith("content."):
             if method in {"content.fetch", "content.read"}:
                 return 1
@@ -645,8 +633,6 @@ class BrokerService:
 
     @staticmethod
     def _trace_result_count(method: str, result: Any) -> int:
-        if method == "search.query_many" and isinstance(result, dict):
-            return sum(len(batch.get("hits", [])) for batch in result.get("results", []))
         if isinstance(result, list):
             return len(result)
         if method == "content.grep" and isinstance(result, dict):

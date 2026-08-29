@@ -9,26 +9,20 @@ from typing import Any
 
 import httpx
 import pytest
-from opensac_sdk._surface import BROKER_METHODS
+from opensac_sdk._surface import SDK_TRANSPORT_METHODS
 from pydantic import ValidationError
 
 from opensac.backends.document import DocumentContent, DocumentHandle
 from opensac.backends.llm import OpenAICompatibleBackend
 from opensac.backends.rerank.base import RerankScore
 from opensac.backends.rerank.jina import JinaReranker
-from opensac.backends.search import (
-    RetrievalMetadata,
-    SearchBatch,
-    SearchBatchFailure,
-    SearchHit,
-)
+from opensac.backends.search import SearchHit
 from opensac.broker.app import RpcResponse
 from opensac.broker.call_context import trace_error_message
 from opensac.broker.failures import CapabilityFailure
 from opensac.broker.policy import BudgetExceeded, MechanismDisabled
 from opensac.broker.providers import (
     CapabilityProviderError,
-    InflightCapacityError,
     ProviderExecutionConfig,
 )
 from opensac.broker.service import BrokerService
@@ -53,7 +47,7 @@ def test_rpc_response_separates_result_and_error() -> None:
 
     successful = RpcResponse(ok=True, result={"value": 1})
     assert successful.error is None
-    assert successful.capability_contract == 13
+    assert successful.capability_contract == 14
     assert RpcResponse(ok=False, error=failure).result is None
     with pytest.raises(ValidationError, match="cannot contain an error"):
         RpcResponse(ok=True, result={}, error=failure)
@@ -522,40 +516,6 @@ async def test_search_rejects_query_and_depth_budgets_before_backend_call() -> N
     assert state.policy.usage.search_calls == 0
 
 
-async def test_search_many_rejects_hard_budgets_before_fanout() -> None:
-    service = _broker_service(
-        {"web": FakeBackend("web")},
-        max_search_queries_per_request=2,
-        max_search_query_chars=4,
-        max_search_top_k=20,
-    )
-    state = service.register_session(make_session())
-
-    with pytest.raises(ValueError, match="3 queries"):
-        await service.call(
-            "token",
-            "search.query_many",
-            {"queries": ["a", "b", "c"]},
-            execution_id="oversized-batch",
-        )
-    report = await service.call("token", "search.query_many", {"queries": ["ok", "abcde"]})
-    assert report["results"][0]["input_index"] == 0
-    assert report["failures"][0]["input_index"] == 1
-    assert report["failures"][0]["code"] == "invalid_request"
-    assert report["failures"][0]["attempts"] == 0
-    with pytest.raises(ValueError, match="retrieval depth 21"):
-        await service.call(
-            "token",
-            "search.query_many",
-            {"queries": ["ok"], "limit": 10, "offset": 11},
-        )
-
-    assert state.policy.usage.search_calls == 2
-    rejected = service.take_trace("token", "oversized-batch")[0]
-    assert rejected.input_count == 3
-    assert rejected.queries == ["a", "b"]
-
-
 async def test_searches_are_counted_and_never_capped() -> None:
     """Retrieval volume across valid calls is measured, not rationed.
 
@@ -571,161 +531,6 @@ async def test_searches_are_counted_and_never_capped() -> None:
     for index in range(25):
         await service.call("token", "search.query", {"query": f"q{index}"})
     assert state.policy.usage.search_calls == 25
-
-
-async def test_search_many_returns_aligned_failures_when_every_query_fails() -> None:
-    service = _broker_service({"web": BrokenBackend()})
-    service.register_session(make_session())
-    report = await service.call("token", "search.query_many", {"queries": ["one", "two"]})
-    assert report["results"] == []
-    assert [row["input_index"] for row in report["failures"]] == [0, 1]
-    assert [row["code"] for row in report["failures"]] == [
-        "provider_invalid_response",
-        "provider_invalid_response",
-    ]
-    assert [row["attempts"] for row in report["failures"]] == [1, 1]
-
-
-async def test_search_many_tolerates_partial_failure() -> None:
-    service = _broker_service({"web": FakeBackend("web")})
-    service.register_session(make_session())
-    # An empty query is rejected by the broker while the other one succeeds.
-    report = await service.call("token", "search.query_many", {"queries": ["ok", ""]})
-    assert len(report["results"][0]["hits"]) == 1
-    assert report["results"][0]["input_index"] == 0
-    assert "must not be empty" in report["failures"][0]["message"]
-    assert report["failures"][0] == {
-        "input_index": 1,
-        "query": "",
-        "code": "invalid_request",
-        "message": "query must not be empty",
-        "retryable": False,
-        "attempts": 0,
-        "provider_status": None,
-        "retry_after_seconds": None,
-        "provider": "web",
-        "component": "search",
-        "scope": "request",
-    }
-
-
-async def test_web_search_many_registers_provenance_in_input_order() -> None:
-    class CompletionOrderBackend(FakeBackend):
-        async def search(self, query, *, limit, offset=0, domains=None):
-            if query == "first":
-                await asyncio.sleep(0.02)
-            return [
-                SearchHit(
-                    source="",
-                    backend="web",
-                    title=query,
-                    url="https://example.com/shared",
-                    snippet=query,
-                    rank=1,
-                    retrieval=RetrievalMetadata(mode="organic", result_mode="snippet"),
-                )
-            ]
-
-    service = _broker_service({"web": CompletionOrderBackend("web")})
-    state = service.register_session(make_session())
-
-    report = await service.call(
-        "token",
-        "search.query_many",
-        {"queries": ["first", "second"], "concurrency": 2},
-        execution_id="exec-query-order",
-    )
-
-    results = report["results"]
-    assert results[0]["hits"][0]["source"] == results[1]["hits"][0]["source"]
-    record = state.document_for_alias(results[0]["hits"][0]["source"])
-    assert record is not None and record.handle.title == "first"
-    event = service.take_trace("token", "exec-query-order")[0]
-    assert [hit.query_index for hit in event.hits] == [0, 1]
-    assert [hit.retrieval_mode for hit in event.hits] == ["organic", "organic"]
-
-
-async def test_custom_route_search_many_prefers_backend_batch_and_preserves_order() -> None:
-    class BatchCustom(FakeBackend):
-        source_kind = "opaque"
-
-        def __init__(self) -> None:
-            super().__init__("custom")
-            self.batch_calls: list[list[str]] = []
-            self.single_calls = 0
-
-        async def search(self, query, *, limit, offset=0, domains=None):
-            self.single_calls += 1
-            return await super().search(query, limit=limit, offset=offset, domains=domains)
-
-        async def search_many(self, queries, *, limit, offset=0, domains=None):
-            self.batch_calls.append(list(queries))
-            return [
-                SearchBatch(query=query, hits=[self._hit(query, offset + 1)]) for query in queries
-            ]
-
-    backend = BatchCustom()
-    service = _broker_service({"custom": backend})
-    state = service.register_session(make_session(backends=["custom"]))
-
-    report = await service.call(
-        "token",
-        "search.query_many",
-        {"queries": ["second", "", "first"], "limit": 1},
-        execution_id="custom-batch",
-    )
-
-    assert backend.batch_calls == [["second", "first"]]
-    assert backend.single_calls == 0
-    assert [batch["query"] for batch in report["results"]] == ["second", "first"]
-    assert [batch["input_index"] for batch in report["results"]] == [0, 2]
-    assert [
-        report["results"][0]["hits"][0]["title"],
-        report["results"][1]["hits"][0]["title"],
-    ] == [
-        "second",
-        "first",
-    ]
-    assert report["failures"][0]["input_index"] == 1
-    assert "must not be empty" in report["failures"][0]["message"]
-    assert state.policy.usage.search_calls == 3
-    attempts = service.take_trace("token", "custom-batch")[0].provider_attempts
-    assert {attempt.component for attempt in attempts} == {"search"}
-
-
-async def test_custom_route_without_batch_uses_single_requests_and_default_policy() -> None:
-    class CustomSearch(FakeBackend):
-        source_kind = "opaque"
-
-        def __init__(self) -> None:
-            super().__init__("custom")
-            self.single_calls = 0
-
-        async def search(self, query, *, limit, offset=0, domains=None):
-            self.single_calls += 1
-            return await super().search(query, limit=limit, offset=offset, domains=domains)
-
-    backend = CustomSearch()
-    policy = ProviderPolicy(concurrency=3)
-    runtime = ProviderRuntime(policy)
-    service = _broker_service(
-        {"custom": backend},
-        search_runtime=runtime,
-    )
-    service.register_session(make_session(backends=["custom"]))
-
-    report = await service.call(
-        "token",
-        "search.query_many",
-        {"queries": ["one", "two"]},
-        execution_id="custom-single",
-    )
-
-    assert [row["query"] for row in report["results"]] == ["one", "two"]
-    assert backend.single_calls == 2
-    assert runtime.policy is policy
-    attempts = service.take_trace("token", "custom-single")[0].provider_attempts
-    assert {attempt.component for attempt in attempts} == {"search"}
 
 
 async def test_broker_closes_each_backend_instance_once() -> None:
@@ -967,8 +772,8 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
     service.register_session(make_session())
     await service.call(
         "token",
-        "search.query_many",
-        {"queries": ["one", "two"], "limit": 1},
+        "search.query",
+        {"query": "one", "limit": 1},
         execution_id="exec-1",
     )
     with pytest.raises(ValueError):
@@ -980,14 +785,10 @@ async def test_capability_trace_records_compact_inputs_results_and_errors() -> N
         )
 
     trace = service.take_trace("token", "exec-1")
-    assert [event.method for event in trace] == ["search.query_many", "content.grep"]
-    # Also pins the `_many` suffix. `_trace_queries` and `_trace_input_count`
-    # split on it, and the host's analysis derives queries-per-question from
-    # this field; a batch method renamed without the suffix would leave both
-    # counting one query per call and reporting a plausible wrong number.
-    assert trace[0].queries == ["one", "two"]
-    assert trace[0].input_count == 2
-    assert trace[0].result_count == 2
+    assert [event.method for event in trace] == ["search.query", "content.grep"]
+    assert trace[0].queries == ["one"]
+    assert trace[0].input_count == 1
+    assert trace[0].result_count == 1
     assert trace[1].status == "error"
     assert trace[1].error_type == "ValueError"
     assert "missing" not in str(trace[0].model_dump())
@@ -2456,15 +2257,14 @@ async def test_trace_records_identity_and_rank_for_every_hit() -> None:
 
     await service.call(
         "token",
-        "search.query_many",
-        {"queries": ["one", "two"], "limit": 2},
+        "search.query",
+        {"query": "one", "limit": 2},
         execution_id="exec-hits",
     )
     event = service.take_trace("token", "exec-hits")[0]
 
-    # A fan-out lands in one event, so per-query duplication is visible in it.
-    assert len(event.hits) == 4
-    assert [hit.rank for hit in event.hits] == [1, 2, 1, 2]
+    assert len(event.hits) == 2
+    assert [hit.rank for hit in event.hits] == [1, 2]
     assert len({hit.identity for hit in event.hits}) == 2
     assert event.hits[0].score == 1.0
     assert {hit.admission for hit in event.hits} == {"search"}
@@ -2547,28 +2347,6 @@ def test_a_trace_error_message_is_bounded_but_never_empty() -> None:
     assert trace_error_message(ValueError()) is None
 
 
-async def test_batching_disabled_forces_one_item_per_call() -> None:
-    """The switch bounds the only remaining public fan-out operation."""
-    service = _broker_service({"web": RankedBackend(["https://example.com/a"])})
-    service.register_session(make_session(mechanisms=Mechanisms(batching=False)))
-
-    with pytest.raises(MechanismDisabled, match="at most one item"):
-        await service.call(
-            "token",
-            "search.query_many",
-            {"queries": ["one", "two"]},
-            execution_id="exec-block",
-        )
-    report = await service.call("token", "search.query_many", {"queries": ["one"]})
-    assert len(report["results"][0]["hits"]) == 1
-
-    # A blocked call is still an event: an arm that disables a capability wants
-    # to know how often the model kept reaching for it.
-    blocked = service.take_trace("token", "exec-block")[0]
-    assert blocked.status == "error"
-    assert blocked.error_type == "MechanismDisabled"
-
-
 async def test_llm_subroutine_disabled_blocks_the_whole_capability_class() -> None:
     service, client = make_llm_service()
     service.sessions["token"].session.mechanisms = Mechanisms(llm_subroutine=False)
@@ -2629,6 +2407,7 @@ async def test_capability_methods_stay_in_step_with_the_handler_table() -> None:
     with pytest.raises(ValueError, match="Unsupported capability"):
         await service.call("token", "search.nope", {})
     for removed in (
+        "search.query_many",
         "content.get_many",
         "content.read_many",
         "llm.complete_many",
@@ -2639,16 +2418,15 @@ async def test_capability_methods_stay_in_step_with_the_handler_table() -> None:
 
 
 def test_capabilities_manifest_drops_only_what_is_disabled() -> None:
-    assert CAPABILITY_METHODS == BROKER_METHODS
+    assert CAPABILITY_METHODS == SDK_TRANSPORT_METHODS
     assert Mechanisms().capabilities() == list(CAPABILITY_METHODS)
     assert "content.snippets" not in CAPABILITY_METHODS
     assert "content.grep" in CAPABILITY_METHODS
     assert "content.grep_report" not in CAPABILITY_METHODS
     without_llm = Mechanisms(llm_subroutine=False).capabilities()
     assert not any(method.startswith("llm.") for method in without_llm)
-    assert "search.query_many" in without_llm
-    # Batching now controls only search.query_many; the method stays advertised
-    # and rejects fan-out wider than one at runtime when disabled.
+    assert "search.query_many" not in without_llm
+    # Batching is SDK helper admission metadata, not a separate broker method.
     assert Mechanisms(batching=False).capabilities() == list(CAPABILITY_METHODS)
 
 
@@ -2670,7 +2448,7 @@ async def test_session_capabilities_reflect_backend_limits_and_mechanisms() -> N
 
     capabilities = await service.call("token", "session.capabilities", {})
 
-    assert capabilities["contracts"] == {"sandbox": 14, "capability": 13}
+    assert capabilities["contracts"] == {"sandbox": 14, "capability": 14}
     assert capabilities["search"] == {
         "backend": "local",
         "supports_include_domains": False,
@@ -2751,51 +2529,6 @@ async def _wait_for_condition(predicate, *, turns: int = 200) -> None:
     raise AssertionError("condition did not become true")
 
 
-class _CoalescingBatchBackend:
-    name = "local"
-    source_kind = "opaque"
-    provider_identity = "test:local:coalescing"
-    supports_domains = False
-    max_depth = None
-
-    def __init__(self) -> None:
-        self.calls: list[list[str]] = []
-        self.release = asyncio.Event()
-
-    @staticmethod
-    def _batch(query: str) -> SearchBatch:
-        return SearchBatch(
-            query=query,
-            hits=[
-                SearchHit(
-                    source="",
-                    backend="local",
-                    title=query,
-                    docid=f"doc-{query}",
-                    snippet="snippet",
-                    rank=1,
-                )
-            ],
-        )
-
-    async def search(self, query, *, limit, offset=0, domains=None):
-        self.calls.append([query])
-        await self.release.wait()
-        return list(self._batch(query).hits)
-
-    async def search_many(self, queries, *, limit, offset=0, domains=None):
-        self.calls.append(list(queries))
-        await self.release.wait()
-        return [self._batch(query) for query in queries]
-
-    async def fetch(self, hit, *, query=None):
-        return DocumentContent(source=hit.source, text=f"body:{hit.docid}")
-
-    @staticmethod
-    def fetch_candidates(hit: DocumentHandle) -> list[DocumentHandle]:
-        return [hit]
-
-
 class _CoalescingSearchBackend:
     name = "web"
     source_kind = "public_url"
@@ -2856,114 +2589,6 @@ class _CoalescingContentBackend(FakeBackend):
             url=hit.url,
             metadata={"nested": {"value": 1}},
         )
-
-
-async def test_inflight_coalescing_overlapping_local_batches_and_duplicates() -> None:
-    backend = _CoalescingBatchBackend()
-    service = _broker_service({"local": backend}, provider_execution_config=COALESCING)
-    state = service.register_session(make_session(backends=["local"]))
-
-    first = asyncio.create_task(
-        service.call(
-            "token",
-            "search.query_many",
-            {"queries": ["alpha", "beta"]},
-            execution_id="first",
-        )
-    )
-    await _wait_for_condition(lambda: len(backend.calls) == 1)
-    second = asyncio.create_task(
-        service.call(
-            "token",
-            "search.query_many",
-            {"queries": ["beta", "beta", "gamma"]},
-            execution_id="second",
-        )
-    )
-    await _wait_for_condition(lambda: len(backend.calls) == 2)
-
-    assert backend.calls == [["alpha", "beta"], ["gamma"]]
-    assert sorted(entry.waiters for entry in state.flights.values()) == [1, 1, 2]
-    backend.release.set()
-    first_report, second_report = await asyncio.gather(first, second)
-
-    first_results = first_report["results"]
-    second_results = second_report["results"]
-    assert [row["query"] for row in first_results] == ["alpha", "beta"]
-    assert [row["query"] for row in second_results] == ["beta", "beta", "gamma"]
-    assert second_results[0] is not second_results[1]
-    second_results[0]["hits"][0]["title"] = "changed"
-    assert second_results[1]["hits"][0]["title"] == "beta"
-    assert state.flights == {}
-    assert state.policy.usage.provider_attempts_by_capability["search"] == 2
-    assert state.policy.usage.provider_coalesced_requests == 1
-    assert state.policy.usage.intra_call_deduplicated_items == 1
-
-    first_trace = service.take_trace("token", "first")
-    second_trace = service.take_trace("token", "second")
-    assert len(first_trace[0].provider_attempts) == 1
-    assert len(second_trace[0].provider_attempts) == 1
-    assert len(second_trace[0].coalesced_requests) == 1
-    assert len(second_trace[0].deduplicated_requests) == 1
-
-
-async def test_inflight_admission_is_atomic_before_provider_side_effect() -> None:
-    backend = _CoalescingBatchBackend()
-    service = _broker_service(
-        {"local": backend},
-        provider_execution_config=ProviderExecutionConfig(
-            inflight_coalescing=True,
-            max_inflight_keys=1,
-        ),
-    )
-    state = service.register_session(make_session(backends=["local"]))
-    leader = asyncio.create_task(service.call("token", "search.query", {"query": "alpha"}))
-    await _wait_for_condition(lambda: len(backend.calls) == 1)
-
-    with pytest.raises(InflightCapacityError):
-        await service.call(
-            "token",
-            "search.query_many",
-            {"queries": ["alpha", "beta"]},
-        )
-
-    assert backend.calls == [["alpha"]]
-    assert len(state.flights) == 1
-    assert next(iter(state.flights.values())).waiters == 1
-    backend.release.set()
-    await leader
-
-
-async def test_inflight_waiter_limit_counts_unique_call_not_duplicate_rows() -> None:
-    backend = _CoalescingBatchBackend()
-    service = _broker_service(
-        {"local": backend},
-        provider_execution_config=ProviderExecutionConfig(
-            inflight_coalescing=True,
-            max_waiters_per_flight=2,
-        ),
-    )
-    state = service.register_session(make_session(backends=["local"]))
-    leader = asyncio.create_task(service.call("token", "search.query", {"query": "same"}))
-    await _wait_for_condition(lambda: len(backend.calls) == 1)
-    duplicate_follower = asyncio.create_task(
-        service.call(
-            "token",
-            "search.query_many",
-            {"queries": ["same", "same"]},
-        )
-    )
-    await _wait_for_condition(lambda: next(iter(state.flights.values())).waiters == 2)
-
-    with pytest.raises(InflightCapacityError):
-        await service.call("token", "search.query", {"query": "same"})
-    assert backend.calls == [["same"]]
-    assert next(iter(state.flights.values())).waiters == 2
-
-    backend.release.set()
-    leader_rows, follower_report = await asyncio.gather(leader, duplicate_follower)
-    assert leader_rows[0]["title"] == "same"
-    assert len(follower_report["results"]) == 2
 
 
 async def test_inflight_feature_disabled_keeps_independent_transports() -> None:
@@ -3223,34 +2848,3 @@ async def test_content_rechecks_cache_after_waiting_for_flight_admission() -> No
     assert (await follower)["text"] == "shared full document"
     assert backend.fetch_calls == 1
     assert state.policy.usage.content_backend_fetches == 1
-
-
-async def test_local_partial_batch_attempt_is_sanitized_and_traced_as_partial() -> None:
-    class PartialBackend(_CoalescingBatchBackend):
-        async def search_many(self, queries, *, limit, offset=0, domains=None):
-            return [
-                self._batch(queries[0]),
-                SearchBatchFailure(
-                    code="provider_rejected",
-                    message="secret provider response body",
-                    retryable=False,
-                ),
-            ]
-
-    backend = PartialBackend()
-    service = _broker_service({"local": backend})
-    service.register_session(make_session(backends=["local"]))
-
-    report = await service.call(
-        "token",
-        "search.query_many",
-        {"queries": ["ok", "bad"]},
-        execution_id="partial-batch",
-    )
-
-    assert len(report["results"][0]["hits"]) == 1
-    assert report["failures"][0]["message"] == "Provider rejected one search item."
-    assert "secret" not in json.dumps(report)
-    trace = service.take_trace("token", "partial-batch")[0]
-    assert trace.provider_attempts[0].status == "partial"
-    assert "secret" not in trace.model_dump_json()

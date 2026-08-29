@@ -8,13 +8,7 @@ from urllib.parse import urljoin
 import httpx
 
 from opensac.backends._response import json_object
-from opensac.backends.search.base import (
-    RetrievalMetadata,
-    SearchBatch,
-    SearchBatchFailure,
-    SearchBatchOutcome,
-    SearchHit,
-)
+from opensac.backends.search.base import RetrievalMetadata, SearchHit
 from opensac.provider import invalid_provider_response
 
 
@@ -105,65 +99,6 @@ class LocalSearchBackend:
             ]
         except (KeyError, TypeError, ValueError) as exc:
             raise invalid_provider_response() from exc
-
-    async def search_many(
-        self,
-        queries: list[str],
-        *,
-        limit: int,
-        offset: int = 0,
-        domains: list[str] | None = None,
-    ) -> list[SearchBatchOutcome]:
-        """Search all queries in one retriever request, preserving their order."""
-        del domains
-        if not queries:
-            return []
-        depth = offset + limit
-        response = await self._http().post(
-            urljoin(self.base_url, "search_many"),
-            json={"queries": queries, "top_k": depth},
-        )
-        response.raise_for_status()
-        payload = json_object(response)
-        retrieval = self._retrieval_metadata(payload)
-        rows = payload.get("results")
-        if not isinstance(rows, list) or len(rows) != len(queries):
-            raise invalid_provider_response()
-
-        batches: list[SearchBatchOutcome] = []
-        for query, row in zip(queries, rows, strict=True):
-            if not isinstance(row, dict):
-                raise invalid_provider_response()
-            returned_query = row.get("query")
-            if returned_query != query:
-                raise invalid_provider_response()
-            raw_hits = row.get("hits", [])
-            if not isinstance(raw_hits, list) or not all(isinstance(hit, dict) for hit in raw_hits):
-                raise invalid_provider_response()
-            try:
-                hits = [
-                    self._normalize_hit(hit, index + 1, retrieval=retrieval)
-                    for index, hit in enumerate(raw_hits[:depth])
-                    if index >= offset
-                ]
-            except (KeyError, TypeError, ValueError) as exc:
-                raise invalid_provider_response() from exc
-            error = row.get("error")
-            if error is not None and not isinstance(error, str):
-                raise invalid_provider_response()
-            try:
-                batches.append(
-                    SearchBatchFailure(
-                        code="provider_rejected",
-                        message="Provider rejected one search item.",
-                        retryable=False,
-                    )
-                    if error
-                    else SearchBatch(query=query, hits=hits)
-                )
-            except (TypeError, ValueError) as exc:
-                raise invalid_provider_response() from exc
-        return batches
 
     @staticmethod
     def _retrieval_metadata(payload: dict) -> RetrievalMetadata | None:

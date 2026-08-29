@@ -88,7 +88,12 @@ if queries:
         pool_by_source[row.source] = candidate
         new_candidates.append(candidate)
     meta["failures"].extend(
-        {"stage": "search", "query": row.query, "status": row.status}
+        {
+            "stage": "search",
+            "query": row.query,
+            "status": row.status,
+            "error": dict(row.error) if row.error is not None else None,
+        }
         for row in search_outcomes
         if row.status != "success"
     )
@@ -116,9 +121,7 @@ if sources:
         try:
             document = sdk.content.fetch(source)
         except BrokerError as error:
-            meta["failures"].append(
-                {"stage": "fetch", "source": source, "code": error.code}
-            )
+            meta["failures"].append({"stage": "fetch", "source": source, "code": error.code})
         else:
             documents[document.source] = document
             already_fetched.add(document.source)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 from collections.abc import Mapping
@@ -27,6 +28,65 @@ _FAILURE_FIELDS = (
     "component",
     "scope",
 )
+
+
+def error_info(error: Mapping[str, Any] | BaseException) -> dict[str, Any]:
+    """Return one bounded, total error record for an aligned SDK outcome."""
+
+    if isinstance(error, Mapping):
+
+        def value(field: str) -> Any:
+            return error.get(field)
+
+        raw_message = value("message")
+    else:
+
+        def value(field: str) -> Any:
+            return getattr(error, field, None)
+
+        raw_message = str(error)
+
+    code = _status_text(value("code") or "broker_call_failed", fallback="broker_call_failed")
+    message = _status_text(raw_message or "Broker call failed", fallback="Broker call failed")
+    attempts = value("attempts")
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+        attempts = None
+    provider_status = value("provider_status")
+    if isinstance(provider_status, bool) or not isinstance(provider_status, int):
+        provider_status = None
+    retry_after_seconds = value("retry_after_seconds")
+    if (
+        isinstance(retry_after_seconds, bool)
+        or not isinstance(retry_after_seconds, (int, float))
+        or not math.isfinite(retry_after_seconds)
+        or retry_after_seconds < 0
+    ):
+        retry_after_seconds = None
+    else:
+        retry_after_seconds = float(retry_after_seconds)
+
+    def optional_text(field: str) -> str | None:
+        raw = value(field)
+        if raw is None:
+            return None
+        rendered = _status_text(raw)
+        return rendered[:_MAX_CONTEXT_CHARS] or None
+
+    scope = optional_text("scope")
+    if scope is not None and scope not in {"request", "resource", "provider", "unknown"}:
+        scope = "unknown"
+
+    return {
+        "code": code[:_MAX_CONTEXT_CHARS],
+        "message": message[:_MAX_MESSAGE_CHARS],
+        "retryable": bool(value("retryable")),
+        "attempts": attempts,
+        "provider_status": provider_status,
+        "retry_after_seconds": retry_after_seconds,
+        "provider": optional_text("provider"),
+        "component": optional_text("component"),
+        "scope": scope,
+    }
 
 
 def _output_path() -> Path:

@@ -96,10 +96,11 @@ Warnings, stdout, stderr, and submitted output share one observation budget; kee
 
 ## Handle interpreter and adapter failures
 
-For `search.many` and `content.grep`, branch only on `status == "success"`; any other status is
-human-readable and must not be parsed. Passage failures remain structured records. Empty hits or
-matches with success status are successful results. A caught `BrokerError` must leave the checkpoint
-incomplete with a bounded error or next action. Let host policy own retries.
+For `search.many`, branch on `status == "success"` and read failed rows from `outcome.error`; status
+is only `"success"` or `"failure"`. For `content.grep`, other statuses are human-readable and must
+not be parsed. Passage failures remain structured records. Empty hits or matches with success status
+are successful results. A caught `BrokerError` must leave the checkpoint incomplete with a bounded
+error or next action. Let host policy own retries.
 
 If an observation reports `interpreter_state=lost` or `state_lost`, the submitted cell is never
 replayed and the next invocation starts clean. Restore a trustworthy checkpoint if one exists,

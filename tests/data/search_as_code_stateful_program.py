@@ -64,7 +64,10 @@ except BrokerError as error:
 fusion = sdk.search.fuse_rrf(search_outcomes, k=60)
 for outcome in search_outcomes:
     if outcome.status != "success":
-        print(f"query failed: {outcome.query} status={outcome.status}")
+        error = outcome.error
+        code = error.code if error is not None else "unknown"
+        message = error.message if error is not None else "search failed"
+        print(f"query failed: {outcome.query} code={code} message={message}")
 
 leader_sources = []
 for outcome in search_outcomes:

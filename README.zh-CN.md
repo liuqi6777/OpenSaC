@@ -104,7 +104,7 @@ mkdir -p "$OPENSAC_RUNTIME_DIR"
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.1/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.2/configs/docker.yaml
 ```
 
 启动已发布镜像：
@@ -205,9 +205,10 @@ PY
 | `sdk.session` | `usage`、`capabilities` | 查看用量、预算、当前契约、限制与机制 |
 | `sdk.output` | `submit` | 返回结构化输出和可选 URL/source 标注 |
 
-`search.many` 和 `content.grep` 返回与输入对齐的 outcome；成功时
-`status == "success"`，其他 status 都是只供展示、不可解析的失败说明。独立 content/LLM 工作由
-Python 显式循环，并逐次处理 `BrokerError`。每条搜索结果只有一个 `source`：规范化后的网页 URL 或
+`search.many` 和 `content.grep` 返回与输入对齐的 outcome。搜索 status 严格为 `"success"`
+或 `"failure"`，失败详情从结构化 `outcome.error` 读取；grep 继续使用只供展示的失败 status。
+独立 content/LLM 工作由 Python 显式循环，并逐次处理 `BrokerError`。每条搜索结果只有一个
+`source`：规范化后的网页 URL 或
 本地文档 ID。Content 只接收
 URL/本地 ID 字符串；Web 部署可直接读取受限的公开 HTTP(S) URL，本地
 ID 仍需搜索准入。Output citations 是可选来源字符串，不代表证据验证。所有公共方法、参数与返回
@@ -274,7 +275,7 @@ Docker 模板都在 `configs/` 中；选择说明见[配置模板](docs/deployme
 
 | 目标 | 文档 |
 | --- | --- |
-| 升级到 v0.8.1 | [v0.8.1 版本说明](docs/opensac-0.8.1.md) |
+| 升级到 v0.8.2 | [v0.8.2 版本说明](docs/opensac-0.8.2.md) |
 | 选择 YAML 配置模板 | [配置模板](docs/deployment.md#configuration-profiles) |
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |

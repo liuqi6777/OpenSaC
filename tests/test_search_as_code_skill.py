@@ -13,7 +13,7 @@ from opensac_sdk._record import Record, record
 from opensac_sdk._resources import SearchResource, StateResource
 from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 
-from opensac.backends.search import SearchBatch, SearchHit
+from opensac.backends.search import SearchHit
 from opensac.sandbox.validator import validate_code
 
 ROOT = Path(__file__).parents[1]
@@ -67,14 +67,25 @@ class FakeSearch:
         self.turn = 1
         self.many_calls: list[tuple[str, ...]] = []
 
+    @staticmethod
+    def _success(query: str, hits: list[SearchHit]) -> Record:
+        return record(
+            {
+                "query": query,
+                "status": "success",
+                "hits": [hit.model_dump(mode="json") for hit in hits],
+                "error": None,
+            }
+        )
+
     def many(self, queries: list[str], **_kwargs: object) -> list[Record]:
         self.many_calls.append(tuple(queries))
         prefix = f"turn_{self.turn}_" if self.vary_by_turn else ""
         if self.hits_per_query == 2:
-            batches = [
-                SearchBatch(
-                    query=query,
-                    hits=[
+            return [
+                self._success(
+                    query,
+                    [
                         SearchHit(
                             source=f"doc_{prefix}unique_{index}",
                             backend="local",
@@ -99,21 +110,11 @@ class FakeSearch:
                 )
                 for index, query in enumerate(queries)
             ]
-            return [
-                record(
-                    {
-                        "query": batch.query,
-                        "status": "success",
-                        "hits": batch.model_dump(mode="json")["hits"],
-                    }
-                )
-                for batch in batches
-            ]
 
-        batches = [
-            SearchBatch(
-                query=query,
-                hits=[
+        return [
+            self._success(
+                query,
+                [
                     SearchHit(
                         source=f"doc_{prefix}{query_index}_{hit_index}",
                         backend="local",
@@ -128,16 +129,6 @@ class FakeSearch:
                 ],
             )
             for query_index, query in enumerate(queries)
-        ]
-        return [
-            record(
-                {
-                    "query": batch.query,
-                    "status": "success",
-                    "hits": batch.model_dump(mode="json")["hits"],
-                }
-            )
-            for batch in batches
         ]
 
     def fuse_rrf(self, report: list[Record], **kwargs: object):
@@ -508,7 +499,8 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
     assert "Grep outcome list" in contract
     assert "sdk.content.fetch(source)" in contract
     assert "never print or submit a complete fetched document" in contract
-    assert 'Only compare it with `"success"`; do not parse failure text' in contract
+    assert "failed rows use `outcome.error`" in contract
+    assert "never display or parse search `status` as failure detail" in contract
 
 
 def test_surface_tiers_route_exact_signatures_to_the_right_reference() -> None:

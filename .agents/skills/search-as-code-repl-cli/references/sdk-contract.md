@@ -67,8 +67,9 @@ extractions in ordinary Python and handle each `BrokerError` at the point where 
 
 - Search hit: `source`, `backend`, `title`, `domain`, `date`, `snippet`, `score`, `rank`,
   `retrieval`, and `metadata`.
-- Search outcome list: one input-aligned row per query with `query`, `status`, and `hits`. List
-  position is the input identity. Failed rows have empty `hits`.
+- Search outcome list: one input-aligned row per query with `query`, `status`, `hits`, and `error`.
+  List position is the input identity. Status is exactly `"success"` or `"failure"`; successful
+  rows have `error=None`, while failed rows have empty `hits` and a structured `error`.
 - Fused candidate: the search-hit fields plus `provenance`, `raw_fused_score`, `domain_weight`,
   `fused_score`, and `fused_rank`. Each provenance row has `input_index`, `query`, `backend`,
   `rank`, and `score`.
@@ -84,9 +85,11 @@ extractions in ordinary Python and handle each `BrokerError` at the point where 
   `unique_source_count`. A passage contains source metadata, exact `text`, `coordinates`, `rank`,
   `score`, and `ranker`.
 - Coordinates use 1-based lines and 0-based, end-exclusive character positions.
-- Search and grep outcome status: exactly `"success"`, or a bounded human-readable failure string.
-  Only compare it with `"success"`; do not parse failure text. Structured details remain in host
-  diagnostics.
+- Search outcome error: `code`, `message`, `retryable`, `attempts`, `provider_status`,
+  `retry_after_seconds`, `provider`, `component`, and `scope`. Read these fields from
+  `outcome.error`; never display or parse search `status` as failure detail.
+- Grep outcome status is exactly `"success"` or a bounded human-readable failure string. Only
+  compare it with `"success"`; do not parse failure text.
 - Passage failure: `code`, `message`, `retryable`, `attempts`, `provider_status`,
   `retry_after_seconds`, `provider`, `component`, `scope`, `input_index`, and `source`.
 - `llm.extract` returns the schema-validated JSON object directly.
@@ -103,9 +106,12 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   failures. Inspect `code`, `retryable`, `attempts`, `provider`, `component`, and `scope`.
 - Local argument type, minimum-boundary, and strict-JSON errors raise `ValueError`. Configurable
   upper bounds are broker policy and are discoverable through `sdk.session.capabilities()`.
-- `search.many` and `content.grep` preserve partial success as input-aligned outcome lists. Branch
-  on `status == "success"`; any other status is a displayable failure. `content.passages` retains
-  structured fetch failures beside successful passages.
+- `search.many` preserves partial success as input-aligned outcomes. Branch on
+  `status == "success"`; failed rows use `outcome.error`. Provider, quota, and deadline errors stay
+  item failures, while an all-systemic transport/protocol/contract/permission failure can raise one
+  representative top-level `BrokerError`.
+- `content.grep` preserves partial success as input-aligned outcomes; other statuses are displayable
+  failure text. `content.passages` retains structured fetch failures beside successful passages.
 - `content.fetch`, `content.read`, `llm.complete`, and `llm.extract` are single operations. A
   failure is a top-level `BrokerError`; Python loops decide whether to continue with later items.
 - `read.window.next` is either `None` at EOF or the exact `start_line`/`start_character` for an

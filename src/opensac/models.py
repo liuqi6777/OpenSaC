@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from opensac.tracing import CapabilityEvent as _CapabilityEvent
 
-CAPABILITY_CONTRACT = 13
+CAPABILITY_CONTRACT = 14
 
 ExecutionMode = Literal["program", "persistent_interpreter"]
 InterpreterState = Literal["not_applicable", "not_started", "ready", "lost"]
@@ -45,7 +45,6 @@ class ResourceBudget(BaseModel):
 # tests keep it aligned with the version-matched sandbox SDK surface.
 CAPABILITY_METHODS: tuple[str, ...] = (
     "search.query",
-    "search.query_many",
     "content.fetch",
     "content.passages",
     "content.read",
@@ -55,13 +54,6 @@ CAPABILITY_METHODS: tuple[str, ...] = (
     "llm.complete",
     "llm.extract",
 )
-
-# method -> the params key holding its batch. Used to bound fan-out when
-# batching is disabled, so the ablation lands on "may I fan out in one call"
-# rather than on "does this method exist".
-FANOUT_METHODS: dict[str, str] = {
-    "search.query_many": "queries",
-}
 
 
 class Mechanisms(BaseModel):
@@ -78,8 +70,8 @@ class Mechanisms(BaseModel):
     run's arm recoverable after the fact.
     """
 
-    # Multi-query search fan-out. Disabled, `search.many` still exists but
-    # accepts one query, so the program has to loop without losing search.
+    # Multi-query SDK helper fan-out. The SDK reads this from the session
+    # manifest and accepts at most one query when batching is disabled.
     batching: bool = True
     # The workspace filesystem surviving across `/exec` calls. Governs
     # agent-authored state only; the broker's reference table is a capability
@@ -104,21 +96,6 @@ class Mechanisms(BaseModel):
                 "what you found without a model call."
             )
         return None
-
-    def fanout_reason(self, method: str, params: dict[str, Any]) -> str | None:
-        """Why this session may not fan ``method`` out this wide, or None."""
-        if self.batching:
-            return None
-        key = FANOUT_METHODS.get(method)
-        if key is None:
-            return None
-        size = len(params.get(key) or [])
-        if size <= 1:
-            return None
-        return (
-            f"Batching is disabled for this session: '{method}' accepts at most one "
-            f"item in '{key}', got {size}. Call it once per item in a loop."
-        )
 
     def capabilities(self) -> list[str]:
         """The methods a program may call, for the session manifest.

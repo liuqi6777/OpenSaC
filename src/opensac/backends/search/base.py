@@ -38,30 +38,6 @@ class SearchHit(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class SearchBatch(BaseModel):
-    """One successful item returned by a batch-capable search backend."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    query: str
-    hits: list[SearchHit] = Field(default_factory=list)
-
-
-class SearchBatchFailure(BaseModel):
-    """One provider-declared item failure in an otherwise valid batch response."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    code: str
-    message: str
-    retryable: bool
-    provider_status: int | None = None
-    retry_after_seconds: float | None = None
-
-
-type SearchBatchOutcome = SearchBatch | SearchBatchFailure
-
-
 class SearchBackend(Protocol):
     """Search I/O adapter; its service binds execution policy outside the adapter."""
 
@@ -94,26 +70,6 @@ class SearchBackend(Protocol):
         offset: int = 0,
         domains: list[str] | None = None,
     ) -> list[SearchHit]: ...
-
-
-@runtime_checkable
-class BatchSearchBackend(Protocol):
-    """Optional backend fast path for one transport-level batch request.
-
-    The broker continues to support :class:`SearchBackend` implementations that
-    only expose ``search``.  Backends implementing this protocol can avoid one
-    HTTP round trip per query and, more importantly for dense retrieval, let the
-    downstream service encode the queries as one model batch.
-    """
-
-    async def search_many(
-        self,
-        queries: list[str],
-        *,
-        limit: int,
-        offset: int = 0,
-        domains: list[str] | None = None,
-    ) -> list[SearchBatchOutcome]: ...
 
 
 @runtime_checkable

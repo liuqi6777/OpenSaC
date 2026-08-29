@@ -72,7 +72,7 @@ providers:
   result_cache_max_bytes: 128000000
 
 sandbox:
-  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.1
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.2
   mode: cold
   experimental_persistent_interpreter: false
   warm_idle_seconds: 300

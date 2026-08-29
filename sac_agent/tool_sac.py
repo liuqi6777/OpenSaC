@@ -119,9 +119,10 @@ SDK calls. Loop explicitly and handle `BrokerError` per item when several extrac
   support claims about document content.
 - For every material document-content claim, inspect non-empty text. Output citations are optional,
   unverified URL/source labels; prefer primary sources and corroborate disputed claims.
-- `[sac_run]` renders structured failure warnings. Branch on `status == "success"` for
-  `search.many` and `content.grep`; do not parse other statuses. Empty hits or matches with success
-  status are successful results.
+- `[sac_run]` renders structured failure warnings. For `search.many`, branch on
+  `status == "success"` and read failure details from `outcome.error`; for `content.grep`, treat
+  other statuses as displayable failure text and do not parse them. Empty hits or matches with
+  success status are successful results.
 
 ## End each stage deliberately
 

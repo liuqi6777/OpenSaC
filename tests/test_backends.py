@@ -208,42 +208,6 @@ async def test_offset_deepens_the_request_and_keeps_ranks_absolute(client) -> No
     assert [hit.rank for hit in hits] == [11, 12, 13, 14, 15]
 
 
-async def test_local_search_many_uses_one_request_and_preserves_order(client) -> None:
-    client.batch_results = [
-        {
-            "query": "beta",
-            "hits": [
-                {
-                    "docid": "2",
-                    "title": "Beta title",
-                    "date": "2026-08-11",
-                    "snippet": "beta",
-                    "rank": 1,
-                }
-            ],
-        },
-        {"query": "alpha", "hits": [{"docid": "1", "snippet": "alpha", "rank": 1}]},
-        {"query": "beta", "hits": [{"docid": "3", "snippet": "beta 2", "rank": 1}]},
-    ]
-    backend = LocalSearchBackend("http://localhost:8081")
-
-    batches = await backend.search_many(["beta", "alpha", "beta"], limit=4)
-
-    assert [batch.query for batch in batches] == ["beta", "alpha", "beta"]
-    assert [batch.hits[0].docid for batch in batches] == ["2", "1", "3"]
-    assert batches[0].hits[0].title == "Beta title"
-    assert batches[0].hits[0].date == "2026-08-11"
-    assert batches[0].hits[0].snippet == "beta"
-    assert batches[0].hits[0].retrieval is not None
-    assert batches[0].hits[0].retrieval.mode == "dense"
-    assert len(client.requests) == 1
-    assert client.requests[0][0].endswith("/search_many")
-    assert client.requests[0][1] == {
-        "queries": ["beta", "alpha", "beta"],
-        "top_k": 4,
-    }
-
-
 async def test_local_backends_use_independent_reusable_http_clients(client) -> None:
     client.search_hits = [{"docid": "1", "snippet": "body", "rank": 1}]
     client.document_text = "body"
