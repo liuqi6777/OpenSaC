@@ -29,16 +29,16 @@ enforced by the broker and reported by `sdk.session.capabilities()`.
 - Local argument errors raise `ValueError`.
 - Provider, quota, transport, extraction JSON/schema, and repair failures raise `BrokerError` with
   `code`, `retryable`, `attempts`, `provider`, `component`, and `scope` details when available.
-- Only `search.many` is a public multi-query helper. Loop in Python for independent content or LLM
-  calls.
+- `search.many`, `content.fetch_many`, and `llm.extract_many` are public aligned fan-out helpers.
+  Loop in Python for independent reads or free-form completions.
 
 ## Public surface
 
 | Namespace | Operations |
 | --- | --- |
 | Search | `search`, `search.many`, `search.fuse_rrf` |
-| Content | `content.fetch`, `content.read`, `content.grep`, `content.passages` |
-| LLM | `llm.complete`, `llm.extract` |
+| Content | `content.fetch`, `content.fetch_many`, `content.read`, `content.grep`, `content.passages` |
+| LLM | `llm.complete`, `llm.extract`, `llm.extract_many` |
 | Session | `session.usage`, `session.capabilities` |
 | State | JSON/JSONL operations including `state.upsert_jsonl` |
 | Output | `output.submit` |
@@ -153,6 +153,54 @@ sdk.content.fetch(source: str) -> Record
 Returns one complete normalized document with `source`, `text`, `title`, `date`, and provider-owned
 `metadata`. A fetch failure raises `BrokerError`. Repeated calls for the same source can reuse the
 session cache, although each request still consumes the public content-fetch budget.
+
+### `sdk.content.fetch_many(...)`
+
+```python
+sdk.content.fetch_many(
+    sources: list[str],
+    *,
+    concurrency: int = 5,
+) -> list[Record]
+```
+
+This SDK helper makes bounded concurrent calls to unary `content.fetch`. It preserves input order
+and duplicate sources, performs no capability-manifest preflight, and returns `[]` for empty input.
+`concurrency` bounds only SDK worker fan-out; broker budget, retry, cache, trace, and provider
+concurrency policies remain authoritative for each request.
+
+Each input has one aligned outcome:
+
+```python
+[
+    {
+        "source": "source_1",
+        "status": "success",
+        "document": {"source": "source_1", "text": "...", "metadata": {}},
+        "error": None,
+    },
+    {
+        "source": "source_2",
+        "status": "failure",
+        "document": None,
+        "error": {
+            "code": "provider_timeout",
+            "message": "...",
+            "retryable": True,
+            "attempts": 2,
+            "provider_status": None,
+            "retry_after_seconds": None,
+            "provider": "example",
+            "component": "document",
+            "scope": "provider",
+        },
+    },
+]
+```
+
+Provider, quota, and deadline failures remain per-item outcomes. If every item fails with a
+transport, protocol, contract, or permission error, the helper raises one representative
+`BrokerError`. Unexpected non-`BrokerError` exceptions propagate.
 
 ### `sdk.content.read(...)`
 
@@ -282,19 +330,30 @@ repair. Every initial or repair model attempt reserves quota before dispatch. In
 output, non-JSON output, schema mismatch, exhausted repair, provider failure, and quota exhaustion
 are surfaced as `BrokerError` without hiding the specific code and attempt count.
 
-To process several items, loop explicitly:
+### `sdk.llm.extract_many(...)`
 
 ```python
-results = []
-failures = []
-for input_index, item in enumerate(items):
-    try:
-        data = sdk.llm.extract(item, instruction=instruction, schema=schema)
-    except BrokerError as error:
-        failures.append({"input_index": input_index, "code": error.code})
-    else:
-        results.append({"input_index": input_index, "data": data})
+sdk.llm.extract_many(
+    items: list[Any],
+    *,
+    instruction: str,
+    schema: dict[str, Any],
+    concurrency: int = 4,
+    max_tokens: int | None = None,
+    repair_attempts: int = 0,
+) -> list[Record]
 ```
+
+Every item shares the instruction, schema, token bound, and repair policy. All items are validated
+as strict JSON before fan-out, while original items are omitted from outcomes and diagnostics.
+Each item remains an independent unary `llm.extract` request, so broker quota, retries, tracing,
+and provider concurrency remain authoritative.
+
+The returned list is input-aligned. Each outcome contains `input_index`, `status`, `data`, and
+`error`. Status is exactly `"success"` or `"failure"`; success has schema-validated `data` and
+`error=None`, while failure has `data=None` and a structured `error`. Provider, schema, quota, and
+deadline failures remain per-item outcomes. If every item fails with a transport, protocol,
+contract, or permission error, the helper raises one representative `BrokerError`.
 
 ## Session
 
@@ -380,12 +439,12 @@ No aliases or deprecation shims are provided.
 | `search(..., domains=...)` | `include_domains=...` |
 | `search.many(..., limit_per_query=...)` | `limit=...` |
 | fusion `batch_index` | `input_index` |
-| `content.get_many(sources)` | loop over `content.fetch(source)` |
+| `content.get_many(sources)` | `content.fetch_many(sources)` |
 | `content.read(..., offset, limit)` | `start_line`, `start_character`, `line_count` |
 | `content.read_many(...)` | loop over `content.read(...)` |
 | `content.grep(sources, pattern, context, max_matches_per_source)` | `grep(pattern, sources=..., context_lines=..., limit_per_source=...)` |
 | `content.passages(query, sources, max_per_source)` | keyword `sources=...`, `limit_per_source=...` |
 | `llm.complete_many(...)` | loop over `llm.complete(...)` |
-| `llm.extract_many(...)` | loop over direct-returning `llm.extract(...)` |
+| legacy broker `llm.extract_many(...)` | SDK `llm.extract_many(...)` over unary `llm.extract` |
 | `state.merge_jsonl(...)` | `state.upsert_jsonl(...)` |
 | `output.submit(output, ...)` | `output.submit(value, ...)` |

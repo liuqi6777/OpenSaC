@@ -61,9 +61,9 @@ class _SearchOutcomeRecord(_Record, Protocol):
     query: str
     status: Literal["success", "failure"]
     hits: list[_SearchHitRecord]
-    error: _SearchOutcomeErrorRecord | None
+    error: _OutcomeErrorRecord | None
 
-class _SearchOutcomeErrorRecord(_Record, Protocol):
+class _OutcomeErrorRecord(_Record, Protocol):
     code: str
     message: str
     retryable: bool
@@ -80,6 +80,12 @@ class _DocumentRecord(_Record, Protocol):
     title: str
     date: str | None
     metadata: dict[str, Any]
+
+class _FetchOutcomeRecord(_Record, Protocol):
+    source: str
+    status: Literal["success", "failure"]
+    document: _DocumentRecord | None
+    error: _OutcomeErrorRecord | None
 
 class _ContentCursorRecord(_Record, Protocol):
     start_line: int
@@ -142,6 +148,12 @@ class _PassageReportRecord(_Record, Protocol):
     warnings: list[_FailureRecord]
     input_count: int
     unique_source_count: int
+
+class _ExtractOutcomeRecord(_Record, Protocol):
+    input_index: int
+    status: Literal["success", "failure"]
+    data: dict[str, Any] | None
+    error: _OutcomeErrorRecord | None
 
 class _ContractsRecord(_Record, Protocol):
     sandbox: int
@@ -226,6 +238,12 @@ class _SearchResource(Protocol):
 
 class _ContentResource(Protocol):
     def fetch(self, source: str) -> _DocumentRecord: ...
+    def fetch_many(
+        self,
+        sources: list[str],
+        *,
+        concurrency: int = ...,
+    ) -> list[_FetchOutcomeRecord]: ...
     def read(
         self,
         source: str,
@@ -273,6 +291,16 @@ class _LLMResource(Protocol):
         max_tokens: int | None = ...,
         repair_attempts: int = ...,
     ) -> dict[str, Any]: ...
+    def extract_many(
+        self,
+        items: list[Any],
+        *,
+        instruction: str,
+        schema: dict[str, Any],
+        concurrency: int = ...,
+        max_tokens: int | None = ...,
+        repair_attempts: int = ...,
+    ) -> list[_ExtractOutcomeRecord]: ...
 
 class _SessionResource(Protocol):
     def usage(self) -> _SessionUsageRecord: ...

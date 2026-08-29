@@ -199,15 +199,16 @@ PY
 | 命名空间 | 主要操作 | 作用 |
 | --- | --- | --- |
 | `sdk.search` | `search`、`many`、`fuse_rrf` | 检索并融合候选，同时保留 provenance |
-| `sdk.content` | `fetch`、`read`、`grep`、`passages` | 抓取、定位和检查证据，并提供明确 cursor |
-| `sdk.llm` | `extract`、`complete` | 可选的单项模型调用与 schema 校验抽取 |
+| `sdk.content` | `fetch`、`fetch_many`、`read`、`grep`、`passages` | 抓取、定位和检查证据，并提供明确 cursor |
+| `sdk.llm` | `extract`、`extract_many`、`complete` | 可选模型调用与 schema 校验抽取 |
 | `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
 | `sdk.session` | `usage`、`capabilities` | 查看用量、预算、当前契约、限制与机制 |
 | `sdk.output` | `submit` | 返回结构化输出和可选 URL/source 标注 |
 
-`search.many` 和 `content.grep` 返回与输入对齐的 outcome。搜索 status 严格为 `"success"`
-或 `"failure"`，失败详情从结构化 `outcome.error` 读取；grep 继续使用只供展示的失败 status。
-独立 content/LLM 工作由 Python 显式循环，并逐次处理 `BrokerError`。每条搜索结果只有一个
+`search.many`、`content.fetch_many`、`llm.extract_many` 和 `content.grep` 返回与输入对齐的
+outcome。搜索、抓取和抽取 status 严格为 `"success"` 或 `"failure"`，失败详情从结构化
+`outcome.error` 读取；grep 继续使用只供展示的失败 status。独立 read 和自由文本 completion
+由 Python 显式循环，并逐次处理 `BrokerError`。每条搜索结果只有一个
 `source`：规范化后的网页 URL 或
 本地文档 ID。Content 只接收
 URL/本地 ID 字符串；Web 部署可直接读取受限的公开 HTTP(S) URL，本地

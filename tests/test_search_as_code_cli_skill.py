@@ -136,11 +136,11 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
         heading="## Compose retrieval and focused inspection",
     )
     assert composed.index("sdk.search.many(") < composed.index("sdk.search.fuse_rrf(")
-    assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.fetch(")
-    assert composed.index("sdk.content.fetch(") < composed.index("sdk.content.passages(")
+    assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.fetch_many(")
+    assert composed.index("sdk.content.fetch_many(") < composed.index("sdk.content.passages(")
     assert "sdk.content.read(" not in composed
     assert "fetch_batch = 4" in composed
-    assert "for candidate in selected:" in composed
+    assert "for outcome in fetch_outcomes:" in composed
 
     verify = _fenced_block(
         PATTERNS_PATH,

@@ -105,31 +105,34 @@ schema = {
 accepted = []
 suggested_queries = []
 extraction_failures = []
-for passage, item in zip(usable, items, strict=True):
-    try:
-        data = sdk.llm.extract(
-            item,
-            instruction=(
-                "Accept only when the passage explicitly states the requested relation. "
-                "Otherwise reject it or propose at most two focused search queries."
-            ),
-            schema=schema,
-            repair_attempts=1,
-        )
-    except BrokerError as error:
-        extraction_failures.append(f"{error.code}:{error.retryable}")
-    else:
-        quote = data.get("evidence_quote")
-        if data.get("next_action") == "accept" and quote and quote in item["text"]:
-            accepted.append(
-                {
-                    "source": passage.source,
-                    "text": passage.text,
-                    "quote": quote,
-                }
-            )
-        elif data.get("next_action") == "search_more":
-            suggested_queries.extend(data.get("followup_queries", []))
+try:
+    extraction_outcomes = sdk.llm.extract_many(
+        items,
+        instruction=(
+            "Accept only when the passage explicitly states the requested relation. "
+            "Otherwise reject it or propose at most two focused search queries."
+        ),
+        schema=schema,
+        concurrency=4,
+        repair_attempts=1,
+    )
+except BrokerError as error:
+    extraction_failures.append(f"{error.code}:{error.retryable}")
+    extraction_outcomes = [None] * len(items)
+
+for passage, item, outcome in zip(usable, items, extraction_outcomes, strict=True):
+    if outcome is None:
+        continue
+    if outcome.status != "success" or outcome.data is None:
+        code = outcome.error.code if outcome.error is not None else "invalid_outcome"
+        extraction_failures.append(code)
+        continue
+    data = outcome.data
+    quote = data.get("evidence_quote")
+    if data.get("next_action") == "accept" and quote and quote in item["text"]:
+        accepted.append({"source": passage.source, "text": passage.text, "quote": quote})
+    elif data.get("next_action") == "search_more":
+        suggested_queries.extend(data.get("followup_queries", []))
 ```
 
 If the pipeline model is unavailable or inconclusive, return to deterministic checks or end with

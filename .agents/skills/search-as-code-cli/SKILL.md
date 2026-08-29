@@ -31,8 +31,8 @@ count, capability sequence, stage split, or workspace schema is required.
 - Search with `sdk.search(...)` or `sdk.search.many(...)`; use `sdk.search.fuse_rrf(...)` when
   fusion, domain policy, or diversity helps.
 - Never print whole content documents.
-- Treat optional `sdk.llm.extract(...)` as transformation, not as new evidence. Validate quotes
-  against its inputs.
+- Treat optional `sdk.llm.extract(...)` or aligned `sdk.llm.extract_many(...)` as transformation,
+  not as new evidence. Validate quotes against their inputs.
 - Read usage or deployment capabilities with `sdk.session` when needed, and use `sdk.state` for
   artifacts. Use `sdk.output.submit(...)` only for a complete runtime result needed through
   `ExecResult.output`.
@@ -55,9 +55,10 @@ limits, or citations. Inspect one method's `__doc__` when necessary.
   provenance, source quality, and the unresolved requirements, choose the smallest source-diverse
   set likely to add evidence. Do not fetch the whole result list; expand with another relevant batch
   only when inspected evidence leaves a gap.
-- Once a candidate is promoted to body inspection, make `sdk.content.fetch(...)` its first content
-  call. Reuse the returned text for all ordinary exact or regex matching, slicing, and cross-checks
-  in local Python; persist one copy only when later programs will reuse it.
+- Once a candidate is promoted to body inspection, make `sdk.content.fetch(...)` or, for a selected
+  batch, `sdk.content.fetch_many(...)` its first content call. Reuse successful returned documents
+  for all ordinary exact or regex matching, slicing, and cross-checks in local Python; persist one
+  copy only when later programs will reuse it.
 - `sdk.content.passages(...)` adds semantic passage ranking that ordinary local matching does not.
   Use it after fetch when semantic localization across long or multiple selected documents is useful,
   alone or after local checks. For each semantic question, pass only the fetched sources plausibly

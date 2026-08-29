@@ -15,10 +15,12 @@ can inspect one exact interface without calling the broker, for example:
 print(sdk.content.passages.__doc__)
 ```
 
-The content surface is single-item for fetching and reading; callers loop explicitly when needed:
+The content surface supports unary fetching and aligned bounded fan-out; reading remains unary:
 
 ```python
 document = sdk.content.fetch(source)
+fetch_outcomes = sdk.content.fetch_many(sources, concurrency=5)
+extract_outcomes = sdk.llm.extract_many(items, instruction=instruction, schema=schema)
 row = sdk.content.read(source, start_line=1, line_count=200)
 grep_outcomes = sdk.content.grep(pattern, sources=sources, mode="regex", context_lines=2)
 ```

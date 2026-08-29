@@ -26,15 +26,16 @@ SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 
 - 本地参数错误抛 `ValueError`。
 - provider、quota、transport、抽取 JSON/schema/repair 失败抛 `BrokerError`，尽可能保留
   `code`、`retryable`、`attempts`、`provider`、`component` 和 `scope`。
-- 只有 `search.many` 是公共多查询 helper；独立的 content/LLM 调用由 Python 循环。
+- `search.many`、`content.fetch_many` 和 `llm.extract_many` 是公共对齐 fan-out helper；
+  独立的 read 和自由文本 completion 由 Python 循环。
 
 ## 公共接口
 
 | Namespace | 操作 |
 | --- | --- |
 | Search | `search`、`search.many`、`search.fuse_rrf` |
-| Content | `content.fetch`、`content.read`、`content.grep`、`content.passages` |
-| LLM | `llm.complete`、`llm.extract` |
+| Content | `content.fetch`、`content.fetch_many`、`content.read`、`content.grep`、`content.passages` |
+| LLM | `llm.complete`、`llm.extract`、`llm.extract_many` |
 | Session | `session.usage`、`session.capabilities` |
 | State | JSON/JSONL 操作，包括 `state.upsert_jsonl` |
 | Output | `output.submit` |
@@ -146,6 +147,53 @@ sdk.content.fetch(source: str) -> Record
 返回一个完整规范化文档：`source`、`text`、`title`、`date` 和 provider `metadata`。
 抓取失败抛 `BrokerError`。同一 source 的重复调用可复用 session cache，但每次请求仍消耗公开的
 content fetch budget。
+
+### `sdk.content.fetch_many(...)`
+
+```python
+sdk.content.fetch_many(
+    sources: list[str],
+    *,
+    concurrency: int = 5,
+) -> list[Record]
+```
+
+这个 SDK helper 会有界并发调用 unary `content.fetch`。它保留输入顺序和重复 source，不做
+capability manifest 预检，空输入直接返回 `[]`。`concurrency` 只限制 SDK worker fan-out；
+每个请求仍由 broker 的预算、重试、缓存、trace 和 provider 并发策略管理。
+
+每个输入对应一个对齐 outcome：
+
+```python
+[
+    {
+        "source": "source_1",
+        "status": "success",
+        "document": {"source": "source_1", "text": "...", "metadata": {}},
+        "error": None,
+    },
+    {
+        "source": "source_2",
+        "status": "failure",
+        "document": None,
+        "error": {
+            "code": "provider_timeout",
+            "message": "...",
+            "retryable": True,
+            "attempts": 2,
+            "provider_status": None,
+            "retry_after_seconds": None,
+            "provider": "example",
+            "component": "document",
+            "scope": "provider",
+        },
+    },
+]
+```
+
+Provider、quota 和 deadline 失败保留为逐项 outcome。若所有项目都因 transport、protocol、
+contract 或 permission 错误失败，helper 会提升一个代表性的顶层 `BrokerError`；意外的非
+`BrokerError` 异常原样传播。
 
 ### `sdk.content.read(...)`
 
@@ -273,19 +321,29 @@ sdk.llm.extract(
 repair 尝试都会在模型调用前预留 quota。provider failure、非法/非 object JSON、schema
 mismatch、repair 耗尽和 quota exhaustion 都抛保留错误码与尝试次数的 `BrokerError`。
 
-多个 item 由调用方显式循环：
+### `sdk.llm.extract_many(...)`
 
 ```python
-results = []
-failures = []
-for input_index, item in enumerate(items):
-    try:
-        data = sdk.llm.extract(item, instruction=instruction, schema=schema)
-    except BrokerError as error:
-        failures.append({"input_index": input_index, "code": error.code})
-    else:
-        results.append({"input_index": input_index, "data": data})
+sdk.llm.extract_many(
+    items: list[Any],
+    *,
+    instruction: str,
+    schema: dict[str, Any],
+    concurrency: int = 4,
+    max_tokens: int | None = None,
+    repair_attempts: int = 0,
+) -> list[Record]
 ```
+
+所有 item 共享 instruction、schema、token 上限和 repair 策略。fan-out 前会先校验全部 item
+都是 strict JSON；原始 item 不会复制到 outcome 或诊断中。每项仍是独立的 unary
+`llm.extract` 请求，因此 broker quota、重试、trace 和 provider 并发策略保持权威。
+
+返回列表与输入对齐，每个 outcome 包含 `input_index`、`status`、`data` 和 `error`。status
+严格为 `"success"` 或 `"failure"`；成功项包含 schema 校验后的 `data` 且 `error=None`，失败项
+包含 `data=None` 和结构化 `error`。Provider、schema、quota 和 deadline 失败保留为逐项
+outcome；若所有项目都因 transport、protocol、contract 或 permission 错误失败，helper 会
+提升一个代表性的顶层 `BrokerError`。
 
 ## Session
 
@@ -369,12 +427,12 @@ sdk.output.submit(value, *, citations: list[str] | None = None) -> None
 | `search(..., domains=...)` | `include_domains=...` |
 | `search.many(..., limit_per_query=...)` | `limit=...` |
 | fusion `batch_index` | `input_index` |
-| `content.get_many(sources)` | 循环调用 `content.fetch(source)` |
+| `content.get_many(sources)` | `content.fetch_many(sources)` |
 | `content.read(..., offset, limit)` | `start_line`、`start_character`、`line_count` |
 | `content.read_many(...)` | 循环调用 `content.read(...)` |
 | `content.grep(sources, pattern, context, max_matches_per_source)` | `grep(pattern, sources=..., context_lines=..., limit_per_source=...)` |
 | `content.passages(query, sources, max_per_source)` | keyword `sources=...`、`limit_per_source=...` |
 | `llm.complete_many(...)` | 循环调用 `llm.complete(...)` |
-| `llm.extract_many(...)` | 循环调用直接返回 object 的 `llm.extract(...)` |
+| 旧 broker `llm.extract_many(...)` | SDK `llm.extract_many(...)` 组合 unary `llm.extract` |
 | `state.merge_jsonl(...)` | `state.upsert_jsonl(...)` |
 | `output.submit(output, ...)` | `output.submit(value, ...)` |

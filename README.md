@@ -211,16 +211,17 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | Namespace | Main operations | Role |
 | --- | --- | --- |
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
-| `sdk.content` | `fetch`, `read`, `grep`, `passages` | Fetch, locate, and inspect evidence with explicit cursors |
-| `sdk.llm` | `extract`, `complete` | Optional single-item model calls and schema-checked extraction |
+| `sdk.content` | `fetch`, `fetch_many`, `read`, `grep`, `passages` | Fetch, locate, and inspect evidence with explicit cursors |
+| `sdk.llm` | `extract`, `extract_many`, `complete` | Optional model calls and schema-checked extraction |
 | `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
 | `sdk.session` | `usage`, `capabilities` | Inspect usage, budgets, active contracts, limits, and mechanisms |
 | `sdk.output` | `submit` | Return structured output with optional URL/source labels |
 
-`search.many` and `content.grep` return input-aligned outcomes. Search status is exactly `"success"`
-or `"failure"`; failed search rows expose structured details in `outcome.error`. Grep keeps its
-display-only failure status. Independent content and LLM work uses explicit Python loops and
-per-call `BrokerError`. Each search hit has one
+`search.many`, `content.fetch_many`, `llm.extract_many`, and `content.grep` return input-aligned
+outcomes. Search, fetch, and extraction status is exactly `"success"` or `"failure"`; failed rows
+expose structured details in `outcome.error`. Grep keeps its display-only failure status.
+Independent reads and free-form completions use explicit Python loops and per-call `BrokerError`.
+Each search hit has one
 `source`: a canonical web URL or local document ID. Empty search results are successful results.
 Content accepts URL/local-ID strings rather than result records. Web deployments can fetch bounded
 public HTTP(S) URLs directly; local IDs remain search-admitted. Output citations are optional

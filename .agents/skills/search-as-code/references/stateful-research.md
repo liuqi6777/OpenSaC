@@ -117,12 +117,17 @@ for candidate in new_candidates:
 sources = [row["source"] for row in selected]
 if sources:
     documents = {}
-    for source in sources:
-        try:
-            document = sdk.content.fetch(source)
-        except BrokerError as error:
-            meta["failures"].append({"stage": "fetch", "source": source, "code": error.code})
-        else:
+    try:
+        fetch_outcomes = sdk.content.fetch_many(sources, concurrency=4)
+    except BrokerError as error:
+        meta["failures"].append({"stage": "fetch_many", "code": error.code})
+    else:
+        for outcome in fetch_outcomes:
+            if outcome.status != "success" or outcome.document is None:
+                code = outcome.error.code if outcome.error is not None else "invalid_outcome"
+                meta["failures"].append({"stage": "fetch", "source": outcome.source, "code": code})
+                continue
+            document = outcome.document
             documents[document.source] = document
             already_fetched.add(document.source)
 

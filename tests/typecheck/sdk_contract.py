@@ -29,6 +29,14 @@ text: str = row.text
 next_line: int | None = row.window.next.start_line if row.window.next else None
 document = sdk.content.fetch(source)
 document_title: str = document.title
+fetch_outcomes = sdk.content.fetch_many([source], concurrency=2)
+fetch_status: str = fetch_outcomes[0].status
+fetched_document = fetch_outcomes[0].document
+fetched_document_title: str | None = (
+    fetched_document.title if fetched_document is not None else None
+)
+fetch_error = fetch_outcomes[0].error
+fetch_error_code: str | None = fetch_error.code if fetch_error is not None else None
 input_index: int = fused[0].provenance[0].input_index if fused else 0
 
 grep_outcomes = sdk.content.grep("OpenSAC", sources=[source], mode="literal", case_sensitive=True)
@@ -52,6 +60,22 @@ extraction = sdk.llm.extract(
     },
 )
 extracted_label: object = extraction["label"]
+extract_outcomes = sdk.llm.extract_many(
+    [{"text": text}],
+    instruction="Extract a label.",
+    schema={
+        "type": "object",
+        "properties": {"label": {"type": "string"}},
+        "required": ["label"],
+    },
+)
+extract_status: str = extract_outcomes[0].status
+extracted_data = extract_outcomes[0].data
+many_extracted_label: object | None = (
+    extracted_data["label"] if extracted_data is not None else None
+)
+extract_error = extract_outcomes[0].error
+extract_error_code: str | None = extract_error.code if extract_error is not None else None
 
 sdk.output.submit(
     {
@@ -63,7 +87,13 @@ sdk.output.submit(
         "capability_contract": capability_contract,
         "content_fetches": content_fetches,
         "document_title": document_title,
+        "fetch_status": fetch_status,
+        "fetched_document_title": fetched_document_title,
+        "fetch_error_code": fetch_error_code,
         "extracted_label": extracted_label,
+        "extract_status": extract_status,
+        "many_extracted_label": many_extracted_label,
+        "extract_error_code": extract_error_code,
         "search_status": search_status,
         "search_hit_count": search_hit_count,
         "search_error_code": search_error_code,

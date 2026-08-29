@@ -72,9 +72,10 @@ def test_sdk_package_publishes_typing_metadata() -> None:
     assert stub.is_file()
     text = stub.read_text(encoding="utf-8")
     assert "def fetch(" in text
+    assert "def fetch_many(" in text
     assert "def extract(" in text
+    assert "def extract_many(" in text
     assert "def read_many(" not in text
-    assert "def extract_many(" not in text
 
 
 def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
@@ -96,7 +97,7 @@ def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
     assert declared == implemented
 
 
-def test_search_many_is_composed_locally_not_mapped_to_broker_batch() -> None:
+def test_many_helpers_are_composed_locally_not_mapped_to_broker_batches() -> None:
     search_many = next(
         operation
         for operation in SDK_SURFACE
@@ -106,14 +107,32 @@ def test_search_many_is_composed_locally_not_mapped_to_broker_batch() -> None:
     assert search_many.transport_method is None
     assert "search.query_many" not in SDK_TRANSPORT_METHODS
 
+    fetch_many = next(
+        operation
+        for operation in SDK_SURFACE
+        if operation.resource == "content" and operation.method == "fetch_many"
+    )
+    assert fetch_many.transport_method is None
+    assert "content.fetch_many" not in SDK_TRANSPORT_METHODS
+
+    extract_many = next(
+        operation
+        for operation in SDK_SURFACE
+        if operation.resource == "llm" and operation.method == "extract_many"
+    )
+    assert extract_many.transport_method is None
+    assert "llm.extract_many" not in SDK_TRANSPORT_METHODS
+
 
 def test_surface_manifest_keeps_model_core_small() -> None:
     model_core = [operation for operation in SDK_SURFACE if operation.model_core]
-    assert len(SDK_SURFACE) == 22
-    assert len([item for item in SDK_SURFACE if item.tier is not SurfaceTier.INTERNAL]) == 20
-    assert len(model_core) == 11
+    assert len(SDK_SURFACE) == 24
+    assert len([item for item in SDK_SURFACE if item.tier is not SurfaceTier.INTERNAL]) == 22
+    assert len(model_core) == 13
     assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
     assert any(operation.public_name == "sdk.content.fetch" for operation in model_core)
+    assert any(operation.public_name == "sdk.content.fetch_many" for operation in model_core)
+    assert any(operation.public_name == "sdk.llm.extract_many" for operation in model_core)
     assert not hasattr(ContentResource, "snippets")
     assert hasattr(ContentResource, "grep")
     assert not hasattr(ContentResource, "grep_report")
@@ -1345,6 +1364,215 @@ def test_content_fetch_forwards_one_source() -> None:
     assert transport.calls == [("content.fetch", {"source": "source_1"})]
 
 
+def test_content_fetch_many_is_bounded_aligned_and_preserves_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(tmp_path / "output.json"))
+
+    class FetchManyTransport:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.calls: list[str] = []
+            self.active = 0
+            self.max_active = 0
+
+        def call(self, method, params):
+            assert method == "content.fetch"
+            source = params["source"]
+            with self.lock:
+                self.calls.append(source)
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep({"slow": 0.04, "failed": 0.01, "fast": 0.005}[source])
+                if source == "failed":
+                    raise BrokerError(
+                        "Document provider timed out.",
+                        code="provider_timeout",
+                        retryable=True,
+                        attempts=3,
+                        provider="test",
+                        component="document",
+                        scope="provider",
+                    )
+                return record(
+                    {
+                        "source": source,
+                        "title": source,
+                        "date": None,
+                        "text": f"body-{source}",
+                        "metadata": {},
+                    }
+                )
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    transport = FetchManyTransport()
+    outcomes = ContentResource(transport).fetch_many(
+        [" slow ", "failed", "fast", "slow"],
+        concurrency=2,
+    )
+
+    assert [outcome.source for outcome in outcomes] == ["slow", "failed", "fast", "slow"]
+    assert [outcome.status for outcome in outcomes] == [
+        "success",
+        "failure",
+        "success",
+        "success",
+    ]
+    assert outcomes[0].document.text == "body-slow"
+    assert outcomes[0].error is None
+    assert outcomes[1].document is None
+    assert dict(outcomes[1].error) == {
+        "code": "provider_timeout",
+        "message": "Document provider timed out.",
+        "retryable": True,
+        "attempts": 3,
+        "provider_status": None,
+        "retry_after_seconds": None,
+        "provider": "test",
+        "component": "document",
+        "scope": "provider",
+    }
+    assert transport.max_active == 2
+    assert transport.calls.count("slow") == 2
+    assert transport.active == 0
+    assert not any(thread.name.startswith("opensac-sdk") for thread in threading.enumerate())
+
+    warning = json.loads((tmp_path / "output.json").read_text())["warnings"][0]
+    assert warning["method"] == "content.fetch_many"
+    assert warning["success_count"] == 3
+    assert warning["failure_count"] == 1
+    assert warning["failures"][0]["input_index"] == 1
+    assert warning["failures"][0]["source"] == "failed"
+
+
+def test_content_fetch_many_returns_provider_failures_and_promotes_system_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(tmp_path / "output.json"))
+
+    class FailingTransport:
+        def __init__(self, *, code: str, succeed: set[str] | None = None) -> None:
+            self.code = code
+            self.succeed = succeed or set()
+
+        def call(self, method, params):
+            assert method == "content.fetch"
+            source = params["source"]
+            if source in self.succeed:
+                return record({"source": source, "text": "body", "metadata": {}})
+            raise BrokerError(
+                f"{self.code} for {source}",
+                code=self.code,
+                retryable=self.code == "broker_transport_error",
+                attempts=1 if self.code.startswith("provider_") else None,
+            )
+
+    provider = ContentResource(FailingTransport(code="provider_timeout")).fetch_many(["one", "two"])
+    assert [outcome.status for outcome in provider] == ["failure", "failure"]
+    assert [outcome.error.code for outcome in provider] == [
+        "provider_timeout",
+        "provider_timeout",
+    ]
+
+    for code in sorted(_SYSTEM_FAILURE_CODES):
+        with pytest.raises(BrokerError) as raised:
+            ContentResource(FailingTransport(code=code)).fetch_many(["one", "two"])
+        assert raised.value.code == code
+
+    class MixedSystemTransport(FailingTransport):
+        def call(self, method, params):
+            assert method == "content.fetch"
+            code = (
+                "broker_transport_error" if params["source"] == "one" else "broker_protocol_error"
+            )
+            raise BrokerError(f"{code} for {params['source']}", code=code, retryable=False)
+
+    with pytest.raises(BrokerError) as mixed_system:
+        ContentResource(MixedSystemTransport(code="unused")).fetch_many(["one", "two"])
+    assert mixed_system.value.code == "broker_transport_error"
+
+    mixed = ContentResource(
+        FailingTransport(code="broker_transport_error", succeed={"one"})
+    ).fetch_many(["one", "two"])
+    assert [outcome.status for outcome in mixed] == ["success", "failure"]
+    assert mixed[1].error.code == "broker_transport_error"
+
+
+def test_content_fetch_many_validates_before_fanout_and_handles_empty_input() -> None:
+    class RecordingTransport:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def call(self, method, params):
+            self.calls.append((method, params))
+            return record({"source": params["source"], "text": "body", "metadata": {}})
+
+    transport = RecordingTransport()
+    content = ContentResource(transport)
+
+    assert content.fetch_many([]) == []
+    with pytest.raises(ValueError, match="source at input index 1 must not be empty"):
+        content.fetch_many(["valid", "  "])
+    with pytest.raises(ValueError, match="sources must be a list"):
+        content.fetch_many(("valid",))
+    with pytest.raises(ValueError, match="concurrency must be at least 1"):
+        content.fetch_many([], concurrency=0)
+
+    assert transport.calls == []
+
+
+def test_content_fetch_many_propagates_unexpected_exceptions_and_joins_workers() -> None:
+    class InvalidTransport:
+        def call(self, method, params):
+            assert method == "content.fetch"
+            if params["source"] == "invalid":
+                raise ValueError("unexpected response")
+            time.sleep(0.01)
+            return record({"source": params["source"], "text": "body", "metadata": {}})
+
+    with pytest.raises(ValueError, match="unexpected response"):
+        ContentResource(InvalidTransport()).fetch_many(["one", "invalid", "two"])
+    assert not any(thread.name.startswith("opensac-sdk") for thread in threading.enumerate())
+
+
+def test_content_fetch_many_failure_warnings_are_strictly_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class FailedTransport:
+        def call(self, method, params):
+            del params
+            assert method == "content.fetch"
+            raise BrokerError(
+                "x" * 10_000,
+                code="provider_timeout",
+                retryable=True,
+                attempts=3,
+            )
+
+    outcomes = ContentResource(FailedTransport()).fetch_many(
+        [f"source-{index}" for index in range(64)]
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    encoded_warnings = json.dumps(
+        payload["warnings"], ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    warning = payload["warnings"][0]
+    assert len(encoded_warnings) <= 4_096
+    assert len(warning["failures"]) + warning["omitted_failure_count"] == 64
+    assert all(outcome.status == "failure" for outcome in outcomes)
+    assert all(len(outcome.error.message) <= 1_024 for outcome in outcomes)
+
+
 def test_content_read_accepts_one_source_and_returns_one_record() -> None:
     class ReadTransport:
         def __init__(self) -> None:
@@ -1563,6 +1791,159 @@ def test_extract_rejects_non_json_values_before_transport() -> None:
         llm.extract({}, instruction="x", schema={}, repair_attempts=-1)
 
     assert transport.calls == []
+
+
+def test_extract_many_is_bounded_aligned_and_does_not_echo_items(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class ExtractManyTransport:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.calls: list[dict] = []
+            self.active = 0
+            self.max_active = 0
+
+        def call(self, method, params):
+            assert method == "llm.extract"
+            item = params["item"]
+            with self.lock:
+                self.calls.append(params)
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                time.sleep({"slow": 0.04, "failed": 0.01, "fast": 0.005}[item["id"]])
+                if item["id"] == "failed":
+                    raise BrokerError(
+                        "Output did not match the schema.",
+                        code="schema_mismatch",
+                        retryable=False,
+                        attempts=2,
+                        provider="test",
+                        component="llm",
+                        scope="resource",
+                    )
+                return record({"label": item["id"]})
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    schema = {
+        "type": "object",
+        "properties": {"label": {"type": "string"}},
+        "required": ["label"],
+    }
+    transport = ExtractManyTransport()
+    outcomes = LLMResource(transport).extract_many(
+        [{"id": "slow"}, {"id": "failed"}, {"id": "fast"}, {"id": "slow"}],
+        instruction="Classify each item",
+        schema=schema,
+        concurrency=2,
+        max_tokens=64,
+        repair_attempts=1,
+    )
+
+    assert [outcome.input_index for outcome in outcomes] == [0, 1, 2, 3]
+    assert [outcome.status for outcome in outcomes] == [
+        "success",
+        "failure",
+        "success",
+        "success",
+    ]
+    assert outcomes[0].data.label == "slow"
+    assert outcomes[0].error is None
+    assert outcomes[1].data is None
+    assert outcomes[1].error.code == "schema_mismatch"
+    assert all("item" not in outcome for outcome in outcomes)
+    assert transport.max_active == 2
+    assert transport.active == 0
+    assert all(call["instruction"] == "Classify each item" for call in transport.calls)
+    assert all(call["schema"] == schema for call in transport.calls)
+    assert all(call["max_tokens"] == 64 for call in transport.calls)
+    assert all(call["repair_attempts"] == 1 for call in transport.calls)
+    assert not any(thread.name.startswith("opensac-sdk") for thread in threading.enumerate())
+
+    warning = json.loads(output_path.read_text(encoding="utf-8"))["warnings"][0]
+    assert warning["method"] == "llm.extract_many"
+    assert warning["success_count"] == 3
+    assert warning["failure_count"] == 1
+    assert warning["failures"][0]["input_index"] == 1
+    assert "item" not in warning["failures"][0]
+
+
+def test_extract_many_validates_every_item_before_fanout_and_handles_empty_input() -> None:
+    transport = ExtractionTransport({"label": "ok"})
+    llm = LLMResource(transport)
+
+    assert llm.extract_many([], instruction="x", schema={}) == []
+    with pytest.raises(ValueError, match="items must be a list"):
+        llm.extract_many(({"ok": True},), instruction="x", schema={})
+    with pytest.raises(ValueError, match=r"items\[1\] must contain only strict JSON values"):
+        llm.extract_many(
+            [{"ok": True}, {"bad": float("nan")}],
+            instruction="x",
+            schema={},
+        )
+    with pytest.raises(ValueError, match="schema must contain only strict JSON values"):
+        llm.extract_many([], instruction="x", schema={"bad": bool})
+    with pytest.raises(ValueError, match="concurrency must be at least 1"):
+        llm.extract_many([], instruction="x", schema={}, concurrency=0)
+
+    assert transport.calls == []
+
+
+def test_extract_many_preserves_provider_failures_and_promotes_all_system_failures() -> None:
+    class FailingTransport:
+        def __init__(self, code: str) -> None:
+            self.code = code
+
+        def call(self, method, params):
+            assert method == "llm.extract"
+            raise BrokerError(
+                f"{self.code} for {params['item']['id']}",
+                code=self.code,
+                retryable=self.code == "provider_timeout",
+                attempts=1 if self.code.startswith("provider_") else None,
+            )
+
+    kwargs = {"instruction": "x", "schema": {}}
+    provider = LLMResource(FailingTransport("provider_timeout")).extract_many(
+        [{"id": "one"}, {"id": "two"}],
+        **kwargs,
+    )
+    assert [outcome.status for outcome in provider] == ["failure", "failure"]
+    assert [outcome.error.code for outcome in provider] == [
+        "provider_timeout",
+        "provider_timeout",
+    ]
+
+    for code in sorted(_SYSTEM_FAILURE_CODES):
+        with pytest.raises(BrokerError) as raised:
+            LLMResource(FailingTransport(code)).extract_many(
+                [{"id": "one"}, {"id": "two"}],
+                **kwargs,
+            )
+        assert raised.value.code == code
+
+    class MixedSystemTransport(FailingTransport):
+        def call(self, method, params):
+            assert method == "llm.extract"
+            code = (
+                "broker_transport_error"
+                if params["item"]["id"] == "one"
+                else "broker_protocol_error"
+            )
+            raise BrokerError(code, code=code, retryable=False)
+
+    with pytest.raises(BrokerError) as mixed_system:
+        LLMResource(MixedSystemTransport("unused")).extract_many(
+            [{"id": "one"}, {"id": "two"}],
+            **kwargs,
+        )
+    assert mixed_system.value.code == "broker_transport_error"
 
 
 def test_state_round_trip_and_path_confinement(tmp_path) -> None:

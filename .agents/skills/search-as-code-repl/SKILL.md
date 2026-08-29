@@ -34,7 +34,8 @@ name, cleanup convention, or checkpoint schema is required.
   bound to this session.
 - Use snippets for triage, not document claims. Inspect text for every material claim; treat mirrors,
   repeated records, and RRF agreement as one source family rather than corroboration.
-- Treat optional `sdk.llm.extract(...)` as transformation of supplied text, not new evidence.
+- Treat optional `sdk.llm.extract(...)` or aligned `sdk.llm.extract_many(...)` as transformation of
+  supplied text, not new evidence.
   Validate quotes against its inputs.
 - Keep evidence source-scoped. Record a bounded exact excerpt and limitation for each requirement;
   verify a relation from entailing text or an explicit evidence-backed join.

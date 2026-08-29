@@ -27,6 +27,7 @@ sdk.search.fuse_rrf(
 Content:
 
 ```python
+sdk.content.fetch_many(sources, *, concurrency=5) -> list[record]
 sdk.content.read(
     source, *, start_line=1, start_character=0,
     line_count=200, max_chars=100_000
@@ -46,6 +47,9 @@ LLM, session, state, and output:
 sdk.llm.extract(
     item, *, instruction, schema, max_tokens=None, repair_attempts=0
 ) -> dict
+sdk.llm.extract_many(
+    items, *, instruction, schema, concurrency=4, max_tokens=None, repair_attempts=0
+) -> list[record]
 
 sdk.session.usage() -> record
 sdk.session.capabilities() -> record
@@ -60,8 +64,9 @@ sdk.state.list(prefix="") -> list[str]
 sdk.output.submit(value, citations=[source_url])
 ```
 
-Only `search.many` is a public batch helper. Loop over independent fetches, reads, completions, or
-extractions in ordinary Python and handle each `BrokerError` at the point where it occurs.
+`search.many`, `content.fetch_many`, and `llm.extract_many` are public aligned fan-out helpers. Loop
+over independent reads or completions in ordinary Python and handle each `BrokerError` where it
+occurs.
 
 ## Exact result fields
 
@@ -74,6 +79,9 @@ extractions in ordinary Python and handle each `BrokerError` at the point where 
   `fused_score`, and `fused_rank`. Each provenance row has `input_index`, `query`, `backend`,
   `rank`, and `score`.
 - Fetched document: `source`, `text`, `title`, `date`, and provider `metadata`.
+- Fetch outcome list: one input-aligned row per source with `source`, `status`, `document`, and
+  `error`. Status is exactly `"success"` or `"failure"`; successful rows have a fetched `document`
+  and `error=None`, while failed rows have `document=None` and a structured `error`.
 - Read slice: the fetched-document fields plus an independent `window` record. `window` contains
   `start_line`, `start_character`, `end_line`, `end_character`, `total_lines`, `next`, and
   `truncated_by_max_chars`.
@@ -93,6 +101,9 @@ extractions in ordinary Python and handle each `BrokerError` at the point where 
 - Passage failure: `code`, `message`, `retryable`, `attempts`, `provider_status`,
   `retry_after_seconds`, `provider`, `component`, `scope`, `input_index`, and `source`.
 - `llm.extract` returns the schema-validated JSON object directly.
+- Extract outcome list: one input-aligned row per item with `input_index`, `status`, `data`, and
+  `error`, without the original item. Successful rows have validated `data` and `error=None`; failed
+  rows have `data=None` and a structured `error`.
 
 Mapping access is canonical: use `row["field"]`, `get`, `keys`, `items`, `values`, iteration, or
 `dict(row)`. Attribute access is only a convenience for known, non-colliding fields; access keys
@@ -110,6 +121,10 @@ There is no public SDK model hierarchy or `types` module. Join capability result
   `status == "success"`; failed rows use `outcome.error`. Provider, quota, and deadline errors stay
   item failures, while an all-systemic transport/protocol/contract/permission failure can raise one
   representative top-level `BrokerError`.
+- `content.fetch_many` uses the same partial-success and all-systemic-failure rules. It preserves
+  source order and duplicates; `concurrency` bounds SDK fan-out without changing broker policy.
+- `llm.extract_many` also uses those rules, validates every item before fan-out, and never copies
+  the original item into results or diagnostics.
 - `content.grep` preserves partial success as input-aligned outcomes; other statuses are displayable
   failure text. `content.passages` retains structured fetch failures beside successful passages.
 - `content.fetch`, `content.read`, `llm.complete`, and `llm.extract` are single operations. A

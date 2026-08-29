@@ -267,6 +267,36 @@ class FakeContent:
             }
         )
 
+    def fetch_many(self, sources: list[str], *, concurrency: int = 5) -> list[Record]:
+        assert concurrency >= 1
+        outcomes = []
+        for source in sources:
+            try:
+                document = self.fetch(source)
+            except BrokerError as error:
+                outcomes.append(
+                    record(
+                        {
+                            "source": source,
+                            "status": "failure",
+                            "document": None,
+                            "error": {"code": error.code},
+                        }
+                    )
+                )
+            else:
+                outcomes.append(
+                    record(
+                        {
+                            "source": source,
+                            "status": "success",
+                            "document": document,
+                            "error": None,
+                        }
+                    )
+                )
+        return outcomes
+
     def read(self, source: str, **kwargs: object) -> Record:
         self.read_sources.append(source)
         start_line = int(kwargs.get("start_line", 1))
@@ -446,7 +476,7 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "candidates, not a fetch queue" in flat_skill
     assert "smallest source-diverse set" in flat_skill
     assert "Do not fetch the whole result list" in flat_skill
-    assert "make `sdk.content.fetch(...)` its first content call" in flat_skill
+    assert "`sdk.content.fetch_many(...)` its first content call" in flat_skill
     assert "semantic passage ranking that ordinary local matching does not" in flat_skill
     assert "avoid running every question over every selected source" in flat_skill
     assert "merely to relocate text already present" in flat_skill
@@ -498,6 +528,8 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
     assert "Search outcome list" in contract
     assert "Grep outcome list" in contract
     assert "sdk.content.fetch(source)" in contract
+    assert "sdk.content.fetch_many(sources, *, concurrency=5)" in contract
+    assert "Fetch outcome list" in contract
     assert "never print or submit a complete fetched document" in contract
     assert "failed rows use `outcome.error`" in contract
     assert "never display or parse search `status` as failure detail" in contract
@@ -566,12 +598,12 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
 
     assert "sdk.search.many(" in rank
     assert "sdk.search.fuse_rrf(" in rank
-    assert "sdk.content.fetch(" in rank
+    assert "sdk.content.fetch_many(" in rank
     assert "sdk.content.passages(" in rank
     assert "sdk.content.read(" not in rank
-    assert rank.index("sdk.content.fetch(") < rank.index("sdk.content.passages(")
+    assert rank.index("sdk.content.fetch_many(") < rank.index("sdk.content.passages(")
     assert "fetch_batch = 4" in rank
-    assert "for candidate in selected:" in rank
+    assert "for outcome in fetch_outcomes:" in rank
     assert "for document in documents.values():" in rank
     assert "sdk.output.submit(" not in rank
     assert "NEXT:" in rank
@@ -582,10 +614,10 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.search.many(" not in verify
     assert "NEXT:" in verify
     assert '"source": document.source' in verify
-    assert verify.index("sdk.content.fetch(") < verify.index("sdk.output.submit(")
+    assert verify.index("sdk.content.fetch_many(") < verify.index("sdk.output.submit(")
     assert "sdk.content.grep(" not in verify
     assert "sdk.content.read(" not in verify
-    assert "for source in sources:" in verify
+    assert "for outcome in fetch_outcomes:" in verify
     assert verify.count("sdk.output.submit(") == 1
     assert "structured_output_requested = False" in verify
     assert "NEXT: synthesize the user-facing answer" in verify
@@ -623,7 +655,7 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "sdk.state.write_jsonl(pool_path, pool)" in stateful_reference
     assert "sdk.state.write_jsonl(content_path, content)" in stateful_reference
     stateful_cache = stateful_stages[0]
-    assert stateful_cache.index("sdk.content.fetch(") < stateful_cache.index(
+    assert stateful_cache.index("sdk.content.fetch_many(") < stateful_cache.index(
         "sdk.content.passages("
     )
     assert "sdk.content.read(" not in stateful_cache
@@ -634,8 +666,8 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     recipe_text = "\n".join(recipes)
     assert "for year in years" in recipe_text
     assert "list(filter(keep, candidates))" in recipe_text
-    assert "sdk.llm.extract(" in recipe_text
-    assert "for passage, item in zip(" in recipe_text
+    assert "sdk.llm.extract_many(" in recipe_text
+    assert "for passage, item, outcome in zip(" in recipe_text
     assert 'quote in item["text"]' in recipe_text
     assert "sdk.search.many(followup_queries" in recipe_text
     assert "MAX_FOLLOWUPS = 6" in recipe_text

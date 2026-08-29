@@ -31,6 +31,7 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
     OperationSpec("search", "many", SurfaceTier.CORE, model_core=True),
     OperationSpec("search", "fuse_rrf", SurfaceTier.HELPER, model_core=True),
     OperationSpec("content", "fetch", SurfaceTier.CORE, "content.fetch", model_core=True),
+    OperationSpec("content", "fetch_many", SurfaceTier.CORE, model_core=True),
     OperationSpec(
         "content",
         "passages",
@@ -73,6 +74,7 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
         "llm.extract",
         model_core=True,
     ),
+    OperationSpec("llm", "extract_many", SurfaceTier.CORE, model_core=True),
 )
 
 MODEL_CORE_METHODS: tuple[str, ...] = tuple(

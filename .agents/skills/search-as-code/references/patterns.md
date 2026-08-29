@@ -95,13 +95,17 @@ try:
 
     documents = {}
     fetch_failures = []
-    for candidate in selected:
-        try:
-            document = sdk.content.fetch(candidate.source)
-        except BrokerError as error:
-            fetch_failures.append(f"{candidate.source}:{error.code}")
-        else:
-            documents[document.source] = document
+    fetch_outcomes = sdk.content.fetch_many(
+        [candidate.source for candidate in selected],
+        concurrency=4,
+    )
+    for outcome in fetch_outcomes:
+        if outcome.status != "success" or outcome.document is None:
+            code = outcome.error.code if outcome.error is not None else "invalid_outcome"
+            fetch_failures.append(f"{outcome.source}:{code}")
+            continue
+        document = outcome.document
+        documents[document.source] = document
 
     local_evidence = []
     compiled = [re.compile(pattern, re.IGNORECASE) for pattern in local_patterns]
@@ -174,16 +178,21 @@ checks = {
 evidence = {}
 problems = []
 documents = []
-for source in sources:
-    try:
-        document = sdk.content.fetch(source)
-    except BrokerError as error:
-        problems.append(f"{source}:fetch:{error.code}")
-        continue
-    if not document.text.strip():
-        problems.append(f"{source}:unreadable")
-        continue
-    documents.append(document)
+try:
+    fetch_outcomes = sdk.content.fetch_many(sources, concurrency=2)
+except BrokerError as error:
+    problems.append(f"fetch_many:{error.code}")
+else:
+    for outcome in fetch_outcomes:
+        if outcome.status != "success" or outcome.document is None:
+            code = outcome.error.code if outcome.error is not None else "invalid_outcome"
+            problems.append(f"{outcome.source}:fetch:{code}")
+            continue
+        document = outcome.document
+        if not document.text.strip():
+            problems.append(f"{outcome.source}:unreadable")
+            continue
+        documents.append(document)
 
 for name, pattern in checks.items():
     compiled = re.compile(pattern, re.IGNORECASE)

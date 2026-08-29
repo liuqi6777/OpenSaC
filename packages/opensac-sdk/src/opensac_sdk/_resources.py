@@ -640,6 +640,69 @@ class ContentResource:
         """
         return self._transport.call("content.fetch", {"source": self._source(source)})
 
+    def fetch_many(
+        self,
+        sources: list[str],
+        *,
+        concurrency: int = 5,
+    ) -> list[Record]:
+        """Fetch several complete documents with bounded concurrency and aligned outcomes.
+
+        ``concurrency`` bounds SDK helper fan-out; each item remains an independent
+        ``content.fetch`` request governed by broker budget, retry, cache, tracing, and
+        provider-concurrency policies. Input order and duplicate sources are preserved.
+
+        Returns:
+            One outcome per input source. Successful rows contain ``document`` and
+            ``error=None``; failed rows contain ``document=None`` and structured ``error``.
+            ``status`` is exactly ``"success"`` or ``"failure"``.
+
+        Raises:
+            BrokerError: Every item failed with a transport, protocol, contract, or
+                permission error.
+        """
+        sources = self._sources(sources)
+        concurrency = integer(concurrency, "concurrency", minimum=1)
+        report = _run_many(sources, concurrency=concurrency, call=self.fetch)
+        report.raise_for_all_system_failures()
+
+        outcomes: list[Record] = []
+        for result in report.outcomes:
+            if isinstance(result, _ManySuccess):
+                outcomes.append(
+                    record(
+                        {
+                            "source": result.item,
+                            "status": "success",
+                            "document": result.value,
+                            "error": None,
+                        }
+                    )
+                )
+                continue
+            if not isinstance(result, _ManyFailure):
+                raise RuntimeError("many fetch returned an invalid internal outcome")
+            outcomes.append(
+                record(
+                    {
+                        "source": result.item,
+                        "status": "failure",
+                        "document": None,
+                        "error": result.info,
+                    }
+                )
+            )
+
+        report.record_failures(
+            "content.fetch_many",
+            detail=lambda failure: failure_detail(
+                failure.info,
+                input_index=failure.input_index,
+                source=failure.item,
+            ),
+        )
+        return outcomes
+
     def read(
         self,
         source: str,
@@ -940,6 +1003,92 @@ class LLMResource:
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
         return self._transport.call("llm.extract", params)
+
+    def extract_many(
+        self,
+        items: list[Any],
+        *,
+        instruction: str,
+        schema: dict[str, Any],
+        concurrency: int = 4,
+        max_tokens: int | None = None,
+        repair_attempts: int = 0,
+    ) -> list[Record]:
+        """Extract several JSON items with bounded concurrency and aligned outcomes.
+
+        Every item uses the same instruction, schema, token bound, and repair policy.
+        ``concurrency`` bounds SDK helper fan-out; each item remains an independent
+        ``llm.extract`` request governed by broker budget, retry, and provider policies.
+        Original items are never copied into outcomes or failure diagnostics.
+
+        Returns:
+            One outcome per input position. Successful rows contain ``data`` and
+            ``error=None``; failed rows contain ``data=None`` and structured ``error``.
+            ``status`` is exactly ``"success"`` or ``"failure"``.
+
+        Raises:
+            ValueError: Local arguments or any item are not strict-JSON serializable.
+            BrokerError: Every item failed with a transport, protocol, contract, or
+                permission error.
+        """
+        if not isinstance(items, list):
+            raise ValueError("items must be a list of strict-JSON values")
+        instruction = string(instruction, "instruction", nonempty=False)
+        concurrency = integer(concurrency, "concurrency", minimum=1)
+        max_tokens = optional_integer(max_tokens, "max_tokens", minimum=1)
+        repair_attempts = integer(repair_attempts, "repair_attempts", minimum=0)
+        if not isinstance(schema, dict):
+            raise ValueError("schema must be a JSON-serializable object")
+        self._ensure_json_serializable(schema, "schema")
+        for input_index, item in enumerate(items):
+            self._ensure_json_serializable(item, f"items[{input_index}]")
+
+        def extract_one(item: Any) -> Record:
+            return self.extract(
+                item,
+                instruction=instruction,
+                schema=schema,
+                max_tokens=max_tokens,
+                repair_attempts=repair_attempts,
+            )
+
+        report = _run_many(items, concurrency=concurrency, call=extract_one)
+        report.raise_for_all_system_failures()
+        outcomes: list[Record] = []
+        for result in report.outcomes:
+            if isinstance(result, _ManySuccess):
+                outcomes.append(
+                    record(
+                        {
+                            "input_index": result.input_index,
+                            "status": "success",
+                            "data": result.value,
+                            "error": None,
+                        }
+                    )
+                )
+                continue
+            if not isinstance(result, _ManyFailure):
+                raise RuntimeError("many extraction returned an invalid internal outcome")
+            outcomes.append(
+                record(
+                    {
+                        "input_index": result.input_index,
+                        "status": "failure",
+                        "data": None,
+                        "error": result.info,
+                    }
+                )
+            )
+
+        report.record_failures(
+            "llm.extract_many",
+            detail=lambda failure: failure_detail(
+                failure.info,
+                input_index=failure.input_index,
+            ),
+        )
+        return outcomes
 
     @staticmethod
     def _ensure_json_serializable(value: Any, field: str) -> None:
