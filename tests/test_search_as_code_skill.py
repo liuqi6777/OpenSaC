@@ -154,6 +154,7 @@ class FakeContent:
         partial_failure: bool = False,
         no_matches: bool = False,
         grep_error: bool = False,
+        long_documents: bool = False,
     ) -> None:
         self.missing_year = missing_year
         self.same_source = same_source
@@ -161,9 +162,11 @@ class FakeContent:
         self.partial_failure = partial_failure
         self.no_matches = no_matches
         self.grep_error = grep_error
+        self.long_documents = long_documents
         self.turn = 1
         self.grep_calls: list[tuple[str, tuple[str, ...]]] = []
         self.passage_calls: list[tuple[str, tuple[str, ...]]] = []
+        self.fetch_sources: list[str] = []
         self.read_sources: list[str] = []
 
     @property
@@ -240,6 +243,38 @@ class FakeContent:
                 )
             )
         return outcomes
+
+    def fetch(self, source: str) -> Record:
+        self.fetch_sources.append(source)
+        if self.partial_failure and source.endswith("2"):
+            raise BrokerError(
+                "content provider unavailable",
+                code="provider_timeout",
+                retryable=True,
+                attempts=3,
+            )
+        parts = []
+        if not self.no_matches:
+            if self.same_source or source.endswith("1"):
+                parts.append(f"target phrase evidence for {source}")
+            if (
+                not self.missing_year
+                and self.turn >= self.year_from_turn
+                and (self.same_source or source.endswith("2"))
+            ):
+                parts.append(f"1998 evidence for {source}")
+        text = "\n".join(parts) or f"unrelated evidence for {source}"
+        if self.long_documents:
+            text = f"{'x' * 5_000}\n{text}\n{'y' * 5_000}"
+        return record(
+            {
+                "source": source,
+                "title": source,
+                "date": "1998",
+                "text": text,
+                "metadata": {},
+            }
+        )
 
     def read(self, source: str, **kwargs: object) -> Record:
         self.read_sources.append(source)
@@ -329,6 +364,7 @@ def _run_pattern(
     partial_failure: bool = False,
     no_matches: bool = False,
     grep_error: bool = False,
+    long_documents: bool = False,
     vary_search_by_turn: bool = False,
     hits_per_query: int = 2,
 ):
@@ -343,6 +379,7 @@ def _run_pattern(
         partial_failure=partial_failure,
         no_matches=no_matches,
         grep_error=grep_error,
+        long_documents=long_documents,
     )
     output = FakeOutput()
     sdk = SimpleNamespace(
@@ -405,7 +442,6 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "Prefer a small data cache over a workflow state machine" in flat_skill
     assert "filter repeated queries or sources" in flat_skill
     assert "Keep each cache cumulative" in flat_skill
-    assert "the same pool and content artifacts" in flat_skill
     assert "Do not print raw result lists, full passages, or the ledger" in flat_skill
     assert "Runtime metrics alone" in flat_skill
     assert "A final research result must use `submit`" not in flat_skill
@@ -416,6 +452,15 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "sdk.content.passages" in flat_skill
     assert "sdk.content.grep" in flat_skill
     assert "sdk.content.read" in flat_skill
+    assert "candidates, not a fetch queue" in flat_skill
+    assert "smallest source-diverse set" in flat_skill
+    assert "Do not fetch the whole result list" in flat_skill
+    assert "make `sdk.content.fetch(...)` its first content call" in flat_skill
+    assert "semantic passage ranking that ordinary local matching does not" in flat_skill
+    assert "avoid running every question over every selected source" in flat_skill
+    assert "merely to relocate text already present" in flat_skill
+    assert "across the whole program" in flat_skill
+    assert "Never pass an unfetched source" in flat_skill
     assert "Treat every example as a starting point rather than a required pipeline" in flat_skill
     assert "fact checking" in skill.split("---", 2)[1]
     assert "Use 2-4 queries" not in flat_skill
@@ -461,6 +506,8 @@ def test_contract_documents_records_without_a_public_model_hierarchy() -> None:
     assert "`read.window.next`" in contract
     assert "Search outcome list" in contract
     assert "Grep outcome list" in contract
+    assert "sdk.content.fetch(source)" in contract
+    assert "never print or submit a complete fetched document" in contract
     assert 'Only compare it with `"success"`; do not parse failure text' in contract
 
 
@@ -527,20 +574,26 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
 
     assert "sdk.search.many(" in rank
     assert "sdk.search.fuse_rrf(" in rank
+    assert "sdk.content.fetch(" in rank
     assert "sdk.content.passages(" in rank
-    assert "sdk.content.read(" in rank
-    assert "for window in windows:" in rank
+    assert "sdk.content.read(" not in rank
+    assert rank.index("sdk.content.fetch(") < rank.index("sdk.content.passages(")
+    assert "fetch_batch = 4" in rank
+    assert "for candidate in selected:" in rank
+    assert "for document in documents.values():" in rank
     assert "sdk.output.submit(" not in rank
     assert "NEXT:" in rank
-    assert "for window, item in read_results[:4]:" in rank
-    assert "[:600]" in rank
+    assert "for passage in passage_report.passages[:4]:" in rank
+    assert "[:500]" in rank
 
     assert len(verify.splitlines()) <= 90
     assert "sdk.search.many(" not in verify
     assert "NEXT:" in verify
-    assert '"source": passage.source' in verify
-    assert verify.index("sdk.content.grep(") < verify.index("sdk.content.read(")
-    assert verify.index("sdk.content.read(") < verify.index("sdk.output.submit(")
+    assert '"source": document.source' in verify
+    assert verify.index("sdk.content.fetch(") < verify.index("sdk.output.submit(")
+    assert "sdk.content.grep(" not in verify
+    assert "sdk.content.read(" not in verify
+    assert "for source in sources:" in verify
     assert verify.count("sdk.output.submit(") == 1
     assert "structured_output_requested = False" in verify
     assert "NEXT: synthesize the user-facing answer" in verify
@@ -577,6 +630,13 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
     assert "do not create `pool_round2.jsonl` or `content_stage3.jsonl`" in stateful_reference
     assert "sdk.state.write_jsonl(pool_path, pool)" in stateful_reference
     assert "sdk.state.write_jsonl(content_path, content)" in stateful_reference
+    stateful_cache = stateful_stages[0]
+    assert stateful_cache.index("sdk.content.fetch(") < stateful_cache.index(
+        "sdk.content.passages("
+    )
+    assert "sdk.content.read(" not in stateful_cache
+    assert "fetch_batch = 4" in stateful_cache
+    assert "for candidate in new_candidates:" in stateful_cache
 
     assert len(recipes) == 4
     recipe_text = "\n".join(recipes)
@@ -607,8 +667,10 @@ def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> N
     sdk, content, output, first = _run_pattern(tmp_path, program=program)
 
     assert sdk.search.many_calls
+    assert 1 <= len(content.fetch_sources) <= 4
     assert content.passage_calls
-    assert content.read_sources
+    assert not content.read_sources
+    assert list(content.passage_calls[0][1]) == content.fetch_sources
     assert "new_queries=2" in first
     assert "EVIDENCE source=" in first
     assert first.strip().endswith(
@@ -631,6 +693,7 @@ def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> N
     )
 
     assert not resumed_sdk.search.many_calls
+    assert not resumed_content.fetch_sources
     assert not resumed_content.passage_calls
     assert not resumed_content.read_sources
     assert "new_queries=0" in second
@@ -638,12 +701,26 @@ def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> N
     assert not resumed_output.submissions
 
 
+def test_composed_pattern_fetches_only_its_selected_subset_before_passages(
+    tmp_path: Path,
+) -> None:
+    _, content, output, printed = _run_pattern(tmp_path, program=_rank_pattern())
+
+    assert 1 <= len(content.fetch_sources) <= 4
+    assert len(content.passage_calls) == 1
+    assert list(content.passage_calls[0][1]) == content.fetch_sources
+    assert not content.grep_calls
+    assert not content.read_sources
+    assert "select another small relevant batch" in printed
+    assert not output.submissions
+
+
 def test_explore_pattern_stops_for_model_judgment(tmp_path: Path) -> None:
     _, content, output, printed = _run_pattern(tmp_path, program=_explore_pattern())
 
     lines = printed.strip().splitlines()
     assert 1 <= sum(line.startswith("CANDIDATE ") for line in lines) <= 8
-    assert lines[-1].startswith("NEXT: inspect")
+    assert lines[-1].startswith("NEXT: choose a small relevant subset")
     assert not content.grep_calls
     assert not output.submissions
 
@@ -651,8 +728,9 @@ def test_explore_pattern_stops_for_model_judgment(tmp_path: Path) -> None:
 def test_verify_pattern_returns_runtime_evidence_for_model_synthesis(tmp_path: Path) -> None:
     _, content, output, printed = _run_pattern(tmp_path, program=_verify_pattern())
 
-    assert len(content.grep_calls) == 2
-    assert content.read_sources
+    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
+    assert not content.grep_calls
+    assert not content.read_sources
     assert "EVIDENCE phrase:" in printed
     assert "EVIDENCE year:" in printed
     assert printed.strip().endswith(
@@ -669,8 +747,9 @@ def test_verify_pattern_submits_runtime_evidence_when_requested(tmp_path: Path) 
     _, content, output, printed = _run_pattern(tmp_path, program=program)
 
     assert printed == ""
-    assert len(content.grep_calls) == 2
-    assert content.read_sources
+    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
+    assert not content.grep_calls
+    assert not content.read_sources
     assert len(output.submissions) == 1
     submitted, citations = output.submissions[0]
     assert {row["constraint"] for row in submitted["evidence"]} == {"phrase", "year"}
@@ -689,6 +768,36 @@ def test_verify_pattern_ends_in_next_when_model_judgment_is_needed(tmp_path: Pat
     assert lines[0].startswith("EVIDENCE phrase:")
     assert lines[-1].startswith("NEXT:")
     assert "missing=['year']" in lines[-1]
+    assert not output.submissions
+
+
+def test_verify_pattern_keeps_evidence_after_one_fetch_fails(tmp_path: Path) -> None:
+    _, content, output, printed = _run_pattern(
+        tmp_path,
+        program=_verify_pattern(),
+        partial_failure=True,
+    )
+
+    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
+    assert "EVIDENCE phrase:" in printed
+    assert "selected-source-url-2:fetch:provider_timeout" in printed
+    assert "missing=['year']" in printed
+    assert not output.submissions
+
+
+def test_verify_pattern_bounds_whole_document_output(tmp_path: Path) -> None:
+    _, content, output, printed = _run_pattern(
+        tmp_path,
+        program=_verify_pattern(),
+        long_documents=True,
+    )
+
+    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
+    assert "EVIDENCE phrase:" in printed
+    assert "EVIDENCE year:" in printed
+    assert len(printed) < 4_000
+    assert "x" * 1_000 not in printed
+    assert "y" * 1_000 not in printed
     assert not output.submissions
 
 

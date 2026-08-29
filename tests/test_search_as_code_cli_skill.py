@@ -52,7 +52,13 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "references/python-recipes.md" in skill
     assert "references/stateful-research.md" in skill
     assert "Treat one program as one semantic checkpoint" in flat_skill
-    assert "search -> fuse -> passages or grep -> focused reads -> normalize" in flat_skill
+    assert "search -> select a relevant subset -> fetch" in flat_skill
+    assert "candidates, not a fetch queue" in flat_skill
+    assert "Do not fetch the whole result list" in flat_skill
+    assert "semantic passage ranking that ordinary local matching does not" in flat_skill
+    assert "avoid running every question over every selected source" in flat_skill
+    assert "merely to relocate text already present" in flat_skill
+    assert "across the whole program" in flat_skill
     assert "Make normalized row schemas total" in flat_skill
     assert "small data cache over a workflow state machine" in flat_skill
     assert "Keep each cache cumulative" in flat_skill
@@ -61,7 +67,7 @@ def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
     assert "same substantive payload could be written before research ran" in flat_skill
     assert "A final research result must use `submit`" not in skill
     assert "program-to-program memory" in skill
-    assert "no `sdk.workspace` API" in skill
+    assert "no `sdk.workspace` API" in flat_skill
     assert "shell-capable environments" in description
     assert "Codex" not in description
     assert "Claude" not in description
@@ -130,8 +136,11 @@ def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
         heading="## Compose retrieval and focused inspection",
     )
     assert composed.index("sdk.search.many(") < composed.index("sdk.search.fuse_rrf(")
-    assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.passages(")
-    assert composed.index("sdk.content.passages(") < composed.index("sdk.content.read(")
+    assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.fetch(")
+    assert composed.index("sdk.content.fetch(") < composed.index("sdk.content.passages(")
+    assert "sdk.content.read(" not in composed
+    assert "fetch_batch = 4" in composed
+    assert "for candidate in selected:" in composed
 
     verify = _fenced_block(
         PATTERNS_PATH,

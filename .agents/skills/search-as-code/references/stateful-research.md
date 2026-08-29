@@ -12,7 +12,7 @@ Three artifacts are usually enough:
 | --- | --- |
 | `meta.json` | Task, attempted queries, bounded failure or coverage summaries |
 | `pool.jsonl` | Normalized search candidates, deduplicated by `source` |
-| `content.jsonl` | Inspected passages or read windows with source, coordinates, and text |
+| `content.jsonl` | Bounded local excerpts or semantic passages with source and coordinates |
 
 These files are a data cache, not a workflow state machine. Do not create per-stage logs, duplicate
 raw reports, or a final ledger unless the caller needs one. Use ordinary Python variables for values
@@ -35,8 +35,6 @@ sources, and stores focused windows. Adapt its inputs and bounds; they are not a
 
 ```python
 import hashlib
-import json
-
 from opensac_sdk import BrokerError, sdk
 
 task = "Identify the target and verify the requested relation."
@@ -52,9 +50,11 @@ meta = (
     else {
         "task": task,
         "queries": [],
+        "fetched_sources": [],
         "failures": [],
     }
 )
+meta.setdefault("fetched_sources", [])
 pool = [dict(row) for row in sdk.state.read_jsonl(pool_path)] if sdk.state.exists(pool_path) else []
 content = (
     [dict(row) for row in sdk.state.read_jsonl(content_path)]
@@ -66,6 +66,7 @@ planned_queries = ['"exact phrase" entity', "rare clue alternate wording"]
 tried = set(meta["queries"])
 queries = [query for query in dict.fromkeys(planned_queries) if query not in tried]
 pool_by_source = {row["source"]: row for row in pool}
+new_candidates = []
 
 if queries:
     # Save attempted queries before an expensive call only when avoiding blind replay matters.
@@ -74,7 +75,7 @@ if queries:
     search_outcomes = sdk.search.many(queries, limit=10, concurrency=4)
     fused = sdk.search.fuse_rrf(search_outcomes, k=60, limit=50)
     for row in fused:
-        pool_by_source[row.source] = {
+        candidate = {
             "source": row.source,
             "title": row.title,
             "domain": row.domain,
@@ -84,6 +85,8 @@ if queries:
             "score": row.fused_score,
             "provenance": row.provenance,
         }
+        pool_by_source[row.source] = candidate
+        new_candidates.append(candidate)
     meta["failures"].extend(
         {"stage": "search", "query": row.query, "status": row.status}
         for row in search_outcomes
@@ -93,64 +96,58 @@ if queries:
 pool = sorted(pool_by_source.values(), key=lambda row: row.get("rank", 1_000_000))[:300]
 sdk.state.write_jsonl(pool_path, pool)
 
-inspected_sources = {row["source"] for row in content}
-sources = [row["source"] for row in pool if row["source"] not in inspected_sources][:24]
-if sources:
-    passage_report = sdk.content.passages(task, sources=sources, limit=10, limit_per_source=2)
-    windows = []
-    seen = set()
-    for passage in passage_report.passages:
-        key = (passage.source, passage.coordinates["start_line"])
-        if key in seen:
-            continue
-        seen.add(key)
-        windows.append(
-            {
-                "source": passage.source,
-                "start_line": max(passage.coordinates["start_line"] - 8, 1),
-                "line_count": 50,
-                "max_chars": 16_000,
-                "passage_coordinates": dict(passage.coordinates),
-            }
-        )
-        if len(windows) >= 6:
-            break
+fetch_batch = 4
+already_fetched = set(meta["fetched_sources"])
+selected = []
+seen_families = set()
+for candidate in new_candidates:
+    family = candidate.get("domain") or candidate["source"]
+    if candidate["source"] in already_fetched or family in seen_families:
+        continue
+    selected.append(candidate)
+    seen_families.add(family)
+    if len(selected) >= fetch_batch:
+        break
 
-    read_results = []
-    read_failures = []
-    for window in windows:
+sources = [row["source"] for row in selected]
+if sources:
+    documents = {}
+    for source in sources:
         try:
-            row = sdk.content.read(
-                window["source"],
-                start_line=window["start_line"],
-                line_count=window["line_count"],
-                max_chars=window["max_chars"],
-            )
+            document = sdk.content.fetch(source)
         except BrokerError as error:
-            read_failures.append({"stage": "read", "source": window["source"], "code": error.code})
+            meta["failures"].append(
+                {"stage": "fetch", "source": source, "code": error.code}
+            )
         else:
-            read_results.append((window, row))
+            documents[document.source] = document
+            already_fetched.add(document.source)
+
+    meta["fetched_sources"] = sorted(already_fetched)
+
+    passage_report = sdk.content.passages(
+        task,
+        sources=list(documents),
+        limit=10,
+        limit_per_source=2,
+    )
     content_by_key = {row["key"]: row for row in content}
-    for window, row in read_results:
-        start = row.window.start_line
-        end = row.window.end_line
-        key = f"{row.source}#L{start}-{end}"
+    for passage in passage_report.passages:
+        coordinates = dict(passage.coordinates)
+        start = coordinates["start_line"]
+        end = coordinates["end_line"]
+        key = f"{passage.source}#L{start}-{end}"
         content_by_key[key] = {
             "key": key,
-            "source": row.source,
-            "title": row.title,
-            "text": row.text,
-            "coordinates": {
-                "start_line": start,
-                "end_line": end,
-                "passage": window["passage_coordinates"],
-            },
+            "source": passage.source,
+            "title": passage.title,
+            "text": passage.text,
+            "coordinates": coordinates,
         }
     meta["failures"].extend(
         {"stage": "passages", "source": row.source, "code": row.code}
         for row in passage_report.failures
     )
-    meta["failures"].extend(read_failures)
     content = list(content_by_key.values())[-300:]
     sdk.state.write_jsonl(content_path, content)
 
@@ -167,8 +164,11 @@ for row in content[-4:]:
 print("NEXT: judge these rows, answer if complete, or extend unresolved requirements")
 ```
 
-The example filters sources already represented in `content.jsonl`; a task may deliberately revisit
-one source for a different window or requirement. Use a stable composite `key` for those windows.
+The example only considers the current targeted search batch, then keeps one candidate per source
+family before fetching. To inspect older pooled candidates, make that semantic choice explicitly in
+the next adapted program. `meta.fetched_sources` prevents an unchanged replay from fetching the same
+source again; persist full document text only when repeated local processing justifies its workspace
+cost.
 
 After an adapter failure with unknown outcome, inspect the existing cache and session usage before
 choosing new work. After explicit `state_lost`, rebuild state and re-admit local IDs; public URLs

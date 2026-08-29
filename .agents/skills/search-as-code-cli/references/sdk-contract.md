@@ -27,6 +27,7 @@ sdk.search.fuse_rrf(
 Content:
 
 ```python
+sdk.content.fetch(source) -> record
 sdk.content.read(
     source, *, start_line=1, start_character=0,
     line_count=200, max_chars=100_000
@@ -125,8 +126,26 @@ There is no public SDK model hierarchy or `types` module. Join capability result
 - Search `offset` is depth into the full ranking. Local document IDs are readable only after search
   returned them; supported web deployments may also admit bounded public HTTP(S) URLs directly.
 - Pass source strings, not search-hit or content-result records, to content methods.
-- `grep` and `passages` fetch their source sets. Session caching may avoid repeated backend work,
-  but each requested source still consumes the applicable public content-fetch budget.
+- Every source requested through `fetch`, `read`, `grep`, or `passages` consumes public
+  content-fetch budget even when session caching avoids backend work.
+- Search results are a candidate pool, not a content batch. Promote only a small, high-relevance,
+  source-diverse subset whose metadata suggests it can close a current evidence gap; do not fetch an
+  entire result list or fused pool. Expand incrementally after inspecting the current subset.
+- For each promoted source, call `fetch` once before any other content method. Reuse the returned text
+  for exact matching, regexes, slicing, and multiple checks in local Python. When later programs will
+  reuse the full text, optionally persist one copy with `sdk.state`; full-document artifacts consume
+  workspace budget.
+- `passages` is the distinct semantic-localization option: after fetch, use it when relevance cannot
+  be captured reliably by lexical checks or when passages must be ranked across long or multiple
+  selected documents. It can complement local inspection and is not mandatory. Scope each passage
+  query to the fetched sources plausibly relevant to that question instead of crossing every query
+  with the whole selected set.
+- `grep` and `read` are usually replaceable by local Python after fetch. Do not call them just to
+  rediscover or reformat a match already available in fetched text; call them only when a provider
+  window or cursor is itself useful.
+- `passages`, `grep`, and `read` accept source strings and may reuse the session cache, avoiding
+  backend retrieval, but every requested source remains another logical content-fetch charge. Never
+  pass an unfetched source to them, and never print or submit a complete fetched document.
 - Treat snippets as triage. Inspect fetched, passage, grep, or read text for material claims.
 - `sdk.session.usage()` exposes only `exec_calls`, `search_calls`, `content_fetches`, `llm_calls`,
   `pipeline_output_tokens_reserved`, `sandbox_seconds`, `workspace_bytes`, `budget_remaining`, and

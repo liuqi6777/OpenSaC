@@ -30,7 +30,7 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
     OperationSpec("search", "__call__", SurfaceTier.CORE, "search.query", model_core=True),
     OperationSpec("search", "many", SurfaceTier.CORE, "search.query_many", model_core=True),
     OperationSpec("search", "fuse_rrf", SurfaceTier.HELPER, model_core=True),
-    OperationSpec("content", "fetch", SurfaceTier.ADVANCED, "content.fetch"),
+    OperationSpec("content", "fetch", SurfaceTier.CORE, "content.fetch", model_core=True),
     OperationSpec(
         "content",
         "passages",

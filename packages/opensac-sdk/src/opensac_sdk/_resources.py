@@ -471,9 +471,11 @@ class SearchResource:
 class ContentResource:
     """Locate and read text from URL or local-document source strings.
 
-    Prefer ``passages`` for semantic discovery, ``grep`` for exact text,
-    and ``read`` for deliberate line-window expansion. Single-source failures raise
-    ``BrokerError``; collection tasks retain per-source failures in aligned outcomes or reports.
+    Fetch a small relevant source set before inspecting it, then reuse the text locally.
+    ``passages`` adds semantic ranking across selected documents; ``grep`` and ``read`` provide
+    optional service-side matches and windows. These methods may reuse the session cache but remain
+    separate logical requests. Single-source failures raise ``BrokerError``; collection tasks
+    retain per-source failures in aligned outcomes or reports.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
@@ -502,11 +504,12 @@ class ContentResource:
             raise ValueError(message) from None
 
     def fetch(self, source: str) -> Record:
-        """Fetch one complete normalized document for advanced local processing.
+        """Fetch one complete normalized document for selected-source local processing.
 
         Returns:
             A document containing ``source``, ``title``, ``date``, ``text``, and
-            provider-owned ``metadata``. Prefer narrower operations when possible.
+            provider-owned ``metadata``. Reuse it locally for several checks, optionally persist
+            one copy with ``sdk.state``, and never print the complete text.
 
         Raises:
             BrokerError: The source could not be fetched.
@@ -526,7 +529,8 @@ class ContentResource:
 
         Lines are 1-based and characters are 0-based. ``line_count`` bounds logical
         lines and ``max_chars`` bounds returned text. Pass ``window.next`` back as
-        ``start_line`` and ``start_character`` to continue without losing text.
+        ``start_line`` and ``start_character`` to continue without losing text. In a
+        fetch-first workflow, local slicing usually avoids this additional logical request.
 
         Returns:
             One content slice with provider ``metadata`` and a separate ``window``.
@@ -560,11 +564,12 @@ class ContentResource:
         context_lines: int = 0,
         limit_per_source: int = 20,
     ) -> list[Record]:
-        """Search document lines and preserve per-source fetch failures.
+        """Search document lines and preserve per-source failures.
 
         ``mode`` selects regular-expression or literal matching. ``start_line`` is
         1-based, ``context_lines`` adds surrounding lines, and ``limit_per_source``
-        bounds each document's contribution.
+        bounds each document's contribution. In a fetch-first workflow, local matching
+        usually avoids this additional logical request.
 
         Returns:
             One outcome per source, in input order. ``status`` is exactly
@@ -666,11 +671,12 @@ class ContentResource:
         limit: int = 20,
         limit_per_source: int = 3,
     ) -> Record:
-        """Rank passages across a caller-supplied set of sources.
+        """Rank passages across a caller-supplied source set.
 
         The broker deduplicates sources in first-seen order, ranks successful documents
         together, then applies ``limit_per_source``. ``limit`` bounds the report.
-        Scores are comparable only within this report.
+        Scores are comparable only within this report. This semantic ranking can add value
+        after fetch when ordinary local lexical checks are insufficient.
 
         Returns:
             A report with ``query``, ``passages``, fetch ``failures``, reranker

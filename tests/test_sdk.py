@@ -88,8 +88,9 @@ def test_surface_manifest_keeps_model_core_small() -> None:
     model_core = [operation for operation in SDK_SURFACE if operation.model_core]
     assert len(SDK_SURFACE) == 22
     assert len([item for item in SDK_SURFACE if item.tier is not SurfaceTier.INTERNAL]) == 20
-    assert len(model_core) == 10
+    assert len(model_core) == 11
     assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
+    assert any(operation.public_name == "sdk.content.fetch" for operation in model_core)
     assert not hasattr(ContentResource, "snippets")
     assert hasattr(ContentResource, "grep")
     assert not hasattr(ContentResource, "grep_report")
