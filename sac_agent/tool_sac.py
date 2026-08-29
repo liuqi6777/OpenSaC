@@ -47,7 +47,7 @@ Core SDK surface:
   1-based, character positions are 0-based, and `window.next` continues losslessly.
 - Use single-item `sdk.llm.extract(...)` only for bounded semantic transformation.
 - Persist optional state with `sdk.state`—there is no `sdk.workspace` API. Read deployment limits
-  with `sdk.session.capabilities()` when needed.
+  with `sdk.capabilities()` when needed.
 - Finish with `sdk.output.submit(value, citations=[source_url])`.
 
 ## Work in deliberate stages

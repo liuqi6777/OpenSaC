@@ -20,11 +20,11 @@ from opensac_sdk._many import (
 )
 from opensac_sdk._record import Record, record, wrap
 from opensac_sdk._resources import (
+    CapabilitiesResource,
     ContentResource,
     LLMResource,
     OutputResource,
     SearchResource,
-    SessionResource,
     StateResource,
 )
 from opensac_sdk._surface import (
@@ -35,11 +35,11 @@ from opensac_sdk._surface import (
 from opensac_sdk.transport import BrokerError, UnixSocketTransport
 
 RESOURCE_TYPES = {
+    "capabilities": CapabilitiesResource,
     "content": ContentResource,
     "llm": LLMResource,
     "output": OutputResource,
     "search": SearchResource,
-    "session": SessionResource,
     "state": StateResource,
 }
 
@@ -77,6 +77,8 @@ def test_sdk_package_publishes_typing_metadata() -> None:
     assert "def extract_many(" in text
     assert "def read_many(" not in text
     assert "def usage(" not in text
+    assert "capabilities: _CapabilitiesResource" in text
+    assert "session: _" not in text
 
 
 def test_surface_manifest_covers_every_sdk_resource_method_once() -> None:
@@ -133,7 +135,9 @@ def test_surface_manifest_keeps_model_core_small() -> None:
     assert all(operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER} for operation in model_core)
     assert any(operation.public_name == "sdk.content.fetch" for operation in model_core)
     assert any(operation.public_name == "sdk.content.fetch_many" for operation in model_core)
+    assert any(operation.public_name == "sdk.capabilities" for operation in model_core)
     assert any(operation.public_name == "sdk.llm.extract_many" for operation in model_core)
+    assert all(operation.resource != "session" for operation in SDK_SURFACE)
     assert not hasattr(ContentResource, "snippets")
     assert hasattr(ContentResource, "grep")
     assert not hasattr(ContentResource, "grep_report")
@@ -182,6 +186,8 @@ def test_lazy_sdk_exposes_resource_and_method_docs_without_a_broker_call() -> No
             assert '"success"' in many_doc
             assert '"failure"' in many_doc
             assert "structured failure details" in many_doc
+            assert opensac_sdk.sdk.capabilities.__doc__ is not None
+            assert not hasattr(opensac_sdk.sdk, "session")
     finally:
         opensac_sdk.sdk.close()
 
@@ -1720,7 +1726,7 @@ def test_sdk_rejects_invalid_public_parameters_before_transport() -> None:
     assert transport.calls == []
 
 
-def test_session_capabilities_is_a_broker_operation() -> None:
+def test_capabilities_resource_uses_session_broker_operation() -> None:
     class SessionTransport:
         def __init__(self) -> None:
             self.calls = []
@@ -1730,9 +1736,8 @@ def test_session_capabilities_is_a_broker_operation() -> None:
             return record({"contracts": {"sandbox": 14, "capability": 15}})
 
     transport = SessionTransport()
-    capabilities = SessionResource(transport).capabilities()
+    capabilities = CapabilitiesResource(transport)()
 
-    assert not hasattr(SessionResource, "usage")
     assert capabilities.contracts.sandbox == 14
     assert capabilities.contracts.capability == 15
     assert transport.calls == [("session.capabilities", {})]

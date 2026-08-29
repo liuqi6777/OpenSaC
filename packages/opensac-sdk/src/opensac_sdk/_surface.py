@@ -48,8 +48,8 @@ SDK_SURFACE: tuple[OperationSpec, ...] = (
         model_core=True,
     ),
     OperationSpec(
-        "session",
         "capabilities",
+        "__call__",
         SurfaceTier.CORE,
         "session.capabilities",
         model_core=True,

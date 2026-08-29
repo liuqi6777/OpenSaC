@@ -202,7 +202,7 @@ PY
 | `sdk.content` | `fetch`、`fetch_many`、`read`、`grep`、`passages` | 抓取、定位和检查证据，并提供明确 cursor |
 | `sdk.llm` | `extract`、`extract_many`、`complete` | 可选模型调用与 schema 校验抽取 |
 | `sdk.state` | JSON/JSONL 与工作空间辅助方法 | 在同一 session 的多次执行间持久化显式状态 |
-| `sdk.session` | `capabilities` | 查看当前契约、部署限制与机制 |
+| 顶层 | `capabilities` | 查看当前契约、部署限制与机制 |
 | `sdk.output` | `submit` | 返回结构化输出和可选 URL/source 标注 |
 
 `search.many`、`content.fetch_many`、`llm.extract_many` 和 `content.grep` 返回与输入对齐的

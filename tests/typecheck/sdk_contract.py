@@ -44,7 +44,7 @@ grep_status: str = grep_outcomes[0].status
 match_line: int = grep_outcomes[0].matches[0].line
 grep_exhaustive: bool = grep_outcomes[0].next_start_line is None
 
-capabilities = sdk.session.capabilities()
+capabilities = sdk.capabilities()
 capability_contract: int = capabilities.contracts.capability
 
 extraction = sdk.llm.extract(

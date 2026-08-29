@@ -12,7 +12,7 @@ opensac agent-run <<'OPENSAC_PY'
 from opensac_sdk import BrokerError, sdk
 
 # Replace this probe with a complete program from references/patterns.md.
-print(sdk.session.capabilities())
+print(sdk.capabilities())
 OPENSAC_PY
 ```
 
@@ -33,8 +33,8 @@ count, capability sequence, stage split, or workspace schema is required.
 - Never print whole content documents.
 - Treat optional `sdk.llm.extract(...)` or aligned `sdk.llm.extract_many(...)` as transformation,
   not as new evidence. Validate quotes against their inputs.
-- Read deployment capabilities with `sdk.session.capabilities()` when needed, and use `sdk.state`
-  for artifacts. Use `sdk.output.submit(...)` only for a complete runtime result needed through
+- Read deployment capabilities with `sdk.capabilities()` when needed, and use `sdk.state` for
+  artifacts. Use `sdk.output.submit(...)` only for a complete runtime result needed through
   `ExecResult.output`.
 
 Read [references/sdk-contract.md](references/sdk-contract.md) for unfamiliar methods, failures,

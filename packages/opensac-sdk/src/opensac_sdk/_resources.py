@@ -1095,13 +1095,13 @@ class LLMResource:
         strict_json_dumps(value, field=field)
 
 
-class SessionResource:
+class CapabilitiesResource:
     """Inspect session-visible deployment capabilities and contract versions."""
 
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
-    def capabilities(self) -> Record:
+    def __call__(self) -> Record:
         """Return session-visible capabilities, limits, and contract versions.
 
         The record reflects the active backend and this session's mechanism

@@ -64,7 +64,8 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
     assert "Core primitives:" not in prompt
     assert "For a known entity, start with" not in prompt
     assert "Print or submit" not in prompt
-    assert "sdk.session.usage" not in prompt
+    assert "sdk.capabilities()" in prompt
+    assert "sdk.session" not in prompt
 
     examples = [part.split("```", 1)[0] for part in prompt.split("```python")[1:]]
     assert len(examples) == 3

@@ -10,7 +10,7 @@ Pipe one complete Python cell to `opensac agent-run`:
 ```bash
 opensac agent-run <<'OPENSAC_PY'
 from opensac_sdk import BrokerError, sdk
-print(sdk.session.capabilities())
+print(sdk.capabilities())
 OPENSAC_PY
 ```
 
@@ -82,8 +82,8 @@ later cells while the interpreter remains ready. This live namespace is the defa
 
 Treat interpreter memory and filesystem persistence as independent mechanisms. Use `sdk.state` only
 when a durable recovery cache or later program reuse saves meaningful external work, and only when
-`sdk.session.capabilities()["mechanisms"]["persistence"]` is enabled. Prefer a small cumulative data
-cache over per-cell logs, stage files, a final ledger, or a disk copy of the whole namespace.
+`sdk.capabilities()["mechanisms"]["persistence"]` is enabled. Prefer a small cumulative data cache
+over per-cell logs, stage files, a final ledger, or a disk copy of the whole namespace.
 
 Keep durable caches cumulative by stable source or window keys. A cell that fetches content should
 also print bounded evidence, no-match, blocked, and failure summaries; do not require a state-only

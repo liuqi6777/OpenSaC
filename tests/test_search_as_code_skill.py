@@ -437,8 +437,8 @@ def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None
     assert "MCP tool `sac_run(code)`" in flat_skill
     assert "REST sessions" not in flat_skill
     assert "request metadata" not in flat_skill
-    assert "Read deployment capabilities with `sdk.session.capabilities()`" in flat_skill
-    assert "sdk.session.usage" not in flat_skill
+    assert "Read deployment capabilities with `sdk.capabilities()`" in flat_skill
+    assert "sdk.session" not in flat_skill
     assert "state_lost" in flat_skill
     assert "submitted program was not replayed" in flat_skill
     assert "execution outcome may be" in flat_skill

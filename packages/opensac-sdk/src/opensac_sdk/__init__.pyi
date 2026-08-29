@@ -179,7 +179,7 @@ class _MechanismsRecord(_Record, Protocol):
     llm_subroutine: bool
     context_decoupling: bool
 
-class _SessionCapabilitiesRecord(_Record, Protocol):
+class _CapabilitiesRecord(_Record, Protocol):
     contracts: _ContractsRecord
     search: _SearchCapabilitiesRecord
     content: _ContentCapabilitiesRecord
@@ -282,8 +282,8 @@ class _LLMResource(Protocol):
         repair_attempts: int = ...,
     ) -> list[_ExtractOutcomeRecord]: ...
 
-class _SessionResource(Protocol):
-    def capabilities(self) -> _SessionCapabilitiesRecord: ...
+class _CapabilitiesResource(Protocol):
+    def __call__(self) -> _CapabilitiesRecord: ...
 
 class _StateResource(Protocol):
     def write_jsonl(self, relative_path: str, rows: list[Any]) -> None: ...
@@ -306,7 +306,7 @@ class _OutputResource(Protocol):
 class _SDK(Protocol):
     search: _SearchResource
     content: _ContentResource
-    session: _SessionResource
+    capabilities: _CapabilitiesResource
     llm: _LLMResource
     state: _StateResource
     output: _OutputResource

@@ -50,7 +50,7 @@ sdk.llm.extract_many(
     items, *, instruction, schema, concurrency=4, max_tokens=None, repair_attempts=0
 ) -> list[record]
 
-sdk.session.capabilities() -> record
+sdk.capabilities() -> record
 sdk.state.write_json(path, value)
 sdk.state.write_jsonl(path, rows)
 sdk.state.append_jsonl(path, rows)
@@ -109,7 +109,7 @@ There is no public SDK model hierarchy or `types` module. Join capability result
 - Catch `BrokerError` for provider, quota, transport, JSON-output, schema-validation, and repair
   failures. Inspect `code`, `retryable`, `attempts`, `provider`, `component`, and `scope`.
 - Local argument type, minimum-boundary, and strict-JSON errors raise `ValueError`. Configurable
-  upper bounds are broker policy and are discoverable through `sdk.session.capabilities()`.
+  upper bounds are broker policy and are discoverable through `sdk.capabilities()`.
 - `search.many` preserves partial success as input-aligned outcomes. Branch on
   `status == "success"`; failed rows use `outcome.error`. Provider, quota, and deadline errors stay
   item failures, while an all-systemic transport/protocol/contract/permission failure can raise one
@@ -154,7 +154,7 @@ There is no public SDK model hierarchy or `types` module. Join capability result
 - Treat snippets as triage. Inspect fetched, grep, or read text for material claims.
 - Resource budgets are enforced by the broker. Every initial or repair model attempt reserves one
   LLM call before dispatch.
-- `sdk.session.capabilities()` reports contract versions, active mechanisms, backend support, and
+- `sdk.capabilities()` reports contract versions, active mechanisms, backend support, and
   configured upper limits. Do not hard-code deployment maxima.
 
 ## State, output, and lifecycle

@@ -3,11 +3,11 @@ from __future__ import annotations
 import threading
 
 from ._resources import (
+    CapabilitiesResource,
     ContentResource,
     LLMResource,
     OutputResource,
     SearchResource,
-    SessionResource,
     StateResource,
 )
 from .transport import UnixSocketTransport
@@ -25,7 +25,7 @@ class OpenSACClient:
         self._transport = transport
         self.search = SearchResource(transport)
         self.content = ContentResource(transport)
-        self.session = SessionResource(transport)
+        self.capabilities = CapabilitiesResource(transport)
         self.llm = LLMResource(transport)
         self.state = state
         self.output = output
@@ -52,9 +52,10 @@ class OpenSACClient:
 class LazyOpenSACClient:
     """OpenSAC sandbox entry point, available as ``opensac_sdk.sdk``.
 
-    Namespaces are ``search``, ``content``, ``session``, ``llm``, ``state``, and
-    ``output``. Read one namespace or method ``.__doc__`` when exact
-    runtime behavior is needed; doing so does not call the broker.
+    Namespaces are ``search``, ``content``, ``llm``, ``state``, and ``output``;
+    ``capabilities()`` inspects the active deployment. Read one namespace or
+    method ``.__doc__`` when exact runtime behavior is needed; doing so does not
+    call the broker.
     """
 
     def __init__(self) -> None:

@@ -21,7 +21,7 @@ plain = dict(row)
 JSON 字段名为 `items`、`values` 或 `get` 时必须使用 `row["..."]`，避免与 dict 方法冲突。
 
 SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 broker 强制，并通过
-`sdk.session.capabilities()` 报告。
+`sdk.capabilities()` 报告。
 
 - 本地参数错误抛 `ValueError`。
 - provider、quota、transport、抽取 JSON/schema/repair 失败抛 `BrokerError`，尽可能保留
@@ -36,7 +36,7 @@ SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 
 | Search | `search`、`search.many`、`search.fuse_rrf` |
 | Content | `content.fetch`、`content.fetch_many`、`content.read`、`content.grep`、`content.passages` |
 | LLM | `llm.complete`、`llm.extract`、`llm.extract_many` |
-| Session | `session.capabilities` |
+| 顶层 | `capabilities` |
 | State | JSON/JSONL 操作，包括 `state.upsert_jsonl` |
 | Output | `output.submit` |
 
@@ -107,10 +107,11 @@ contract 或 permission 错误失败，`many` 会提升一个代表性的顶层 
 
 `Mechanisms.batching` 只控制这个操作。关闭时仍允许单个 query，但拒绝更宽的 fan-out。
 
-实现固定为 SDK 有界线程池路径：先通过 `session.capabilities` 做 admission，再为每个输入发出
-单项 `search.query`，没有环境变量或 broker/client 模式开关。这里的 concurrency 是 helper
-admission，不是 provider semaphore；预算、rate limit、retry、cache/coalescing 和实际 provider
-并发仍由 broker 控制。SDK 不去重，broker 也不再暴露 batch search RPC。迁移边界见
+实现固定为 SDK 有界线程池路径：先通过 `sdk.capabilities()` 返回的部署 manifest 做 admission，
+再为每个输入发出单项 `search.query`，没有环境变量或 broker/client 模式开关。这里的
+concurrency 是 helper admission，不是 provider semaphore；预算、rate limit、retry、
+cache/coalescing 和实际 provider 并发仍由 broker 控制。SDK 不去重，broker 也不再暴露 batch
+search RPC。迁移边界见
 [版本说明](opensac-0.8.2.md)。
 
 ### `sdk.search.fuse_rrf(...)`
@@ -345,9 +346,9 @@ sdk.llm.extract_many(
 outcome；若所有项目都因 transport、protocol、contract 或 permission 错误失败，helper 会
 提升一个代表性的顶层 `BrokerError`。
 
-## Session
+## Capabilities
 
-### `sdk.session.capabilities()`
+### `sdk.capabilities()`
 
 返回 contract 版本、search backend 支持、content/LLM 上限和机制开关。生成程序应读取它，
 不要硬编码部署上限。

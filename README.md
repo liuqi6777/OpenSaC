@@ -214,7 +214,7 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.content` | `fetch`, `fetch_many`, `read`, `grep`, `passages` | Fetch, locate, and inspect evidence with explicit cursors |
 | `sdk.llm` | `extract`, `extract_many`, `complete` | Optional model calls and schema-checked extraction |
 | `sdk.state` | JSON/JSONL and workspace helpers | Persist explicit state across executions in one session |
-| `sdk.session` | `capabilities` | Inspect active contracts, deployment limits, and mechanisms |
+| Top level | `capabilities` | Inspect active contracts, deployment limits, and mechanisms |
 | `sdk.output` | `submit` | Return structured output with optional URL/source labels |
 
 `search.many`, `content.fetch_many`, `llm.extract_many`, and `content.grep` return input-aligned

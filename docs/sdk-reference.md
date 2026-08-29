@@ -23,7 +23,7 @@ plain = dict(row)
 Use `row["items"]`, `row["values"]`, or `row["get"]` when a JSON field collides with a dict method.
 
 The SDK validates types, strict JSON, and basic lower bounds. Deployment-specific upper bounds are
-enforced by the broker and reported by `sdk.session.capabilities()`.
+enforced by the broker and reported by `sdk.capabilities()`.
 
 - Local argument errors raise `ValueError`.
 - Provider, quota, transport, extraction JSON/schema, and repair failures raise `BrokerError` with
@@ -38,7 +38,7 @@ enforced by the broker and reported by `sdk.session.capabilities()`.
 | Search | `search`, `search.many`, `search.fuse_rrf` |
 | Content | `content.fetch`, `content.fetch_many`, `content.read`, `content.grep`, `content.passages` |
 | LLM | `llm.complete`, `llm.extract`, `llm.extract_many` |
-| Session | `session.capabilities` |
+| Top level | `capabilities` |
 | State | JSON/JSONL operations including `state.upsert_jsonl` |
 | Output | `output.submit` |
 
@@ -110,9 +110,10 @@ protocol, contract, or permission error, `many` raises one representative top-le
 `Mechanisms.batching` controls this operation only. When batching is disabled, one query is still
 accepted but a wider fan-out is rejected.
 
-The implementation is a single bounded SDK thread-pool path. It checks `session.capabilities` for
-admission and then issues one `search.query` call per input; there is no environment variable or
-broker/client mode switch. Its concurrency value is helper admission, not the provider semaphore.
+The implementation is a single bounded SDK thread-pool path. It checks the deployment manifest
+returned by `sdk.capabilities()` for admission and then issues one `search.query` call per input;
+there is no environment variable or broker/client mode switch. Its concurrency value is helper
+admission, not the provider semaphore.
 The broker still owns budgets, rate limits, retries, cache/coalescing, and actual provider
 concurrency. The SDK does not deduplicate, and the broker exposes no batch search RPC. The
 [release notes](opensac-0.8.2.md) describe the migration boundaries.
@@ -354,9 +355,9 @@ The returned list is input-aligned. Each outcome contains `input_index`, `status
 deadline failures remain per-item outcomes. If every item fails with a transport, protocol,
 contract, or permission error, the helper raises one representative `BrokerError`.
 
-## Session
+## Capabilities
 
-### `sdk.session.capabilities()`
+### `sdk.capabilities()`
 
 Returns contract versions, search backend support, content/LLM upper limits, and active mechanism
 switches. Generated programs should inspect this record instead of hard-coding deployment maxima.

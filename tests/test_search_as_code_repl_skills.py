@@ -53,8 +53,8 @@ def test_repl_skills_are_explicit_and_use_separate_adapter_surfaces() -> None:
         flat_skill = " ".join(skill.split())
         assert "execution_mode=persistent_interpreter" in flat_skill
         assert "interpreter_state=ready" in flat_skill
-        assert "sdk.session.capabilities()" in flat_skill
-        assert "sdk.session.usage()" not in flat_skill
+        assert "sdk.capabilities()" in flat_skill
+        assert "sdk.session" not in flat_skill
         assert "sdk.output.submit(...)" in flat_skill
         assert "not a prescribed workflow" in flat_skill
         assert "No fixed query count, capability sequence, cell split" in flat_skill
