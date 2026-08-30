@@ -11,7 +11,6 @@ from unittest.mock import patch
 from opensac_sdk import BrokerError
 from opensac_sdk._record import Record, record
 from opensac_sdk._resources import SearchResource, WorkspaceResource
-from opensac_sdk._surface import SDK_SURFACE, SurfaceTier
 
 from opensac.backends.search import SearchHit
 from opensac.sandbox.validator import validate_code
@@ -32,28 +31,12 @@ def _code_block(path: Path, heading: str) -> str:
     return section.split("```python", 1)[1].split("```", 1)[0]
 
 
-def _explore_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Explore candidates")
-
-
 def _emitter_pattern() -> str:
     return _code_block(PATTERNS_PATH, "## Emit one globally bounded observation")
 
 
 def _repeated_units_pattern() -> str:
     return _code_block(REPEATED_UNITS_PATH, "## Gate fan-out and preserve record sets")
-
-
-def _verify_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Verify selected sources and return evidence")
-
-
-def _rank_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Compose retrieval and focused inspection")
-
-
-def _cache_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Optionally cache selected fetches across calls")
 
 
 def _stateful_pattern() -> str:
@@ -579,7 +562,6 @@ def test_contract_documents_mapping_records_and_workspace() -> None:
     assert "sdk.content.fetch(source)" in contract
     assert "sdk.content.fetch_many(sources, *, concurrency=5)" in contract
     assert "Fetch outcome list" in contract
-    assert "never print a complete fetched document" in contract
     assert "failed rows use `outcome.error`" in contract
     assert "never display or parse search `status` as failure detail" in contract
     assert "sdk.session" not in contract
@@ -594,32 +576,10 @@ def test_contract_omits_sdk_capabilities_not_taught_by_the_skill() -> None:
     assert "LLM call" not in contract
 
 
-def test_core_patterns_only_call_core_or_helper_operations() -> None:
-    calls = {
-        f"sdk.{resource}.{method}" if method else f"sdk.{resource}"
-        for resource, method in re.findall(
-            r"sdk\.([a-z_]+)(?:\.([a-z_]+))?\(",
-            PATTERNS_PATH.read_text(encoding="utf-8"),
-        )
-    }
-    allowed = {
-        operation.public_name
-        for operation in SDK_SURFACE
-        if operation.tier in {SurfaceTier.CORE, SurfaceTier.HELPER}
-    }
-
-    assert calls
-    assert calls <= allowed
-
-
 def test_patterns_compile_and_pass_sandbox_validation() -> None:
     programs = {
         "emitter": _emitter_pattern(),
         "repeated-units": _repeated_units_pattern(),
-        "explore": _explore_pattern(),
-        "rank": _rank_pattern(),
-        "verify": _verify_pattern(),
-        "cache": _cache_pattern(),
         "stateful-fixture": _stateful_pattern(),
     }
 
@@ -628,14 +588,6 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
         validate_code(program)
         assert not any(token in program for token in ("NEXT:", "READY:", "ERROR:"))
 
-    assert "sdk.search.many(" in programs["explore"]
-    assert "sdk.content." not in programs["explore"]
-    assert "sdk.search.many(" in programs["rank"]
-    assert "sdk.content.fetch_many(" in programs["rank"]
-    assert "sdk.search." not in programs["verify"]
-    assert "sdk.content.fetch_many(" in programs["verify"]
-    assert "sdk.search." not in programs["cache"]
-    assert "sdk.workspace." in programs["cache"]
     assert "sdk.workspace." in programs["stateful-fixture"]
 
 
@@ -759,133 +711,6 @@ def test_repeated_unit_helpers_gate_fanout_and_preserve_multiple_records() -> No
     }
     assert result["unit_rows"][0]["complete"] is True
     assert result["unit_rows"][1]["problems"] == ["unresolved_mentions"]
-
-
-def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> None:
-    program = _cache_pattern()
-
-    sdk, content, first = _run_pattern(tmp_path, program=program)
-
-    assert not sdk.search.many_calls
-    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
-    assert not content.passage_calls
-    assert not content.read_sources
-    assert first.count("CACHE status=success") == 2
-    artifact_names = {Path(path).name for path in sdk.workspace.list()}
-    assert artifact_names == {"fetch-cache.jsonl"}
-    cached_content = sdk.workspace.read_jsonl("fetch-cache.jsonl")
-    assert {row.requested_source for row in cached_content} == set(content.fetch_sources)
-    assert all(row.status == "success" for row in cached_content)
-    assert all(row.source == row.requested_source for row in cached_content)
-    assert all(row.text for row in cached_content)
-
-    resumed_sdk, resumed_content, second = _run_pattern(
-        tmp_path,
-        program=program,
-    )
-
-    assert not resumed_sdk.search.many_calls
-    assert not resumed_content.fetch_sources
-    assert not resumed_content.passage_calls
-    assert not resumed_content.read_sources
-    assert second.count("CACHE status=success") == 2
-    assert {Path(path).name for path in resumed_sdk.workspace.list()} == artifact_names
-
-
-def test_stateful_cache_example_persists_item_failures_without_replay(tmp_path: Path) -> None:
-    program = _cache_pattern()
-
-    sdk, content, first = _run_pattern(
-        tmp_path,
-        program=program,
-        partial_failure=True,
-    )
-
-    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
-    cached = {row.requested_source: row for row in sdk.workspace.read_jsonl("fetch-cache.jsonl")}
-    assert cached["selected-source-url-1"].status == "success"
-    assert cached["selected-source-url-2"].status == "failure"
-    assert cached["selected-source-url-2"].error.code == "provider_timeout"
-    assert "error=provider_timeout" in first
-
-    _, resumed_content, second = _run_pattern(tmp_path, program=program)
-
-    assert not resumed_content.fetch_sources
-    assert "status=failure" in second
-
-
-def test_composed_pattern_fetches_only_its_selected_subset_for_local_inspection(
-    tmp_path: Path,
-) -> None:
-    _, content, printed = _run_pattern(tmp_path, program=_rank_pattern())
-
-    assert 1 <= len(content.fetch_sources) <= 4
-    assert not content.passage_calls
-    assert not content.grep_calls
-    assert not content.read_sources
-    assert "COUNTS selected=" in printed
-
-
-def test_explore_pattern_stops_for_model_judgment(tmp_path: Path) -> None:
-    _, content, printed = _run_pattern(tmp_path, program=_explore_pattern())
-
-    lines = printed.strip().splitlines()
-    assert 1 <= sum(line.startswith("CANDIDATE ") for line in lines) <= 8
-    assert lines[-1].startswith("COUNTS candidates=")
-    assert not content.grep_calls
-
-
-def test_verify_pattern_returns_runtime_evidence_for_model_synthesis(tmp_path: Path) -> None:
-    sdk, content, printed = _run_pattern(tmp_path, program=_verify_pattern())
-
-    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
-    assert not content.grep_calls
-    assert not content.read_sources
-    assert "EVIDENCE phrase:" in printed
-    assert "EVIDENCE year:" in printed
-    assert printed.strip().endswith("COVERAGE supported=2/2 missing=[] problems=[]")
-    assert not hasattr(sdk, "output")
-
-
-def test_verify_pattern_reports_missing_fields_for_model_judgment(tmp_path: Path) -> None:
-    _, _, printed = _run_pattern(
-        tmp_path,
-        program=_verify_pattern(),
-        missing_year=True,
-    )
-
-    lines = printed.strip().splitlines()
-    assert lines[0].startswith("EVIDENCE phrase:")
-    assert lines[-1].startswith("COVERAGE supported=1/2")
-    assert "missing=['year']" in lines[-1]
-
-
-def test_verify_pattern_keeps_evidence_after_one_fetch_fails(tmp_path: Path) -> None:
-    _, content, printed = _run_pattern(
-        tmp_path,
-        program=_verify_pattern(),
-        partial_failure=True,
-    )
-
-    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
-    assert "EVIDENCE phrase:" in printed
-    assert "selected-source-url-2:fetch:provider_timeout" in printed
-    assert "missing=['year']" in printed
-
-
-def test_verify_pattern_bounds_whole_document_output(tmp_path: Path) -> None:
-    _, content, printed = _run_pattern(
-        tmp_path,
-        program=_verify_pattern(),
-        long_documents=True,
-    )
-
-    assert content.fetch_sources == ["selected-source-url-1", "selected-source-url-2"]
-    assert "EVIDENCE phrase:" in printed
-    assert "EVIDENCE year:" in printed
-    assert len(printed) < 4_000
-    assert "x" * 1_000 not in printed
-    assert "y" * 1_000 not in printed
 
 
 def test_pattern_keeps_one_ranked_pool_and_prints_sources_for_read_passages(

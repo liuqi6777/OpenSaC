@@ -70,8 +70,7 @@ not mandatory schemas.
 
 For recoverable external calls, persist a `started` marker only when replay ambiguity matters, then
 persist item outcomes before later transformation. Reconcile surviving state from durable data
-rather than blindly replaying the call. See the
-[optional cache example](references/patterns.md#optionally-cache-selected-fetches-across-calls).
+rather than blindly replaying the call.
 
 ## Return bounded observations
 

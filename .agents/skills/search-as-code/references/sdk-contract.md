@@ -84,10 +84,6 @@ reads in ordinary Python and handle each `BrokerError` where it occurs.
   `outcome.error`; never display or parse search `status` as failure detail.
 - Grep outcome status is exactly `"success"` or a bounded human-readable failure string. Only
   compare it with `"success"`; do not parse failure text.
-Mapping access is canonical: use `row["field"]`, `get`, `keys`, `items`, `values`, iteration, or
-`dict(row)`. Attribute access is only a convenience for known, non-colliding fields; access keys
-such as `items`, `values`, or `get` with brackets.
-
 Join capability results by `source`.
 
 ## Failure and continuation semantics
@@ -119,22 +115,8 @@ Join capability results by `source`.
   backend reports support for it.
 - Search `offset` is depth into the full ranking. Local document IDs are readable only after search
   returned them; supported web deployments may also admit bounded public HTTP(S) URLs directly.
-- Pass source strings, not search-hit or content-result records, to content methods.
 - Every source requested through `fetch`, `read`, or `grep` consumes public
   content-fetch budget even when session caching avoids backend work.
-- Search results are candidate records, not content inputs. Code passes the source strings selected by
-  the agent's strategy rather than a fused result object or an unexamined result list.
-- For each promoted source, call `fetch` once before any other content method. Reuse the returned text
-  for exact matching, regexes, slicing, and multiple checks in local Python. When later programs will
-  reuse the full text, optionally persist one copy with `sdk.workspace`; full-document artifacts consume
-  workspace budget.
-- `grep` and `read` are usually replaceable by local Python after fetch. Do not call them just to
-  rediscover or reformat a match already available in fetched text; call them only when a provider
-  window or cursor is itself useful.
-- `grep` and `read` accept source strings and may reuse the session cache, avoiding backend retrieval,
-  but every requested source remains another logical content-fetch charge. Never pass an unfetched
-  source to them, and never print a complete fetched document.
-- Treat snippets as triage. Inspect fetched, grep, or read text for material claims.
 - `sdk.capabilities()` reports contract versions, active mechanisms, backend support, and
   configured upper limits. Do not hard-code deployment maxima.
 
@@ -144,10 +126,6 @@ Join capability results by `source`.
 - Artifact paths are workspace-relative and cannot escape it. `sdk.workspace.list(prefix)` hides
   internal runtime files. Applications choose their own artifact layout.
 - `upsert_jsonl` replaces whole rows by the chosen key; it does not merge object fields.
-- Use bounded `print(...)` calls for the agent-visible handoff, carrying each exact source string
-  beside the evidence it supports.
-- Persist large structured values with `sdk.workspace` instead of printing full documents or
-  ledgers.
 - Process-per-call programs lose Python variables between calls. Persistent-interpreter variants
   retain completed assignments only while the observation reports `interpreter_state=ready`.
   Files and live variables remain independent; `mechanisms.persistence` controls files only.

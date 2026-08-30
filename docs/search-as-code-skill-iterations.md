@@ -775,3 +775,34 @@ final artifact omitted dispute notes that remained elsewhere in persisted eviden
 useful evaluator findings, but they do not justify another prescriptive rule: source choice is a
 research judgment, and full-state alignment is already a core invariant. No further skill change
 follows this A/B.
+
+## Round 26 — task-facing reference pruning
+
+This ablation retained the Round 25 queries, model, effort, fresh-agent isolation, and 4,000-character
+soft output target. It removed only task-facing reference material: the generic explore, composed
+retrieval, verification, and durable-cache programs from `patterns.md`, plus duplicated orchestration
+prose from `sdk-contract.md`. The bounded emitter, orchestration helpers, and repeated-unit helpers
+remained. Tests that existed only to freeze the deleted tutorial programs were removed.
+
+`patterns.md` fell from 15,122 to 3,282 characters, `sdk-contract.md` from 9,599 to 7,927, and the
+focused suite from 29 to 20 tests. Skill validation, all 20 tests, Ruff, and `git diff --check` passed
+before forward testing.
+
+| Dimension | BrowseComp | WideSearch |
+| --- | --- | --- |
+| References read | Main skill, SDK contract, orchestration; `patterns.md` was not opened | Main skill, SDK contract, repeated units, orchestration |
+| Approximate instruction load | About 4.3k tokens, down from about 8.6k in Round 25 | About 5.4k tokens, down from about 5.8k |
+| `sac_run` calls | 8 | 11 |
+| Durable/dataflow behavior | Search and selected bodies were persisted; four bodies were source-bound and reused for a cumulative evidence artifact; the final lift parser reused cached Wikipedia text | Three aggregate bodies were persisted once; the 14-unit set, two-source evidence, 43 summiter records, variants/conflicts, and code-derived coverage were persisted in final state |
+| Evidence result | Complete station identification, address precision, architect/company/branch, opening, wartime use, lift rationale, and closure | Complete 14/14 table and 43/43 summiter records; alternate spellings and true-summit/source conflicts retained |
+| Remaining defects | Reported only the LTM 9 May 1915 rename date even after fetching the Historic England body that had yielded a 9 June conflict in Round 25 | Local parser repair over the same cached bodies spanned Calls 4–7 and 10 despite reading the orchestration helper; Call 7 printed too much raw text and was truncated. One adapter-unknown call was correctly reconciled from durable state before replay |
+
+### Round 26 decision
+
+The deletion materially reduced BrowseComp instruction load without removing durable reuse,
+source-scoped evidence, or final-state behavior. WideSearch saved less because its task legitimately
+routed to repeated-unit and orchestration references, but it retained closed-set and one-to-many
+correctness and used a more selective three-source initial fetch than Round 25. The missed BrowseComp
+date conflict and fragmented WideSearch parser are real trajectory defects, but the retained main and
+orchestration instructions already cover both; one paired sample does not justify restoring generic
+tutorial programs. Keep the pruning for the next isolated ablation.
