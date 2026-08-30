@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from opensac.sandbox.validator import validate_code
@@ -8,78 +9,56 @@ ROOT = Path(__file__).parents[1]
 SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code-cli"
 MCP_SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
-CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
-PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
-REFERENCE_NAMES = ("patterns.md", "sdk-contract.md")
+REFERENCE_NAMES = ("sdk-contract.md", "orchestration.md", "repeated-units.md")
 
 
-def _fenced_block(path: Path, fence: str, *, heading: str | None = None) -> str:
+def _fenced_blocks(path: Path, fence: str) -> list[str]:
     text = path.read_text(encoding="utf-8")
-    if heading is not None:
-        text = text.split(heading, 1)[1]
-    return text.split(f"```{fence}", 1)[1].split("```", 1)[0].strip()
+    return [part.split("```", 1)[0].strip() for part in text.split(f"```{fence}")[1:]]
 
 
 def _posix_program() -> str:
-    lines = _fenced_block(SKILL_PATH, "bash").splitlines()
+    blocks = _fenced_blocks(SKILL_PATH, "bash")
+    assert len(blocks) == 1
+    lines = blocks[0].splitlines()
     assert lines[0] == "opensac agent-run <<'OPENSAC_PY'"
     assert lines[-1] == "OPENSAC_PY"
     return "\n".join(lines[1:-1])
 
 
-def test_cli_skill_is_small_host_neutral_and_routes_details() -> None:
+def test_cli_skill_preserves_its_adapter_boundary_and_routes_shared_references() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
-    flat_skill = " ".join(skill.split())
-    description = skill.splitlines()[2]
+    frontmatter = skill.split("---", 2)[1]
+    linked_references = set(re.findall(r"\((references/[^)]+\.md)(?:#[^)]+)?\)", skill))
 
-    assert len(skill) < 10_000
+    assert "name: search-as-code-cli" in frontmatter
+    assert "shell-capable environments" in frontmatter
     assert "opensac agent-run <<'OPENSAC_PY'" in skill
     assert "uv run opensac agent-run" in skill
-    assert "Never expose or override its identity, manage REST sessions" in flat_skill
+    assert "sdk.workspace" in skill
     assert "state_lost" in skill
-    assert "program was not replayed" in skill
-    assert "`HTTP 401` or `HTTP 403`" in skill
-    assert "without printing or embedding any credential" in flat_skill
-    assert "references/sdk-contract.md" in skill
-    assert "references/patterns.md" in skill
-    assert "references/advanced.md" not in skill
-    assert "references/python-recipes.md" not in skill
-    assert "references/stateful-research.md" not in skill
-    assert "Treat one program as one semantic checkpoint" in flat_skill
-    assert "search -> select a relevant subset -> fetch" in flat_skill
-    assert "candidates, not a fetch queue" in flat_skill
-    assert "Do not fetch the whole result list" in flat_skill
-    assert "sdk.content.passages" not in flat_skill
-    assert "merely to relocate text already present" in flat_skill
-    assert "Use ordinary Python freely for deterministic orchestration" in flat_skill
-    assert "not a required sequence or policy" in flat_skill
-    assert "across the whole program" in flat_skill
-    assert "Make normalized row schemas total" in flat_skill
-    assert "small data cache over a workflow state machine" in flat_skill
-    assert "Keep each cache cumulative" in flat_skill
-    assert "persist an operation as `started`" in flat_skill
-    assert "persist each input as `success` or `failure`" in flat_skill
-    assert "Agent completion is the final response to the user" in flat_skill
-    assert "Once printed evidence covers the request" in flat_skill
-    assert "source strings in stdout" in flat_skill
-    assert "persists structured artifacts between programs" in flat_skill
-    assert "sdk.workspace" in flat_skill
-    assert "sdk.state" not in flat_skill
-    assert "sdk.output" not in flat_skill
-    assert "shell-capable environments" in description
-    assert "Codex" not in description
-    assert "Claude" not in description
-    assert "Use 2-4 queries" not in skill
-    assert "6-12" not in skill
-    assert "SAC_API_" not in skill
-    assert "SAC_CLI_" not in skill
-    assert "SAC_AGENT_" not in skill
-    assert "CODEX_THREAD_ID" not in skill
-    assert "CLAUDE_CODE_SESSION_ID" not in skill
-    assert "/v1/sessions" not in skill
-    assert "bind_context" not in skill
-    assert "SQLite" not in skill
-    assert "lease" not in skill
+    assert "4,000" in skill
+    assert linked_references == {f"references/{name}" for name in REFERENCE_NAMES}
+    assert "patterns.md" not in skill
+
+
+def test_cli_skill_invocation_compiles_and_passes_sandbox_validation() -> None:
+    program = _posix_program()
+    compile(program, "<search-as-code-cli-invocation>", "exec")
+    validate_code(program)
+
+
+def test_cli_references_match_the_canonical_skill_and_helpers_compile() -> None:
+    for name in REFERENCE_NAMES:
+        cli_reference = SKILL_DIR / "references" / name
+        canonical_reference = MCP_SKILL_DIR / "references" / name
+        assert cli_reference.read_bytes() == canonical_reference.read_bytes()
+
+    assert not (SKILL_DIR / "references" / "patterns.md").exists()
+    for name in ("orchestration.md", "repeated-units.md"):
+        for index, program in enumerate(_fenced_blocks(SKILL_DIR / "references" / name, "python")):
+            compile(program, f"<{name}:{index}>", "exec")
+            validate_code(program)
 
 
 def test_claude_code_project_uses_cli_instead_of_removed_mcp_binding() -> None:
@@ -91,89 +70,8 @@ def test_claude_code_project_uses_cli_instead_of_removed_mcp_binding() -> None:
         assert "bind_context" not in settings
 
 
-def test_cli_skill_invocation_compiles_and_passes_sandbox_validation() -> None:
-    program = _posix_program()
-    compile(program, "<search-as-code-cli-invocation>", "exec")
-    validate_code(program)
-    assert "from opensac_sdk import" in program
-    assert "sdk.capabilities()" in program
-    assert "sdk.session" not in program
-
-
-def test_cli_research_references_stay_in_sync_with_the_mcp_skill() -> None:
-    for name in REFERENCE_NAMES:
-        cli_reference = SKILL_DIR / "references" / name
-        mcp_reference = MCP_SKILL_DIR / "references" / name
-        assert cli_reference.is_file()
-        assert cli_reference.read_bytes() == mcp_reference.read_bytes()
-    for name in ("advanced.md", "python-recipes.md", "stateful-research.md"):
-        assert not (SKILL_DIR / "references" / name).exists()
-
-    pattern_headings = (
-        "## Explore candidates",
-        "## Compose retrieval and focused inspection",
-        "## Verify selected sources and return evidence",
-        "## Optionally extract structured fields from inspected evidence",
-        "## Optionally cache selected fetches across calls",
-    )
-    for heading in pattern_headings:
-        path = PATTERNS_PATH
-        program = _fenced_block(path, "python", heading=heading)
-        compile(program, "<search-as-code-cli-pattern>", "exec")
-        validate_code(program)
-
-    composed = _fenced_block(
-        PATTERNS_PATH,
-        "python",
-        heading="## Compose retrieval and focused inspection",
-    )
-    assert composed.index("sdk.search.many(") < composed.index("sdk.search.fuse_rrf(")
-    assert composed.index("sdk.search.fuse_rrf(") < composed.index("sdk.content.fetch_many(")
-    assert "sdk.content.passages(" not in composed
-    assert "sdk.content.read(" not in composed
-    assert "for outcome in fetch_outcomes:" in composed
-
-    verify = _fenced_block(
-        PATTERNS_PATH,
-        "python",
-        heading="## Verify selected sources and return evidence",
-    )
-    assert "structured_output_requested" not in verify
-    assert "sdk.output" not in verify
-    assert "READY: synthesize" in verify
-
-    extraction = _fenced_block(
-        PATTERNS_PATH,
-        "python",
-        heading="## Optionally extract structured fields from inspected evidence",
-    )
-    assert "sdk.llm.extract_many(" in extraction
-    assert "zip(evidence_items, outcomes, strict=True)" in extraction
-    assert 'quote not in item["text"]' in extraction
-    assert "sdk.search." not in extraction
-    assert "sdk.output" not in extraction
-
-    cache = _fenced_block(
-        PATTERNS_PATH,
-        "python",
-        heading="## Optionally cache selected fetches across calls",
-    )
-    assert cache.index("sdk.workspace.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
-    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.workspace.upsert_jsonl(")
-    assert "concurrency=" not in cache
-
-    contract = CONTRACT_PATH.read_text(encoding="utf-8")
-    assert "sdk.content.passages(" not in contract
-    assert "llm.complete" not in contract
-    assert "sdk.session" not in contract
-    assert "sdk.output" not in contract
-    assert "sdk.workspace" in contract
-    assert "sdk.state" not in contract
-
-
 def test_cli_skill_has_codex_catalog_metadata() -> None:
     metadata = (SKILL_DIR / "agents" / "openai.yaml").read_text(encoding="utf-8")
 
     assert 'display_name: "Search as Code CLI"' in metadata
-    assert 'short_description: "Run grounded OpenSAC research through a local CLI"' in metadata
     assert "$search-as-code-cli" in metadata

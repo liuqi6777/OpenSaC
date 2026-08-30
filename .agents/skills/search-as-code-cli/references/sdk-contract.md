@@ -40,16 +40,9 @@ sdk.content.grep(
 ) -> list[record]
 ```
 
-LLM, capabilities, and workspace:
+Capabilities and workspace:
 
 ```python
-sdk.llm.extract(
-    item, *, instruction, schema, max_tokens=None, repair_attempts=0
-) -> dict
-sdk.llm.extract_many(
-    items, *, instruction, schema, concurrency=4, max_tokens=None, repair_attempts=0
-) -> list[record]
-
 sdk.capabilities() -> record
 sdk.workspace.write_json(path, value)
 sdk.workspace.write_jsonl(path, rows)
@@ -61,9 +54,8 @@ sdk.workspace.exists(path) -> bool
 sdk.workspace.list(prefix="") -> list[str]
 ```
 
-`search.many`, `content.fetch_many`, and `llm.extract_many` are public aligned fan-out helpers. Loop
-over independent reads or completions in ordinary Python and handle each `BrokerError` where it
-occurs.
+`search.many` and `content.fetch_many` are public aligned fan-out helpers. Loop over independent
+reads in ordinary Python and handle each `BrokerError` where it occurs.
 
 ## Exact result fields
 
@@ -92,21 +84,12 @@ occurs.
   `outcome.error`; never display or parse search `status` as failure detail.
 - Grep outcome status is exactly `"success"` or a bounded human-readable failure string. Only
   compare it with `"success"`; do not parse failure text.
-- `llm.extract` returns the schema-validated JSON object directly.
-- Extract outcome list: one input-aligned row per item with `input_index`, `status`, `data`, and
-  `error`, without the original item. Successful rows have validated `data` and `error=None`; failed
-  rows have `data=None` and a structured `error`.
-
-Mapping access is canonical: use `row["field"]`, `get`, `keys`, `items`, `values`, iteration, or
-`dict(row)`. Attribute access is only a convenience for known, non-colliding fields; access keys
-such as `items`, `values`, or `get` with brackets.
-
 Join capability results by `source`.
 
 ## Failure and continuation semantics
 
-- Catch `BrokerError` for provider, quota, transport, JSON-output, schema-validation, and repair
-  failures. Inspect `code`, `retryable`, `attempts`, `provider`, `component`, and `scope`.
+- Catch `BrokerError` for provider, quota, and transport failures. Inspect `code`, `retryable`,
+  `attempts`, `provider`, `component`, and `scope`.
 - Local argument type, minimum-boundary, and strict-JSON errors raise `ValueError`. Configurable
   upper bounds are broker policy and are discoverable through `sdk.capabilities()`.
 - `search.many` preserves partial success as input-aligned outcomes. Branch on
@@ -115,12 +98,10 @@ Join capability results by `source`.
   representative top-level `BrokerError`.
 - `content.fetch_many` uses the same partial-success and all-systemic-failure rules. It preserves
   source order and duplicates; `concurrency` bounds SDK fan-out without changing broker policy.
-- `llm.extract_many` also uses those rules, validates every item before fan-out, and never copies
-  the original item into results or diagnostics.
 - `content.grep` preserves partial success as input-aligned outcomes; other statuses are displayable
   failure text.
-- `content.fetch`, `content.read`, and `llm.extract` are single operations. A failure is a top-level
-  `BrokerError`; Python loops decide whether to continue with later items.
+- `content.fetch` and `content.read` are single operations. A failure is a top-level `BrokerError`;
+  Python loops decide whether to continue with later items.
 - `read.window.next` is either `None` at EOF or the exact `start_line`/`start_character` for an
   unlossy follow-up call. This matters when `max_chars` stops within one long line.
 - For capped grep scans, continue each successful outcome from non-null `next_start_line`.
@@ -134,25 +115,8 @@ Join capability results by `source`.
   backend reports support for it.
 - Search `offset` is depth into the full ranking. Local document IDs are readable only after search
   returned them; supported web deployments may also admit bounded public HTTP(S) URLs directly.
-- Pass source strings, not search-hit or content-result records, to content methods.
 - Every source requested through `fetch`, `read`, or `grep` consumes public
   content-fetch budget even when session caching avoids backend work.
-- Search results are a candidate pool, not a content batch. Promote only a small, high-relevance,
-  source-diverse subset whose metadata suggests it can close a current evidence gap; do not fetch an
-  entire result list or fused pool. Expand incrementally after inspecting the current subset.
-- For each promoted source, call `fetch` once before any other content method. Reuse the returned text
-  for exact matching, regexes, slicing, and multiple checks in local Python. When later programs will
-  reuse the full text, optionally persist one copy with `sdk.workspace`; full-document artifacts consume
-  workspace budget.
-- `grep` and `read` are usually replaceable by local Python after fetch. Do not call them just to
-  rediscover or reformat a match already available in fetched text; call them only when a provider
-  window or cursor is itself useful.
-- `grep` and `read` accept source strings and may reuse the session cache, avoiding backend retrieval,
-  but every requested source remains another logical content-fetch charge. Never pass an unfetched
-  source to them, and never print a complete fetched document.
-- Treat snippets as triage. Inspect fetched, grep, or read text for material claims.
-- Resource budgets are enforced by the broker. Every initial or repair model attempt reserves one
-  LLM call before dispatch.
 - `sdk.capabilities()` reports contract versions, active mechanisms, backend support, and
   configured upper limits. Do not hard-code deployment maxima.
 
@@ -162,10 +126,6 @@ Join capability results by `source`.
 - Artifact paths are workspace-relative and cannot escape it. `sdk.workspace.list(prefix)` hides
   internal runtime files. Applications choose their own artifact layout.
 - `upsert_jsonl` replaces whole rows by the chosen key; it does not merge object fields.
-- Use bounded `print(...)` calls for the agent-visible handoff, carrying each exact source string
-  beside the evidence it supports.
-- Persist large structured values with `sdk.workspace` instead of printing full documents or
-  ledgers.
 - Process-per-call programs lose Python variables between calls. Persistent-interpreter variants
   retain completed assignments only while the observation reports `interpreter_state=ready`.
   Files and live variables remain independent; `mechanisms.persistence` controls files only.

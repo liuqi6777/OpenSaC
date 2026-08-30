@@ -834,3 +834,24 @@ Restore the approximately 4,000-character soft budget without restoring the emit
 `patterns.md` deleted: neither the preceding reference-prune agents nor this pair routed to it, and the
 remaining prose states the invariant directly. This leaves output sizing as concise guidance rather
 than a required helper or string-level protocol.
+
+## Variant synchronization after round 27
+
+The CLI, persistent-MCP, and persistent-CLI skills were still carrying the pre-audit tutorial set.
+They now share the canonical SDK contract, orchestration helpers, and repeated-unit helpers with the
+main skill while retaining only their transport- and lifecycle-specific entrypoint guidance.
+
+- Removed each variant's identical 13,339-character `patterns.md`, including generic explore,
+  retrieval, verification, extraction, cache, and `NEXT:`/`READY:` examples.
+- Reduced the CLI entrypoint from 9,717 to 6,695 characters, the persistent-MCP entrypoint from 8,230
+  to 6,869, and the persistent-CLI entrypoint from 8,875 to 7,446.
+- Replaced each 10,611-character SDK contract with the canonical 7,927-character subset and added the
+  canonical optional orchestration and repeated-unit references. All four skill variants now use
+  byte-identical copies of those three references.
+- Preserved the quoted-heredoc and fallback launcher contract for CLI variants, plus execution-mode,
+  interpreter-readiness, live-memory, and state-loss semantics for persistent variants.
+- Applied the same marker-free completion guidance and approximately 4,000-character soft
+  observation budget to all variants. No emitter implementation or wording-level protocol was added.
+
+The variant tests now protect adapter boundaries, reference synchronization, executable examples,
+and invocation policy rather than freezing the old tutorial prose.
