@@ -231,4 +231,3 @@ if evidence and not missing:
         excerpt = " ".join(row["text"].split())[:500]
         title = pool_by_source.get(row["source"], {}).get("title")
         print(f"EVIDENCE {name}: source={row['source']!r} title={title!r} text={excerpt!r}")
-    print(f"READY: synthesize research_id={research_id}")

@@ -21,6 +21,8 @@ SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
 PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
+ORCHESTRATION_PATH = SKILL_DIR / "references" / "orchestration.md"
+REPEATED_UNITS_PATH = SKILL_DIR / "references" / "repeated-units.md"
 STATEFUL_PROGRAM_PATH = ROOT / "tests" / "data" / "search_as_code_stateful_program.py"
 
 
@@ -34,6 +36,14 @@ def _explore_pattern() -> str:
     return _code_block(PATTERNS_PATH, "## Explore candidates")
 
 
+def _emitter_pattern() -> str:
+    return _code_block(PATTERNS_PATH, "## Emit one globally bounded observation")
+
+
+def _repeated_units_pattern() -> str:
+    return _code_block(REPEATED_UNITS_PATH, "## Gate fan-out and preserve record sets")
+
+
 def _verify_pattern() -> str:
     return _code_block(PATTERNS_PATH, "## Verify selected sources and return evidence")
 
@@ -44,13 +54,6 @@ def _rank_pattern() -> str:
 
 def _cache_pattern() -> str:
     return _code_block(PATTERNS_PATH, "## Optionally cache selected fetches across calls")
-
-
-def _extract_pattern() -> str:
-    return _code_block(
-        PATTERNS_PATH,
-        "## Optionally extract structured fields from inspected evidence",
-    )
 
 
 def _stateful_pattern() -> str:
@@ -416,80 +419,137 @@ def _run_pattern(
     return sdk, content, printed.getvalue()
 
 
-def test_skill_teaches_contracts_without_prescribing_research_strategy() -> None:
+def test_skill_keeps_the_core_contract_small_and_schema_neutral() -> None:
     skill = SKILL_PATH.read_text(encoding="utf-8")
-    flat_skill = " ".join(skill.split())
     description = skill.splitlines()[2]
+    linked_references = {
+        target.split("#", 1)[0]
+        for target in re.findall(r"\]\((references/[^)]+)\)", skill)
+    }
 
-    assert len(skill) < 10_000
+    assert len(skill) < 7_000
+    assert "fact checking" in description
     assert "Codex" not in description
     assert "Claude" not in description
-    assert "MCP tool `sac_run(code)`" in flat_skill
-    assert "REST sessions" not in flat_skill
-    assert "request metadata" not in flat_skill
-    assert "Read deployment capabilities with `sdk.capabilities()`" in flat_skill
-    assert "sdk.session" not in flat_skill
-    assert "sdk.output" not in flat_skill
-    assert "sdk.workspace" in flat_skill
-    assert "sdk.state" not in flat_skill
-    assert "state_lost" in flat_skill
-    assert "program was not replayed" in flat_skill
-    assert "execution outcome may be" in flat_skill
-    assert "same program blindly" in flat_skill
-    assert "Public web URLs" in flat_skill
-    assert "references/sdk-contract.md" in flat_skill
-    assert "references/patterns.md" in flat_skill
-    assert "references/advanced.md" not in flat_skill
-    assert "references/python-recipes.md" not in flat_skill
-    assert "references/stateful-research.md" not in flat_skill
-    assert "optionally-cache-selected-fetches-across-calls" in flat_skill
-    assert "Choose the strategy yourself" in flat_skill
-    assert "teaches how to encode it as OpenSAC code" in flat_skill
-    assert "No fixed query count, capability" in flat_skill
-    assert "stage split, or workspace schema is required" in flat_skill
-    assert "Use ordinary Python freely for deterministic orchestration" in flat_skill
-    assert "this is not a required sequence or policy" in flat_skill
-    assert "Issue another search batch only" not in flat_skill
-    assert "Once useful authoritative candidates exist" not in flat_skill
-    assert "Agent completion is the final response to the user" in flat_skill
-    assert "Once printed evidence covers the request" in flat_skill
-    assert "Material claims, evidence, status, and source strings in stdout" in flat_skill
-    assert "Prefer a small data cache over a workflow state machine" in flat_skill
-    assert "filter repeated queries or sources" in flat_skill
-    assert "Keep each cache cumulative" in flat_skill
-    assert "Do not print raw result lists, full documents, or the ledger" in flat_skill
-    assert "Runtime metrics alone" in flat_skill
-    assert "not as new evidence" in flat_skill
-    assert "persists structured artifacts between programs" in flat_skill
-    assert "observations show artifact paths, not their" in flat_skill
-    assert "sdk.content.passages" not in flat_skill
-    assert "sdk.content.grep" in flat_skill
-    assert "sdk.content.read" in flat_skill
-    assert "candidates, not a fetch queue" in flat_skill
-    assert "smallest source-diverse set" in flat_skill
-    assert "Do not fetch the whole result list" in flat_skill
-    assert "`sdk.content.fetch_many(...)` its first content call" in flat_skill
-    assert "merely to relocate text already present" in flat_skill
-    assert "across the whole program" in flat_skill
-    assert "Never pass an unfetched source" in flat_skill
-    assert "Treat every example as a starting point rather than a required pipeline" in flat_skill
-    assert "fact checking" in skill.split("---", 2)[1]
-    assert "Use 2-4 queries" not in flat_skill
-    assert "6-12" not in flat_skill
-    assert "Before ending with `NEXT:`" not in flat_skill
-    assert "session_id" not in flat_skill
-    assert "SAC_MCP_" not in flat_skill
+    assert {
+        "references/sdk-contract.md",
+        "references/patterns.md",
+        "references/orchestration.md",
+        "references/repeated-units.md",
+    } <= linked_references
+    assert all((SKILL_DIR / target).is_file() for target in linked_references)
+    assert all(
+        symbol in skill
+        for symbol in (
+            "sac_run(code)",
+            "sdk.search",
+            "sdk.content.fetch",
+            "sdk.workspace",
+            "BrokerError",
+            "state_lost",
+        )
+    )
+    assert not any(token in skill for token in ("NEXT:", "READY:", "ERROR:"))
+    assert all(
+        fixed_name not in skill
+        for fixed_name in (
+            "record-result.json",
+            "record-units.json",
+            "allowed_exclusion_codes",
+            "answer_rows",
+        )
+    )
+    assert "Use 2-4 queries" not in skill
+    assert "6-12" not in skill
+    assert "session_id" not in skill
+    assert "SAC_MCP_" not in skill
 
 
-def test_example_references_are_explicitly_non_prescriptive() -> None:
-    patterns = PATTERNS_PATH.read_text(encoding="utf-8")
-    flat_patterns = " ".join(patterns.split())
+def test_orchestration_contracts_compile_and_close_local_state() -> None:
+    reference = ORCHESTRATION_PATH.read_text(encoding="utf-8")
+    programs = re.findall(r"```python\n(.*?)```", reference, re.DOTALL)
+    assert len(programs) == 3
+    namespaces = []
+    for program in programs:
+        namespace: dict[str, object] = {}
+        exec(compile(program, "<orchestration-contract>", "exec"), namespace)
+        namespaces.append(namespace)
 
-    assert "not a required pipeline" in flat_patterns
-    assert "query count, bounds, call grouping, and stopping point are examples" in flat_patterns
-    assert "selected sources are inputs" in flat_patterns
-    assert "not a search or stopping policy" in flat_patterns
+    run_candidates = namespaces[0]["run_parser_candidates"]
+    result = run_candidates(  # type: ignore[operator]
+        "body",
+        [("bad", lambda _: []), ("good", lambda _: [{"key": "row"}])],
+        lambda rows: [] if len(rows) == 1 else ["cardinality"],
+    )
+    assert result == {
+        "state": "supported",
+        "rows": [{"key": "row"}],
+        "attempts": [
+            {"name": "bad", "rows": 0, "problems": ["cardinality"]},
+            {"name": "good", "rows": 1, "problems": []},
+        ],
+    }
 
+    bind_selected = namespaces[1]["bind_selected_artifact"]
+    body, problems = bind_selected(  # type: ignore[operator]
+        {"source": "source-a", "artifact": "selected.json"},
+        "other.json",
+        {"source": "source-b", "body": "body"},
+    )
+    assert body == ""
+    assert problems == ["selected_artifact_path", "selected_artifact_source"]
+
+    finalize = namespaces[2]["finalize_scoped_claim"]
+    base = {
+        "subject": "entity",
+        "predicate": "built_for",
+        "scope": {"role": "original", "time": "1904"},
+    }
+    context_only = finalize(  # type: ignore[operator]
+        {
+            **base,
+            "evidence": [
+                {
+                    "subject": "entity",
+                    "predicate": "occupied_by",
+                    "scope": {"role": "later", "time": "1931"},
+                    "stance": "context",
+                }
+            ],
+        }
+    )
+    assert context_only["state"] == "unknown"
+    unvalidated_support = finalize(  # type: ignore[operator]
+        {
+            **base,
+            "evidence": [
+                {
+                    "subject": "entity",
+                    "predicate": "built_for",
+                    "scope": base["scope"],
+                    "stance": "supports",
+                    "validated": False,
+                }
+            ],
+        }
+    )
+    assert unvalidated_support["state"] == "unknown"
+    contradicted = finalize(  # type: ignore[operator]
+        {
+            **base,
+            "evidence": [
+                {
+                    "subject": "entity",
+                    "predicate": "built_for",
+                    "scope": base["scope"],
+                    "stance": "contradicts",
+                    "validated": True,
+                }
+            ],
+        }
+    )
+    assert contradicted["state"] == "contradicted"
+    assert contradicted["conflict"] is False
 
 def test_skill_has_codex_catalog_metadata() -> None:
     metadata = (SKILL_DIR / "agents" / "openai.yaml").read_text(encoding="utf-8")
@@ -530,6 +590,8 @@ def test_contract_omits_sdk_capabilities_not_taught_by_the_skill() -> None:
 
     assert "sdk.content.passages(" not in contract
     assert "llm.complete" not in contract
+    assert "sdk.llm." not in contract
+    assert "LLM call" not in contract
 
 
 def test_core_patterns_only_call_core_or_helper_operations() -> None:
@@ -551,91 +613,152 @@ def test_core_patterns_only_call_core_or_helper_operations() -> None:
 
 
 def test_patterns_compile_and_pass_sandbox_validation() -> None:
-    explore = _explore_pattern()
-    rank = _rank_pattern()
-    verify = _verify_pattern()
-    extract = _extract_pattern()
-    cache = _cache_pattern()
-    stateful = _stateful_pattern()
+    programs = {
+        "emitter": _emitter_pattern(),
+        "repeated-units": _repeated_units_pattern(),
+        "explore": _explore_pattern(),
+        "rank": _rank_pattern(),
+        "verify": _verify_pattern(),
+        "cache": _cache_pattern(),
+        "stateful-fixture": _stateful_pattern(),
+    }
 
-    for name, program in (
-        ("explore", explore),
-        ("rank", rank),
-        ("verify", verify),
-        ("extract", extract),
-        ("cache", cache),
-        ("stateful-fixture", stateful),
-    ):
+    for name, program in programs.items():
         compile(program, f"<search-as-code-{name}-pattern>", "exec")
         validate_code(program)
+        assert not any(token in program for token in ("NEXT:", "READY:", "ERROR:"))
 
-    assert len(explore.splitlines()) <= 45
-    assert "sdk.search.many(" in explore
-    assert "sdk.search.fuse_rrf(" in explore
-    assert "fuse_rrf(outcomes, k=60)[:8]" in explore
-    assert "NEXT:" in explore
-    assert "sdk.content.grep(" not in explore
-    assert "sdk.output" not in explore
+    assert "sdk.search.many(" in programs["explore"]
+    assert "sdk.content." not in programs["explore"]
+    assert "sdk.search.many(" in programs["rank"]
+    assert "sdk.content.fetch_many(" in programs["rank"]
+    assert "sdk.search." not in programs["verify"]
+    assert "sdk.content.fetch_many(" in programs["verify"]
+    assert "sdk.search." not in programs["cache"]
+    assert "sdk.workspace." in programs["cache"]
+    assert "sdk.workspace." in programs["stateful-fixture"]
 
-    assert "sdk.search.many(" in rank
-    assert "sdk.search.fuse_rrf(" in rank
-    assert "sdk.content.fetch_many(" in rank
-    assert "sdk.content.passages(" not in rank
-    assert "sdk.content.read(" not in rank
-    assert "for outcome in fetch_outcomes:" in rank
-    assert "for document in documents.values():" in rank
-    assert "sdk.output" not in rank
-    assert "NEXT:" in rank
-    assert "local_evidence" in rank
-    assert "[:500]" in rank
 
-    assert len(verify.splitlines()) <= 90
-    assert "sdk.search.many(" not in verify
-    assert "NEXT:" in verify
-    assert '"source": document.source' in verify
-    assert verify.index("sdk.content.fetch_many(") < verify.index("print(")
-    assert "sdk.content.grep(" not in verify
-    assert "sdk.content.read(" not in verify
-    assert "for outcome in fetch_outcomes:" in verify
-    assert "sdk.output" not in verify
-    assert "structured_output_requested" not in verify
-    assert "READY: synthesize the user-facing answer" in verify
+def test_global_emitter_prioritizes_one_row_per_stable_key() -> None:
+    namespace: dict[str, object] = {}
+    exec(compile(_emitter_pattern(), "<search-as-code-emitter>", "exec"), namespace)
+    rows = [
+        {"key": "alpha", "status": "supported", "source": "a-1", "excerpt": "x" * 50},
+        {"key": "alpha", "status": "supported", "source": "a-2", "excerpt": "y" * 50},
+        {"key": "beta", "status": "supported", "source": "b-1", "excerpt": "z" * 50},
+    ]
+    printed = io.StringIO()
 
-    assert "sdk.workspace." not in explore
-    assert "sdk.workspace." not in verify
+    with contextlib.redirect_stdout(printed):
+        namespace["emit_observation"](rows, max_chars=310)  # type: ignore[operator]
 
-    assert len(cache.splitlines()) <= 80
-    assert "sdk.search." not in cache
-    assert "sdk.content.passages(" not in cache
-    assert "concurrency=" not in cache
-    assert '"requested_source": requested_source' in cache
-    assert "document.source" in cache
-    assert 'cache_row(source, "started")' in cache
-    assert cache.index("sdk.workspace.upsert_jsonl(") < cache.index("sdk.content.fetch_many(")
-    assert cache.index("sdk.content.fetch_many(") < cache.rindex("sdk.workspace.upsert_jsonl(")
+    output = printed.getvalue()
+    assert "source='a-1'" in output
+    assert "source='b-1'" in output
+    assert "source='a-2'" not in output
+    assert "shown=2" in output
+    assert "omitted=1" in output
 
-    assert len(extract.splitlines()) <= 55
-    assert "sdk.llm.extract_many(" in extract
-    assert "zip(evidence_items, outcomes, strict=True)" in extract
-    assert 'quote not in item["text"]' in extract
-    assert "sdk.search." not in extract
-    assert "sdk.output" not in extract
-    assert "followup" not in extract
 
-    assert 'root = f"runs/{research_id}"' in stateful
-    assert "POOL_LIMIT = 200" in stateful
-    assert "CONTENT_BATCH = 40" in stateful
-    assert "READ_LIMIT_PER_CONSTRAINT = 6" in stateful
-    assert "sdk.workspace.upsert_jsonl(pool_path" in stateful
-    assert 'sdk.workspace.list(f"{root}/")' in stateful
-    assert "sdk.workspace.write_jsonl(pool_path, bounded_pool)" in stateful
-    assert '"requirements": {name: spec["requirement"]' in stateful
-    assert '"source_policy": source_policy' in stateful
-    assert "ordered_sources" in stateful
-    assert "attempted[name]" in stateful
-    assert "grep(list(pool)" not in stateful
-    assert "sdk.output" not in stateful
-    assert "READY: synthesize" in stateful
+def test_global_emitter_shrinks_excerpts_before_omitting_primary_keys() -> None:
+    namespace: dict[str, object] = {}
+    exec(compile(_emitter_pattern(), "<search-as-code-emitter>", "exec"), namespace)
+    rows = [
+        {
+            "key": key,
+            "status": "supported",
+            "source": f"source-{key}",
+            "excerpt": key * 300,
+        }
+        for key in ("alpha", "beta", "gamma")
+    ]
+    printed = io.StringIO()
+
+    with contextlib.redirect_stdout(printed):
+        namespace["emit_observation"](rows, max_chars=420)  # type: ignore[operator]
+
+    output = printed.getvalue()
+    assert all(f"key='{key}'" in output for key in ("alpha", "beta", "gamma"))
+    assert "shown=3" in output
+    assert "omitted=0" in output
+    assert "alpha" * 40 not in output
+
+
+def test_repeated_unit_helpers_gate_fanout_and_preserve_multiple_records() -> None:
+    namespace: dict[str, object] = {}
+    exec(compile(_repeated_units_pattern(), "<repeated-units>", "exec"), namespace)
+
+    source_rows = [
+        {"key": "alpha", "membership": "supported"},
+        {"key": "beta", "membership": "supported"},
+    ]
+    gated, problems = namespace["gate_units"](  # type: ignore[operator]
+        source_rows, expected_count=2
+    )
+    assert gated == source_rows
+    assert problems == []
+    gated, problems = namespace["gate_units"](  # type: ignore[operator]
+        source_rows[:1], expected_count=2
+    )
+    assert gated == []
+    assert problems == ["cardinality"]
+
+    units = [
+        {
+            "key": "alpha",
+            "requested_fields": ["degree", "field"],
+            "records": [
+                {
+                    "key": "degree-one",
+                    "fields": {
+                        "degree": {"state": "supported", "value": "BS"},
+                        "field": {"state": "supported", "value": "Field One"},
+                    },
+                    "evidence": [{"source": "source-a", "excerpt": "earned BS in Field One"}],
+                },
+                {
+                    "key": "degree-two",
+                    "fields": {
+                        "degree": {"state": "supported", "value": "BS"},
+                        "field": {"state": "missing", "value": ""},
+                    },
+                    "evidence": [{"source": "source-a", "excerpt": "earned a second BS"}],
+                },
+            ],
+            "unresolved_mentions": [],
+            "exclusions": [
+                {
+                    "validated": True,
+                    "source": "source-a",
+                    "excerpt": "honorary doctorate",
+                    "reason": "outside requested earned degrees",
+                }
+            ],
+            "scope_complete": True,
+        },
+        {
+            "key": "beta",
+            "requested_fields": ["degree", "field"],
+            "records": [],
+            "unresolved_mentions": ["possible degree"],
+            "exclusions": [],
+            "scope_complete": True,
+        },
+    ]
+    result = namespace["finalize_record_units"](units)  # type: ignore[operator]
+
+    assert [row["record_key"] for row in result["answer_rows"]] == [
+        "degree-one",
+        "degree-two",
+    ]
+    assert result["coverage"] == {
+        "units": 2,
+        "records": 2,
+        "complete_units": 1,
+        "field_states": {"supported": 3, "missing": 1},
+    }
+    assert result["unit_rows"][0]["complete"] is True
+    assert result["unit_rows"][1]["problems"] == ["unresolved_mentions"]
 
 
 def test_stateful_cache_example_reuses_cumulative_artifacts(tmp_path: Path) -> None:
@@ -700,7 +823,7 @@ def test_composed_pattern_fetches_only_its_selected_subset_for_local_inspection(
     assert not content.passage_calls
     assert not content.grep_calls
     assert not content.read_sources
-    assert "select another small relevant batch" in printed
+    assert "COUNTS selected=" in printed
 
 
 def test_explore_pattern_stops_for_model_judgment(tmp_path: Path) -> None:
@@ -708,7 +831,7 @@ def test_explore_pattern_stops_for_model_judgment(tmp_path: Path) -> None:
 
     lines = printed.strip().splitlines()
     assert 1 <= sum(line.startswith("CANDIDATE ") for line in lines) <= 8
-    assert lines[-1].startswith("NEXT: choose a small relevant subset")
+    assert lines[-1].startswith("COUNTS candidates=")
     assert not content.grep_calls
 
 
@@ -720,13 +843,11 @@ def test_verify_pattern_returns_runtime_evidence_for_model_synthesis(tmp_path: P
     assert not content.read_sources
     assert "EVIDENCE phrase:" in printed
     assert "EVIDENCE year:" in printed
-    assert printed.strip().endswith(
-        "READY: synthesize the user-facing answer from this verified evidence"
-    )
+    assert printed.strip().endswith("COVERAGE supported=2/2 missing=[] problems=[]")
     assert not hasattr(sdk, "output")
 
 
-def test_verify_pattern_ends_in_next_when_model_judgment_is_needed(tmp_path: Path) -> None:
+def test_verify_pattern_reports_missing_fields_for_model_judgment(tmp_path: Path) -> None:
     _, _, printed = _run_pattern(
         tmp_path,
         program=_verify_pattern(),
@@ -735,7 +856,7 @@ def test_verify_pattern_ends_in_next_when_model_judgment_is_needed(tmp_path: Pat
 
     lines = printed.strip().splitlines()
     assert lines[0].startswith("EVIDENCE phrase:")
-    assert lines[-1].startswith("NEXT:")
+    assert lines[-1].startswith("COVERAGE supported=1/2")
     assert "missing=['year']" in lines[-1]
 
 
@@ -789,7 +910,7 @@ def test_pattern_keeps_one_ranked_pool_and_prints_sources_for_read_passages(
     evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
     assert set(evidence) == {"phrase", "year"}
     assert all(row.source in printed for row in evidence.values())
-    assert "READY: synthesize" in printed
+    assert "unsupported: none" in printed
 
 
 def test_pattern_pool_score_is_idempotent_across_replayed_stages(tmp_path: Path) -> None:
@@ -806,11 +927,11 @@ def test_pattern_pool_score_is_idempotent_across_replayed_stages(tmp_path: Path)
     assert replayed == first
 
 
-def test_pattern_does_not_emit_ready_with_an_unsupported_constraint(tmp_path: Path) -> None:
+def test_pattern_reports_an_unsupported_constraint_without_completion_token(tmp_path: Path) -> None:
     sdk, _, printed = _run_pattern(tmp_path, missing_year=True)
 
     assert "unsupported: ['year']" in printed
-    assert "READY:" not in printed
+    assert not any(token in _stateful_pattern() for token in ("NEXT:", "READY:", "ERROR:"))
     evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
     assert set(evidence) == {"phrase"}
     attempts = sdk.workspace.read_json(_artifact(sdk.workspace, "attempts.json"))
@@ -827,7 +948,7 @@ def test_pattern_verifies_far_apart_constraints_in_the_same_document(tmp_path: P
         set(row) == {"fingerprint", "requirement", "source", "text"} for row in evidence.values()
     )
     assert "source='doc_consensus'" in printed
-    assert "READY: synthesize" in printed
+    assert "unsupported: none" in printed
 
 
 def test_pattern_unions_new_evidence_across_turns(tmp_path: Path) -> None:
@@ -841,7 +962,7 @@ def test_pattern_unions_new_evidence_across_turns(tmp_path: Path) -> None:
     assert "unsupported: ['year']" in printed
     assert "EVIDENCE phrase:" in printed
     assert "EVIDENCE year:" in printed
-    assert "READY: synthesize" in printed
+    assert "unsupported: none" in printed
     evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
     assert set(evidence) == {"phrase", "year"}
     assert evidence.phrase.source.startswith("doc_turn_1_")
@@ -852,7 +973,7 @@ def test_pattern_reports_partial_fetch_failure_and_keeps_matches(tmp_path: Path)
     _, _, printed = _run_pattern(tmp_path, partial_failure=True)
 
     assert "failure[provider_timeout]" in printed
-    assert "READY: synthesize" in printed
+    assert "unsupported: none" in printed
 
 
 def test_pattern_bounds_pool_and_content_batches(tmp_path: Path) -> None:
@@ -927,4 +1048,4 @@ def test_pattern_revalidates_changed_regex_in_the_same_namespace(tmp_path: Path)
     assert any(pattern == "target phrase" for pattern, _ in content.grep_calls)
     evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
     assert set(evidence) == {"phrase", "year"}
-    assert "READY: synthesize" in printed
+    assert "unsupported: none" in printed

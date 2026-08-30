@@ -1,22 +1,102 @@
 # Search-as-Code patterns
 
 These programs are independent, adaptable examples, not a required pipeline. Combine, split, skip,
-or reorder them when the task calls for a different strategy. Only the final optional pattern uses
-workspace artifacts, for a result that a later program will reuse.
+or reorder them when the task calls for a different strategy. Workspace examples persist artifacts
+only when a later program will reuse them.
 
 ## Example building blocks
 
 - **Explore candidates** demonstrates bounded multi-query search and reusable source output.
 - **Compose retrieval and inspection** demonstrates stateless search, ranking, full-text
   materialization, and optional structured views.
-- **Verify and return evidence** demonstrates exact checks, context expansion, and the optional
-  structured-output branch.
-- **Extract structured fields** demonstrates aligned transformation of already inspected evidence.
+- **Verify and return evidence** demonstrates exact checks, context expansion, and a coverage summary.
+- **Emit one globally bounded observation** demonstrates a single stdout budget across fan-out rows.
 - **Cache selected fetches across calls** demonstrates recovery ordering without prescribing how
   sources were selected or how cached text will be inspected.
 
+Closed-set and one-to-many tasks have a smaller dedicated reference:
+[repeated units and record sets](repeated-units.md).
+
 Each block illustrates capability mechanics. Its query count, bounds, call grouping, and stopping
 point are examples for the agent to adapt.
+
+## Emit one globally bounded observation
+
+Use one emitter when a checkpoint can produce more than a few candidate, unit, or evidence rows.
+Collect and normalize rows during capability handling; do not print from those loops. The emitter
+keeps the source on every shown row, preserves room for counts, and makes omission explicit. Adapt
+the row fields and limit, but keep one budget over every code path. `key` names the material
+requirement or unit; keep `source` separate instead of constructing `source::field` keys.
+
+```python
+def one_line(value):
+    return " ".join(str(value or "").split())
+
+
+def emit_observation(rows, *, max_chars=3_800):
+    primary_by_key = {}
+    secondary = []
+    seen = set()
+    for row in rows:
+        normalized = {
+            "key": one_line(row.get("key")),
+            "status": one_line(row.get("status")) or "unknown",
+            "source": one_line(row.get("source")),
+            "excerpt": one_line(row.get("excerpt"))[:180],
+        }
+        identity = tuple(normalized.values())
+        if identity not in seen:
+            seen.add(identity)
+            if normalized["key"] not in primary_by_key:
+                primary_by_key[normalized["key"]] = normalized
+            else:
+                secondary.append(normalized)
+
+    # Shrink primary excerpts until every material key fits, then spend residual budget on extras.
+    primary = list(primary_by_key.values())
+    unique = [*primary, *secondary]
+    failures = sum(row["status"] == "failed" for row in unique)
+
+    def render(row, excerpt_chars):
+        return (
+            f"ROW key={row['key']!r} status={row['status']} "
+            f"source={row['source']!r} excerpt={row['excerpt'][:excerpt_chars]!r}"
+        )
+
+    excerpt_chars = 180
+    while True:
+        primary_lines = [render(row, excerpt_chars) for row in primary]
+        footer = (
+            f"COUNTS total={len(unique)} shown={len(primary_lines)} "
+            f"omitted={len(unique) - len(primary_lines)} failures={failures}"
+        )
+        if len("\n".join([*primary_lines, footer])) <= max_chars or excerpt_chars == 0:
+            break
+        excerpt_chars = max(0, excerpt_chars - 20)
+
+    shown_lines = []
+    for row in unique:
+        line = render(row, excerpt_chars)
+        next_shown = len(shown_lines) + 1
+        footer = (
+            f"COUNTS total={len(unique)} shown={next_shown} "
+            f"omitted={len(unique) - next_shown} failures={failures}"
+        )
+        if len("\n".join([*shown_lines, line, footer])) > max_chars:
+            break
+        shown_lines.append(line)
+
+    footer = (
+        f"COUNTS total={len(unique)} shown={len(shown_lines)} "
+        f"omitted={len(unique) - len(shown_lines)} "
+        f"failures={failures}"
+    )
+    print("\n".join([*shown_lines, footer]))
+```
+
+The helper places the first row for each material key before secondary excerpts and shrinks primary
+excerpts before omitting a key. It is only a projection: derive coverage from the full in-memory or
+persisted rows, not from the visible subset. Adapt or replace it when a simpler fixed summary fits.
 
 ## Explore candidates
 
@@ -39,24 +119,23 @@ queries = list(
 try:
     outcomes = sdk.search.many(queries, limit=10, concurrency=4)
 except BrokerError as error:
-    print(f"ERROR: search code={error.code} retryable={error.retryable}")
+    print(f"FAILURE operation=search code={error.code} retryable={error.retryable}")
 else:
     candidates = sdk.search.fuse_rrf(outcomes, k=60)[:8]
-    for item in candidates:
-        snippet = " ".join((item.snippet or "").split())[:240]
-        print(
-            f"CANDIDATE source={item.source!r} date={item.date or '-'} "
-            f"domain={item.domain or '-'} title={item.title or '(untitled)'} "
-            f"snippet={snippet!r}"
-        )
     failed = sum(outcome.status != "success" for outcome in outcomes)
-    if candidates:
-        print(
-            f"NEXT: choose a small relevant subset from {len(candidates)} candidates; "
-            f"failed_queries={failed}"
+    summary = f"COUNTS candidates={len(candidates)} failed_queries={failed}"
+    lines = []
+    for item in candidates:
+        title = " ".join((item.title or "(untitled)").split())[:120]
+        snippet = " ".join((item.snippet or "").split())[:200]
+        line = (
+            f"CANDIDATE source={item.source!r} date={item.date or '-'} "
+            f"domain={item.domain or '-'} title={title!r} snippet={snippet!r}"
         )
-    else:
-        print(f"NEXT: rewrite or broaden the queries; failed_queries={failed}")
+        if len("\n".join([*lines, line, summary])) > 3_800:
+            break
+        lines.append(line)
+    print("\n".join([*lines, summary]))
 ```
 
 ## Compose retrieval and focused inspection
@@ -119,21 +198,26 @@ try:
             local_evidence.append({"source": document.source, "text": document.text[start:end]})
             break
 except BrokerError as error:
-    print(f"ERROR: evidence retrieval code={error.code} retryable={error.retryable}")
+    print(f"FAILURE operation=evidence_retrieval code={error.code} retryable={error.retryable}")
 else:
-    for item in local_evidence[:4]:
-        excerpt = " ".join(item["text"].split())[:500]
-        print(f"LOCAL_EVIDENCE source={item['source']!r} text={excerpt!r}")
     failures = [
         outcome.error.code if outcome.error is not None else "unknown"
         for outcome in search_outcomes
         if outcome.status != "success"
     ]
     failures.extend(fetch_failures)
-    print(
-        "NEXT: judge coverage; select another small relevant batch only for unresolved constraints; "
-        f"selected={len(selected)} failures={failures[:4]}"
+    summary = (
+        f"COUNTS selected={len(selected)} evidence={len(local_evidence)} "
+        f"failures={len(failures)} codes={failures[:4]!r}"
     )
+    lines = []
+    for item in local_evidence:
+        excerpt = " ".join(item["text"].split())[:500]
+        line = f"LOCAL_EVIDENCE source={item['source']!r} text={excerpt!r}"
+        if len("\n".join([*lines, line, summary])) > 3_800:
+            break
+        lines.append(line)
+    print("\n".join([*lines, summary]))
 ```
 
 ## Verify selected sources and return evidence
@@ -196,78 +280,25 @@ for name, pattern in checks.items():
         break
 
 missing = sorted(set(checks) - evidence.keys())
-if missing:
-    for name, row in evidence.items():
-        print(
-            f"EVIDENCE {name}: source={row['source']!r} "
-            f"coordinates={row['coordinates']!r} text={row['text']!r}"
-        )
-    print(f"NEXT: revise sources/checks for missing={missing}; problems={problems[:4]}")
-else:
-    for name, row in evidence.items():
-        print(
-            f"EVIDENCE {name}: source={row['source']!r} "
-            f"coordinates={row['coordinates']!r} text={row['text']!r}"
-        )
-    print("READY: synthesize the user-facing answer from this verified evidence")
+summary = (
+    f"COVERAGE supported={len(evidence)}/{len(checks)} "
+    f"missing={missing!r} problems={problems[:4]!r}"
+)
+lines = []
+for name, row in evidence.items():
+    line = (
+        f"EVIDENCE {name}: source={row['source']!r} "
+        f"coordinates={row['coordinates']!r} text={row['text']!r}"
+    )
+    if len("\n".join([*lines, line, summary])) > 3_800:
+        break
+    lines.append(line)
+print("\n".join([*lines, summary]))
 ```
 
 Use a relation-specific check. If text presence alone cannot verify the requested relationship,
-adapt the check or use the optional structured extraction pattern below. Do not treat unrelated
-keyword matches as proof.
-
-## Optionally extract structured fields from inspected evidence
-
-Use extraction only to transform bounded text that has already been inspected. Keep each input next
-to its aligned outcome because `extract_many` does not return the original item. A schema-valid
-result remains unsupported until its quote is found verbatim in that input.
-
-```python
-from opensac_sdk import BrokerError, sdk
-
-evidence_items = [
-    {
-        "source": "selected-source-url-1",
-        "text": "A bounded excerpt that states the relation being checked.",
-    }
-]
-schema = {
-    "type": "object",
-    "properties": {
-        "claim": {"type": "string"},
-        "quote": {"type": "string"},
-    },
-    "required": ["claim", "quote"],
-    "additionalProperties": False,
-}
-
-try:
-    outcomes = sdk.llm.extract_many(
-        evidence_items,
-        instruction="Extract the stated relation and an exact supporting quote.",
-        schema=schema,
-    )
-except BrokerError as error:
-    print(f"ERROR: extraction code={error.code} retryable={error.retryable}")
-else:
-    verified = []
-    failures = []
-    for item, outcome in zip(evidence_items, outcomes, strict=True):
-        if outcome.status != "success" or outcome.data is None:
-            code = outcome.error.code if outcome.error is not None else "invalid_outcome"
-            failures.append({"source": item["source"], "code": code})
-            continue
-        quote = outcome.data["quote"]
-        if not quote or quote not in item["text"]:
-            failures.append({"source": item["source"], "code": "quote_not_in_input"})
-            continue
-        verified.append({"source": item["source"], "claim": outcome.data["claim"], "quote": quote})
-
-    for row in verified:
-        print(f"EXTRACTED source={row['source']!r} claim={row['claim']!r} quote={row['quote']!r}")
-    if failures:
-        print(f"EXTRACTION_FAILURES {failures!r}")
-```
+adapt the deterministic parser or leave the field unsupported. Do not treat unrelated keyword
+matches as proof.
 
 ## Optionally cache selected fetches across calls
 
@@ -333,16 +364,22 @@ if pending:
     sdk.workspace.upsert_jsonl(cache_path, terminal_rows, key="requested_source")
     cached.update({row["requested_source"]: row for row in terminal_rows})
 
+lines = []
 for requested_source in selected_sources:
     row = cached[requested_source]
-    error_code = row["error"].get("code", "-")
-    print(
+    lines.append(
         f"CACHE status={row['status']} requested={requested_source!r} "
-        f"source={row['source']!r} error={error_code}"
+        f"source={row['source']!r} error={row['error'].get('code', '-')}"
     )
+unresolved = sum(cached[source]["status"] != "success" for source in selected_sources)
+summary = f"COUNTS cached={len(selected_sources)} unresolved_fetches={unresolved}"
+print("\n".join([*lines, summary]))
 ```
 
 The example stores full text because cross-program reuse is its premise; store only the bounded data
 the later program needs when full text is unnecessary. `requested_source` prevents unchanged replay,
 while `source` records the canonical value returned by fetch. A surviving `started` row has an
-unknown outcome. Retry only when durable workspace data proves the operation is missing.
+unknown outcome. Retry only when durable workspace data proves the operation is missing. This
+skeleton stops where a task-specific semantic choice may be needed. If the relation checks are already
+known, append their local parsing, validation, evidence-row update, and emitter to this program instead
+of submitting the cache skeleton as its own checkpoint.
