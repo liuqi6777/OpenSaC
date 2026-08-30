@@ -74,10 +74,9 @@ rather than blindly replaying the call.
 
 ## Return bounded observations
 
-Collect rows first and print once. Keep one global budget of about 4,000 characters across normal
-rows, failures, and total/shown/omitted counts. Every shown evidence row keeps its source. Do not
-print raw result lists, complete documents, or workspace ledgers. The
-[bounded emitter example](references/patterns.md#emit-one-globally-bounded-observation) is optional.
+Collect rows first and print once. Keep one global soft budget of about 4,000 characters across
+normal rows, failures, and total/shown/omitted counts. Every shown evidence row keeps its source.
+Do not print raw result lists, complete documents, or workspace ledgers.
 
 The program output need not say whether research should continue. Once the full in-memory or
 persisted state supports the request, answer the user directly; if material fields or enumeration

@@ -19,7 +19,6 @@ ROOT = Path(__file__).parents[1]
 SKILL_DIR = ROOT / ".agents" / "skills" / "search-as-code"
 SKILL_PATH = SKILL_DIR / "SKILL.md"
 CONTRACT_PATH = SKILL_DIR / "references" / "sdk-contract.md"
-PATTERNS_PATH = SKILL_DIR / "references" / "patterns.md"
 ORCHESTRATION_PATH = SKILL_DIR / "references" / "orchestration.md"
 REPEATED_UNITS_PATH = SKILL_DIR / "references" / "repeated-units.md"
 STATEFUL_PROGRAM_PATH = ROOT / "tests" / "data" / "search_as_code_stateful_program.py"
@@ -29,10 +28,6 @@ def _code_block(path: Path, heading: str) -> str:
     text = path.read_text(encoding="utf-8")
     section = text.split(heading, 1)[1]
     return section.split("```python", 1)[1].split("```", 1)[0]
-
-
-def _emitter_pattern() -> str:
-    return _code_block(PATTERNS_PATH, "## Emit one globally bounded observation")
 
 
 def _repeated_units_pattern() -> str:
@@ -416,7 +411,6 @@ def test_skill_keeps_the_core_contract_small_and_schema_neutral() -> None:
     assert "Claude" not in description
     assert {
         "references/sdk-contract.md",
-        "references/patterns.md",
         "references/orchestration.md",
         "references/repeated-units.md",
     } <= linked_references
@@ -576,9 +570,8 @@ def test_contract_omits_sdk_capabilities_not_taught_by_the_skill() -> None:
     assert "LLM call" not in contract
 
 
-def test_patterns_compile_and_pass_sandbox_validation() -> None:
+def test_reference_programs_compile_and_pass_sandbox_validation() -> None:
     programs = {
-        "emitter": _emitter_pattern(),
         "repeated-units": _repeated_units_pattern(),
         "stateful-fixture": _stateful_pattern(),
     }
@@ -589,51 +582,6 @@ def test_patterns_compile_and_pass_sandbox_validation() -> None:
         assert not any(token in program for token in ("NEXT:", "READY:", "ERROR:"))
 
     assert "sdk.workspace." in programs["stateful-fixture"]
-
-
-def test_global_emitter_prioritizes_one_row_per_stable_key() -> None:
-    namespace: dict[str, object] = {}
-    exec(compile(_emitter_pattern(), "<search-as-code-emitter>", "exec"), namespace)
-    rows = [
-        {"key": "alpha", "status": "supported", "source": "a-1", "excerpt": "x" * 50},
-        {"key": "alpha", "status": "supported", "source": "a-2", "excerpt": "y" * 50},
-        {"key": "beta", "status": "supported", "source": "b-1", "excerpt": "z" * 50},
-    ]
-    printed = io.StringIO()
-
-    with contextlib.redirect_stdout(printed):
-        namespace["emit_observation"](rows, max_chars=310)  # type: ignore[operator]
-
-    output = printed.getvalue()
-    assert "source='a-1'" in output
-    assert "source='b-1'" in output
-    assert "source='a-2'" not in output
-    assert "shown=2" in output
-    assert "omitted=1" in output
-
-
-def test_global_emitter_shrinks_excerpts_before_omitting_primary_keys() -> None:
-    namespace: dict[str, object] = {}
-    exec(compile(_emitter_pattern(), "<search-as-code-emitter>", "exec"), namespace)
-    rows = [
-        {
-            "key": key,
-            "status": "supported",
-            "source": f"source-{key}",
-            "excerpt": key * 300,
-        }
-        for key in ("alpha", "beta", "gamma")
-    ]
-    printed = io.StringIO()
-
-    with contextlib.redirect_stdout(printed):
-        namespace["emit_observation"](rows, max_chars=420)  # type: ignore[operator]
-
-    output = printed.getvalue()
-    assert all(f"key='{key}'" in output for key in ("alpha", "beta", "gamma"))
-    assert "shown=3" in output
-    assert "omitted=0" in output
-    assert "alpha" * 40 not in output
 
 
 def test_repeated_unit_helpers_gate_fanout_and_preserve_multiple_records() -> None:

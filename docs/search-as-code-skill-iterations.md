@@ -806,3 +806,31 @@ correctness and used a more selective three-source initial fetch than Round 25. 
 date conflict and fragmented WideSearch parser are real trajectory defects, but the retained main and
 orchestration instructions already cover both; one paired sample does not justify restoring generic
 tutorial programs. Keep the pruning for the next isolated ablation.
+
+## Round 27 — output-budget ablation
+
+This round retained the Round 26 queries and fresh `gpt-5.6-terra/high` isolation, deleted the last
+optional bounded-emitter example, and replaced the approximately 4,000-character observation budget
+with only a qualitative request for a compact model-visible projection. Neither agent read the deleted
+`patterns.md`, so observed output changes do not depend on losing task-facing example context.
+
+| Dimension | BrowseComp | WideSearch |
+| --- | --- | --- |
+| References read | Main skill and SDK contract | Main skill, SDK contract, and repeated units |
+| `sac_run` calls | 7 | 14 |
+| Evidence result | Complete station answer; recovered the 9 May versus 9 June 1915 source conflict missed in Round 26 | Complete 14/14 table and 43 traditional first-ascenter records; retained Everest, Kangchenjunga, and Shishapangma true-summit issues and Shishapangma transcription/nationality conflict |
+| Durable/dataflow behavior | Candidate and selected bodies were persisted; later extraction and Markdown-link parser repair reused those bodies | Search state, source bodies, the first-ascent table, parsed rows, and final coverage were persisted; the final coverage check validated 14 rows, 14 dates, and 43 records |
+| Observation behavior | Stdout lengths were 2,038, 10,923, 11,205, 29,694, 17,809, 4,959, and 7,127 characters. No host truncation occurred, but six of seven calls exceeded the removed target and several printed broad matching-line/excerpt collections | One call printed an entire persisted 40,068-character section and the host explicitly truncated it at about 20,298 tokens. Two earlier calls returned empty stdout despite containing `print`; later lengths were not recoverable from the adapter transcript |
+
+### Round 27 decision
+
+The qualitative word `compact` did not bound model-visible output. BrowseComp still produced a strong
+answer, but large broad projections consumed substantially more context than the task required;
+WideSearch demonstrated the concrete failure mode by printing a complete table section and losing part
+of it to host truncation. The numeric target is therefore useful as a soft orchestration guardrail even
+though it is not an SDK or MCP hard limit and cannot guarantee compliance by itself.
+
+Restore the approximately 4,000-character soft budget without restoring the emitter program. Keep
+`patterns.md` deleted: neither the preceding reference-prune agents nor this pair routed to it, and the
+remaining prose states the invariant directly. This leaves output sizing as concise guidance rather
+than a required helper or string-level protocol.
