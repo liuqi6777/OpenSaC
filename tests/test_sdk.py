@@ -17,7 +17,6 @@ from opensac_sdk._many import (
     _ManySuccess,
     _run_many,
 )
-from opensac_sdk._outcome import failure, success
 from opensac_sdk._record import Record, record, wrap
 from opensac_sdk._resources import (
     CapabilitiesResource,
@@ -43,7 +42,8 @@ RESOURCE_TYPES = {
 
 
 def test_package_root_exposes_only_runtime_entrypoints() -> None:
-    assert opensac_sdk.__all__ == ["Outcome", "sdk", "__version__"]
+    assert opensac_sdk.__all__ == ["sdk", "__version__"]
+    assert not hasattr(opensac_sdk, "Outcome")
     assert not hasattr(opensac_sdk, "SearchHit")
     assert not hasattr(opensac_sdk, "OpenSACClient")
     assert not hasattr(opensac_sdk, "LazyOpenSACClient")
@@ -193,10 +193,9 @@ def test_lazy_sdk_exposes_resource_and_method_docs_without_a_broker_call() -> No
             assert "sdk.search(query" in search_doc
             assert "canonical web URL" in search_doc
             many_doc = " ".join((opensac_sdk.sdk.search.many.__doc__ or "").split())
-            assert "value" in many_doc
-            assert '"success"' in many_doc
-            assert '"failure"' in many_doc
-            assert "structured ``error`` details" in many_doc
+            assert "hit list or ``None``" in many_doc
+            assert "structured warnings" in many_doc
+            assert "successful no-match search" in many_doc
             assert opensac_sdk.sdk.capabilities.__doc__ is not None
             assert opensac_sdk.sdk.workspace.__doc__ is not None
             assert not hasattr(opensac_sdk.sdk, "output")
@@ -356,15 +355,65 @@ def test_unix_transport_rejects_invalid_json_as_a_protocol_error() -> None:
 
 def test_search_resource_returns_typed_hits() -> None:
     transport = FakeTransport()
-    outcome = SearchResource(transport)("query", limit=3)
-    assert outcome.status == "success"
-    assert outcome.value[0].source == "source_1"
+    hits = SearchResource(transport)("query", limit=3)
+    assert hits is not None
+    assert hits[0].source == "source_1"
     assert transport.calls == [
         (
             "search.query",
             {"query": "query", "limit": 3, "offset": 0, "include_domains": None},
         )
     ]
+
+
+def test_broker_backed_falsey_results_remain_successful(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class FalseyTransport:
+        def call(self, method, params):
+            del params
+            if method == "search.query":
+                return []
+            if method == "llm.complete":
+                return ""
+            if method == "llm.extract":
+                return record({})
+            raise AssertionError(method)
+
+    transport = FalseyTransport()
+    assert SearchResource(transport)("no matches") == []
+    assert LLMResource(transport).complete("empty response") == ""
+    assert LLMResource(transport).extract({}, instruction="", schema={}) == {}
+    assert not output_path.exists()
+
+
+def test_unary_sdk_calls_only_capture_broker_errors(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class FailedTransport:
+        def call(self, method, params):
+            del method, params
+            raise BrokerError(
+                "Search provider timed out.",
+                code="provider_timeout",
+                retryable=True,
+                attempts=2,
+            )
+
+    assert SearchResource(FailedTransport())("query") is None
+    warning = json.loads(output_path.read_text(encoding="utf-8"))["warnings"][0]
+    assert warning["method"] == "search"
+    assert warning["failures"][0]["query"] == "query"
+
+    class UnexpectedTransport:
+        def call(self, method, params):
+            del method, params
+            raise RuntimeError("unexpected SDK bug")
+
+    with pytest.raises(RuntimeError, match="unexpected SDK bug"):
+        SearchResource(UnexpectedTransport())("query")
 
 
 def _search_report(
@@ -392,29 +441,25 @@ def _search_report(
     )
 
 
-def _search_outcomes(
+def _search_results(
     results: list[Record | dict[str, object]],
     *,
     failures: list[Record | dict[str, object]] | None = None,
     input_count: int | None = None,
-) -> list[Record]:
+) -> tuple[list[str], list[list[Record] | None]]:
     report = _search_report(results, failures=failures, input_count=input_count)
-    outcomes: list[Record | None] = [None] * report.input_count
+    queries = [""] * report.input_count
+    batches: list[list[Record] | None] = [None] * report.input_count
     for result in report.results:
-        outcomes[result.input_index] = success(
-            result.hits,
-            context={"input_index": result.input_index, "query": result.query},
-        )
+        queries[result.input_index] = result.query
+        batches[result.input_index] = result.hits
     for failed in report.failures:
-        outcomes[failed.input_index] = failure(
-            error_info(failed),
-            context={"input_index": failed.input_index, "query": failed.query},
-        )
-    assert all(outcome is not None for outcome in outcomes)
-    return [outcome for outcome in outcomes if outcome is not None]
+        queries[failed.input_index] = failed.query
+    assert all(queries)
+    return queries, batches
 
 
-def test_search_many_returns_input_aligned_outcomes() -> None:
+def test_search_many_returns_input_aligned_results() -> None:
     class ManyTransport:
         def call(self, method, params):
             if method == "session.capabilities":
@@ -426,17 +471,14 @@ def test_search_many_returns_input_aligned_outcomes() -> None:
             assert params["include_domains"] == ["example.com"]
             return []
 
-    outcomes = SearchResource(ManyTransport()).many(
+    results = SearchResource(ManyTransport()).many(
         ["one", "two"],
         limit=12,
         offset=4,
         include_domains=["example.com"],
     )
 
-    assert [dict(outcome) for outcome in outcomes] == [
-        {"input_index": 0, "query": "one", "status": "success", "value": [], "error": None},
-        {"input_index": 1, "query": "two", "status": "success", "value": [], "error": None},
-    ]
+    assert results == [[], []]
 
 
 def test_search_many_records_all_failed_warning_without_raising(tmp_path, monkeypatch) -> None:
@@ -459,17 +501,10 @@ def test_search_many_records_all_failed_warning_without_raising(tmp_path, monkey
             )
 
     search = SearchResource(FailedManyTransport())
-    outcomes = search.many(["one", "two"])
-    assert search.fuse_rrf(outcomes) == []
-
-    assert [outcome.query for outcome in outcomes] == ["one", "two"]
-    assert all(outcome.value is None for outcome in outcomes)
-    assert all(outcome.status == "failure" for outcome in outcomes)
-    assert all(outcome.error.code == "provider_timeout" for outcome in outcomes)
-    assert all(outcome.error.message == "Search provider timed out." for outcome in outcomes)
-    assert all(outcome.error.retryable is True for outcome in outcomes)
-    assert all(outcome.error.attempts == 3 for outcome in outcomes)
-    assert all(outcome.error.provider == "serper" for outcome in outcomes)
+    queries = ["one", "two"]
+    results = search.many(queries)
+    assert search.fuse_rrf(queries, results) == []
+    assert results == [None, None]
     warnings = json.loads(output_path.read_text(encoding="utf-8"))["warnings"]
     assert len(warnings) == 1
     warning = warnings[0]
@@ -497,7 +532,7 @@ def test_sdk_failure_warnings_are_strictly_bounded(tmp_path, monkeypatch) -> Non
                 attempts=3,
             )
 
-    outcomes = SearchResource(FailedManyTransport()).many([f"query-{index}" for index in range(64)])
+    results = SearchResource(FailedManyTransport()).many([f"query-{index}" for index in range(64)])
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     encoded_warnings = json.dumps(
@@ -506,9 +541,7 @@ def test_sdk_failure_warnings_are_strictly_bounded(tmp_path, monkeypatch) -> Non
     warning = payload["warnings"][0]
     assert len(encoded_warnings) <= 4_096
     assert len(warning["failures"]) + warning["omitted_failure_count"] == 64
-    assert all(outcome.status == "failure" for outcome in outcomes)
-    assert all(len(outcome.error.message) <= 1_024 for outcome in outcomes)
-    assert all("\n" not in outcome.error.message for outcome in outcomes)
+    assert results == [None] * 64
 
 
 def test_warning_budget_keeps_later_failure_summaries(tmp_path, monkeypatch) -> None:
@@ -783,31 +816,20 @@ def test_search_many_is_bounded_aligned_and_does_not_deduplicate(
                     self.active -= 1
 
     transport = ClientTransport()
-    outcomes = SearchResource(transport).many(
+    results = SearchResource(transport).many(
         ["slow", "failed", "fast", "slow"],
         concurrency=2,
     )
 
-    assert [outcome.query for outcome in outcomes] == ["slow", "failed", "fast", "slow"]
-    assert [outcome.status for outcome in outcomes] == [
-        "success",
-        "failure",
-        "success",
-        "success",
+    assert results[0] is not None
+    assert results[1] is None
+    assert results[2] is not None
+    assert results[3] is not None
+    assert [results[index][0].source for index in (0, 2, 3)] == [
+        "doc-slow",
+        "doc-fast",
+        "doc-slow",
     ]
-    assert outcomes[0].error is None
-    assert outcomes[1].value is None
-    assert dict(outcomes[1].error) == {
-        "code": "provider_timeout",
-        "message": "Search provider timed out.",
-        "retryable": True,
-        "attempts": 3,
-        "provider_status": None,
-        "retry_after_seconds": None,
-        "provider": "test",
-        "component": "search",
-        "scope": "provider",
-    }
     assert transport.max_active == 2
     assert transport.query_calls.count("slow") == 2
     warning = json.loads((tmp_path / "output.json").read_text())["warnings"][0]
@@ -845,11 +867,10 @@ def test_search_many_checks_manifest_admission_before_fanout() -> None:
         ),
         (_search_capabilities(max_depth=5), ["one"], {}, "invalid_request"),
     ]
-    for manifest, queries, kwargs, code in cases:
+    for manifest, queries, kwargs, _code in cases:
         transport = ManifestTransport(manifest)
-        outcomes = SearchResource(transport).many(queries, **kwargs)
-        assert [outcome.status for outcome in outcomes] == ["failure"] * len(queries)
-        assert {outcome.error.code for outcome in outcomes} == {code}
+        results = SearchResource(transport).many(queries, **kwargs)
+        assert results == [None] * len(queries)
         assert transport.calls == ["session.capabilities"]
 
 
@@ -859,9 +880,8 @@ def test_search_many_rejects_malformed_manifest() -> None:
             del method, params
             return {"search": {}}
 
-    outcomes = SearchResource(MalformedTransport()).many(["one"])
-    assert outcomes[0].status == "failure"
-    assert outcomes[0].error.code == "broker_protocol_error"
+    results = SearchResource(MalformedTransport()).many(["one"])
+    assert results == [None]
 
 
 def test_search_many_returns_all_operational_failures(
@@ -894,9 +914,8 @@ def test_search_many_returns_all_operational_failures(
         "permission_denied",
     }
     for code in sorted(system_codes):
-        outcomes = SearchResource(FailingTransport(code=code)).many(["one", "two"])
-        assert [outcome.status for outcome in outcomes] == ["failure", "failure"]
-        assert {outcome.error.code for outcome in outcomes} == {code}
+        results = SearchResource(FailingTransport(code=code)).many(["one", "two"])
+        assert results == [None, None]
 
     class MixedSystemTransport(FailingTransport):
         def call(self, method, params):
@@ -906,23 +925,15 @@ def test_search_many_returns_all_operational_failures(
             raise BrokerError(f"{code} for {params['query']}", code=code, retryable=False)
 
     mixed_system = SearchResource(MixedSystemTransport(code="unused")).many(["one", "two"])
-    assert [outcome.error.code for outcome in mixed_system] == [
-        "broker_transport_error",
-        "broker_protocol_error",
-    ]
+    assert mixed_system == [None, None]
 
     mixed = SearchResource(
         FailingTransport(code="broker_transport_error", succeed={"one"}),
     ).many(["one", "two"])
-    assert [outcome.status for outcome in mixed] == ["success", "failure"]
-    assert mixed[1].error.code == "broker_transport_error"
+    assert mixed == [[], None]
 
     provider = SearchResource(FailingTransport(code="provider_timeout")).many(["one", "two"])
-    assert [outcome.status for outcome in provider] == ["failure", "failure"]
-    assert [outcome.error.code for outcome in provider] == [
-        "provider_timeout",
-        "provider_timeout",
-    ]
+    assert provider == [None, None]
 
 
 def test_search_many_validates_empty_input_without_starting_search() -> None:
@@ -960,28 +971,28 @@ def test_search_many_restores_partial_duplicate_queries_to_input_order(
             return [_hit("doc-same", 1)]
 
     search = SearchResource(PartialManyTransport())
-    outcomes = search.many(["same", "failed", "same"])
+    queries = ["same", "failed", "same"]
+    results = search.many(queries)
 
-    assert [outcome.query for outcome in outcomes] == ["same", "failed", "same"]
-    assert [outcome.status == "success" for outcome in outcomes] == [True, False, True]
-    assert [
-        hit.source for outcome in outcomes if outcome.status == "success" for hit in outcome.value
-    ] == [
+    assert results[0] is not None
+    assert results[1] is None
+    assert results[2] is not None
+    assert [hit.source for batch in results if batch is not None for hit in batch] == [
         "doc-same",
         "doc-same",
     ]
-    fused = search.fuse_rrf(outcomes)
+    fused = search.fuse_rrf(queries, results)
     assert [row.input_index for row in fused[0].provenance] == [0, 2]
 
 
 def test_search_rrf_fuses_sources_locally_and_preserves_provenance() -> None:
     transport = FakeTransport()
     search = SearchResource(transport)
-    report = _search_outcomes(
+    queries, results = _search_results(
         [
             record(
                 {
-                    "query": "alpha",
+                    "query": " alpha ",
                     "hits": [_hit("a", 1, score=0.9), _hit("a", 3), _hit("b", 2)],
                 }
             ),
@@ -1000,13 +1011,12 @@ def test_search_rrf_fuses_sources_locally_and_preserves_provenance() -> None:
         input_count=3,
     )
 
-    result = search.fuse_rrf(report, weights=[1, 2, 1])
+    result = search.fuse_rrf(queries, results, weights=[1, 2, 1])
 
     assert transport.calls == []
     assert [candidate.source for candidate in result] == ["b", "a"]
     assert [candidate.fused_rank for candidate in result] == [1, 2]
-    assert report[2].status == "failure"
-    assert report[2].error.code == "provider_timeout"
+    assert results[2] is None
 
     candidate_a = result[1]
     assert isinstance(candidate_a, Record)
@@ -1025,24 +1035,20 @@ def test_search_rrf_fuses_sources_locally_and_preserves_provenance() -> None:
 
 def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
     search = SearchResource(FakeTransport())
-    tied = search.fuse_rrf(
-        _search_outcomes(
-            [
-                record({"query": "first", "hits": [_hit("z", 1)]}),
-                record({"query": "second", "hits": [_hit("a", 1)]}),
-            ]
-        ),
-        limit=1,
+    queries, results = _search_results(
+        [
+            record({"query": "first", "hits": [_hit("z", 1)]}),
+            record({"query": "second", "hits": [_hit("a", 1)]}),
+        ]
     )
+    tied = search.fuse_rrf(queries, results, limit=1)
     assert [candidate.source for candidate in tied] == ["z"]
 
-    empty = search.fuse_rrf(_search_outcomes([]))
+    empty = search.fuse_rrf([], [])
     assert empty == []
 
-    zero_limit = search.fuse_rrf(
-        _search_outcomes([record({"query": "one", "hits": [_hit("a", 1)]})]),
-        limit=0,
-    )
+    queries, results = _search_results([record({"query": "one", "hits": [_hit("a", 1)]})])
+    zero_limit = search.fuse_rrf(queries, results, limit=0)
     assert zero_limit == []
 
 
@@ -1058,39 +1064,39 @@ def test_search_rrf_has_stable_ties_limit_and_empty_input() -> None:
     ],
 )
 def test_search_rrf_rejects_invalid_options(kwargs, message) -> None:
-    report = _search_outcomes(
+    queries, results = _search_results(
         [
             record({"query": "one", "hits": [_hit("a", 1)]}),
             record({"query": "two", "hits": [_hit("b", 1)]}),
         ]
     )
     with pytest.raises(ValueError, match=message):
-        SearchResource(FakeTransport()).fuse_rrf(report, **kwargs)
+        SearchResource(FakeTransport()).fuse_rrf(queries, results, **kwargs)
 
 
 @pytest.mark.parametrize(
-    ("report", "message"),
+    ("queries", "results", "message"),
     [
-        ({"results": []}, "list returned by search.many"),
-        ([42], "mapping"),
-        ([{"query": "one", "status": "success", "value": "invalid"}], "value"),
+        (["one"], {"results": []}, "list returned by search.many"),
+        (["one"], [42], "list or None"),
+        (["one"], [[42]], "mapping"),
+        (["one"], [], "same length"),
     ],
 )
-def test_search_rrf_rejects_invalid_outcome_shapes(report, message) -> None:
+def test_search_rrf_rejects_invalid_result_shapes(queries, results, message) -> None:
     with pytest.raises(ValueError, match=message):
-        SearchResource(FakeTransport()).fuse_rrf(report)
+        SearchResource(FakeTransport()).fuse_rrf(queries, results)
 
 
 def test_search_rrf_refuses_non_positive_source_rank() -> None:
+    queries, results = _search_results([record({"query": "bad", "hits": [_hit("a", 0)]})])
     with pytest.raises(ValueError, match="rank"):
-        SearchResource(FakeTransport()).fuse_rrf(
-            _search_outcomes([record({"query": "bad", "hits": [_hit("a", 0)]})])
-        )
+        SearchResource(FakeTransport()).fuse_rrf(queries, results)
 
 
 def test_search_rrf_applies_domain_policy_before_limit() -> None:
     search = SearchResource(FakeTransport())
-    report = _search_outcomes(
+    queries, results = _search_results(
         [
             record(
                 {
@@ -1108,7 +1114,8 @@ def test_search_rrf_applies_domain_policy_before_limit() -> None:
     )
 
     result = search.fuse_rrf(
-        report,
+        queries,
+        results,
         exclude_domains=["Instagram.COM."],
         domain_weights={"noise.example": 0.1},
         max_per_domain=1,
@@ -1127,20 +1134,22 @@ def test_search_rrf_applies_domain_policy_before_limit() -> None:
 
 
 def test_search_rrf_uses_most_specific_domain_weight() -> None:
+    queries, results = _search_results(
+        [
+            record(
+                {
+                    "query": "one",
+                    "hits": [
+                        _hit("https://docs.example.com/a", 1, backend="web"),
+                        _hit("https://blog.example.com/a", 2, backend="web"),
+                    ],
+                }
+            )
+        ]
+    )
     result = SearchResource(FakeTransport()).fuse_rrf(
-        _search_outcomes(
-            [
-                record(
-                    {
-                        "query": "one",
-                        "hits": [
-                            _hit("https://docs.example.com/a", 1, backend="web"),
-                            _hit("https://blog.example.com/a", 2, backend="web"),
-                        ],
-                    }
-                )
-            ]
-        ),
+        queries,
+        results,
         domain_weights={"example.com": 0.25, "docs.example.com": 2.0},
     )
 
@@ -1152,17 +1161,19 @@ def test_search_rrf_uses_most_specific_domain_weight() -> None:
 
 
 def test_search_rrf_domain_policy_ignores_non_web_and_malformed_sources() -> None:
+    queries, results = _search_results(
+        [
+            record(
+                {
+                    "query": "one",
+                    "hits": [_hit("local-document", 1), _hit("https://[invalid", 2)],
+                }
+            )
+        ]
+    )
     result = SearchResource(FakeTransport()).fuse_rrf(
-        _search_outcomes(
-            [
-                record(
-                    {
-                        "query": "one",
-                        "hits": [_hit("local-document", 1), _hit("https://[invalid", 2)],
-                    }
-                )
-            ]
-        ),
+        queries,
+        results,
         exclude_domains=["example.com"],
         max_per_domain=1,
     )
@@ -1183,9 +1194,9 @@ def test_search_rrf_domain_policy_ignores_non_web_and_malformed_sources() -> Non
     ],
 )
 def test_search_rrf_rejects_invalid_domain_policy(kwargs, message) -> None:
-    report = _search_outcomes([record({"query": "one", "hits": [_hit("a", 1)]})])
+    queries, results = _search_results([record({"query": "one", "hits": [_hit("a", 1)]})])
     with pytest.raises(ValueError, match=message):
-        SearchResource(FakeTransport()).fuse_rrf(report, **kwargs)
+        SearchResource(FakeTransport()).fuse_rrf(queries, results, **kwargs)
 
 
 def test_search_rrf_ignores_separate_failures() -> None:
@@ -1201,16 +1212,15 @@ def test_search_rrf_ignores_separate_failures() -> None:
             "retry_after_seconds": 2.0,
         }
     )
-    report = _search_outcomes([], failures=[failure], input_count=1)
+    queries, results = _search_results([], failures=[failure], input_count=1)
 
-    result = SearchResource(FakeTransport()).fuse_rrf(report)
+    result = SearchResource(FakeTransport()).fuse_rrf(queries, results)
 
     assert result == []
-    assert report[0].status == "failure"
-    assert report[0].error.code == "provider_rate_limited"
+    assert results == [None]
 
 
-def test_content_grep_returns_matches_and_source_aligned_status(tmp_path, monkeypatch) -> None:
+def test_content_grep_returns_matches_and_source_aligned_results(tmp_path, monkeypatch) -> None:
     output_path = tmp_path / "output.json"
     monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
 
@@ -1263,7 +1273,7 @@ def test_content_grep_returns_matches_and_source_aligned_status(tmp_path, monkey
             )
 
     transport = GrepTransport()
-    outcomes = ContentResource(transport).grep(
+    results = ContentResource(transport).grep(
         "target",
         sources=["source_1", "source_2"],
         mode="literal",
@@ -1273,36 +1283,25 @@ def test_content_grep_returns_matches_and_source_aligned_status(tmp_path, monkey
         limit_per_source=4,
     )
 
-    assert len(outcomes) == 2
-    success, failed = outcomes
+    assert len(results) == 2
+    success, failed = results
     assert isinstance(success, Record)
     assert dict(success) == {
-        "input_index": 0,
         "source": "source_1",
-        "status": "success",
-        "value": {
-            "source": "source_1",
-            "title": "One",
-            "matches": [
-                {
-                    "line": 3,
-                    "text": "target",
-                    "before": [],
-                    "after": [],
-                    "spans": [{"start_character": 0, "end_character": 6}],
-                }
-            ],
-            "next_start_line": None,
-        },
-        "error": None,
+        "title": "One",
+        "matches": [
+            {
+                "line": 3,
+                "text": "target",
+                "before": [],
+                "after": [],
+                "spans": [{"start_character": 0, "end_character": 6}],
+            }
+        ],
+        "next_start_line": None,
     }
-    assert success.value.matches[0].spans[0].end_character == 6
-    assert failed.input_index == 1
-    assert failed.source == "source_2"
-    assert failed.status == "failure"
-    assert failed.value is None
-    assert failed.error.code == "provider_not_found"
-    assert failed.error.provider_status == 404
+    assert success.matches[0].spans[0].end_character == 6
+    assert failed is None
     warning = json.loads(output_path.read_text(encoding="utf-8"))["warnings"][0]
     assert warning["method"] == "content.grep"
     assert warning["failures"][0]["code"] == "provider_not_found"
@@ -1321,6 +1320,30 @@ def test_content_grep_returns_matches_and_source_aligned_status(tmp_path, monkey
             },
         )
     ]
+
+
+def test_content_grep_whole_call_failure_returns_aligned_none(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class FailedGrepTransport:
+        def call(self, method, params):
+            assert method == "content.grep"
+            del params
+            raise BrokerError(
+                "Broker transport failed.",
+                code="broker_transport_error",
+                retryable=True,
+            )
+
+    sources = ["source_1", "source_2"]
+    results = ContentResource(FailedGrepTransport()).grep("target", sources=sources)
+
+    assert results == [None, None]
+    warning = json.loads(output_path.read_text(encoding="utf-8"))["warnings"][0]
+    assert warning["method"] == "content.grep"
+    assert warning["success_count"] == 0
+    assert [detail["source"] for detail in warning["failures"]] == sources
 
 
 def test_content_grep_keeps_duplicate_sources_separate_by_input_position() -> None:
@@ -1380,13 +1403,17 @@ def test_content_grep_keeps_duplicate_sources_separate_by_input_position() -> No
                 }
             )
 
-    outcomes = ContentResource(DuplicateGrepTransport()).grep(
+    results = ContentResource(DuplicateGrepTransport()).grep(
         "target", sources=["same-source", "same-source"], mode="literal"
     )
 
-    assert [outcome.source for outcome in outcomes] == ["same-source", "same-source"]
-    assert [outcome.value.matches[0].line for outcome in outcomes] == [2, 8]
-    assert [outcome.value.next_start_line for outcome in outcomes] == [3, None]
+    assert all(result is not None for result in results)
+    assert [result.source for result in results if result is not None] == [
+        "same-source",
+        "same-source",
+    ]
+    assert [result.matches[0].line for result in results if result is not None] == [2, 8]
+    assert [result.next_start_line for result in results if result is not None] == [3, None]
 
 
 def test_content_fetch_forwards_one_source() -> None:
@@ -1399,11 +1426,11 @@ def test_content_fetch_forwards_one_source() -> None:
             return record({"source": params["source"], "text": "body", "metadata": {}})
 
     transport = FetchTransport()
-    outcome = ContentResource(transport).fetch("source_1")
+    document = ContentResource(transport).fetch("source_1")
 
-    assert outcome.status == "success"
-    assert outcome.value.source == "source_1"
-    assert outcome.value.text == "body"
+    assert document is not None
+    assert document.source == "source_1"
+    assert document.text == "body"
     assert transport.calls == [("content.fetch", {"source": "source_1"})]
 
 
@@ -1453,32 +1480,17 @@ def test_content_fetch_many_is_bounded_aligned_and_preserves_duplicates(
                     self.active -= 1
 
     transport = FetchManyTransport()
-    outcomes = ContentResource(transport).fetch_many(
+    results = ContentResource(transport).fetch_many(
         [" slow ", "failed", "fast", "slow"],
         concurrency=2,
     )
 
-    assert [outcome.source for outcome in outcomes] == ["slow", "failed", "fast", "slow"]
-    assert [outcome.status for outcome in outcomes] == [
-        "success",
-        "failure",
-        "success",
-        "success",
-    ]
-    assert outcomes[0].value.text == "body-slow"
-    assert outcomes[0].error is None
-    assert outcomes[1].value is None
-    assert dict(outcomes[1].error) == {
-        "code": "provider_timeout",
-        "message": "Document provider timed out.",
-        "retryable": True,
-        "attempts": 3,
-        "provider_status": None,
-        "retry_after_seconds": None,
-        "provider": "test",
-        "component": "document",
-        "scope": "provider",
-    }
+    assert results[0] is not None
+    assert results[1] is None
+    assert results[2] is not None
+    assert results[3] is not None
+    assert [results[index].source for index in (0, 2, 3)] == ["slow", "fast", "slow"]
+    assert results[0].text == "body-slow"
     assert transport.max_active == 2
     assert transport.calls.count("slow") == 2
     assert transport.active == 0
@@ -1516,11 +1528,7 @@ def test_content_fetch_many_returns_all_operational_failures(
             )
 
     provider = ContentResource(FailingTransport(code="provider_timeout")).fetch_many(["one", "two"])
-    assert [outcome.status for outcome in provider] == ["failure", "failure"]
-    assert [outcome.error.code for outcome in provider] == [
-        "provider_timeout",
-        "provider_timeout",
-    ]
+    assert provider == [None, None]
 
     system_codes = {
         "broker_transport_error",
@@ -1529,9 +1537,8 @@ def test_content_fetch_many_returns_all_operational_failures(
         "permission_denied",
     }
     for code in sorted(system_codes):
-        outcomes = ContentResource(FailingTransport(code=code)).fetch_many(["one", "two"])
-        assert [outcome.status for outcome in outcomes] == ["failure", "failure"]
-        assert {outcome.error.code for outcome in outcomes} == {code}
+        results = ContentResource(FailingTransport(code=code)).fetch_many(["one", "two"])
+        assert results == [None, None]
 
     class MixedSystemTransport(FailingTransport):
         def call(self, method, params):
@@ -1542,16 +1549,14 @@ def test_content_fetch_many_returns_all_operational_failures(
             raise BrokerError(f"{code} for {params['source']}", code=code, retryable=False)
 
     mixed_system = ContentResource(MixedSystemTransport(code="unused")).fetch_many(["one", "two"])
-    assert [outcome.error.code for outcome in mixed_system] == [
-        "broker_transport_error",
-        "broker_protocol_error",
-    ]
+    assert mixed_system == [None, None]
 
     mixed = ContentResource(
         FailingTransport(code="broker_transport_error", succeed={"one"})
     ).fetch_many(["one", "two"])
-    assert [outcome.status for outcome in mixed] == ["success", "failure"]
-    assert mixed[1].error.code == "broker_transport_error"
+    assert mixed[0] is not None
+    assert mixed[0].source == "one"
+    assert mixed[1] is None
 
 
 def test_content_fetch_many_validates_before_fanout_and_handles_empty_input() -> None:
@@ -1609,7 +1614,7 @@ def test_content_fetch_many_failure_warnings_are_strictly_bounded(
                 attempts=3,
             )
 
-    outcomes = ContentResource(FailedTransport()).fetch_many(
+    results = ContentResource(FailedTransport()).fetch_many(
         [f"source-{index}" for index in range(64)]
     )
 
@@ -1620,8 +1625,7 @@ def test_content_fetch_many_failure_warnings_are_strictly_bounded(
     warning = payload["warnings"][0]
     assert len(encoded_warnings) <= 4_096
     assert len(warning["failures"]) + warning["omitted_failure_count"] == 64
-    assert all(outcome.status == "failure" for outcome in outcomes)
-    assert all(len(outcome.error.message) <= 1_024 for outcome in outcomes)
+    assert results == [None] * 64
 
 
 def test_content_read_accepts_one_source_and_returns_one_record() -> None:
@@ -1634,7 +1638,7 @@ def test_content_read_accepts_one_source_and_returns_one_record() -> None:
             return record({"source": params["source"], "text": "body"})
 
     transport = ReadTransport()
-    outcome = ContentResource(transport).read(
+    result = ContentResource(transport).read(
         "source_1",
         start_line=3,
         start_character=2,
@@ -1642,9 +1646,9 @@ def test_content_read_accepts_one_source_and_returns_one_record() -> None:
         max_chars=50,
     )
 
-    assert outcome.status == "success"
-    assert outcome.source == "source_1"
-    assert outcome.value.text == "body"
+    assert result is not None
+    assert result.source == "source_1"
+    assert result.text == "body"
     assert transport.calls == [
         (
             "content.read",
@@ -1659,7 +1663,7 @@ def test_content_read_accepts_one_source_and_returns_one_record() -> None:
     ]
 
 
-def test_content_read_returns_failure_outcome_and_records_warning(tmp_path, monkeypatch) -> None:
+def test_content_read_returns_none_and_records_warning(tmp_path, monkeypatch) -> None:
     output_path = tmp_path / "output.json"
     monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
 
@@ -1676,12 +1680,9 @@ def test_content_read_returns_failure_outcome_and_records_warning(tmp_path, monk
                 scope="resource",
             )
 
-    outcome = ContentResource(FailedReadTransport()).read("https://example.com/missing")
+    result = ContentResource(FailedReadTransport()).read("https://example.com/missing")
 
-    assert outcome.status == "failure"
-    assert outcome.value is None
-    assert outcome.error.code == "provider_not_found"
-    assert outcome.error.provider == "jina"
+    assert result is None
     warnings = json.loads(output_path.read_text(encoding="utf-8"))["warnings"]
     assert len(warnings) == 1
     warning = warnings[0]
@@ -1738,15 +1739,14 @@ def test_content_passages_returns_nested_records() -> None:
             )
 
     transport = PassageTransport()
-    outcome = ContentResource(transport).passages(
+    report = ContentResource(transport).passages(
         "revenue singapore",
         sources=["source_1", "source_1"],
         limit=5,
         limit_per_source=2,
     )
 
-    assert outcome.status == "success"
-    report = outcome.value
+    assert report is not None
     assert isinstance(report.passages[0], Record)
     assert isinstance(report.passages[0].coordinates, Record)
     assert "locator" not in report.passages[0]
@@ -1763,6 +1763,46 @@ def test_content_passages_returns_nested_records() -> None:
             },
         )
     ]
+
+
+def test_content_passages_partial_failure_returns_report_and_warning(tmp_path, monkeypatch) -> None:
+    output_path = tmp_path / "output.json"
+    monkeypatch.setenv("OPENSAC_OUTPUT_PATH", str(output_path))
+
+    class PartialPassageTransport:
+        def call(self, method, params):
+            assert method == "content.passages"
+            del params
+            return record(
+                {
+                    "query": "target",
+                    "passages": [],
+                    "failures": [
+                        {
+                            "input_index": 1,
+                            "source": "source_2",
+                            "code": "provider_timeout",
+                            "message": "Document provider timed out.",
+                            "retryable": True,
+                            "attempts": 1,
+                        }
+                    ],
+                    "warnings": [],
+                    "input_count": 2,
+                    "unique_source_count": 2,
+                }
+            )
+
+    report = ContentResource(PartialPassageTransport()).passages(
+        "target", sources=["source_1", "source_2"]
+    )
+
+    assert report is not None
+    assert report.failures[0].source == "source_2"
+    warning = json.loads(output_path.read_text(encoding="utf-8"))["warnings"][0]
+    assert warning["method"] == "content.passages"
+    assert warning["success_count"] == 1
+    assert warning["failure_count"] == 1
 
 
 def test_content_rejects_record_inputs_before_transport() -> None:
@@ -1806,10 +1846,9 @@ def test_capabilities_resource_uses_session_broker_operation() -> None:
             return record({"contracts": {"sandbox": 14, "capability": 15}})
 
     transport = SessionTransport()
-    outcome = CapabilitiesResource(transport)()
+    capabilities = CapabilitiesResource(transport)()
 
-    assert outcome.status == "success"
-    capabilities = outcome.value
+    assert capabilities is not None
     assert capabilities.contracts.sandbox == 14
     assert capabilities.contracts.capability == 15
     assert transport.calls == [("session.capabilities", {})]
@@ -1828,7 +1867,7 @@ class ExtractionTransport:
 def test_extract_returns_validated_object_and_forwards_repair() -> None:
     transport = ExtractionTransport({"matches": True})
 
-    outcome = LLMResource(transport).extract(
+    result = LLMResource(transport).extract(
         {"text": "yes"},
         instruction="Classify the item",
         schema={
@@ -1840,9 +1879,8 @@ def test_extract_returns_validated_object_and_forwards_repair() -> None:
         repair_attempts=2,
     )
 
-    assert isinstance(outcome, Record)
-    assert outcome.status == "success"
-    assert outcome.value.matches is True
+    assert isinstance(result, Record)
+    assert result.matches is True
     assert transport.calls[0] == (
         "llm.extract",
         {
@@ -1917,7 +1955,7 @@ def test_extract_many_is_bounded_aligned_and_does_not_echo_items(
         "required": ["label"],
     }
     transport = ExtractManyTransport()
-    outcomes = LLMResource(transport).extract_many(
+    results = LLMResource(transport).extract_many(
         [{"id": "slow"}, {"id": "failed"}, {"id": "fast"}, {"id": "slow"}],
         instruction="Classify each item",
         schema=schema,
@@ -1926,18 +1964,13 @@ def test_extract_many_is_bounded_aligned_and_does_not_echo_items(
         repair_attempts=1,
     )
 
-    assert [outcome.input_index for outcome in outcomes] == [0, 1, 2, 3]
-    assert [outcome.status for outcome in outcomes] == [
-        "success",
-        "failure",
-        "success",
-        "success",
-    ]
-    assert outcomes[0].value.label == "slow"
-    assert outcomes[0].error is None
-    assert outcomes[1].value is None
-    assert outcomes[1].error.code == "schema_mismatch"
-    assert all("item" not in outcome for outcome in outcomes)
+    assert results[0] is not None
+    assert results[0].label == "slow"
+    assert results[1] is None
+    assert results[2] is not None
+    assert results[2].label == "fast"
+    assert results[3] is not None
+    assert results[3].label == "slow"
     assert transport.max_active == 2
     assert transport.active == 0
     assert all(call["instruction"] == "Classify each item" for call in transport.calls)
@@ -1994,11 +2027,7 @@ def test_extract_many_preserves_all_operational_failures() -> None:
         [{"id": "one"}, {"id": "two"}],
         **kwargs,
     )
-    assert [outcome.status for outcome in provider] == ["failure", "failure"]
-    assert [outcome.error.code for outcome in provider] == [
-        "provider_timeout",
-        "provider_timeout",
-    ]
+    assert provider == [None, None]
 
     system_codes = {
         "broker_transport_error",
@@ -2007,12 +2036,11 @@ def test_extract_many_preserves_all_operational_failures() -> None:
         "permission_denied",
     }
     for code in sorted(system_codes):
-        outcomes = LLMResource(FailingTransport(code)).extract_many(
+        results = LLMResource(FailingTransport(code)).extract_many(
             [{"id": "one"}, {"id": "two"}],
             **kwargs,
         )
-        assert [outcome.status for outcome in outcomes] == ["failure", "failure"]
-        assert {outcome.error.code for outcome in outcomes} == {code}
+        assert results == [None, None]
 
     class MixedSystemTransport(FailingTransport):
         def call(self, method, params):
@@ -2028,10 +2056,7 @@ def test_extract_many_preserves_all_operational_failures() -> None:
         [{"id": "one"}, {"id": "two"}],
         **kwargs,
     )
-    assert [outcome.error.code for outcome in mixed_system] == [
-        "broker_transport_error",
-        "broker_protocol_error",
-    ]
+    assert mixed_system == [None, None]
 
 
 def test_workspace_round_trip_and_path_confinement(tmp_path) -> None:
@@ -2226,7 +2251,9 @@ def test_a_result_answers_to_either_spelling_of_a_field_read() -> None:
     they have read returns, and the attribute-only form turns that prior into
     `'SearchHit' object is not subscriptable`, which ends the turn.
     """
-    hit = SearchResource(FakeTransport())("query").value[0]
+    hits = SearchResource(FakeTransport())("query")
+    assert hits is not None
+    hit = hits[0]
     assert hit["source"] == hit.source == "source_1"
     assert hit.get("title") == "Title"
     assert hit.get("nonexistent") is None
@@ -2262,7 +2289,9 @@ def test_a_result_written_to_the_workspace_comes_back_readable(tmp_path) -> None
     every other line around it is written.
     """
     workspace = WorkspaceResource(str(tmp_path))
-    hit = SearchResource(FakeTransport())("query").value[0]
+    hits = SearchResource(FakeTransport())("query")
+    assert hits is not None
+    hit = hits[0]
 
     # Passed straight in: `default=str` would have written the repr instead,
     # and a later turn subscripting that string would get a character.

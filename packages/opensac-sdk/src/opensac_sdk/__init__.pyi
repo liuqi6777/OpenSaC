@@ -10,29 +10,6 @@ class _Record(Protocol):
     def items(self) -> ItemsView[str, Any]: ...
     def values(self) -> ValuesView[Any]: ...
 
-class _OutcomeErrorRecord(_Record, Protocol):
-    code: str
-    message: str
-    retryable: bool
-    attempts: int | None
-    provider_status: int | None
-    retry_after_seconds: float | None
-    provider: str | None
-    component: str | None
-    scope: Literal["request", "resource", "provider", "unknown"] | None
-
-class _Success[ValueT](_Record, Protocol):
-    status: Literal["success"]
-    value: ValueT
-    error: None
-
-class _Failure(_Record, Protocol):
-    status: Literal["failure"]
-    value: None
-    error: _OutcomeErrorRecord
-
-type Outcome[ValueT] = _Success[ValueT] | _Failure
-
 class _FailureRecord(_Record, Protocol):
     code: str
     message: str
@@ -70,32 +47,12 @@ class _FusedSearchHitRecord(_SearchHitRecord, Protocol):
     fused_score: float
     fused_rank: int
 
-class _SearchManySuccess(_Success[list[_SearchHitRecord]], Protocol):
-    input_index: int
-    query: str
-
-class _SearchManyFailure(_Failure, Protocol):
-    input_index: int
-    query: str
-
-type _SearchManyOutcome = _SearchManySuccess | _SearchManyFailure
-
 class _DocumentRecord(_Record, Protocol):
     source: str
     text: str
     title: str
     date: str | None
     metadata: dict[str, Any]
-
-class _FetchManySuccess(_Success[_DocumentRecord], Protocol):
-    input_index: int
-    source: str
-
-class _FetchManyFailure(_Failure, Protocol):
-    input_index: int
-    source: str
-
-type _FetchManyOutcome = _FetchManySuccess | _FetchManyFailure
 
 class _ContentCursorRecord(_Record, Protocol):
     start_line: int
@@ -134,16 +91,6 @@ class _GrepResultRecord(_Record, Protocol):
     matches: list[_ContentMatchRecord]
     next_start_line: int | None
 
-class _GrepSuccess(_Success[_GrepResultRecord], Protocol):
-    input_index: int
-    source: str
-
-class _GrepFailure(_Failure, Protocol):
-    input_index: int
-    source: str
-
-type _GrepOutcome = _GrepSuccess | _GrepFailure
-
 class _PassageCoordinatesRecord(_Record, Protocol):
     start_line: int
     start_character: int
@@ -167,14 +114,6 @@ class _PassageReportRecord(_Record, Protocol):
     warnings: list[_FailureRecord]
     input_count: int
     unique_source_count: int
-
-class _ExtractManySuccess(_Success[dict[str, Any]], Protocol):
-    input_index: int
-
-class _ExtractManyFailure(_Failure, Protocol):
-    input_index: int
-
-type _ExtractManyOutcome = _ExtractManySuccess | _ExtractManyFailure
 
 class _ContractsRecord(_Record, Protocol):
     sandbox: int
@@ -215,7 +154,7 @@ class _SearchResource(Protocol):
         limit: int = ...,
         offset: int = ...,
         include_domains: list[str] | None = ...,
-    ) -> Outcome[list[_SearchHitRecord]]: ...
+    ) -> list[_SearchHitRecord] | None: ...
     def many(
         self,
         queries: list[str],
@@ -224,10 +163,11 @@ class _SearchResource(Protocol):
         offset: int = ...,
         concurrency: int = ...,
         include_domains: list[str] | None = ...,
-    ) -> list[_SearchManyOutcome]: ...
+    ) -> list[list[_SearchHitRecord] | None]: ...
     def fuse_rrf(
         self,
-        report: list[_SearchManyOutcome],
+        queries: list[str],
+        results: list[list[_SearchHitRecord] | None],
         *,
         weights: list[float] | None = ...,
         k: int = ...,
@@ -238,13 +178,13 @@ class _SearchResource(Protocol):
     ) -> list[_FusedSearchHitRecord]: ...
 
 class _ContentResource(Protocol):
-    def fetch(self, source: str) -> Outcome[_DocumentRecord]: ...
+    def fetch(self, source: str) -> _DocumentRecord | None: ...
     def fetch_many(
         self,
         sources: list[str],
         *,
         concurrency: int = ...,
-    ) -> list[_FetchManyOutcome]: ...
+    ) -> list[_DocumentRecord | None]: ...
     def read(
         self,
         source: str,
@@ -253,7 +193,7 @@ class _ContentResource(Protocol):
         start_character: int = ...,
         line_count: int = ...,
         max_chars: int = ...,
-    ) -> Outcome[_ContentSliceRecord]: ...
+    ) -> _ContentSliceRecord | None: ...
     def grep(
         self,
         pattern: str,
@@ -264,7 +204,7 @@ class _ContentResource(Protocol):
         start_line: int = ...,
         context_lines: int = ...,
         limit_per_source: int = ...,
-    ) -> list[_GrepOutcome]: ...
+    ) -> list[_GrepResultRecord | None]: ...
     def passages(
         self,
         query: str,
@@ -272,7 +212,7 @@ class _ContentResource(Protocol):
         sources: list[str],
         limit: int = ...,
         limit_per_source: int = ...,
-    ) -> Outcome[_PassageReportRecord]: ...
+    ) -> _PassageReportRecord | None: ...
 
 class _LLMResource(Protocol):
     def complete(
@@ -282,7 +222,7 @@ class _LLMResource(Protocol):
         system: str | None = ...,
         temperature: float = ...,
         max_tokens: int | None = ...,
-    ) -> Outcome[str]: ...
+    ) -> str | None: ...
     def extract(
         self,
         item: Any,
@@ -291,7 +231,7 @@ class _LLMResource(Protocol):
         schema: dict[str, Any],
         max_tokens: int | None = ...,
         repair_attempts: int = ...,
-    ) -> Outcome[dict[str, Any]]: ...
+    ) -> dict[str, Any] | None: ...
     def extract_many(
         self,
         items: list[Any],
@@ -301,10 +241,10 @@ class _LLMResource(Protocol):
         concurrency: int = ...,
         max_tokens: int | None = ...,
         repair_attempts: int = ...,
-    ) -> list[_ExtractManyOutcome]: ...
+    ) -> list[dict[str, Any] | None]: ...
 
 class _CapabilitiesResource(Protocol):
-    def __call__(self) -> Outcome[_CapabilitiesRecord]: ...
+    def __call__(self) -> _CapabilitiesRecord | None: ...
 
 class _WorkspaceResource(Protocol):
     def write_jsonl(self, relative_path: str, rows: list[Any]) -> None: ...
