@@ -55,14 +55,14 @@ queries = list(
         ]
     )
 )
-search_outcomes = sdk.search.many(queries, limit=10, concurrency=6)
+search_results = sdk.search.many(queries, limit=10, concurrency=6)
 
-fusion = sdk.search.fuse_rrf(search_outcomes, k=60)
+fusion = sdk.search.fuse_rrf(queries, search_results, k=60)
 leader_sources = []
-for outcome in search_outcomes:
-    if outcome.status != "success":
+for result in search_results:
+    if result is None:
         continue
-    for hit in outcome.value[:2]:
+    for hit in result[:2]:
         if hit.source not in leader_sources:
             leader_sources.append(hit.source)
 
@@ -154,28 +154,27 @@ for name, spec in constraints.items():
     for start in range(0, len(available), CONTENT_BATCH):
         chunk = available[start : start + CONTENT_BATCH]
         attempted[name].update(chunk)
-        grep_outcomes = sdk.content.grep(pattern, sources=chunk, context_lines=2)
+        grep_results = sdk.content.grep(pattern, sources=chunk, context_lines=2)
 
         seen_matches = set()
-        for outcome in grep_outcomes:
-            if outcome.status != "success":
+        for result in grep_results:
+            if result is None:
                 continue
-            for match in outcome.value.matches:
+            for match in result.matches:
                 if reads_for_constraint >= READ_LIMIT_PER_CONSTRAINT:
                     break
-                if outcome.source in seen_matches:
+                if result.source in seen_matches:
                     continue
-                seen_matches.add(outcome.source)
+                seen_matches.add(result.source)
                 reads_for_constraint += 1
-                read_outcome = sdk.content.read(
-                    outcome.source,
+                passage = sdk.content.read(
+                    result.source,
                     start_line=max(match.line - 10, 1),
                     line_count=40,
                     max_chars=16_000,
                 )
-                if read_outcome.status != "success":
+                if passage is None:
                     continue
-                passage = read_outcome.value
                 if not passage.text.strip() or not compiled.search(passage.text):
                     continue
 

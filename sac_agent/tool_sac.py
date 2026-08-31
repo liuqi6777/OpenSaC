@@ -43,7 +43,8 @@ from opensac_sdk import sdk
 
 Core SDK surface:
 
-- Search with `sdk.search.many(...)`; combine its outcomes with `sdk.search.fuse_rrf(...)`.
+- Search with `sdk.search.many(...)`; combine its aligned results with
+  `sdk.search.fuse_rrf(queries, results, ...)`.
 - Inspect documents with `sdk.content.grep(...)` and `sdk.content.read(...)`; read lines are
   1-based, character positions are 0-based, and `window.next` continues losslessly.
 - Use single-item `sdk.llm.extract(...)` only for bounded semantic transformation.
@@ -68,8 +69,8 @@ When search results need interpretation, stop after a bounded preview:
 
 ```python
 queries = ['"exact phrase" entity', "entity alternate wording"]
-search_outcomes = sdk.search.many(queries, limit=5)
-for item in sdk.search.fuse_rrf(search_outcomes)[:5]:
+search_results = sdk.search.many(queries, limit=5)
+for item in sdk.search.fuse_rrf(queries, search_results)[:5]:
     print(f"CANDIDATE source={item.source!r} title={item.title!r}")
 print("NEXT: choose sources and checks")
 ```
@@ -81,18 +82,17 @@ import re
 
 sources = ["selected-source-url"]
 pattern = r"target phrase"
-outcomes = sdk.content.grep(pattern, sources=sources, context_lines=2)
+results = sdk.content.grep(pattern, sources=sources, context_lines=2)
 passage = None
-for outcome in outcomes:
-    if outcome.status != "success" or not outcome.value.matches:
+for result in results:
+    if result is None or not result.matches:
         continue
-    match = outcome.value.matches[0]
-    read_outcome = sdk.content.read(
-        outcome.source, start_line=max(match.line - 8, 1), line_count=30, max_chars=12_000
+    match = result.matches[0]
+    item = sdk.content.read(
+        result.source, start_line=max(match.line - 8, 1), line_count=30, max_chars=12_000
     )
-    if read_outcome.status != "success":
+    if item is None:
         continue
-    item = read_outcome.value
     if re.search(pattern, item.text, re.IGNORECASE):
         passage = item
         break
@@ -109,7 +109,7 @@ Use bounded comprehensions, `filter`, dicts, sets, `sorted`, `any`, and `all` to
 join by source, rank candidates, and measure coverage. Prefer `re`, dates, strings, and arithmetic
 to an extraction call. `extract` cannot call tools, create trusted sources, or certify citation
 labels. Validate its quoted evidence, clean and cap proposed follow-up inputs, then make bounded
-SDK calls. Use `extract_many` for repeated extraction and branch on each generic outcome.
+SDK calls. Use `extract_many` for repeated extraction and branch on each aligned result.
 
 ## Keep the evidence boundary intact
 
@@ -119,10 +119,10 @@ SDK calls. Use `extract_many` for repeated extraction and branch on each generic
   support claims about document content.
 - For every material document-content claim, inspect non-empty text and carry its exact source
   string beside the printed evidence. Prefer primary sources and corroborate disputed claims.
-- `sac_run` renders structured failure warnings automatically. Every broker-backed method returns
-  a generic outcome, or an aligned outcome list for fan-out. Branch on `status == "success"` before
-  consuming `outcome.value`; read failure details from `outcome.error`. Do not add `try/except` or
-  print failures merely to expose them. Empty successful values are valid results.
+- `sac_run` renders structured failure warnings automatically. Broker-backed single-item methods
+  return a result or `None`; fan-out methods return an input-aligned list with `None` in failed
+  positions. Check `is None`, never truthiness, because empty lists, strings, and objects can be
+  successful results. Do not add `try/except` or print failures merely to expose them.
 
 ## End each stage deliberately
 
@@ -147,7 +147,7 @@ Python variables do not survive calls.
 
 Public web URLs remain reusable; local IDs and workspace artifacts are session-bound. On explicit
 `state_lost`, rebuild workspace artifacts and local-ID admission. For an unknown timeout or adapter
-outcome, do not replay blindly: resume only work durable progress proves missing. After a final
+result, do not replay blindly: resume only work durable progress proves missing. After a final
 capability failure, change the query, source, or candidate.
 
 Return the final answer directly as your entire response, without wrapper tags or a preamble.

@@ -8,11 +8,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
-from opensac_sdk._outcome import failure as outcome_failure
-from opensac_sdk._outcome import success as outcome_success
 from opensac_sdk._record import Record, record
 from opensac_sdk._resources import SearchResource, WorkspaceResource
-from opensac_sdk.transport import BrokerError
 
 from opensac.backends.search import SearchHit
 from opensac.sandbox.validator import validate_code
@@ -55,20 +52,15 @@ class FakeSearch:
         self.many_calls: list[tuple[str, ...]] = []
 
     @staticmethod
-    def _success(input_index: int, query: str, hits: list[SearchHit]) -> Record:
-        return outcome_success(
-            [hit.model_dump(mode="json") for hit in hits],
-            context={"input_index": input_index, "query": query},
-        )
+    def _result(hits: list[SearchHit]) -> list[Record]:
+        return [record(hit.model_dump(mode="json")) for hit in hits]
 
-    def many(self, queries: list[str], **_kwargs: object) -> list[Record]:
+    def many(self, queries: list[str], **_kwargs: object) -> list[list[Record] | None]:
         self.many_calls.append(tuple(queries))
         prefix = f"turn_{self.turn}_" if self.vary_by_turn else ""
         if self.hits_per_query == 2:
             return [
-                self._success(
-                    index,
-                    query,
+                self._result(
                     [
                         SearchHit(
                             source=f"doc_{prefix}unique_{index}",
@@ -92,13 +84,11 @@ class FakeSearch:
                         ),
                     ],
                 )
-                for index, query in enumerate(queries)
+                for index, _query in enumerate(queries)
             ]
 
         return [
-            self._success(
-                query_index,
-                query,
+            self._result(
                 [
                     SearchHit(
                         source=f"doc_{prefix}{query_index}_{hit_index}",
@@ -113,11 +103,16 @@ class FakeSearch:
                     for hit_index in range(self.hits_per_query)
                 ],
             )
-            for query_index, query in enumerate(queries)
+            for query_index, _query in enumerate(queries)
         ]
 
-    def fuse_rrf(self, report: list[Record], **kwargs: object):
-        return self._resource.fuse_rrf(report, **kwargs)
+    def fuse_rrf(
+        self,
+        queries: list[str],
+        results: list[list[Record] | None],
+        **kwargs: object,
+    ):
+        return self._resource.fuse_rrf(queries, results, **kwargs)
 
 
 class FakeContent:
@@ -155,21 +150,10 @@ class FakeContent:
         *,
         sources: list[str],
         **_kwargs: object,
-    ) -> list[Record]:
+    ) -> list[Record | None]:
         self.grep_calls.append((pattern, tuple(sources)))
         if self.grep_error:
-            return [
-                outcome_failure(
-                    BrokerError(
-                        "content provider unavailable",
-                        code="provider_unavailable",
-                        retryable=True,
-                        attempts=3,
-                    ),
-                    context={"input_index": index, "source": source},
-                )
-                for index, source in enumerate(sources)
-            ]
+            return [None] * len(sources)
         is_year = "1998" in pattern
         if self.no_matches or (is_year and (self.missing_year or self.turn < self.year_from_turn)):
             matched_index = None
@@ -195,50 +179,27 @@ class FakeContent:
                 }
             )
         failed_index = len(sources) - 1 if self.partial_failure else None
-        outcomes = []
+        results = []
         for index, source in enumerate(sources):
             if index == failed_index:
-                outcomes.append(
-                    outcome_failure(
-                        BrokerError(
-                            "document fetch timed out",
-                            code="provider_timeout",
-                            retryable=True,
-                            attempts=3,
-                        ),
-                        context={"input_index": index, "source": source},
-                    )
-                )
+                results.append(None)
                 continue
-            outcomes.append(
-                outcome_success(
-                    record(
-                        {
-                            "source": source,
-                            "title": source,
-                            "matches": (
-                                [match] if index == matched_index and match is not None else []
-                            ),
-                            "next_start_line": None,
-                        }
-                    ),
-                    context={"input_index": index, "source": source},
+            results.append(
+                record(
+                    {
+                        "source": source,
+                        "title": source,
+                        "matches": [match] if index == matched_index and match is not None else [],
+                        "next_start_line": None,
+                    }
                 )
             )
-        return outcomes
+        return results
 
-    def fetch(self, source: str) -> Record:
+    def fetch(self, source: str) -> Record | None:
         self.fetch_sources.append(source)
         if self.partial_failure and source.endswith("2"):
-            return outcome_failure(
-                BrokerError(
-                    "content provider unavailable",
-                    code="provider_timeout",
-                    retryable=True,
-                    attempts=3,
-                ),
-                context={"source": source},
-            )
+            return None
         parts = []
         if not self.no_matches:
             if self.same_source or source.endswith("1"):
@@ -252,56 +213,42 @@ class FakeContent:
         text = "\n".join(parts) or f"unrelated evidence for {source}"
         if self.long_documents:
             text = f"{'x' * 5_000}\n{text}\n{'y' * 5_000}"
-        return outcome_success(
-            record(
-                {
-                    "source": source,
-                    "title": source,
-                    "date": "1998",
-                    "text": text,
-                    "metadata": {},
-                }
-            ),
-            context={"source": source},
+        return record(
+            {
+                "source": source,
+                "title": source,
+                "date": "1998",
+                "text": text,
+                "metadata": {},
+            }
         )
 
-    def fetch_many(self, sources: list[str], *, concurrency: int = 5) -> list[Record]:
+    def fetch_many(self, sources: list[str], *, concurrency: int = 5) -> list[Record | None]:
         assert concurrency >= 1
-        outcomes = []
-        for input_index, source in enumerate(sources):
-            fetched = self.fetch(source)
-            context = {"input_index": input_index, "source": source}
-            if fetched.status == "failure":
-                outcomes.append(outcome_failure(fetched.error, context=context))
-            else:
-                outcomes.append(outcome_success(fetched.value, context=context))
-        return outcomes
+        return [self.fetch(source) for source in sources]
 
     def read(self, source: str, **kwargs: object) -> Record:
         self.read_sources.append(source)
         start_line = int(kwargs.get("start_line", 1))
         line_count = int(kwargs.get("line_count", 200))
         text = f"{'1998' if start_line > 50 else 'target phrase'} evidence for {source}"
-        return outcome_success(
-            record(
-                {
-                    "source": source,
-                    "title": source,
-                    "date": "1998",
-                    "text": text,
-                    "metadata": {},
-                    "window": {
-                        "start_line": start_line,
-                        "start_character": int(kwargs.get("start_character", 0)),
-                        "end_line": start_line + line_count - 1,
-                        "end_character": len(text),
-                        "total_lines": 200,
-                        "next": None,
-                        "truncated_by_max_chars": False,
-                    },
-                }
-            ),
-            context={"source": source},
+        return record(
+            {
+                "source": source,
+                "title": source,
+                "date": "1998",
+                "text": text,
+                "metadata": {},
+                "window": {
+                    "start_line": start_line,
+                    "start_character": int(kwargs.get("start_character", 0)),
+                    "end_line": start_line + line_count - 1,
+                    "end_character": len(text),
+                    "total_lines": 200,
+                    "next": None,
+                    "truncated_by_max_chars": False,
+                },
+            }
         )
 
     def passages(
@@ -337,18 +284,15 @@ class FakeContent:
                     "ranker": "lexical:bm25",
                 }
             )
-        return outcome_success(
-            record(
-                {
-                    "query": query,
-                    "passages": rows,
-                    "failures": [],
-                    "warnings": [],
-                    "input_count": len(sources),
-                    "unique_source_count": len(set(sources)),
-                }
-            ),
-            context={"query": query},
+        return record(
+            {
+                "query": query,
+                "passages": rows,
+                "failures": [],
+                "warnings": [],
+                "input_count": len(sources),
+                "unique_source_count": len(set(sources)),
+            }
         )
 
 
@@ -421,7 +365,8 @@ def test_skill_keeps_the_core_contract_small_and_schema_neutral() -> None:
             "sdk.search",
             "sdk.content.fetch",
             "sdk.workspace",
-            "outcome.value",
+            "result or `None`",
+            "zip(inputs, results, strict=True)",
             "state_lost",
         )
     )
@@ -551,14 +496,15 @@ def test_contract_documents_mapping_records_and_workspace() -> None:
     assert "sdk.output" not in contract
     assert "Adapter failures occur outside the sandbox" in contract
     assert "0-based, end-exclusive" in contract
-    assert "`read.value.window.next`" in contract
-    assert "Search outcome list" in contract
-    assert "Grep outcome list" in contract
+    assert "`read.window.next`" in contract
+    assert "Search result list" in contract
+    assert "Grep result list" in contract
     assert "sdk.content.fetch(source)" in contract
     assert "sdk.content.fetch_many(sources, *, concurrency=5)" in contract
-    assert "Fetch outcome list" in contract
-    assert "failure outcomes" in contract
-    assert "do not add `try/except`" in contract
+    assert "Fetch result list" in contract
+    assert "return `None`" in contract
+    assert "Check `is None`, never truthiness" in contract
+    assert "Do not add `try/except`" in contract
     assert "sdk.session" not in contract
 
 

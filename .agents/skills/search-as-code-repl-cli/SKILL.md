@@ -11,8 +11,8 @@ Pipe one complete Python cell to `opensac agent-run`:
 opensac agent-run <<'OPENSAC_PY'
 from opensac_sdk import sdk
 
-outcome = sdk.capabilities()
-print(f"capabilities_status={outcome.status}")
+capabilities = sdk.capabilities()
+print(f"capabilities_available={capabilities is not None}")
 OPENSAC_PY
 ```
 
@@ -36,7 +36,7 @@ names, or one workspace schema.
 - Treat one cell as one semantic checkpoint. Compose mechanically linked capability calls and local
   transformations in that cell; split only when the agent must make a new semantic choice, a separate
   output budget is useful, or recovery/debugging matters.
-- Search outcomes are candidate data. Pass source strings, not result records, to content methods.
+- Search results are candidate data. Pass source strings, not result records, to content methods.
   Fetch only selected sources, inspect returned bodies locally, and keep each evidence excerpt beside
   its source and material requirement.
 - If another cell may reuse a successful body, keep the exact returned document in live memory while
@@ -47,7 +47,7 @@ names, or one workspace schema.
   alignment—before a downstream capability call.
 - Represent cumulative state with stable material keys. Start unresolved fields as unknown, keep
   independently testable fields and relations separate, and carry failures and source conflicts.
-  For batches, align outcomes to inputs and derive later inputs from validated rows rather than
+  For batches, align results to inputs and derive later inputs from validated rows rather than
   retyping an anticipated list.
 - Preserve zero, one, or many records when a unit can yield multiple results. Do not collapse a
   record set to one convenient match; derive coverage from normalized rows supporting the answer.
@@ -60,7 +60,8 @@ completion label or every final row.
 
 ## Capability and evidence basics
 
-- Search with `sdk.search(...)` or `sdk.search.many(...)`; optionally fuse results.
+- Search with `sdk.search(...)` or `sdk.search.many(...)`; fuse aligned batches with
+  `sdk.search.fuse_rrf(queries, results, ...)` when useful.
 - Material claims require inspected page text. Snippets help select sources but are not claim
   evidence. Mirrors count as one source family.
 - Make `sdk.content.fetch(...)` or `sdk.content.fetch_many(...)` the first content call for a
@@ -77,7 +78,7 @@ failures, limits, and lifecycle semantics.
 ## Repeated and multi-cell work
 
 Batch repeated units instead of using one `agent-run` per row. Validate upstream keys and membership
-before fan-out, map every success or failure back to its input, and retain cumulative rows only when a
+before fan-out, map every available or missing result back to its input, and retain cumulative rows only when a
 later semantic checkpoint will reuse them.
 
 For closed sets or one-to-many enumerations, read
@@ -91,7 +92,8 @@ the interpreter remains ready. Treat live memory and `sdk.workspace` as independ
 the workspace when durable recovery or reuse after state loss saves meaningful external work.
 
 For recoverable external calls, persist a `started` marker only when replay ambiguity matters, then
-persist item outcomes before later transformation. After an uncertain adapter failure, inspect
+persist item availability or unresolved inputs before later transformation. After an uncertain
+adapter failure, inspect
 relevant globals and durable rows before repeating an external operation.
 
 ## Return bounded observations
@@ -107,16 +109,17 @@ a partial or inconclusive result. No finalization-only cell is needed merely to 
 ## Handle interpreter and adapter failures
 
 Read the rendered observation, including structured OpenSAC warnings and errors; shell status alone
-is insufficient. Every broker-backed SDK method returns a generic outcome, or an input-aligned
-outcome list for fan-out operations. Consume `outcome.value` only after `status == "success"`;
-failures use `outcome.error`, while an empty successful value is valid. OpenSAC renders bounded
+is insufficient. Broker-backed single-item methods return a result or `None`; fan-out methods return
+an input-aligned list with `None` in failed positions. Check `is None`, never truthiness, because
+empty lists, strings, or objects can be successful results. Preserve the original inputs and use
+`zip(inputs, results, strict=True)` when failed-item identity matters. OpenSAC renders bounded
 external-failure warnings automatically, so do not add `try/except` or print failures merely to
-expose them. Carry or persist failures when later dataflow must remember unresolved work.
+expose them. Persist unresolved inputs when later dataflow must remember them.
 
 If an observation reports `state_lost` or `interpreter_lost`, the cell is not replayed and the next
 invocation starts clean. Restore trustworthy workspace data if present, re-admit local IDs, and reuse
 public URLs only when permitted. Adapter failures occur outside the sandbox and may leave execution
-outcome unknown; inspect surviving state before replaying. Adapter `HTTP 401` or `HTTP 403` means host
+result unknown; inspect surviving state before replaying. Adapter `HTTP 401` or `HTTP 403` means host
 credential setup failed; report it without exposing credentials.
 
 Treat every referenced helper as a starting point, not a required pipeline.
