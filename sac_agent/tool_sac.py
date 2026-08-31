@@ -38,7 +38,7 @@ sandbox with `opensac_sdk` preinstalled. Use the SDK only; do not call REST APIs
 Begin programs with:
 
 ```python
-from opensac_sdk import BrokerError, sdk
+from opensac_sdk import sdk
 ```
 
 Core SDK surface:
@@ -84,15 +84,15 @@ pattern = r"target phrase"
 outcomes = sdk.content.grep(pattern, sources=sources, context_lines=2)
 passage = None
 for outcome in outcomes:
-    if outcome.status != "success" or not outcome.matches:
+    if outcome.status != "success" or not outcome.value.matches:
         continue
-    match = outcome.matches[0]
-    try:
-        item = sdk.content.read(
-            outcome.source, start_line=max(match.line - 8, 1), line_count=30, max_chars=12_000
-        )
-    except BrokerError:
+    match = outcome.value.matches[0]
+    read_outcome = sdk.content.read(
+        outcome.source, start_line=max(match.line - 8, 1), line_count=30, max_chars=12_000
+    )
+    if read_outcome.status != "success":
         continue
+    item = read_outcome.value
     if re.search(pattern, item.text, re.IGNORECASE):
         passage = item
         break
@@ -109,7 +109,7 @@ Use bounded comprehensions, `filter`, dicts, sets, `sorted`, `any`, and `all` to
 join by source, rank candidates, and measure coverage. Prefer `re`, dates, strings, and arithmetic
 to an extraction call. `extract` cannot call tools, create trusted sources, or certify citation
 labels. Validate its quoted evidence, clean and cap proposed follow-up inputs, then make bounded
-SDK calls. Loop explicitly and handle `BrokerError` per item when several extractions are needed.
+SDK calls. Use `extract_many` for repeated extraction and branch on each generic outcome.
 
 ## Keep the evidence boundary intact
 
@@ -119,10 +119,10 @@ SDK calls. Loop explicitly and handle `BrokerError` per item when several extrac
   support claims about document content.
 - For every material document-content claim, inspect non-empty text and carry its exact source
   string beside the printed evidence. Prefer primary sources and corroborate disputed claims.
-- `[sac_run]` renders structured failure warnings. For `search.many`, branch on
-  `status == "success"` and read failure details from `outcome.error`; for `content.grep`, treat
-  other statuses as displayable failure text and do not parse them. Empty hits or matches with
-  success status are successful results.
+- `sac_run` renders structured failure warnings automatically. Every broker-backed method returns
+  a generic outcome, or an aligned outcome list for fan-out. Branch on `status == "success"` before
+  consuming `outcome.value`; read failure details from `outcome.error`. Do not add `try/except` or
+  print failures merely to expose them. Empty successful values are valid results.
 
 ## End each stage deliberately
 

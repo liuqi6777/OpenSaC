@@ -39,8 +39,9 @@ def test_repl_skills_preserve_separate_adapter_surfaces() -> None:
 
     expected_links = {f"references/{name}" for name in REFERENCE_NAMES}
     for skill in (mcp_skill, cli_skill):
-        assert "execution_mode=persistent_interpreter" in skill
-        assert "interpreter_state=ready" in skill
+        assert "`persistent_interpreter`" in skill
+        assert "observations intentionally omit execution status metadata" in skill
+        assert "interpreter_state=ready" not in skill
         assert "sdk.workspace" in skill
         assert "4,000" in skill
         assert _linked_references(skill) == expected_links

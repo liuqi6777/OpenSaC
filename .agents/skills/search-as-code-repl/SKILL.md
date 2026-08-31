@@ -8,12 +8,12 @@ description: Run evidence-grounded OpenSAC research through sac_run when the hos
 Invoke `sac_run(code)` with one complete Python cell. The MCP host binds the conversation and owns
 the OpenSAC session; never create, display, or delete REST sessions or kernel identifiers.
 `sac_run` is the outer adapter tool, not a Python API inside the sandbox. Put only the cell body in
-the `code` argument; never call `sac_run` from inside that cell. Import `BrokerError` and `sdk` from
-`opensac_sdk` when needed.
+the `code` argument; never call `sac_run` from inside that cell. Import `sdk` from `opensac_sdk`
+when needed.
 
-The first observation must report `execution_mode=persistent_interpreter`. If it reports another
-mode or omits it, stop and report a configuration mismatch. Reuse the live interpreter only while
-`interpreter_state=ready`; `not_started` has no reusable Python namespace yet.
+This skill is available only when the host is explicitly configured for
+`persistent_interpreter`; observations intentionally omit execution status metadata. Reuse the live
+interpreter until an explicit `state_lost` or `interpreter_lost` error reports that it was discarded.
 
 Choose the research strategy yourself. This skill teaches how to encode that strategy as OpenSAC
 code; it does not prescribe query counts, source choices, cell stages, stopping rules, live-variable
@@ -94,14 +94,15 @@ a partial or inconclusive result. No finalization-only cell is needed merely to 
 
 ## Handle interpreter and adapter failures
 
-For `search.many`, branch on `status == "success"`; failed rows use `outcome.error`, while an empty
-successful result is valid. Carry failures rather than hard-coding zero failures. A caught
-`BrokerError` leaves that work unresolved; return bounded failure data and let the next agent
-decision choose recovery.
+Every broker-backed SDK method returns a generic outcome, or an input-aligned outcome list for
+fan-out operations. Consume `outcome.value` only after `status == "success"`; failures use
+`outcome.error`, while an empty successful value is valid. OpenSAC renders bounded external-failure
+warnings automatically, so do not add `try/except` or print failures merely to expose them. Carry or
+persist failures when later dataflow must remember unresolved work.
 
-If an observation reports `interpreter_state=lost` or `state_lost`, the cell is not replayed and the
-next invocation starts clean. Restore trustworthy workspace data if present, re-admit local IDs, and
-reuse public URLs only when permitted. Adapter failures occur outside the sandbox and may leave
-execution outcome unknown; inspect surviving state before replaying.
+If an observation reports `state_lost` or `interpreter_lost`, the cell is not replayed and the next
+invocation starts clean. Restore trustworthy workspace data if present, re-admit local IDs, and reuse
+public URLs only when permitted. Adapter failures occur outside the sandbox and may leave execution
+outcome unknown; inspect surviving state before replaying.
 
 Treat every referenced helper as a starting point, not a required pipeline.

@@ -9,9 +9,10 @@ Pipe one complete Python research program to `opensac agent-run`:
 
 ```bash
 opensac agent-run <<'OPENSAC_PY'
-from opensac_sdk import BrokerError, sdk
+from opensac_sdk import sdk
 
-print(sdk.capabilities())
+outcome = sdk.capabilities()
+print(f"capabilities_status={outcome.status}")
 OPENSAC_PY
 ```
 
@@ -98,13 +99,13 @@ announce completion.
 
 ## Handle failures and state loss
 
-Read the rendered observation, including sandbox exit code, stdout, stderr, and warnings; shell
-status alone is insufficient. For `search.many`, branch on `status == "success"`; failed rows use
-`outcome.error`, while an empty successful result is valid. Carry failures rather than hard-coding
-zero failures.
-
-A caught `BrokerError` leaves that work unresolved. Return bounded failure data and let the next
-agent decision choose recovery; do not blindly retry external failures.
+Read the rendered observation, including stdout and structured OpenSAC warnings or errors; shell
+status alone is insufficient. Every broker-backed SDK method returns a generic outcome, or an
+input-aligned outcome list for fan-out operations. Consume `outcome.value` only after
+`status == "success"`; failures use `outcome.error`, while an empty successful value is valid.
+OpenSAC renders bounded external-failure warnings automatically, so do not add `try/except` or print
+failures merely to expose them. Carry or persist failures when later dataflow must remember
+unresolved work, and do not blindly retry them.
 
 Public web URLs remain reusable; local IDs are session-bound. On `state_lost`, the program was not
 replayed, so rebuild workspace artifacts and local-ID admission. Adapter failures occur outside the

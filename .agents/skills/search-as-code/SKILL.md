@@ -6,7 +6,7 @@ description: Run evidence-grounded research with OpenSAC through the sac_run MCP
 # Search as Code
 
 Run one complete Python program through the model-visible MCP tool `sac_run(code)`. Import
-`BrokerError` and `sdk` from `opensac_sdk` when needed.
+`sdk` from `opensac_sdk` when needed.
 
 Choose the research strategy yourself. This skill teaches how to encode that strategy as OpenSAC
 code; it does not prescribe query counts, source choices, call stages, stopping rules, or one
@@ -85,11 +85,11 @@ needed just to announce completion.
 
 ## Handle failures and state loss
 
-For `search.many`, branch on `status == "success"`; failed rows use `outcome.error`, while an
-empty successful result is valid. Carry failures rather than hard-coding zero failures.
-
-A caught `BrokerError` leaves that work unresolved. Return bounded failure data and let the next
-agent decision choose recovery; do not blindly retry external failures.
+Every broker-backed SDK method returns a generic outcome, or an input-aligned outcome list for
+fan-out operations. Consume `outcome.value` only after `status == "success"`; failures use
+`outcome.error`, while an empty successful value is valid. OpenSAC renders bounded external-failure
+warnings automatically, so do not add `try/except` or print failures merely to expose them. Carry or
+persist failures when later dataflow must remember unresolved work, and do not blindly retry them.
 
 Public web URLs remain reusable; local IDs are session-bound. On `state_lost`, the program was not
 replayed, so rebuild workspace artifacts and local-ID admission. Adapter failures occur outside the

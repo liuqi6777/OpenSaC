@@ -54,9 +54,10 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
         "Upgrade to `sdk.workspace` only when",
         "candidate pool, evidence ledger, or attempted-source history",
         "do not replay blindly",
-        "For `search.many`, branch on",
+        "Every broker-backed method returns",
+        "consuming `outcome.value`",
         "read failure details from `outcome.error`",
-        "other statuses as displayable failure text",
+        "Do not add `try/except`",
     ):
         assert guidance in normalized
 
