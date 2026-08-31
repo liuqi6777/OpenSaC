@@ -7,9 +7,10 @@ queries = [
 ]
 
 official_domains = {"postgresql.org", "github.com", "elastic.co", "milvus.io"}
-search_outcomes = sdk.search.many(queries, limit=10, concurrency=3)
+search_results = sdk.search.many(queries, limit=10, concurrency=3)
 fusion = sdk.search.fuse_rrf(
-    search_outcomes,
+    queries,
+    search_results,
     k=60,
     limit=24,
     domain_weights={domain: 1.5 for domain in official_domains},
@@ -20,13 +21,12 @@ unique = {
     candidate.source: candidate for candidate in fusion if candidate.domain in official_domains
 }
 
-passages_outcome = sdk.content.passages(
+report = sdk.content.passages(
     "vector index types, filtering, consistency and limitations",
     sources=list(unique),
     limit=20,
     limit_per_source=3,
 )
-report = passages_outcome.value if passages_outcome.status == "success" else None
 passages = report.passages if report is not None else []
 failures = report.failures if report is not None else []
 

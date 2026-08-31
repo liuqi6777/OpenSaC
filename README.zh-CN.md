@@ -104,7 +104,7 @@ mkdir -p "$OPENSAC_RUNTIME_DIR"
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.3/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.4/configs/docker.yaml
 ```
 
 启动已发布镜像：
@@ -171,8 +171,9 @@ from opensac import OpenSAC
 program = """
 from opensac_sdk import sdk
 
-outcome = sdk.search("谁提出了 ReAct prompting 方法？", limit=5)
-hits = outcome.value if outcome.status == "success" else []
+hits = sdk.search("谁提出了 ReAct prompting 方法？", limit=5)
+if hits is None:
+    hits = []
 for hit in hits:
     print(f"CANDIDATE source={hit.source!r} title={hit.title!r}")
 """
@@ -206,9 +207,9 @@ PY
 | `sdk.workspace` | JSON/JSONL artifact 辅助方法 | 在同一 session 的多次执行间持久化结构化 artifact |
 | 顶层 | `capabilities` | 查看当前契约、部署限制与机制 |
 
-所有 broker-backed unary 操作返回通用 outcome；fan-out 操作返回与输入对齐的同一形态。
-只有当 `status == "success"` 时才能消费 `outcome.value`；operational failure 的结构化详情在
-`outcome.error` 中，并会自动渲染成有界 warning。每条搜索结果只有一个
+所有 broker-backed unary 操作直接返回结果或 `None`；fan-out 操作返回与输入对齐的列表，失败
+位置为 `None`。必须使用 `is None` 判断，不能依赖 truthiness，因为空列表、空字符串或空对象也
+可能是成功结果。Operational failure 会自动渲染成有界结构化 warning。每条搜索结果只有一个
 `source`：规范化后的网页 URL 或
 本地文档 ID。Content 只接收
 URL/本地 ID 字符串；Web 部署可直接读取受限的公开 HTTP(S) URL，本地
@@ -277,7 +278,7 @@ Docker 模板都在 `configs/` 中；选择说明见[配置模板](docs/deployme
 
 | 目标 | 文档 |
 | --- | --- |
-| 升级到 v0.8.3 | [v0.8.3 版本说明](docs/opensac-0.8.3.md) |
+| 升级到当前版本 | [版本说明](docs/opensac-0.8.4.md) |
 | 选择 YAML 配置模板 | [配置模板](docs/deployment.md#configuration-profiles) |
 | 部署或升级 OpenSAC | [部署指南](docs/deployment.md) |
 | 连接 Codex、Claude Code、CLI 或自定义智能体 | [智能体集成](docs/agent-integrations.zh-CN.md) |

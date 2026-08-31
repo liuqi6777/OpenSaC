@@ -6,7 +6,7 @@
 ## 约定
 
 ```python
-from opensac_sdk import Outcome, sdk
+from opensac_sdk import sdk
 ```
 
 公开 object 返回值是支持 mapping 的 `Record`。mapping 访问是规范语义；已知且不与 dict 方法
@@ -21,24 +21,25 @@ plain = dict(row)
 JSON 字段名为 `items`、`values` 或 `get` 时必须使用 `row["..."]`，避免与 dict 方法冲突。
 
 SDK 只检查类型、strict JSON 和基本下界；部署可配置的上限由 broker 强制，并通过
-成功的 `sdk.capabilities()` outcome 报告。
+成功的 `sdk.capabilities()` 结果报告。
 
 - 本地参数错误抛 `ValueError`。
 - provider、quota、deadline、transport、protocol、permission、抽取 JSON/schema/repair 失败
-  返回 failure outcome，并尽可能保留结构化 `error` 详情。
+  返回 `None`，并记录结构化 warning。
 - `search.many`、`content.fetch_many` 和 `llm.extract_many` 是公共对齐 fan-out helper；
-  返回与 unary 操作相同的 outcome 形态，并与输入顺序对齐。
+  每个输入位置返回结果或 `None`。
 
-所有 broker-backed 方法返回 `Outcome[T]`；对齐 fan-out 返回 `list[Outcome[T]]`：
+所有 broker-backed unary 方法返回 `T | None`；对齐 fan-out 返回 `list[T | None]`：
 
 ```python
-{"status": "success", "value": result, "error": None}
-{"status": "failure", "value": None, "error": {"code": "...", "message": "..."}}
+hits = sdk.search("query")
+if hits is None:
+    print("NEXT: revise the query")
 ```
 
-只有在 `status == "success"` 后才能消费 `value`。OpenSAC 会自动记录有界失败 warning 并由
-agent observation 渲染；调用方不需要为 operational failure 写 `try/except` 或手动打印错误。
-非预期的程序异常仍会传播。
+必须使用 `is None`，不能依赖 truthiness：`[]`、`""`、`{}` 都可能是成功结果。OpenSAC 会
+自动记录有界失败 warning 并由 agent observation 渲染；调用方不需要为 operational failure
+写 `try/except` 或手动打印错误。本地参数错误与非预期程序异常仍会传播。
 
 ## 公共接口
 
@@ -61,15 +62,15 @@ sdk.search(
     limit: int = 10,
     offset: int = 0,
     include_domains: list[str] | None = None,
-) -> Outcome[list[Record]]
+) -> list[Record] | None
 ```
 
 `offset` 是完整排名的深度，不是页码。只有 backend 声明支持时才能使用
 `include_domains`。
 
-Outcome 额外带 `query` 上下文。成功 `value` 是排序后的 hit 列表；每个 hit 包含 `source`、
+成功结果是排序后的 hit 列表；每个 hit 包含 `source`、
 `backend`、`title`、`domain`、`date`、`snippet`、`score`、`rank`、`retrieval` 和 `metadata`。
-空的成功 value 表示正常零匹配。
+空列表表示正常零匹配；`None` 表示 operational failure。
 
 ### `sdk.search.many(...)`
 
@@ -81,37 +82,23 @@ sdk.search.many(
     offset: int = 0,
     concurrency: int = 5,
     include_domains: list[str] | None = None,
-) -> list[Outcome[list[Record]]]
+) -> list[list[Record] | None]
 ```
 
-返回列表与 `queries` 一一对齐。每个 outcome 在通用字段外增加 `input_index` 和 `query`：
+返回列表与 `queries` 一一对齐；成功位置是 hit 列表，失败位置是 `None`：
 
 ```python
-[
-    {"input_index": 0, "query": "q1", "status": "success", "value": [...], "error": None},
-    {
-        "input_index": 1,
-        "query": "q2",
-        "status": "failure",
-        "value": None,
-        "error": {
-            "code": "provider_timeout",
-            "message": "...",
-            "retryable": True,
-            "attempts": 2,
-            "provider_status": None,
-            "retry_after_seconds": None,
-            "provider": "example",
-            "component": "search",
-            "scope": "provider",
-        },
-    },
-]
+queries = ["q1", "q2"]
+results = sdk.search.many(queries)
+for query, hits in zip(queries, results, strict=True):
+    if hits is None:
+        continue
+    print(query, len(hits))
 ```
 
 Admission、provider、quota、deadline、transport、protocol、contract 和 permission 错误都保留为
-对齐 failure outcome，即使每项都失败也不提升异常。Batch admission 失败会为每个输入复制同一个
-request-scope error；空输入直接返回 `[]`，不调用 broker。
+对齐 `None`，即使每项都失败也不提升异常；空输入直接返回 `[]`，不调用 broker。结构化 warning
+保留 `input_index` 和 query 上下文，返回列表本身不再暴露可编程错误详情。
 
 `Mechanisms.batching` 只控制这个操作。关闭时仍允许单个 query，但拒绝更宽的 fan-out。
 
@@ -126,7 +113,8 @@ search RPC。迁移边界见
 
 ```python
 sdk.search.fuse_rrf(
-    report,
+    queries: list[str],
+    results: list[list[Record] | None],
     *,
     weights: list[float] | None = None,
     k: int = 60,
@@ -139,8 +127,8 @@ sdk.search.fuse_rrf(
 
 这是不调用 broker 的确定性本地 helper。融合结果增加 `provenance`、`raw_fused_score`、
 `domain_weight`、`fused_score` 和 `fused_rank`；provenance 行使用 `input_index`，并带
-`query`、`backend`、`rank` 和 `score`。`input_index` 由 outcome 列表位置推导；失败 outcome
-会被跳过，但 `weights` 仍与所有 outcome 对齐。
+`query`、`backend`、`rank` 和 `score`。queries 与 results 必须等长对齐；`None` 会被跳过，
+成功空列表合法，`weights` 仍与所有输入位置对齐。
 
 ## Content
 
@@ -150,10 +138,10 @@ web 部署可按宿主策略额外允许受限的公共 HTTP(S) URL。
 ### `sdk.content.fetch(...)`
 
 ```python
-sdk.content.fetch(source: str) -> Outcome[Record]
+sdk.content.fetch(source: str) -> Record | None
 ```
 
-成功 `value` 是完整规范化文档：`source`、`text`、`title`、`date` 和 provider `metadata`。
+成功结果是完整规范化文档：`source`、`text`、`title`、`date` 和 provider `metadata`。
 同一 source 的重复调用可复用 session cache，但每次请求仍消耗公开的 content fetch budget。
 
 ### `sdk.content.fetch_many(...)`
@@ -163,46 +151,25 @@ sdk.content.fetch_many(
     sources: list[str],
     *,
     concurrency: int = 5,
-) -> list[Outcome[Record]]
+) -> list[Record | None]
 ```
 
 这个 SDK helper 会有界并发调用 unary `content.fetch`。它保留输入顺序和重复 source，不做
 capability manifest 预检，空输入直接返回 `[]`。`concurrency` 只限制 SDK worker fan-out；
 每个请求仍由 broker 的预算、重试、缓存、trace 和 provider 并发策略管理。
 
-每个输入对应一个对齐 outcome：
+每个输入对应一个对齐结果。需要识别失败 source 时，保留原始输入：
 
 ```python
-[
-    {
-        "input_index": 0,
-        "source": "source_1",
-        "status": "success",
-        "value": {"source": "source_1", "text": "...", "metadata": {}},
-        "error": None,
-    },
-    {
-        "input_index": 1,
-        "source": "source_2",
-        "status": "failure",
-        "value": None,
-        "error": {
-            "code": "provider_timeout",
-            "message": "...",
-            "retryable": True,
-            "attempts": 2,
-            "provider_status": None,
-            "retry_after_seconds": None,
-            "provider": "example",
-            "component": "document",
-            "scope": "provider",
-        },
-    },
-]
+documents = sdk.content.fetch_many(sources)
+for source, document in zip(sources, documents, strict=True):
+    if document is None:
+        continue
+    print(source, document.title)
 ```
 
-所有 operational failure 都保留为逐项 outcome，包括全部为系统性失败的情况；非预期程序异常
-原样传播。
+所有 operational failure 都保留为逐项 `None`，包括全部为系统性失败的情况；非预期程序异常
+原样传播，warning 保留有界的输入上下文。
 
 ### `sdk.content.read(...)`
 
@@ -214,10 +181,10 @@ sdk.content.read(
     start_character: int = 0,
     line_count: int = 200,
     max_chars: int = 100_000,
-) -> Outcome[Record]
+) -> Record | None
 ```
 
-行号从 1 开始，字符位置从 0 开始且结束位置不包含在内。成功 `value` 包含文档字段和独立的
+行号从 1 开始，字符位置从 0 开始且结束位置不包含在内。成功结果包含文档字段和独立的
 `window`：
 
 ```python
@@ -248,40 +215,23 @@ sdk.content.grep(
     start_line: int = 1,
     context_lines: int = 0,
     limit_per_source: int = 20,
-) -> list[Outcome[Record]]
+) -> list[Record | None]
 ```
 
-返回列表与 `sources` 一一对齐。每个 outcome 外层带 `input_index` 和 `source`；成功 `value`
-包含 `source`、`title`、`matches` 和 `next_start_line`：
+返回列表与 `sources` 一一对齐。成功结果包含 `source`、`title`、`matches` 和
+`next_start_line`；失败 source 的位置是 `None`：
 
 ```python
-[
-    {
-        "input_index": 0,
-        "source": "source_1",
-        "status": "success",
-        "value": {
-            "source": "source_1",
-            "title": "Example",
-            "matches": [...],
-            "next_start_line": 42,
-        },
-        "error": None,
-    },
-    {
-        "input_index": 1,
-        "source": "source_2",
-        "status": "failure",
-        "value": None,
-        "error": {"code": "provider_not_found", "message": "..."},
-    },
-]
+results = sdk.content.grep("target", sources=sources)
+for source, result in zip(sources, results, strict=True):
+    if result is None:
+        continue
+    print(source, len(result.matches))
 ```
 
 match 包含 1-based `line`、`text`、`before`、`after` 和 `spans`。span 使用 0-based、
-end-exclusive 的 `start_character`/`end_character`。成功 outcome 的
-`value.next_start_line` 非空时可从该行继续；为 `None` 表示已扫描到 EOF。成功 value 中
-`matches` 为空不是失败。
+end-exclusive 的 `start_character`/`end_character`。成功结果的 `next_start_line` 非空时可从
+该行继续；为 `None` 表示已扫描到 EOF。成功结果中 `matches` 为空不是失败。
 
 ### `sdk.content.passages(...)`
 
@@ -292,11 +242,11 @@ sdk.content.passages(
     sources: list[str],
     limit: int = 20,
     limit_per_source: int = 3,
-) -> Outcome[Record]
+) -> Record | None
 ```
 
-broker 按首次出现顺序去重 source，做全局 passage 排序，再应用单 source 上限。成功 `value`
-报告包含 `query`、`passages`、`failures`、`warnings`、`input_count` 和 `unique_source_count`。
+broker 按首次出现顺序去重 source，做全局 passage 排序，再应用单 source 上限。成功报告包含
+`query`、`passages`、`failures`、`warnings`、`input_count` 和 `unique_source_count`。
 passage 带 source 元数据、精确 `text`、coordinates、`rank`、`score` 和 `ranker`。reranker
 失败会退回 lexical BM25，并记录到 `warnings`。
 
@@ -313,7 +263,7 @@ sdk.llm.complete(
     system: str | None = None,
     temperature: float = 0.2,
     max_tokens: int | None = None,
-) -> Outcome[str]
+) -> str | None
 ```
 
 ### `sdk.llm.extract(...)`
@@ -326,13 +276,13 @@ sdk.llm.extract(
     schema: dict[str, Any],
     max_tokens: int | None = None,
     repair_attempts: int = 0,
-) -> Outcome[dict[str, Any]]
+) -> dict[str, Any] | None
 ```
 
-`item` 和 `schema` 必须是 strict-JSON 可序列化值，schema 根必须描述 object。成功 `value`
+`item` 和 `schema` 必须是 strict-JSON 可序列化值，schema 根必须描述 object。成功结果
 是通过 schema 校验的 object。`repair_attempts=1` 允许 broker 做一次 repair；每次 initial 或
 repair 尝试都会在模型调用前预留 quota。provider failure、非法/非 object JSON、schema
-mismatch、repair 耗尽和 quota exhaustion 都返回保留错误码与尝试次数的 failure outcome。
+mismatch、repair 耗尽和 quota exhaustion 都返回 `None`；有界结构化 warning 保留相关详情。
 
 ### `sdk.llm.extract_many(...)`
 
@@ -345,21 +295,21 @@ sdk.llm.extract_many(
     concurrency: int = 4,
     max_tokens: int | None = None,
     repair_attempts: int = 0,
-) -> list[Outcome[dict[str, Any]]]
+) -> list[dict[str, Any] | None]
 ```
 
 所有 item 共享 instruction、schema、token 上限和 repair 策略。fan-out 前会先校验全部 item
-都是 strict JSON；原始 item 不会复制到 outcome 或诊断中。每项仍是独立的 unary
+都是 strict JSON；原始 item 不会复制到诊断中。每项仍是独立的 unary
 `llm.extract` 请求，因此 broker quota、重试、trace 和 provider 并发策略保持权威。
 
-返回列表与输入对齐，每项在通用 outcome 外增加 `input_index`；成功 `value` 是通过 schema
-校验的 object。Provider、schema、quota、deadline 及系统性失败都保留为逐项 outcome。
+返回列表与输入对齐；成功位置是通过 schema 校验的 object，provider、schema、quota、deadline
+及系统性失败的位置是 `None`。Warning 带 `input_index`，但有意不记录原始 item。
 
 ## Capabilities
 
 ### `sdk.capabilities()`
 
-返回 `Outcome[Record]`。成功 `value` 包含 contract 版本、search backend 支持、content/LLM
+返回 `Record | None`。成功结果包含 contract 版本、search backend 支持、content/LLM
 上限和机制开关。生成程序应读取它，不要硬编码部署上限。
 
 ## Workspace
@@ -382,17 +332,21 @@ sdk.workspace.list(prefix="") -> list[str]
 使用 Python `print(...)` 返回有界结果，并把精确 source 字符串与对应证据一起输出。更大的
 结构化数据应保存到 `sdk.workspace`，不要打印完整文档或 ledger。
 
-## `main` 分支 Outcome 迁移
+## 0.8.4 Breaking 迁移
 
 Broker-backed 调用不再通过 `BrokerError` 暴露 operational failure。旧的直接返回值和
-resource-specific batch 字段没有兼容 shim。
+`Outcome`、resource-specific variant 以及旧 `fuse_rrf(report, ...)` 都没有兼容 shim。
 
 | 之前的返回 | 当前返回 |
 | --- | --- |
-| unary `T` 或抛 `BrokerError` | `Outcome[T]` |
-| search `hits` / fetch `document` / extract `data` | 通用 outcome `value` |
-| grep 的展示文本 failure status | `status == "failure"` 加结构化 `error` |
-| 全系统性 fan-out 异常 | 对齐 failure outcomes |
+| unary `Outcome[T]` | `T | None` |
+| 对齐 `list[Outcome[T]]` | `list[T | None]` |
+| `outcome.status` / `.value` / `.error` | `result is None` 加自动结构化 warning |
+| `fuse_rrf(search_outcomes, ...)` | `fuse_rrf(queries, search_results, ...)` |
+
+必须使用 `is None`，不能依赖 truthiness。SDK 只捕获 `BrokerError`；本地 `ValueError` 与非预期
+程序异常仍会传播。这个生成程序 API 变更不调整 capability contract 15 或 sandbox contract 14。
+完整边界见[当前版本说明](opensac-0.8.4.md)。
 
 ## 0.8.3 Breaking 迁移
 

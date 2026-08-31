@@ -6,26 +6,23 @@ queries = [
     "approximate nearest neighbor search",
 ]
 
-search_outcomes = sdk.search.many(queries, limit=5, concurrency=3)
-search_failure_count = sum(outcome.status == "failure" for outcome in search_outcomes)
+search_results = sdk.search.many(queries, limit=5, concurrency=3)
+search_failure_count = sum(result is None for result in search_results)
 
 # A local source is its document ID. Sorting low-to-high makes each later
 # duplicate replace its lower-scoring predecessor in the comprehension.
-all_hits = [
-    hit for outcome in search_outcomes if outcome.status == "success" for hit in outcome.value
-]
+all_hits = [hit for result in search_results if result is not None for hit in result]
 best = {hit.source: hit for hit in sorted(all_hits, key=lambda candidate: candidate.score or 0)}
 
 ranked = sorted(best.values(), key=lambda hit: hit.score or 0, reverse=True)[:5]
 print(f"{len(ranked)} unique documents from {len(queries)} queries")
 
-passages_outcome = sdk.content.passages(
+report = sdk.content.passages(
     "vector index types and their tradeoffs",
     sources=[hit.source for hit in ranked],
     limit=15,
     limit_per_source=3,
 )
-report = passages_outcome.value if passages_outcome.status == "success" else None
 passages = report.passages if report is not None else []
 failures = report.failures if report is not None else []
 

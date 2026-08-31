@@ -115,7 +115,7 @@ Download `configs/docker.yaml`, then set its two `storage` paths to `$OPENSAC_RU
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.3/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.4/configs/docker.yaml
 ```
 
 Start the published image:
@@ -183,8 +183,9 @@ from opensac import OpenSAC
 program = """
 from opensac_sdk import sdk
 
-outcome = sdk.search("Who introduced the ReAct prompting method?", limit=5)
-hits = outcome.value if outcome.status == "success" else []
+hits = sdk.search("Who introduced the ReAct prompting method?", limit=5)
+if hits is None:
+    hits = []
 for hit in hits:
     print(f"CANDIDATE source={hit.source!r} title={hit.title!r}")
 """
@@ -218,10 +219,10 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.workspace` | JSON/JSONL artifact helpers | Persist structured artifacts across executions in one session |
 | Top level | `capabilities` | Inspect active contracts, deployment limits, and mechanisms |
 
-Every broker-backed unary operation returns a generic outcome; fan-out operations return the same
-shape aligned to input order. Consume `outcome.value` only when `status == "success"`; operational
-failures expose structured details in `outcome.error` and are rendered automatically as bounded
-warnings. Each search hit has one
+Every broker-backed unary operation returns its result or `None`; fan-out operations return an
+input-aligned list with `None` in failed positions. Check `is None`, not truthiness, because an empty
+list, string, or object can be a successful result. Operational failures are rendered automatically
+as bounded structured warnings. Each search hit has one
 `source`: a canonical web URL or local document ID. Empty search results are successful results.
 Content accepts URL/local-ID strings rather than result records. Web deployments can fetch bounded
 public HTTP(S) URLs directly; local IDs remain search-admitted. Generated programs return bounded,
@@ -294,7 +295,7 @@ service also exposes the live runtime dashboard at `http://127.0.0.1:8000/dashbo
 
 | Goal | Document |
 | --- | --- |
-| Upgrade to v0.8.3 | [v0.8.3 release notes](docs/opensac-0.8.3.md) |
+| Upgrade to the current release | [Release notes](docs/opensac-0.8.4.md) |
 | Choose a YAML configuration profile | [Configuration profiles](docs/deployment.md#configuration-profiles) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Add broker backends or capability modules | [Broker plugins](docs/broker-plugins.md) |
