@@ -8,7 +8,7 @@ requires a matching SDK and broker; sandbox contract 14 remains unchanged.
 Import the synchronous SDK with:
 
 ```python
-from opensac_sdk import BrokerError, sdk
+from opensac_sdk import Outcome, sdk
 ```
 
 Public object results are mapping-backed records. Mapping access is canonical; known non-colliding
@@ -23,13 +23,25 @@ plain = dict(row)
 Use `row["items"]`, `row["values"]`, or `row["get"]` when a JSON field collides with a dict method.
 
 The SDK validates types, strict JSON, and basic lower bounds. Deployment-specific upper bounds are
-enforced by the broker and reported by `sdk.capabilities()`.
+enforced by the broker and reported by a successful `sdk.capabilities()` outcome.
 
 - Local argument errors raise `ValueError`.
-- Provider, quota, transport, extraction JSON/schema, and repair failures raise `BrokerError` with
-  `code`, `retryable`, `attempts`, `provider`, `component`, and `scope` details when available.
+- Provider, quota, deadline, transport, protocol, permission, extraction JSON/schema, and repair
+  failures return a failure outcome with structured `error` details.
 - `search.many`, `content.fetch_many`, and `llm.extract_many` are public aligned fan-out helpers.
-  Loop in Python for independent reads or free-form completions.
+  They return the same outcome shape as their unary operation, aligned to input order.
+
+Every broker-backed method returns `Outcome[T]`, or `list[Outcome[T]]` for aligned fan-out. The
+generic shape is:
+
+```python
+{"status": "success", "value": result, "error": None}
+{"status": "failure", "value": None, "error": {"code": "...", "message": "..."}}
+```
+
+Consume `value` only after checking `status == "success"`. OpenSAC automatically records bounded
+failure warnings for agent observation rendering; callers do not need `try/except` or failure
+printing for operational errors. Unexpected programming exceptions still propagate.
 
 ## Public surface
 
@@ -52,14 +64,15 @@ sdk.search(
     limit: int = 10,
     offset: int = 0,
     include_domains: list[str] | None = None,
-) -> list[Record]
+) -> Outcome[list[Record]]
 ```
 
 `offset` is ranking depth, not a page number. `include_domains` is accepted only when the active
 backend reports support for domain filtering.
 
-Each hit contains `source`, `backend`, `title`, `domain`, `date`, `snippet`, `score`, `rank`,
-`retrieval`, and `metadata`. An empty list is a successful no-match result.
+The outcome adds `query` as context. A successful `value` is the ranked hit list. Each hit contains
+`source`, `backend`, `title`, `domain`, `date`, `snippet`, `score`, `rank`, `retrieval`, and
+`metadata`. An empty successful value is a valid no-match result.
 
 ### `sdk.search.many(...)`
 
@@ -71,19 +84,20 @@ sdk.search.many(
     offset: int = 0,
     concurrency: int = 5,
     include_domains: list[str] | None = None,
-) -> list[Record]
+) -> list[Outcome[list[Record]]]
 ```
 
-The returned list is aligned one-to-one with `queries`; list position is the input identity. Every
-outcome has `query`, `status`, `hits`, and `error`:
+The returned list is aligned one-to-one with `queries`; every outcome adds `input_index` and `query`
+to the generic shape:
 
 ```python
 [
-    {"query": "q1", "status": "success", "hits": [...], "error": None},
+    {"input_index": 0, "query": "q1", "status": "success", "value": [...], "error": None},
     {
         "query": "q2",
+        "input_index": 1,
         "status": "failure",
-        "hits": [],
+        "value": None,
         "error": {
             "code": "provider_timeout",
             "message": "...",
@@ -99,12 +113,9 @@ outcome has `query`, `status`, `hits`, and `error`:
 ]
 ```
 
-`status` is exactly `"success"` or `"failure"`. On success, `error` is `None`; on failure, it is a
-bounded structured record. Read failure details from `error.code` and `error.message`, rather than
-displaying or parsing `status`. Empty `hits` with success status is a valid no-match result.
-
-Provider, quota, and deadline errors remain item outcomes. If every item fails with a transport,
-protocol, contract, or permission error, `many` raises one representative top-level `BrokerError`.
+Admission, provider, quota, deadline, transport, protocol, contract, and permission failures remain
+aligned failure outcomes, including when every item fails. Batch-wide admission failures repeat the
+same request-scoped error for each input. Empty input returns `[]` without a broker call.
 
 `Mechanisms.batching` controls this operation only. When batching is disabled, one query is still
 accepted but a wider fan-out is rejected.
@@ -146,12 +157,12 @@ to host policy.
 ### `sdk.content.fetch(...)`
 
 ```python
-sdk.content.fetch(source: str) -> Record
+sdk.content.fetch(source: str) -> Outcome[Record]
 ```
 
-Returns one complete normalized document with `source`, `text`, `title`, `date`, and provider-owned
-`metadata`. A fetch failure raises `BrokerError`. Repeated calls for the same source can reuse the
-session cache, although each request still consumes the public content-fetch budget.
+A successful `value` is one complete normalized document with `source`, `text`, `title`, `date`,
+and provider-owned `metadata`. Repeated calls for the same source can reuse the session cache,
+although each request still consumes the public content-fetch budget.
 
 ### `sdk.content.fetch_many(...)`
 
@@ -160,7 +171,7 @@ sdk.content.fetch_many(
     sources: list[str],
     *,
     concurrency: int = 5,
-) -> list[Record]
+) -> list[Outcome[Record]]
 ```
 
 This SDK helper makes bounded concurrent calls to unary `content.fetch`. It preserves input order
@@ -174,14 +185,16 @@ Each input has one aligned outcome:
 [
     {
         "source": "source_1",
+        "input_index": 0,
         "status": "success",
-        "document": {"source": "source_1", "text": "...", "metadata": {}},
+        "value": {"source": "source_1", "text": "...", "metadata": {}},
         "error": None,
     },
     {
         "source": "source_2",
+        "input_index": 1,
         "status": "failure",
-        "document": None,
+        "value": None,
         "error": {
             "code": "provider_timeout",
             "message": "...",
@@ -197,9 +210,8 @@ Each input has one aligned outcome:
 ]
 ```
 
-Provider, quota, and deadline failures remain per-item outcomes. If every item fails with a
-transport, protocol, contract, or permission error, the helper raises one representative
-`BrokerError`. Unexpected non-`BrokerError` exceptions propagate.
+Every operational failure remains a per-item outcome, including all-systemic failures. Unexpected
+programming exceptions propagate.
 
 ### `sdk.content.read(...)`
 
@@ -211,11 +223,11 @@ sdk.content.read(
     start_character: int = 0,
     line_count: int = 200,
     max_chars: int = 100_000,
-) -> Record
+) -> Outcome[Record]
 ```
 
-Lines are 1-based. Characters are 0-based and end-exclusive. The returned content slice contains
-the document fields plus an independent `window`:
+Lines are 1-based. Characters are 0-based and end-exclusive. A successful `value` contains the
+document fields plus an independent `window`:
 
 ```python
 {
@@ -245,37 +257,40 @@ sdk.content.grep(
     start_line: int = 1,
     context_lines: int = 0,
     limit_per_source: int = 20,
-) -> list[Record]
+) -> list[Outcome[Record]]
 ```
 
-The returned list is aligned one-to-one with `sources`. Each outcome contains `source`, `title`,
-`status`, `matches`, and `next_start_line`:
+The returned list is aligned one-to-one with `sources`. Each outcome adds outer `input_index` and
+`source`; a successful `value` contains `source`, `title`, `matches`, and `next_start_line`:
 
 ```python
 [
     {
         "source": "source_1",
-        "title": "Example",
+        "input_index": 0,
         "status": "success",
-        "matches": [...],
-        "next_start_line": 42,
+        "value": {
+            "source": "source_1",
+            "title": "Example",
+            "matches": [...],
+            "next_start_line": 42,
+        },
+        "error": None,
     },
     {
         "source": "source_2",
-        "title": None,
-        "status": "failure[provider_not_found]: ...",
-        "matches": [],
-        "next_start_line": None,
+        "input_index": 1,
+        "status": "failure",
+        "value": None,
+        "error": {"code": "provider_not_found", "message": "..."},
     },
 ]
 ```
 
-A match contains 1-based `line`, `text`, `before`, `after`, and `spans`; its source and title come
-from the owning outcome. Each span contains 0-based, end-exclusive `start_character` and
-`end_character`. On a successful outcome, continue a capped scan from non-null `next_start_line`;
-`None` means that source was scanned to EOF. Zero matches with success status is not a failure.
-For grep outcomes, compare `status` with `"success"`; other values are displayable failure
-descriptions and should not be parsed.
+A match contains 1-based `line`, `text`, `before`, `after`, and `spans`. Each span contains 0-based,
+end-exclusive `start_character` and `end_character`. On success, continue a capped scan from
+non-null `outcome.value.next_start_line`; `None` means that source was scanned to EOF. Zero matches
+in a successful value is not a failure.
 
 ### `sdk.content.passages(...)`
 
@@ -286,13 +301,14 @@ sdk.content.passages(
     sources: list[str],
     limit: int = 20,
     limit_per_source: int = 3,
-) -> Record
+) -> Outcome[Record]
 ```
 
 The broker deduplicates sources in first-seen order, ranks passages globally, then applies the
-per-source cap. The report contains `query`, `passages`, `failures`, `warnings`, `input_count`, and
-`unique_source_count`. Passage rows include source metadata, exact `text`, coordinates, `rank`,
-`score`, and `ranker`. A reranker failure falls back to lexical BM25 and appears in `warnings`.
+per-source cap. A successful `value` contains the report fields `query`, `passages`, `failures`,
+`warnings`, `input_count`, and `unique_source_count`. Passage rows include source metadata, exact
+`text`, coordinates, `rank`, `score`, and `ranker`. A reranker failure falls back to lexical BM25
+and appears in the report and automatically rendered warnings.
 
 ## LLM
 
@@ -307,7 +323,7 @@ sdk.llm.complete(
     system: str | None = None,
     temperature: float = 0.2,
     max_tokens: int | None = None,
-) -> str
+) -> Outcome[str]
 ```
 
 ### `sdk.llm.extract(...)`
@@ -320,14 +336,14 @@ sdk.llm.extract(
     schema: dict[str, Any],
     max_tokens: int | None = None,
     repair_attempts: int = 0,
-) -> dict[str, Any]
+) -> Outcome[dict[str, Any]]
 ```
 
 `item` and `schema` must be strict-JSON serializable, and the schema root must describe an object.
-The method returns the validated object directly. `repair_attempts=1` permits one broker-managed
+A successful `value` is the validated object. `repair_attempts=1` permits one broker-managed
 repair. Every initial or repair model attempt reserves quota before dispatch. Invalid provider
 output, non-JSON output, schema mismatch, exhausted repair, provider failure, and quota exhaustion
-are surfaced as `BrokerError` without hiding the specific code and attempt count.
+return failure outcomes without hiding the specific code and attempt count.
 
 ### `sdk.llm.extract_many(...)`
 
@@ -340,7 +356,7 @@ sdk.llm.extract_many(
     concurrency: int = 4,
     max_tokens: int | None = None,
     repair_attempts: int = 0,
-) -> list[Record]
+) -> list[Outcome[dict[str, Any]]]
 ```
 
 Every item shares the instruction, schema, token bound, and repair policy. All items are validated
@@ -348,18 +364,17 @@ as strict JSON before fan-out, while original items are omitted from outcomes an
 Each item remains an independent unary `llm.extract` request, so broker quota, retries, tracing,
 and provider concurrency remain authoritative.
 
-The returned list is input-aligned. Each outcome contains `input_index`, `status`, `data`, and
-`error`. Status is exactly `"success"` or `"failure"`; success has schema-validated `data` and
-`error=None`, while failure has `data=None` and a structured `error`. Provider, schema, quota, and
-deadline failures remain per-item outcomes. If every item fails with a transport, protocol,
-contract, or permission error, the helper raises one representative `BrokerError`.
+The returned list is input-aligned. Each outcome adds `input_index` to the generic shape; successful
+`value` fields contain schema-validated objects. Provider, schema, quota, deadline, and systemic
+failures all remain per-item outcomes.
 
 ## Capabilities
 
 ### `sdk.capabilities()`
 
-Returns contract versions, search backend support, content/LLM upper limits, and active mechanism
-switches. Generated programs should inspect this record instead of hard-coding deployment maxima.
+Returns `Outcome[Record]`. A successful `value` contains contract versions, search backend support,
+content/LLM upper limits, and active mechanism switches. Generated programs should inspect it
+instead of hard-coding deployment maxima.
 
 ## Workspace
 
@@ -382,6 +397,18 @@ not a field-level merge.
 Return bounded results with Python's `print(...)`, carrying exact source strings beside the evidence
 they support. Persist larger structured values with `sdk.workspace` instead of printing full documents
 or ledgers.
+
+## Outcome migration on `main`
+
+Broker-backed calls no longer expose operational failures as `BrokerError`. There is no compatibility
+shim for the old direct-value or resource-specific batch fields.
+
+| Previous return | Current return |
+| --- | --- |
+| unary `T` or raised `BrokerError` | `Outcome[T]` |
+| search `hits` / fetch `document` / extract `data` | generic outcome `value` |
+| grep display-text failure status | `status == "failure"` plus structured `error` |
+| all-systemic fan-out exception | aligned failure outcomes |
 
 ## 0.8.3 breaking migration
 

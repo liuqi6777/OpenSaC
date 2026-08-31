@@ -202,6 +202,7 @@ def record_external_failures(
             warnings = list(warnings) if isinstance(warnings, list) else []
             if any(
                 isinstance(existing, dict)
+                and existing.get("method") == warning["method"]
                 and existing.get("success_count") == warning["success_count"]
                 and existing.get("failure_count") == warning["failure_count"]
                 and existing.get("failures") == warning["failures"]

@@ -171,7 +171,8 @@ from opensac import OpenSAC
 program = """
 from opensac_sdk import sdk
 
-hits = sdk.search("谁提出了 ReAct prompting 方法？", limit=5)
+outcome = sdk.search("谁提出了 ReAct prompting 方法？", limit=5)
+hits = outcome.value if outcome.status == "success" else []
 for hit in hits:
     print(f"CANDIDATE source={hit.source!r} title={hit.title!r}")
 """
@@ -205,10 +206,9 @@ PY
 | `sdk.workspace` | JSON/JSONL artifact 辅助方法 | 在同一 session 的多次执行间持久化结构化 artifact |
 | 顶层 | `capabilities` | 查看当前契约、部署限制与机制 |
 
-`search.many`、`content.fetch_many`、`llm.extract_many` 和 `content.grep` 返回与输入对齐的
-outcome。搜索、抓取和抽取 status 严格为 `"success"` 或 `"failure"`，失败详情从结构化
-`outcome.error` 读取；grep 继续使用只供展示的失败 status。独立 read 和自由文本 completion
-由 Python 显式循环，并逐次处理 `BrokerError`。每条搜索结果只有一个
+所有 broker-backed unary 操作返回通用 outcome；fan-out 操作返回与输入对齐的同一形态。
+只有当 `status == "success"` 时才能消费 `outcome.value`；operational failure 的结构化详情在
+`outcome.error` 中，并会自动渲染成有界 warning。每条搜索结果只有一个
 `source`：规范化后的网页 URL 或
 本地文档 ID。Content 只接收
 URL/本地 ID 字符串；Web 部署可直接读取受限的公开 HTTP(S) URL，本地

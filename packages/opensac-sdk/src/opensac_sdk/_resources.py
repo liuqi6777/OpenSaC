@@ -8,12 +8,13 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ._diagnostics import (
+    error_info,
     failure_detail,
-    failure_status,
     record_external_failures,
 )
 from ._json import atomic_write_text, strict_json_dumps, strict_jsonl_dumps
 from ._many import _ManyFailure, _ManySuccess, _run_many
+from ._outcome import Outcome, capture, failure, success
 from ._record import Record, record, wrap
 from ._validation import (
     boolean,
@@ -50,23 +51,40 @@ class SearchResource:
         limit: int = 10,
         offset: int = 0,
         include_domains: list[str] | None = None,
-    ) -> list[Record]:
-        """Search one query and return a ranked window of hit records.
+    ) -> Outcome[list[Record]]:
+        """Search one query and return one outcome containing a ranked hit window.
 
         ``offset`` is depth in the full ranking, not a page number.
         ``include_domains`` is accepted only by backends that support filtering.
 
-        Returns:
-            Hits ordered by ``rank``. Each record includes ``source``, ``backend``,
-            ``title``, ``snippet``, ``score``, ``rank``, ``retrieval``, and
-            ``metadata``. An empty list is a successful search with no matches.
-
-        Raises:
-            BrokerError: The whole search failed or the request was rejected.
+        A successful outcome's ``value`` contains hits ordered by ``rank``. Each hit
+        includes ``source``, ``backend``, ``title``, ``snippet``, ``score``, ``rank``,
+        ``retrieval``, and ``metadata``. An empty value is a successful no-match search.
+        Operational failures return a failure outcome with structured ``error`` details.
         """
         query = string(query, "query", strip=True)
         limit, offset = self._search_window(limit, offset)
         include_domains = optional_string_list(include_domains, "include_domains")
+        return capture(
+            "search",
+            lambda: self._query(
+                query,
+                limit=limit,
+                offset=offset,
+                include_domains=include_domains,
+            ),
+            context={"query": query},
+            query=query,
+        )
+
+    def _query(
+        self,
+        query: str,
+        *,
+        limit: int,
+        offset: int,
+        include_domains: list[str] | None,
+    ) -> list[Record]:
         return self._transport.call(
             "search.query",
             {
@@ -93,15 +111,10 @@ class SearchResource:
         concurrency. ``include_domains`` has the same semantics as single-query
         search.
 
-        Returns:
-            One outcome per input query, in input order. ``status`` is exactly
-            ``"success"`` or ``"failure"``. ``error`` is ``None`` on success and
-            contains structured failure details otherwise. Failed outcomes have
-            empty ``hits``.
-
-        Raises:
-            BrokerError: Admission failed, or every item failed with a transport,
-                protocol, contract, or permission error.
+        Returns one generic outcome per input query, in input order. Successful
+        outcomes have ``status="success"`` and ranked hit-list ``value`` fields;
+        failures have ``status="failure"``, ``value=None``, and structured ``error``
+        details. Operational failures do not raise exceptions.
         """
         queries = string_list(queries, "queries")
         limit, offset = self._search_window(limit, offset)
@@ -124,16 +137,37 @@ class SearchResource:
         concurrency: int,
         include_domains: list[str] | None,
     ) -> list[Record]:
-        self._validate_many_admission(
-            queries,
-            limit=limit,
-            offset=offset,
-            concurrency=concurrency,
-            include_domains=include_domains,
-        )
+        if not queries:
+            return []
+        try:
+            self._validate_many_admission(
+                queries,
+                limit=limit,
+                offset=offset,
+                concurrency=concurrency,
+                include_domains=include_domains,
+            )
+        except BrokerError as error:
+            info = error_info(error)
+            outcomes = [
+                failure(
+                    info,
+                    context={"input_index": input_index, "query": query},
+                )
+                for input_index, query in enumerate(queries)
+            ]
+            record_external_failures(
+                "search.many",
+                success_count=0,
+                failures=[
+                    failure_detail(info, input_index=input_index, query=query)
+                    for input_index, query in enumerate(queries)
+                ],
+            )
+            return outcomes
 
         def search_one(query: str) -> list[Record]:
-            return self(
+            return self._query(
                 query,
                 limit=limit,
                 offset=offset,
@@ -141,31 +175,28 @@ class SearchResource:
             )
 
         report = _run_many(queries, concurrency=concurrency, call=search_one)
-        report.raise_for_all_system_failures()
         outcomes: list[Record] = []
         for result in report.outcomes:
             if isinstance(result, _ManySuccess):
                 outcomes.append(
-                    record(
-                        {
+                    success(
+                        result.value,
+                        context={
+                            "input_index": result.input_index,
                             "query": result.item,
-                            "status": "success",
-                            "hits": result.value,
-                            "error": None,
-                        }
+                        },
                     )
                 )
                 continue
             if not isinstance(result, _ManyFailure):
                 raise RuntimeError("many search returned an invalid internal outcome")
             outcomes.append(
-                record(
-                    {
+                failure(
+                    result.info,
+                    context={
+                        "input_index": result.input_index,
                         "query": result.item,
-                        "status": "failure",
-                        "hits": [],
-                        "error": result.info,
-                    }
+                    },
                 )
             )
 
@@ -357,13 +388,13 @@ class SearchResource:
                 raise ValueError("Every search outcome status must be a string")
             if not isinstance(batch.get("query"), str):
                 raise ValueError("Every search outcome query must be a string")
-            if not isinstance(batch.get("hits"), list):
-                raise ValueError("Every search outcome hits must be a list")
+            if status == "success" and not isinstance(batch.get("value"), list):
+                raise ValueError("Every successful search outcome value must be a list")
             if status != "success":
                 continue
             weight = normalized_weights[input_index]
             best_in_batch: dict[str, tuple[int, Record]] = {}
-            for hit_index, hit in enumerate(batch.hits):
+            for hit_index, hit in enumerate(batch.value):
                 if hit.rank < 1:
                     raise ValueError("Every fused search hit must have rank >= 1")
                 previous = best_in_batch.get(hit.source)
@@ -597,8 +628,8 @@ class ContentResource:
     Fetch a small relevant source set before inspecting it, then reuse the text locally.
     ``passages`` adds semantic ranking across selected documents; ``grep`` and ``read`` provide
     optional service-side matches and windows. These methods may reuse the session cache but remain
-    separate logical requests. Single-source failures raise ``BrokerError``; collection tasks
-    retain per-source failures in aligned outcomes or reports.
+    separate logical requests. Broker-backed methods return generic outcomes; collection tasks
+    retain per-source failures in aligned outcome lists or successful reports.
     """
 
     def __init__(self, transport: UnixSocketTransport) -> None:
@@ -626,18 +657,24 @@ class ContentResource:
             message = str(exc).replace("source at input index 0", "source")
             raise ValueError(message) from None
 
-    def fetch(self, source: str) -> Record:
-        """Fetch one complete normalized document for selected-source local processing.
+    def fetch(self, source: str) -> Outcome[Record]:
+        """Fetch one complete normalized document into a generic outcome.
 
-        Returns:
-            A document containing ``source``, ``title``, ``date``, ``text``, and
-            provider-owned ``metadata``. Reuse it locally for several checks, optionally persist
-            one copy with ``sdk.workspace``, and never print the complete text.
-
-        Raises:
-            BrokerError: The source could not be fetched.
+        A successful ``value`` contains ``source``, ``title``, ``date``, ``text``, and
+        provider-owned ``metadata``. Reuse it locally for several checks, optionally persist
+        one copy with ``sdk.workspace``, and never print the complete text. Operational
+        failures return structured failure outcomes.
         """
-        return self._transport.call("content.fetch", {"source": self._source(source)})
+        source = self._source(source)
+        return capture(
+            "content.fetch",
+            lambda: self._fetch(source),
+            context={"source": source},
+            source=source,
+        )
+
+    def _fetch(self, source: str) -> Record:
+        return self._transport.call("content.fetch", {"source": source})
 
     def fetch_many(
         self,
@@ -651,44 +688,36 @@ class ContentResource:
         ``content.fetch`` request governed by broker budget, retry, cache, tracing, and
         provider-concurrency policies. Input order and duplicate sources are preserved.
 
-        Returns:
-            One outcome per input source. Successful rows contain ``document`` and
-            ``error=None``; failed rows contain ``document=None`` and structured ``error``.
-            ``status`` is exactly ``"success"`` or ``"failure"``.
-
-        Raises:
-            BrokerError: Every item failed with a transport, protocol, contract, or
-                permission error.
+        Returns one generic outcome per input source. Successful ``value`` fields contain
+        documents; failures contain structured ``error`` records. Operational failures
+        never escape as ``BrokerError``.
         """
         sources = self._sources(sources)
         concurrency = integer(concurrency, "concurrency", minimum=1)
-        report = _run_many(sources, concurrency=concurrency, call=self.fetch)
-        report.raise_for_all_system_failures()
+        report = _run_many(sources, concurrency=concurrency, call=self._fetch)
 
         outcomes: list[Record] = []
         for result in report.outcomes:
             if isinstance(result, _ManySuccess):
                 outcomes.append(
-                    record(
-                        {
+                    success(
+                        result.value,
+                        context={
+                            "input_index": result.input_index,
                             "source": result.item,
-                            "status": "success",
-                            "document": result.value,
-                            "error": None,
-                        }
+                        },
                     )
                 )
                 continue
             if not isinstance(result, _ManyFailure):
                 raise RuntimeError("many fetch returned an invalid internal outcome")
             outcomes.append(
-                record(
-                    {
+                failure(
+                    result.info,
+                    context={
+                        "input_index": result.input_index,
                         "source": result.item,
-                        "status": "failure",
-                        "document": None,
-                        "error": result.info,
-                    }
+                    },
                 )
             )
 
@@ -710,33 +739,36 @@ class ContentResource:
         start_character: int = 0,
         line_count: int = 200,
         max_chars: int = 100_000,
-    ) -> Record:
-        """Read one 1-indexed line window from a source.
+    ) -> Outcome[Record]:
+        """Read one 1-indexed line window from a source into an outcome.
 
         Lines are 1-based and characters are 0-based. ``line_count`` bounds logical
         lines and ``max_chars`` bounds returned text. Pass ``window.next`` back as
         ``start_line`` and ``start_character`` to continue without losing text. In a
         fetch-first workflow, local slicing usually avoids this additional logical request.
 
-        Returns:
-            One content slice with provider ``metadata`` and a separate ``window``.
-
-        Raises:
-            BrokerError: The broker could not return a typed content row.
+        A successful ``value`` contains one content slice with provider ``metadata`` and
+        a separate ``window``. Operational failures return structured failure outcomes.
         """
         start_line = integer(start_line, "start_line", minimum=1)
         start_character = integer(start_character, "start_character", minimum=0)
         line_count = integer(line_count, "line_count", minimum=1)
         max_chars = integer(max_chars, "max_chars", minimum=1)
-        return self._transport.call(
+        source = self._source(source)
+        return capture(
             "content.read",
-            {
-                "source": self._source(source),
-                "start_line": start_line,
-                "start_character": start_character,
-                "line_count": line_count,
-                "max_chars": max_chars,
-            },
+            lambda: self._transport.call(
+                "content.read",
+                {
+                    "source": source,
+                    "start_line": start_line,
+                    "start_character": start_character,
+                    "line_count": line_count,
+                    "max_chars": max_chars,
+                },
+            ),
+            context={"source": source},
+            source=source,
         )
 
     def grep(
@@ -757,13 +789,9 @@ class ContentResource:
         bounds each document's contribution. In a fetch-first workflow, local matching
         usually avoids this additional logical request.
 
-        Returns:
-            One outcome per source, in input order. ``status`` is exactly
-            ``"success"`` or a human-readable failure string. Each outcome owns
-            its ``matches``; a non-null ``next_start_line`` continues a capped scan.
-
-        Raises:
-            BrokerError: The report could not be produced.
+        Returns one generic outcome per source, in input order. Successful ``value``
+        records own their ``matches`` and continuation cursor; failures carry structured
+        ``error`` records.
         """
         pattern = string(pattern, "pattern")
         if mode not in {"regex", "literal"}:
@@ -773,6 +801,47 @@ class ContentResource:
         context_lines = integer(context_lines, "context_lines", minimum=0)
         limit_per_source = integer(limit_per_source, "limit_per_source", minimum=1)
         sources = self._sources(sources)
+        if not sources:
+            return []
+        try:
+            return self._grep(
+                pattern,
+                sources=sources,
+                mode=mode,
+                case_sensitive=case_sensitive,
+                start_line=start_line,
+                context_lines=context_lines,
+                limit_per_source=limit_per_source,
+            )
+        except BrokerError as error:
+            info = error_info(error)
+            record_external_failures(
+                "content.grep",
+                success_count=0,
+                failures=[
+                    failure_detail(info, input_index=input_index, source=source)
+                    for input_index, source in enumerate(sources)
+                ],
+            )
+            return [
+                failure(
+                    info,
+                    context={"input_index": input_index, "source": source},
+                )
+                for input_index, source in enumerate(sources)
+            ]
+
+    def _grep(
+        self,
+        pattern: str,
+        *,
+        sources: list[str],
+        mode: str,
+        case_sensitive: bool,
+        start_line: int,
+        context_lines: int,
+        limit_per_source: int,
+    ) -> list[Record]:
         report = self._transport.call(
             "content.grep",
             {
@@ -822,29 +891,26 @@ class ContentResource:
             input_index = SearchResource._claim_outcome(
                 "content.grep", outcomes, result.input_index
             )
-            outcomes[input_index] = record(
-                {
-                    "source": result.source,
-                    "title": result.title,
-                    "status": "success",
-                    "matches": matches_by_input[input_index],
-                    "next_start_line": result.next_start_line,
-                }
+            outcomes[input_index] = success(
+                record(
+                    {
+                        "source": result.source,
+                        "title": result.title,
+                        "matches": matches_by_input[input_index],
+                        "next_start_line": result.next_start_line,
+                    }
+                ),
+                context={"input_index": input_index, "source": result.source},
             )
-        for failure in report.failures:
+        for failed in report.failures:
             input_index = SearchResource._claim_outcome(
-                "content.grep", outcomes, failure.input_index
+                "content.grep", outcomes, failed.input_index
             )
             if matches_by_input[input_index]:
                 raise SearchResource._protocol_error("content.grep", "matches for a failed source")
-            outcomes[input_index] = record(
-                {
-                    "source": failure.source,
-                    "title": None,
-                    "status": failure_status(failure),
-                    "matches": [],
-                    "next_start_line": None,
-                }
+            outcomes[input_index] = failure(
+                failed,
+                context={"input_index": input_index, "source": failed.source},
             )
         SearchResource._require_complete_report("content.grep", outcomes)
         return [outcome for outcome in outcomes if outcome is not None]
@@ -856,30 +922,47 @@ class ContentResource:
         sources: list[str],
         limit: int = 20,
         limit_per_source: int = 3,
-    ) -> Record:
-        """Rank passages across a caller-supplied source set.
+    ) -> Outcome[Record]:
+        """Rank passages across a caller-supplied source set into an outcome.
 
         The broker deduplicates sources in first-seen order, ranks successful documents
         together, then applies ``limit_per_source``. ``limit`` bounds the report.
         Scores are comparable only within this report. This semantic ranking can add value
         after fetch when ordinary local lexical checks are insufficient.
 
-        Returns:
-            A report with ``query``, ``passages``, fetch ``failures``, reranker
-            ``warnings``, ``input_count``, and ``unique_source_count``. Each passage
-            includes exact ``text``, coordinates, and ranker metadata.
-
-        Raises:
-            BrokerError: The report could not be produced.
+        A successful ``value`` is a report with ``query``, ``passages``, fetch
+        ``failures``, reranker ``warnings``, ``input_count``, and ``unique_source_count``.
+        Operational whole-report failures return a structured failure outcome.
         """
         query = string(query, "query", strip=True)
         limit = integer(limit, "limit", minimum=1)
         limit_per_source = integer(limit_per_source, "limit_per_source", minimum=1)
+        sources = self._sources(sources)
+        return capture(
+            "content.passages",
+            lambda: self._passages(
+                query,
+                sources=sources,
+                limit=limit,
+                limit_per_source=limit_per_source,
+            ),
+            context={"query": query},
+            query=query,
+        )
+
+    def _passages(
+        self,
+        query: str,
+        *,
+        sources: list[str],
+        limit: int,
+        limit_per_source: int,
+    ) -> Record:
         report = self._transport.call(
             "content.passages",
             {
                 "query": query,
-                "sources": self._sources(sources),
+                "sources": sources,
                 "limit": limit,
                 "limit_per_source": limit_per_source,
             },
@@ -919,18 +1002,15 @@ class LLMResource:
         system: str | None = None,
         temperature: float = 0.2,
         max_tokens: int | None = None,
-    ) -> str:
-        """Run one free-form pipeline-model completion.
+    ) -> Outcome[str]:
+        """Run one free-form pipeline-model completion into an outcome.
 
         ``system`` supplies optional instructions, ``temperature`` controls sampling,
         and ``max_tokens`` optionally bounds the response. Prefer ``extract``
         when downstream code expects structured data.
 
-        Returns:
-            The model's response text.
-
-        Raises:
-            BrokerError: The deployment has no pipeline model or completion fails.
+        A successful ``value`` is the model's response text. Operational failures,
+        including unavailable pipeline-model capability, return structured outcomes.
         """
         prompt = string(prompt, "prompt")
         system = optional_string(system, "system")
@@ -945,14 +1025,17 @@ class LLMResource:
             "max_tokens",
             minimum=1,
         )
-        return self._transport.call(
+        return capture(
             "llm.complete",
-            {
-                "prompt": prompt,
-                "system": system,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
+            lambda: self._transport.call(
+                "llm.complete",
+                {
+                    "prompt": prompt,
+                    "system": system,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+            ),
         )
 
     def extract(
@@ -963,19 +1046,16 @@ class LLMResource:
         schema: dict[str, Any],
         max_tokens: int | None = None,
         repair_attempts: int = 0,
-    ) -> Record:
-        """Transform one JSON value into a schema-checked JSON object.
+    ) -> Outcome[Record]:
+        """Transform one JSON value into a schema-checked outcome.
 
         ``item`` and ``schema`` must be strict-JSON serializable. The schema root
         must be an object. ``repair_attempts`` must be non-negative and cannot
         exceed the broker-advertised limit.
 
-        Returns:
-            The validated JSON object directly.
-
-        Raises:
-            ValueError: Local arguments are not JSON serializable or valid.
-            BrokerError: Provider, JSON, schema, repair, or quota processing fails.
+        A successful ``value`` is the validated JSON object. Provider, JSON, schema,
+        repair, and quota failures return structured failure outcomes. Invalid local
+        arguments still raise ``ValueError``.
         """
         instruction = string(instruction, "instruction", nonempty=False)
         max_tokens = optional_integer(
@@ -993,6 +1073,26 @@ class LLMResource:
         self._ensure_json_serializable(schema, "schema")
         self._ensure_json_serializable(item, "item")
 
+        return capture(
+            "llm.extract",
+            lambda: self._extract(
+                item,
+                instruction=instruction,
+                schema=schema,
+                max_tokens=max_tokens,
+                repair_attempts=repair_attempts,
+            ),
+        )
+
+    def _extract(
+        self,
+        item: Any,
+        *,
+        instruction: str,
+        schema: dict[str, Any],
+        max_tokens: int | None,
+        repair_attempts: int,
+    ) -> Record:
         params = {
             "item": item,
             "instruction": instruction,
@@ -1020,15 +1120,9 @@ class LLMResource:
         ``llm.extract`` request governed by broker budget, retry, and provider policies.
         Original items are never copied into outcomes or failure diagnostics.
 
-        Returns:
-            One outcome per input position. Successful rows contain ``data`` and
-            ``error=None``; failed rows contain ``data=None`` and structured ``error``.
-            ``status`` is exactly ``"success"`` or ``"failure"``.
-
-        Raises:
-            ValueError: Local arguments or any item are not strict-JSON serializable.
-            BrokerError: Every item failed with a transport, protocol, contract, or
-                permission error.
+        Returns one generic outcome per input position. Successful ``value`` fields
+        contain schema-validated objects; failures contain structured ``error`` records.
+        Invalid local arguments still raise ``ValueError``.
         """
         if not isinstance(items, list):
             raise ValueError("items must be a list of strict-JSON values")
@@ -1043,7 +1137,7 @@ class LLMResource:
             self._ensure_json_serializable(item, f"items[{input_index}]")
 
         def extract_one(item: Any) -> Record:
-            return self.extract(
+            return self._extract(
                 item,
                 instruction=instruction,
                 schema=schema,
@@ -1052,31 +1146,22 @@ class LLMResource:
             )
 
         report = _run_many(items, concurrency=concurrency, call=extract_one)
-        report.raise_for_all_system_failures()
         outcomes: list[Record] = []
         for result in report.outcomes:
             if isinstance(result, _ManySuccess):
                 outcomes.append(
-                    record(
-                        {
-                            "input_index": result.input_index,
-                            "status": "success",
-                            "data": result.value,
-                            "error": None,
-                        }
+                    success(
+                        result.value,
+                        context={"input_index": result.input_index},
                     )
                 )
                 continue
             if not isinstance(result, _ManyFailure):
                 raise RuntimeError("many extraction returned an invalid internal outcome")
             outcomes.append(
-                record(
-                    {
-                        "input_index": result.input_index,
-                        "status": "failure",
-                        "data": None,
-                        "error": result.info,
-                    }
+                failure(
+                    result.info,
+                    context={"input_index": result.input_index},
                 )
             )
 
@@ -1100,13 +1185,16 @@ class CapabilitiesResource:
     def __init__(self, transport: UnixSocketTransport) -> None:
         self._transport = transport
 
-    def __call__(self) -> Record:
-        """Return session-visible capabilities, limits, and contract versions.
+    def __call__(self) -> Outcome[Record]:
+        """Return session-visible capabilities, limits, and contract versions in an outcome.
 
         The record reflects the active backend and this session's mechanism
         switches without exposing provider credentials or internal endpoints.
         """
-        return self._transport.call("session.capabilities", {})
+        return capture(
+            "capabilities",
+            lambda: self._transport.call("session.capabilities", {}),
+        )
 
 
 class WorkspaceResource:

@@ -8,15 +8,6 @@ from typing import Any
 from ._diagnostics import error_info, record_external_failures
 from .transport import BrokerError
 
-_SYSTEM_FAILURE_CODES = frozenset(
-    {
-        "broker_transport_error",
-        "broker_protocol_error",
-        "capability_contract_mismatch",
-        "permission_denied",
-    }
-)
-
 
 @dataclass(frozen=True, slots=True)
 class _ManySuccess[ItemT, ResultT]:
@@ -48,17 +39,6 @@ class _ManyReport[ItemT, ResultT]:
     @property
     def failure_count(self) -> int:
         return len(self.failures)
-
-    def raise_for_all_system_failures(self) -> None:
-        """Raise when no item reached a usable broker capability boundary."""
-
-        failures = self.failures
-        if (
-            self.outcomes
-            and len(failures) == len(self.outcomes)
-            and all(failure.error.code in _SYSTEM_FAILURE_CODES for failure in failures)
-        ):
-            raise failures[0].error
 
     def record_failures(
         self,

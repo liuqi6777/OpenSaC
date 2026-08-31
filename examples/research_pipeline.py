@@ -20,23 +20,23 @@ unique = {
     candidate.source: candidate for candidate in fusion if candidate.domain in official_domains
 }
 
-report = sdk.content.passages(
+passages_outcome = sdk.content.passages(
     "vector index types, filtering, consistency and limitations",
     sources=list(unique),
     limit=20,
     limit_per_source=3,
 )
+report = passages_outcome.value if passages_outcome.status == "success" else None
+passages = report.passages if report is not None else []
+failures = report.failures if report is not None else []
 
 sdk.workspace.write_jsonl(
     "evidence.jsonl",
-    [dict(item) for item in report.passages],
+    [dict(item) for item in passages],
 )
-for item in report.passages[:8]:
+for item in passages[:8]:
     excerpt = " ".join(item.text.split())[:400]
     print(
         f"EVIDENCE source={item.source!r} coordinates={dict(item.coordinates)!r} text={excerpt!r}"
     )
-print(
-    f"READY: evidence={len(report.passages)} failures={len(report.failures)} "
-    "artifact='evidence.jsonl'"
-)
+print(f"READY: evidence={len(passages)} failures={len(failures)} artifact='evidence.jsonl'")

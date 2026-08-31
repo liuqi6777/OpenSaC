@@ -1,56 +1,78 @@
 from __future__ import annotations
 
-from opensac_sdk import BrokerError, sdk
+from typing import Any
 
-hits = sdk.search("OpenSAC", limit=3)
+from opensac_sdk import Outcome, sdk
+
+search_outcome = sdk.search("OpenSAC", limit=3)
+public_outcome_annotation: Outcome[list[Any]] = search_outcome
+if search_outcome.status == "failure":
+    search_failure_code: str = search_outcome.error.code
+    hits = []
+else:
+    hits = search_outcome.value
 source: str = hits[0].source
 rank: int = hits[0]["rank"]
 
 batches = sdk.search.many(["OpenSAC", "search as code"])
 search_status: str = batches[0].status
-search_hit_count: int = len(batches[0].hits)
-search_error = batches[0].error
-search_error_code: str | None = search_error.code if search_error is not None else None
+search_hit_count: int = len(batches[0].value) if batches[0].status == "success" else 0
+search_error_code: str | None = batches[0].error.code if batches[0].status == "failure" else None
 
 fused = sdk.search.fuse_rrf(batches)
 fused_rank: int | None = fused[0].rank if fused else None
 
-try:
-    sdk.search("provider diagnostics")
-except BrokerError as error:
-    broker_provider: str | None = error.provider
-    broker_component: str | None = error.component
-    broker_scope: str | None = error.scope
+diagnostic = sdk.search("provider diagnostics")
+if diagnostic.status == "failure":
+    broker_provider: str | None = diagnostic.error.provider
+    broker_component: str | None = diagnostic.error.component
+    broker_scope: str | None = diagnostic.error.scope
 else:
     broker_provider = broker_component = broker_scope = None
 
-row = sdk.content.read(source, start_line=1, line_count=20)
+read_outcome = sdk.content.read(source, start_line=1, line_count=20)
+if read_outcome.status == "failure":
+    raise RuntimeError(read_outcome.error.message)
+row = read_outcome.value
 text: str = row.text
 next_line: int | None = row.window.next.start_line if row.window.next else None
-document = sdk.content.fetch(source)
+fetch_outcome = sdk.content.fetch(source)
+if fetch_outcome.status == "failure":
+    raise RuntimeError(fetch_outcome.error.message)
+document = fetch_outcome.value
 document_title: str = document.title
 fetch_outcomes = sdk.content.fetch_many([source], concurrency=2)
 fetch_status: str = fetch_outcomes[0].status
-fetched_document = fetch_outcomes[0].document
+fetched_document = fetch_outcomes[0].value
 fetched_document_title: str | None = (
     fetched_document.title if fetched_document is not None else None
 )
-fetch_error = fetch_outcomes[0].error
-fetch_error_code: str | None = fetch_error.code if fetch_error is not None else None
+fetch_error_code: str | None = (
+    fetch_outcomes[0].error.code if fetch_outcomes[0].status == "failure" else None
+)
 input_index: int = fused[0].provenance[0].input_index if fused else 0
 
 grep_outcomes = sdk.content.grep("OpenSAC", sources=[source], mode="literal", case_sensitive=True)
 grep_status: str = grep_outcomes[0].status
-match_line: int = grep_outcomes[0].matches[0].line
-grep_exhaustive: bool = grep_outcomes[0].next_start_line is None
+match_line: int = (
+    grep_outcomes[0].value.matches[0].line if grep_outcomes[0].status == "success" else 0
+)
+grep_exhaustive: bool = (
+    grep_outcomes[0].value.next_start_line is None
+    if grep_outcomes[0].status == "success"
+    else False
+)
 
-capabilities = sdk.capabilities()
+capabilities_outcome = sdk.capabilities()
+if capabilities_outcome.status == "failure":
+    raise RuntimeError(capabilities_outcome.error.message)
+capabilities = capabilities_outcome.value
 capability_contract: int = capabilities.contracts.capability
 sdk.workspace.write_json("checkpoint.json", {"source": source})
 workspace_files: list[str] = sdk.workspace.list()
 checkpoint_source: object = sdk.workspace.read_json("checkpoint.json")["source"]
 
-extraction = sdk.llm.extract(
+extraction_outcome = sdk.llm.extract(
     {"text": text},
     instruction="Extract a label.",
     schema={
@@ -60,6 +82,9 @@ extraction = sdk.llm.extract(
         "additionalProperties": False,
     },
 )
+if extraction_outcome.status == "failure":
+    raise RuntimeError(extraction_outcome.error.message)
+extraction = extraction_outcome.value
 extracted_label: object = extraction["label"]
 extract_outcomes = sdk.llm.extract_many(
     [{"text": text}],
@@ -71,12 +96,13 @@ extract_outcomes = sdk.llm.extract_many(
     },
 )
 extract_status: str = extract_outcomes[0].status
-extracted_data = extract_outcomes[0].data
+extracted_data = extract_outcomes[0].value
 many_extracted_label: object | None = (
     extracted_data["label"] if extracted_data is not None else None
 )
-extract_error = extract_outcomes[0].error
-extract_error_code: str | None = extract_error.code if extract_error is not None else None
+extract_error_code: str | None = (
+    extract_outcomes[0].error.code if extract_outcomes[0].status == "failure" else None
+)
 
 print(
     {

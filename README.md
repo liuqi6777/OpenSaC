@@ -183,7 +183,8 @@ from opensac import OpenSAC
 program = """
 from opensac_sdk import sdk
 
-hits = sdk.search("Who introduced the ReAct prompting method?", limit=5)
+outcome = sdk.search("Who introduced the ReAct prompting method?", limit=5)
+hits = outcome.value if outcome.status == "success" else []
 for hit in hits:
     print(f"CANDIDATE source={hit.source!r} title={hit.title!r}")
 """
@@ -217,11 +218,10 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.workspace` | JSON/JSONL artifact helpers | Persist structured artifacts across executions in one session |
 | Top level | `capabilities` | Inspect active contracts, deployment limits, and mechanisms |
 
-`search.many`, `content.fetch_many`, `llm.extract_many`, and `content.grep` return input-aligned
-outcomes. Search, fetch, and extraction status is exactly `"success"` or `"failure"`; failed rows
-expose structured details in `outcome.error`. Grep keeps its display-only failure status.
-Independent reads and free-form completions use explicit Python loops and per-call `BrokerError`.
-Each search hit has one
+Every broker-backed unary operation returns a generic outcome; fan-out operations return the same
+shape aligned to input order. Consume `outcome.value` only when `status == "success"`; operational
+failures expose structured details in `outcome.error` and are rendered automatically as bounded
+warnings. Each search hit has one
 `source`: a canonical web URL or local document ID. Empty search results are successful results.
 Content accepts URL/local-ID strings rather than result records. Web deployments can fetch bounded
 public HTTP(S) URLs directly; local IDs remain search-admitted. Generated programs return bounded,
