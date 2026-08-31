@@ -7,9 +7,10 @@ queries = [
 ]
 
 official_domains = {"postgresql.org", "github.com", "elastic.co", "milvus.io"}
-search_outcomes = sdk.search.many(queries, limit=10, concurrency=3)
+search_results = sdk.search.many(queries, limit=10, concurrency=3)
 fusion = sdk.search.fuse_rrf(
-    search_outcomes,
+    queries,
+    search_results,
     k=60,
     limit=24,
     domain_weights={domain: 1.5 for domain in official_domains},
@@ -26,17 +27,16 @@ report = sdk.content.passages(
     limit=20,
     limit_per_source=3,
 )
+passages = report.passages if report is not None else []
+failures = report.failures if report is not None else []
 
 sdk.workspace.write_jsonl(
     "evidence.jsonl",
-    [dict(item) for item in report.passages],
+    [dict(item) for item in passages],
 )
-for item in report.passages[:8]:
+for item in passages[:8]:
     excerpt = " ".join(item.text.split())[:400]
     print(
         f"EVIDENCE source={item.source!r} coordinates={dict(item.coordinates)!r} text={excerpt!r}"
     )
-print(
-    f"READY: evidence={len(report.passages)} failures={len(report.failures)} "
-    "artifact='evidence.jsonl'"
-)
+print(f"READY: evidence={len(passages)} failures={len(failures)} artifact='evidence.jsonl'")

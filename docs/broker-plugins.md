@@ -128,6 +128,14 @@ Use the normalized models exported by the relevant package:
 - `opensac.backends.rerank`: `RerankScore`; and
 - `opensac.backends.llm`: `LLMResponse`.
 
+Every `SearchHit` must carry a non-empty locator in either `url` or `docid`. The broker admits that
+locator without deciding whether the selected document backend can fetch its scheme. Absolute
+HTTP(S) locators are canonicalized for stable identity; other locators retain their provider-native
+spelling. The document backend owns fetchability checks through `fetch_candidates()` and an
+optional `preflight_fetch()`. A `public_url` document backend may additionally receive direct public
+HTTP(S) URLs according to host admission policy, while an `opaque` backend only receives locators
+previously admitted by search.
+
 `provider_identity` is an opaque process-wide governor identity. It must distinguish effective
 provider endpoints and credentials without exposing credential material in traces or logs. An
 adapter may additionally implement async `aclose()`; the broker will close supported backends when

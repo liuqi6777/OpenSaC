@@ -129,18 +129,18 @@ async def test_search_many_round_trips_concurrently_over_unix_socket(
     monkeypatch.setenv("OPENSAC_EXECUTION_ID", "client-many-uds")
     search = SearchResource(transport)
     try:
-        outcomes = await asyncio.to_thread(
+        queries = ["slow", "failed", "fast"]
+        results = await asyncio.to_thread(
             search.many,
-            ["slow", "failed", "fast"],
+            queries,
             concurrency=2,
         )
-        assert [outcome.query for outcome in outcomes] == ["slow", "failed", "fast"]
-        assert [outcome.status for outcome in outcomes] == ["success", "failure", "success"]
-        assert outcomes[1].error.code == "provider_timeout"
-        assert outcomes[1].error.attempts == 1
+        assert results[0] is not None
+        assert results[1] is None
+        assert results[2] is not None
         assert backend.max_active == 2
         assert sorted(backend.calls) == ["failed", "fast", "slow"]
-        fused = search.fuse_rrf(outcomes)
+        fused = search.fuse_rrf(queries, results)
         assert [candidate.source for candidate in fused] == ["doc-slow", "doc-fast"]
         assert [candidate.provenance[0].input_index for candidate in fused] == [0, 2]
         trace = service.take_trace("secret", "client-many-uds")
@@ -183,16 +183,13 @@ async def test_search_many_allows_partial_budget_success_over_unix_socket(
     await runtime.start()
     transport = UnixSocketTransport(str(runtime.socket_path), "secret")
     try:
-        outcomes = await asyncio.to_thread(
+        results = await asyncio.to_thread(
             SearchResource(transport).many,
             ["one", "two", "three", "four"],
             concurrency=4,
         )
-        assert sum(outcome.status == "success" for outcome in outcomes) == 2
-        assert (
-            sum(outcome.error.code == "budget_exhausted" for outcome in outcomes if outcome.error)
-            == 2
-        )
+        assert sum(result is not None for result in results) == 2
+        assert sum(result is None for result in results) == 2
         assert backend.calls == 2
         assert state.policy.usage.search_calls == 2
     finally:
@@ -217,12 +214,11 @@ async def test_search_many_honours_batching_mechanism_over_unix_socket(
     await runtime.start()
     transport = UnixSocketTransport(str(runtime.socket_path), "secret")
     try:
-        with pytest.raises(BrokerError) as raised:
-            await asyncio.to_thread(
-                SearchResource(transport).many,
-                ["one", "two"],
-            )
-        assert raised.value.code == "capability_disabled"
+        results = await asyncio.to_thread(
+            SearchResource(transport).many,
+            ["one", "two"],
+        )
+        assert results == [None, None]
         assert state.policy.usage.search_calls == 0
     finally:
         transport.close()
@@ -261,14 +257,15 @@ async def test_search_many_registers_shared_source_by_completion_order(
     await runtime.start()
     transport = UnixSocketTransport(str(runtime.socket_path), "secret")
     try:
-        outcomes = await asyncio.to_thread(
+        results = await asyncio.to_thread(
             SearchResource(transport).many,
             ["first", "second"],
             concurrency=2,
         )
-        assert [outcome.query for outcome in outcomes] == ["first", "second"]
-        source = outcomes[0].hits[0].source
-        assert outcomes[1].hits[0].source == source
+        assert results[0] is not None
+        assert results[1] is not None
+        source = results[0][0].source
+        assert results[1][0].source == source
         remembered = state.document_for_alias(source)
         assert remembered is not None and remembered.handle.title == "second"
     finally:
@@ -328,9 +325,8 @@ async def test_search_many_cancellation_drains_socket_calls_and_threads(
         assert cancelled >= 2
         assert ("secret", "client-many-cancel") not in service.execution_tasks
 
-        with pytest.raises(BrokerError) as raised:
-            await asyncio.wait_for(running, timeout=2)
-        assert raised.value.code == "broker_transport_error"
+        results = await asyncio.wait_for(running, timeout=2)
+        assert results == [None, None]
         assert backend.cancelled_count == 2
         assert not any(thread.name.startswith("opensac-sdk") for thread in threading.enumerate())
 
@@ -519,21 +515,18 @@ async def test_extraction_provider_failure_is_typed_and_sanitized(tmp_path) -> N
     await runtime.start()
     try:
         resource = LLMResource(UnixSocketTransport(str(runtime.socket_path), "secret"))
-        with pytest.raises(BrokerError) as failed:
-            await asyncio.to_thread(
-                resource.extract,
-                {"value": 1},
-                instruction="Copy the value.",
-                schema={
-                    "type": "object",
-                    "properties": {"value": {"type": "integer"}},
-                    "required": ["value"],
-                    "additionalProperties": False,
-                },
-            )
-        assert failed.value.code == "provider_invalid_response"
-        assert failed.value.retryable is False
-        assert "provider response" not in str(failed.value)
+        result = await asyncio.to_thread(
+            resource.extract,
+            {"value": 1},
+            instruction="Copy the value.",
+            schema={
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+        )
+        assert result is None
     finally:
         await runtime.stop()
 
@@ -560,8 +553,10 @@ async def test_llm_resource_round_trips_over_real_unix_socket(tmp_path) -> None:
     await runtime.start()
     try:
         resource = LLMResource(UnixSocketTransport(str(runtime.socket_path), "secret"))
-        assert await asyncio.to_thread(resource.complete, "plan") == "PLAN"
-        assert [await asyncio.to_thread(resource.complete, prompt) for prompt in ["a", "b"]] == [
+        plan = await asyncio.to_thread(resource.complete, "plan")
+        assert plan == "PLAN"
+        results = [await asyncio.to_thread(resource.complete, prompt) for prompt in ["a", "b"]]
+        assert results == [
             "A",
             "B",
         ]

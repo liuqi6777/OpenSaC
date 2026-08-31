@@ -192,9 +192,19 @@ class FakeOpenSAC:
                     "warnings": (
                         [
                             {
+                                "code": "external_result_failure",
                                 "method": "content.read",
                                 "success_count": 0,
                                 "failure_count": 1,
+                                "failures": [
+                                    {
+                                        "source": "https://example.com/missing",
+                                        "code": "provider_not_found",
+                                        "message": "Document was not found.",
+                                        "retryable": False,
+                                    }
+                                ],
+                                "omitted_failure_count": 0,
                             }
                         ]
                         if code == "rich-output"
@@ -336,7 +346,7 @@ async def test_restart_resumes_same_leased_session_and_workspace(tmp_path: Path)
     assert not server.deleted
 
 
-async def test_mcp_returns_only_program_stdout(tmp_path: Path) -> None:
+async def test_mcp_uses_shared_structured_renderer(tmp_path: Path) -> None:
     server = FakeOpenSAC()
     bridge = _bridge(tmp_path, server)
     try:
@@ -344,7 +354,15 @@ async def test_mcp_returns_only_program_stdout(tmp_path: Path) -> None:
     finally:
         await bridge.aclose()
 
-    assert observation == "stdout only"
+    assert observation.startswith("[OpenSAC warning]")
+    assert '"method":"content.read"' in observation
+    assert '"code":"provider_not_found"' in observation
+    assert '"code":"stderr_output"' in observation
+    assert observation.endswith("stdout only")
+    assert "[OpenSAC status]" not in observation
+    assert "[OpenSAC workspace]" not in observation
+    assert "hidden-workspace.jsonl" not in observation
+    assert "structured result" not in observation
 
 
 @pytest.mark.parametrize(
@@ -352,12 +370,13 @@ async def test_mcp_returns_only_program_stdout(tmp_path: Path) -> None:
     [
         (
             "validator-error",
-            "[sac_run] Rejected by the sandbox code validator: invalid Python",
+            '[OpenSAC error] {"code":"sandbox_error","message":'
+            '"Rejected by the sandbox code validator: invalid Python"}',
         ),
         (
             "runtime-error",
-            "before failure\n\n[sac_run] execution_failed:\n"
-            "Traceback (most recent call last):\nValueError: boom",
+            'before failure\n\n[OpenSAC error] {"code":"execution_failed",'
+            '"exit_code":1,"message":"Traceback (most recent call last):\\nValueError: boom"}',
         ),
     ],
 )

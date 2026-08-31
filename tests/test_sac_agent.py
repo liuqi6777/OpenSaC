@@ -54,9 +54,10 @@ def test_sac_tool_prompt_teaches_core_research_protocol() -> None:
         "Upgrade to `sdk.workspace` only when",
         "candidate pool, evidence ledger, or attempted-source history",
         "do not replay blindly",
-        "For `search.many`, branch on",
-        "read failure details from `outcome.error`",
-        "other statuses as displayable failure text",
+        "single-item methods return a result or `None`",
+        "input-aligned list with `None` in failed positions",
+        "Check `is None`, never truthiness",
+        "Do not add `try/except`",
     ):
         assert guidance in normalized
 
@@ -215,10 +216,15 @@ def test_sac_observation_prioritizes_external_failure_warnings() -> None:
         }
     )
 
-    assert rendered.index("warnings:") < rendered.index("stdout:")
-    assert "content.passages succeeded for 1 item(s); 1 failed" in rendered
+    assert rendered.index("[OpenSAC warning]") < rendered.index("successful passage")
+    assert '"method":"content.passages"' in rendered
+    assert '"success_count":1' in rendered
+    assert '"failure_count":1' in rendered
     assert "provider_not_found" in rendered
     assert "successful passage" in rendered
+    assert "[OpenSAC status]" not in rendered
+    assert "[OpenSAC workspace]" not in rendered
+    assert "stdout:" not in rendered
     assert "search_calls" not in rendered
     assert "docs_fetched" not in rendered
     assert "usage" not in rendered

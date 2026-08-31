@@ -25,11 +25,10 @@ BLOCKED_CALLS = {"__import__", "breakpoint", "compile", "eval", "exec", "help", 
 # start no chain toward `__class__` -> `__subclasses__` -> arbitrary objects,
 # which is what the blanket ban exists to interrupt.
 #
-# They are worth exempting because `type(exc).__name__` is how Python code
-# reports an error, and generated pipelines wrap their retrieval in try/except
-# constantly. Refusing the whole program over an error message costs the
-# control model a turn and teaches it nothing: the rejection names a rule, not
-# the harmless line that tripped it.
+# They are worth exempting because `type(exc).__name__` remains useful when
+# reporting local parsing and programming errors. Refusing the whole program
+# over an error message costs the control model a turn and teaches it nothing:
+# the rejection names a rule, not the harmless line that tripped it.
 #
 # The ban is defence in depth, not the security boundary. It is bypassable by
 # construction -- `getattr(obj, "__cla" + "ss__")` never reaches this check --

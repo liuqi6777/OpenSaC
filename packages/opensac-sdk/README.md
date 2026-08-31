@@ -16,15 +16,19 @@ can inspect one exact interface without calling the broker, for example:
 print(sdk.content.passages.__doc__)
 ```
 
-The content surface supports unary fetching and aligned bounded fan-out; reading remains unary:
+Broker-backed operations return their result or `None`. Bounded fan-out helpers return
+input-aligned lists with `None` in failed positions:
 
 ```python
 document = sdk.content.fetch(source)
-fetch_outcomes = sdk.content.fetch_many(sources, concurrency=5)
-extract_outcomes = sdk.llm.extract_many(items, instruction=instruction, schema=schema)
-row = sdk.content.read(source, start_line=1, line_count=200)
-grep_outcomes = sdk.content.grep(pattern, sources=sources, mode="regex", context_lines=2)
+documents = sdk.content.fetch_many(sources, concurrency=5)
+extractions = sdk.llm.extract_many(items, instruction=instruction, schema=schema)
+content = sdk.content.read(source, start_line=1, line_count=200)
+grep_results = sdk.content.grep(pattern, sources=sources, mode="regex", context_lines=2)
 ```
+
+Check `is None`, not truthiness, because empty containers and strings can be successful results.
+Operational failures are recorded as bounded agent-visible structured warnings.
 
 See the complete API reference in
 [English](https://github.com/liuqi6777/OpenSaC/blob/main/docs/sdk-reference.md) or

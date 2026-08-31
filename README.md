@@ -115,7 +115,7 @@ Download `configs/docker.yaml`, then set its two `storage` paths to `$OPENSAC_RU
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.3/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.4/configs/docker.yaml
 ```
 
 Start the published image:
@@ -184,6 +184,8 @@ program = """
 from opensac_sdk import sdk
 
 hits = sdk.search("Who introduced the ReAct prompting method?", limit=5)
+if hits is None:
+    hits = []
 for hit in hits:
     print(f"CANDIDATE source={hit.source!r} title={hit.title!r}")
 """
@@ -217,11 +219,10 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.workspace` | JSON/JSONL artifact helpers | Persist structured artifacts across executions in one session |
 | Top level | `capabilities` | Inspect active contracts, deployment limits, and mechanisms |
 
-`search.many`, `content.fetch_many`, `llm.extract_many`, and `content.grep` return input-aligned
-outcomes. Search, fetch, and extraction status is exactly `"success"` or `"failure"`; failed rows
-expose structured details in `outcome.error`. Grep keeps its display-only failure status.
-Independent reads and free-form completions use explicit Python loops and per-call `BrokerError`.
-Each search hit has one
+Every broker-backed unary operation returns its result or `None`; fan-out operations return an
+input-aligned list with `None` in failed positions. Check `is None`, not truthiness, because an empty
+list, string, or object can be a successful result. Operational failures are rendered automatically
+as bounded structured warnings. Each search hit has one
 `source`: a canonical web URL or local document ID. Empty search results are successful results.
 Content accepts URL/local-ID strings rather than result records. Web deployments can fetch bounded
 public HTTP(S) URLs directly; local IDs remain search-admitted. Generated programs return bounded,
@@ -294,7 +295,7 @@ service also exposes the live runtime dashboard at `http://127.0.0.1:8000/dashbo
 
 | Goal | Document |
 | --- | --- |
-| Upgrade to v0.8.3 | [v0.8.3 release notes](docs/opensac-0.8.3.md) |
+| Upgrade to the current release | [Release notes](docs/opensac-0.8.4.md) |
 | Choose a YAML configuration profile | [Configuration profiles](docs/deployment.md#configuration-profiles) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Add broker backends or capability modules | [Broker plugins](docs/broker-plugins.md) |

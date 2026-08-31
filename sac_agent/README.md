@@ -21,8 +21,9 @@ context management, subagents, or backend-specific retrieval logic.
 2. The model writes a Python research program using `opensac_sdk`.
 3. `sac_run` lazily creates one OpenSAC session and executes the program in its
    sandbox.
-4. Compact stdout, stderr, warnings, and workspace filenames are returned to the model as a tool
-   observation.
+4. Program stdout is returned to the model, with structured `[OpenSAC warning]` lines before it and
+   a structured `[OpenSAC error]` line after it when diagnostics exist. Status and workspace
+   metadata are omitted.
 5. Later tool calls reuse the same session, so local sources and workspace files survive across
    turns. Public web URLs can also be reused across sessions. The session is deleted when the run ends.
 
@@ -229,7 +230,7 @@ not require authentication.
 The endpoint must support native OpenAI-style function calling. A text-only
 chat-completions implementation is not sufficient for this agent.
 
-### `[sac_run] OpenSAC request failed`
+### `[OpenSAC error] {"code":"request_failed",...}`
 
 Check that `SAC_API_BASE` points to the OpenSAC API, the bearer key matches the
 server configuration, and the server can create a sandbox session. OpenSAC

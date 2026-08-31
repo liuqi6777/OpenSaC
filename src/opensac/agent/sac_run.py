@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -86,55 +87,26 @@ def state_loss_code(response: httpx.Response) -> str | None:
 def render_observation(
     payload: Mapping[str, Any], *, output_limit: int = DEFAULT_OUTPUT_LIMIT
 ) -> str:
-    if payload.get("error"):
-        return f"[sac_run] {payload['error']}"
-
-    execution_mode = str(payload.get("execution_mode") or "program")
-    interpreter_state = str(payload.get("interpreter_state") or "not_applicable")
-    namespace_count = payload.get("namespace_symbol_count")
-    namespace_summary = (
-        f" namespace_symbols={namespace_count}" if namespace_count is not None else ""
-    )
-    sections = [
-        f"[sac_run] exit_code={payload.get('exit_code')} "
-        f"duration={float(payload.get('duration_seconds', 0.0)):.1f}s "
-        f"execution_mode={execution_mode} "
-        f"interpreter_state={interpreter_state}"
-        f"{namespace_summary}"
-    ]
-    if interpreter_state == "lost":
-        reason = str(payload.get("interpreter_loss_reason") or "unknown")
-        sections.append(
-            "state_lost: The persistent interpreter was lost "
-            f"({reason}). The cell will not be replayed."
-        )
-    remaining = output_limit
+    sections: list[str] = []
     warning_body = _render_warnings(payload.get("warnings"))
-    if warning_body and remaining > 0:
-        rendered = truncate_observation(warning_body, min(remaining, _WARNING_OUTPUT_LIMIT))
-        sections.append(f"warnings:\n{rendered}")
-        remaining -= len(rendered)
-    bodies: list[tuple[str, str]] = []
-    if str(payload.get("stdout") or "").strip():
-        bodies.append(("stdout", str(payload["stdout"]).strip()))
-    if str(payload.get("stderr") or "").strip():
-        bodies.append(("stderr", str(payload["stderr"]).strip()))
-    for label, body in bodies:
-        if remaining <= 0:
-            break
-        rendered = truncate_observation(body, remaining)
-        sections.append(f"{label}:\n{rendered}")
-        remaining -= len(rendered)
+    stderr = str(payload.get("stderr") or "").strip()
+    error = _render_error(payload, stderr=stderr)
+    if stderr and not error:
+        stderr_warning = _tagged("warning", {"code": "stderr_output", "message": stderr})
+        warning_body = f"{warning_body}\n{stderr_warning}" if warning_body else stderr_warning
+    if warning_body:
+        sections.append(truncate_observation(warning_body, _WARNING_OUTPUT_LIMIT))
 
-    artifacts = sorted(str(item) for item in (payload.get("artifacts") or []))
-    sections.append(
-        "workspace: empty"
-        if not artifacts
-        else f"workspace: {len(artifacts)} file(s): {', '.join(artifacts[:40])}"
-    )
-    if len(sections) == 2 and not artifacts:
-        sections.insert(1, "The program printed nothing.")
-    return "\n\n".join(sections)
+    stdout = "" if payload.get("stdout") is None else str(payload["stdout"])
+    if stdout:
+        sections.append(stdout)
+    if error:
+        sections.append(error)
+
+    if sections == [stdout]:
+        return truncate_observation(stdout, output_limit)
+    rendered = "\n\n".join(section.strip() for section in sections if section.strip())
+    return truncate_observation(rendered, output_limit) if rendered else ""
 
 
 def _render_warnings(value: Any) -> str:
@@ -144,31 +116,81 @@ def _render_warnings(value: Any) -> str:
     for warning in value:
         if not isinstance(warning, Mapping):
             continue
-        method = str(warning.get("method") or "unknown")
-        success_count = int(warning.get("success_count") or 0)
-        failure_count = int(warning.get("failure_count") or 0)
         lines.append(
-            f"OpenSAC external failure: {method} succeeded for "
-            f"{success_count} item(s); {failure_count} failed."
+            _tagged(
+                "warning",
+                {
+                    "code": str(warning.get("code") or "external_result_failure"),
+                    "method": str(warning.get("method") or "unknown"),
+                    "success_count": int(warning.get("success_count") or 0),
+                    "failure_count": int(warning.get("failure_count") or 0),
+                    "omitted_failure_count": int(warning.get("omitted_failure_count") or 0),
+                },
+            )
         )
         failures = warning.get("failures")
         if isinstance(failures, list):
             for failure in failures:
                 if not isinstance(failure, Mapping):
                     continue
-                code = str(failure.get("code") or "unknown")
-                context = failure.get("source") or failure.get("query")
-                index = failure.get("input_index")
-                target = f" source={context}" if context else ""
-                if not target and index is not None:
-                    target = f" input_index={index}"
-                retryable = " retryable" if failure.get("retryable") else ""
-                message = str(failure.get("message") or "External operation failed.")
-                lines.append(f"- [{code}]{target}{retryable}: {message}")
-        omitted = int(warning.get("omitted_failure_count") or 0)
-        if omitted:
-            lines.append(f"- {omitted} more failure(s) omitted")
+                detail = {
+                    field: failure[field]
+                    for field in (
+                        "code",
+                        "input_index",
+                        "source",
+                        "query",
+                        "retryable",
+                        "attempts",
+                        "provider_status",
+                        "retry_after_seconds",
+                        "provider",
+                        "component",
+                        "scope",
+                        "message",
+                    )
+                    if failure.get(field) is not None
+                }
+                detail.setdefault("code", "unknown")
+                detail.setdefault("message", "External operation failed.")
+                lines.append(_tagged("warning", detail))
     return "\n".join(lines)
+
+
+def _render_error(payload: Mapping[str, Any], *, stderr: str) -> str:
+    error = payload.get("error")
+    if error:
+        return render_error("sandbox_error", str(error))
+    if payload.get("interpreter_state") == "lost":
+        return render_error(
+            "state_lost",
+            "The persistent interpreter was lost; the cell will not be replayed.",
+            reason=str(payload.get("interpreter_loss_reason") or "unknown"),
+        )
+    if payload.get("timed_out"):
+        return render_error("timed_out", "Execution timed out.")
+    if payload.get("output_limit_exceeded"):
+        return render_error(
+            "output_limit_exceeded",
+            "Execution output exceeded its limit.",
+        )
+    if payload.get("succeeded") is False:
+        return render_error(
+            "execution_failed",
+            stderr or f"Program exited with code {payload.get('exit_code')}.",
+            exit_code=payload.get("exit_code"),
+        )
+    return ""
+
+
+def render_error(code: str, message: str, **details: Any) -> str:
+    value = {"code": code, **details, "message": message}
+    return _tagged("error", value)
+
+
+def _tagged(kind: str, value: Mapping[str, Any]) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"[OpenSAC {kind}] {encoded}"
 
 
 def truncate_observation(text: str, limit: int) -> str:

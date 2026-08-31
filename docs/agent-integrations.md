@@ -19,7 +19,7 @@ endpoint exposed inside sandbox programs as `sdk.llm.*`.
 
 ## Prerequisites
 
-Start the public `v0.8.3` service image by following the main README's
+Start the public `v0.8.4` service image by following the main README's
 [Docker quick start](../README.md#quick-start-with-docker). The service itself needs no source
 checkout. PyPI publication is not planned, so a host that uses the CLI or MCP adapter should check
 out the matching release to install the adapter and skills:
@@ -27,7 +27,7 @@ out the matching release to install the adapter and skills:
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-git checkout v0.8.3
+git checkout v0.8.4
 uv tool install --editable '/absolute/path/to/OpenSaC[mcp]'
 
 export SAC_API_BASE=http://127.0.0.1:8000
@@ -57,9 +57,12 @@ document IDs while keeping session IDs out of model-generated arguments. Public 
 carried across sessions. The experimental alternative is
 `OpenSAC.create_session(execution_mode="persistent_interpreter")`, described below.
 
-Render the execution response's bounded `warnings` list before stdout. These warnings expose
-partial or complete external item failures even when generated code only prints successful values;
-they do not make an otherwise successful execution fail.
+Use the shared compact observation renderer. A clean success is the program's stdout unchanged.
+Render each bounded warning as a JSON object prefixed with `[OpenSAC warning]` before stdout, and
+render an execution error as a JSON object prefixed with `[OpenSAC error]` after stdout. Omit status
+and workspace metadata. Warnings expose partial or complete external item failures even when
+generated code only prints successful values; they do not make an otherwise successful execution
+fail.
 
 The runnable [sac_agent](../sac_agent/README.md) package demonstrates a minimal OpenAI-compatible
 ReAct loop. For production harnesses, also handle leases, `worker_restarted`, `session_expired`,

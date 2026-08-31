@@ -1,8 +1,8 @@
 # OpenSAC SDK contract used by this skill
 
 Use this reference when exact signatures, fields, limits, or failure semantics matter. It documents
-the SDK subset used by this skill, not every SDK capability. Import only `BrokerError` and `sdk` from
-`opensac_sdk`. Structured results are mapping-backed records. Mapping access is canonical; known
+the SDK subset used by this skill, not every SDK capability. Import only `sdk` from `opensac_sdk`.
+Structured results are mapping-backed records. Mapping access is canonical; known
 non-colliding fields also support `row.source`, and `dict(row)` serializes the record. Use key access
 for fields such as `items`, `values`, or `get`.
 
@@ -13,12 +13,12 @@ Search:
 ```python
 sdk.search(
     query, *, limit=10, offset=0, include_domains=None
-) -> list[record]
+) -> list[record] | None
 sdk.search.many(
     queries, *, limit=10, offset=0, concurrency=5, include_domains=None
-) -> list[record]
+) -> list[list[record] | None]
 sdk.search.fuse_rrf(
-    report, *, weights=None, k=60, limit=None, exclude_domains=None,
+    queries, results, *, weights=None, k=60, limit=None, exclude_domains=None,
     domain_weights=None, max_per_domain=None
 ) -> list[record]
 ```
@@ -28,22 +28,22 @@ sdk.search.fuse_rrf(
 Content:
 
 ```python
-sdk.content.fetch(source) -> record
-sdk.content.fetch_many(sources, *, concurrency=5) -> list[record]
+sdk.content.fetch(source) -> record | None
+sdk.content.fetch_many(sources, *, concurrency=5) -> list[record | None]
 sdk.content.read(
     source, *, start_line=1, start_character=0,
     line_count=200, max_chars=100_000
-) -> record
+) -> record | None
 sdk.content.grep(
     pattern, *, sources, mode="regex", case_sensitive=False,
     start_line=1, context_lines=0, limit_per_source=20
-) -> list[record]
+) -> list[record | None]
 ```
 
 Capabilities and workspace:
 
 ```python
-sdk.capabilities() -> record
+sdk.capabilities() -> record | None
 sdk.workspace.write_json(path, value)
 sdk.workspace.write_jsonl(path, rows)
 sdk.workspace.append_jsonl(path, rows)
@@ -54,59 +54,49 @@ sdk.workspace.exists(path) -> bool
 sdk.workspace.list(prefix="") -> list[str]
 ```
 
-`search.many` and `content.fetch_many` are public aligned fan-out helpers. Loop over independent
-reads in ordinary Python and handle each `BrokerError` where it occurs.
+`search.many` and `content.fetch_many` are public aligned fan-out helpers. Broker-backed methods do
+not raise operational failures; branch on `result is None`.
 
 ## Exact result fields
 
 - Search hit: `source`, `backend`, `title`, `domain`, `date`, `snippet`, `score`, `rank`,
   `retrieval`, and `metadata`.
-- Search outcome list: one input-aligned row per query with `query`, `status`, `hits`, and `error`.
-  List position is the input identity. Status is exactly `"success"` or `"failure"`; successful
-  rows have `error=None`, while failed rows have empty `hits` and a structured `error`.
+- Search result list: one input-aligned position per query. A successful position is the query's
+  search-hit list; a failed position is `None`. Keep the original query list for identity.
 - Fused candidate: the search-hit fields plus `provenance`, `raw_fused_score`, `domain_weight`,
   `fused_score`, and `fused_rank`. Each provenance row has `input_index`, `query`, `backend`,
   `rank`, and `score`.
 - Fetched document: `source`, `text`, `title`, `date`, and provider `metadata`.
-- Fetch outcome list: one input-aligned row per source with `source`, `status`, `document`, and
-  `error`. Status is exactly `"success"` or `"failure"`; successful rows have a fetched `document`
-  and `error=None`, while failed rows have `document=None` and a structured `error`.
+- Fetch result list: one input-aligned position per source. A successful position is the fetched
+  document; a failed position is `None`. Keep the original source list for identity.
 - Read slice: the fetched-document fields plus an independent `window` record. `window` contains
   `start_line`, `start_character`, `end_line`, `end_character`, `total_lines`, `next`, and
   `truncated_by_max_chars`.
-- Grep outcome list: one input-aligned row per source with `source`, `title`, `status`, `matches`,
-  and `next_start_line`. Failed rows have `title=None`, empty `matches`, and no continuation.
+- Grep result list: one input-aligned position per source. A successful record contains `source`,
+  `title`, `matches`, and `next_start_line`; a failed position is `None`.
 - Grep match: `line`, `text`, `before`, `after`, and `spans`. Its source and title come from the
-  owning outcome. Each span has 0-based, end-exclusive `start_character` and `end_character`.
+  owning result. Each span has 0-based, end-exclusive `start_character` and `end_character`.
 - Coordinates use 1-based lines and 0-based, end-exclusive character positions.
-- Search outcome error: `code`, `message`, `retryable`, `attempts`, `provider_status`,
-  `retry_after_seconds`, `provider`, `component`, and `scope`. Read these fields from
-  `outcome.error`; never display or parse search `status` as failure detail.
-- Grep outcome status is exactly `"success"` or a bounded human-readable failure string. Only
-  compare it with `"success"`; do not parse failure text.
 Join capability results by `source`.
 
 ## Failure and continuation semantics
 
-- Catch `BrokerError` for provider, quota, and transport failures. Inspect `code`, `retryable`,
-  `attempts`, `provider`, `component`, and `scope`.
+- Provider, quota, deadline, transport, protocol, contract, and permission failures return `None`.
+  OpenSAC records bounded structured warnings with sanitized operational details; do not parse the
+  rendered warning as a program data contract.
 - Local argument type, minimum-boundary, and strict-JSON errors raise `ValueError`. Configurable
-  upper bounds are broker policy and are discoverable through `sdk.capabilities()`.
-- `search.many` preserves partial success as input-aligned outcomes. Branch on
-  `status == "success"`; failed rows use `outcome.error`. Provider, quota, and deadline errors stay
-  item failures, while an all-systemic transport/protocol/contract/permission failure can raise one
-  representative top-level `BrokerError`.
-- `content.fetch_many` uses the same partial-success and all-systemic-failure rules. It preserves
-  source order and duplicates; `concurrency` bounds SDK fan-out without changing broker policy.
-- `content.grep` preserves partial success as input-aligned outcomes; other statuses are displayable
-  failure text.
-- `content.fetch` and `content.read` are single operations. A failure is a top-level `BrokerError`;
-  Python loops decide whether to continue with later items.
+  upper bounds are broker policy and are discoverable through a non-`None` `sdk.capabilities()`
+  result.
+- Single operations return `T | None`. Fan-out operations preserve input order, duplicates, and
+  partial success as aligned `list[T | None]`; even all-systemic failures remain aligned `None`.
+- Check `is None`, never truthiness, because an empty list, string, or object can be successful.
+  Use `zip(inputs, results, strict=True)` when failed-item identity matters. Do not add `try/except`
+  or print errors merely for visibility.
 - `read.window.next` is either `None` at EOF or the exact `start_line`/`start_character` for an
   unlossy follow-up call. This matters when `max_chars` stops within one long line.
-- For capped grep scans, continue each successful outcome from non-null `next_start_line`.
-  `next_start_line=None` means that successful source was scanned to EOF.
-- Empty search hits or grep matches with success status are successful results.
+- For capped grep scans, continue each successful result from non-null `result.next_start_line`.
+  A null cursor means that source was scanned to EOF.
+- Empty search hits or grep matches in non-`None` results are successful.
 - Let host policy own provider retries, rate limits, caching, and in-flight coalescing.
 
 ## Retrieval, quota, and content boundaries
@@ -117,8 +107,8 @@ Join capability results by `source`.
   returned them; supported web deployments may also admit bounded public HTTP(S) URLs directly.
 - Every source requested through `fetch`, `read`, or `grep` consumes public
   content-fetch budget even when session caching avoids backend work.
-- `sdk.capabilities()` reports contract versions, active mechanisms, backend support, and
-  configured upper limits. Do not hard-code deployment maxima.
+- A non-`None` `sdk.capabilities()` result reports contract versions, active mechanisms, backend
+  support, and configured upper limits. Do not hard-code deployment maxima.
 
 ## Workspace, stdout, and lifecycle
 
@@ -127,13 +117,12 @@ Join capability results by `source`.
   internal runtime files. Applications choose their own artifact layout.
 - `upsert_jsonl` replaces whole rows by the chosen key; it does not merge object fields.
 - Process-per-call programs lose Python variables between calls. Persistent-interpreter variants
-  retain completed assignments only while the observation reports `interpreter_state=ready`.
-  Files and live variables remain independent; `mechanisms.persistence` controls files only.
-- On `state_lost` or `interpreter_state=lost`, the failed program is not replayed. Restore trusted
-  workspace data, re-admit local IDs, and reuse public URLs only when their deployment permits it. A
-  direct persistent session may surface this terminal state as `interpreter_lost`.
-- Adapter failures occur outside the sandbox and are not `BrokerError`; their execution outcome may
-  be unknown. Repeat external work only when durable progress proves it is missing.
+  retain completed assignments until an explicit `state_lost` or `interpreter_lost` error. Files
+  and live variables remain independent; `mechanisms.persistence` controls files only.
+- On `state_lost` or `interpreter_lost`, the failed program is not replayed. Restore trusted
+  workspace data, re-admit local IDs, and reuse public URLs only when their deployment permits it.
+- Adapter failures occur outside the sandbox and are not SDK results; their execution result may be
+  unknown. Repeat external work only when durable progress proves it is missing.
 
 ## Runtime documentation and sandbox constraints
 

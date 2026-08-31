@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 
-from opensac_sdk import BrokerError, sdk
+from opensac_sdk import sdk
 
 # Include the exact user task here. It separates unrelated research in one conversation.
 task = "Identify the target entity and verify the requested phrase and year."
@@ -55,25 +55,14 @@ queries = list(
         ]
     )
 )
-try:
-    search_outcomes = sdk.search.many(queries, limit=10, concurrency=6)
-except BrokerError as error:
-    print(f"search failed: code={error.code} retryable={error.retryable} attempts={error.attempts}")
-    search_outcomes = []
+search_results = sdk.search.many(queries, limit=10, concurrency=6)
 
-fusion = sdk.search.fuse_rrf(search_outcomes, k=60)
-for outcome in search_outcomes:
-    if outcome.status != "success":
-        error = outcome.error
-        code = error.code if error is not None else "unknown"
-        message = error.message if error is not None else "search failed"
-        print(f"query failed: {outcome.query} code={code} message={message}")
-
+fusion = sdk.search.fuse_rrf(queries, search_results, k=60)
 leader_sources = []
-for outcome in search_outcomes:
-    if outcome.status != "success":
+for result in search_results:
+    if result is None:
         continue
-    for hit in outcome.hits[:2]:
+    for hit in result[:2]:
         if hit.source not in leader_sources:
             leader_sources.append(hit.source)
 
@@ -165,36 +154,26 @@ for name, spec in constraints.items():
     for start in range(0, len(available), CONTENT_BATCH):
         chunk = available[start : start + CONTENT_BATCH]
         attempted[name].update(chunk)
-        try:
-            grep_outcomes = sdk.content.grep(pattern, sources=chunk, context_lines=2)
-        except BrokerError as error:
-            print(f"grep failed: {name} code={error.code} retryable={error.retryable}")
-            break
-
-        for outcome in grep_outcomes:
-            if outcome.status != "success":
-                print(f"fetch failed: {name} source={outcome.source} status={outcome.status}")
+        grep_results = sdk.content.grep(pattern, sources=chunk, context_lines=2)
 
         seen_matches = set()
-        for outcome in grep_outcomes:
-            if outcome.status != "success":
+        for result in grep_results:
+            if result is None:
                 continue
-            for match in outcome.matches:
+            for match in result.matches:
                 if reads_for_constraint >= READ_LIMIT_PER_CONSTRAINT:
                     break
-                if outcome.source in seen_matches:
+                if result.source in seen_matches:
                     continue
-                seen_matches.add(outcome.source)
+                seen_matches.add(result.source)
                 reads_for_constraint += 1
-                try:
-                    passage = sdk.content.read(
-                        outcome.source,
-                        start_line=max(match.line - 10, 1),
-                        line_count=40,
-                        max_chars=16_000,
-                    )
-                except BrokerError as error:
-                    print(f"read failed: {name} code={error.code}")
+                passage = sdk.content.read(
+                    result.source,
+                    start_line=max(match.line - 10, 1),
+                    line_count=40,
+                    max_chars=16_000,
+                )
+                if passage is None:
                     continue
                 if not passage.text.strip() or not compiled.search(passage.text):
                     continue

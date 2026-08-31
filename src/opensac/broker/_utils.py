@@ -43,6 +43,18 @@ def canonical_url(url: str) -> str:
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, query, ""))
 
 
+def _canonical_http_url_or_original(source: str) -> str:
+    """Canonicalize an absolute HTTP(S) locator without interpreting other schemes."""
+
+    try:
+        parts = urlsplit(source)
+    except ValueError:
+        return source
+    if parts.scheme.lower() in {"http", "https"} and parts.netloc:
+        return canonical_url(source)
+    return source
+
+
 def public_web_url(value: Any) -> str:
     """Validate and normalize a bounded public HTTP(S) document address."""
 
@@ -73,19 +85,18 @@ def public_web_url(value: Any) -> str:
 
 
 def source_for(hit: SearchHit) -> str:
-    """Return the source-native public address for a backend hit."""
+    """Return the source-native locator for a backend hit."""
 
     if hit.url:
-        parts = urlsplit(hit.url.strip())
-        if parts.scheme.lower() not in {"http", "https"} or not parts.netloc:
-            raise ValueError("Search backend returned a non-HTTP document URL")
-        source = canonical_url(hit.url)
+        source = _canonical_http_url_or_original(hit.url.strip())
     elif hit.docid:
         source = str(hit.docid).strip()
     else:
         raise ValueError("Search backend returned a hit without a URL or docid")
     if not source:
         raise ValueError("Search backend returned an empty document source")
+    if any(ord(character) < 32 for character in source):
+        raise ValueError("Search backend returned a source containing control characters")
     if len(source) > _MAX_SOURCE_CHARS:
         raise ValueError(
             f"Search backend returned a source longer than {_MAX_SOURCE_CHARS} characters"
@@ -112,7 +123,7 @@ def document_identity(route: str, handle: DocumentHandle) -> str:
     if handle.docid:
         return f"{route}:docid:{handle.docid}"
     if handle.url:
-        return f"{route}:url:{canonical_url(handle.url)}"
+        return f"{route}:url:{_canonical_http_url_or_original(handle.url)}"
     raise ValueError("Document handle has neither a URL nor a document identifier")
 
 
@@ -124,7 +135,10 @@ def normalize_source(value: Any) -> str:
         raise ValueError("source must not be empty")
     if len(source) > _MAX_SOURCE_CHARS:
         raise ValueError(f"source must be at most {_MAX_SOURCE_CHARS} characters")
-    parts = urlsplit(source)
+    try:
+        parts = urlsplit(source)
+    except ValueError:
+        return source
     if parts.scheme.lower() in {"http", "https"} and parts.netloc:
         return canonical_url(source)
     return source

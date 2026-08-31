@@ -13,11 +13,12 @@ from opensac_sdk._surface import SDK_TRANSPORT_METHODS
 from pydantic import ValidationError
 
 from opensac.backends.document import DocumentContent, DocumentHandle
+from opensac.backends.document.jina import JinaReaderBackend
 from opensac.backends.llm import OpenAICompatibleBackend
 from opensac.backends.rerank.base import RerankScore
 from opensac.backends.rerank.jina import JinaReranker
 from opensac.backends.search import SearchHit
-from opensac.broker._utils import canonical_url, normalize_web_source
+from opensac.broker._utils import canonical_url, normalize_web_source, source_for
 from opensac.broker.app import RpcResponse
 from opensac.broker.call_context import trace_error_message
 from opensac.broker.capabilities.content import ContentLimits
@@ -280,6 +281,82 @@ async def test_search_and_content_use_distinct_backend_objects() -> None:
     assert content["text"] == "separate document"
     assert search_backend.calls == 1
     assert document_backend.calls == 1
+
+
+async def test_search_defers_non_http_locator_validation_to_document_backend() -> None:
+    class NonHttpSearchBackend:
+        name = "web"
+        supports_domains = True
+        max_depth = 100
+        provider_identity = "non-http-search"
+        result_cacheable = False
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            del query, domains
+            return [SearchHit(backend="web", url="s3://bucket/key", rank=offset + 1)][:limit]
+
+    document_backend = JinaReaderBackend("")
+    service = _broker_service(
+        {"web": NonHttpSearchBackend()},
+        document_backends={"web": document_backend},
+    )
+    service.register_session(make_session())
+
+    hit = (await service.call("token", "search.query", {"query": "locator"}))[0]
+
+    assert hit["source"] == "s3://bucket/key"
+    with pytest.raises(CapabilityProviderError) as failed:
+        await service.call("token", "content.fetch", {"source": hit["source"]})
+    assert failed.value.code == "invalid_request"
+    assert failed.value.attempts == 0
+    assert document_backend._client is None
+
+
+async def test_custom_document_backend_can_fetch_non_http_locator() -> None:
+    class NonHttpSearchBackend:
+        name = "custom"
+        supports_domains = False
+        max_depth = None
+        provider_identity = "custom-locator-search"
+        result_cacheable = False
+
+        async def search(self, query, *, limit, offset=0, domains=None):
+            del query, domains
+            return [SearchHit(backend="custom", url="s3://Bucket/key#version", rank=offset + 1)][
+                :limit
+            ]
+
+    class NonHttpDocumentBackend:
+        name = "custom"
+        source_kind = "opaque"
+        provider_identity = "custom-locator-document"
+        result_cacheable = False
+
+        def __init__(self) -> None:
+            self.urls: list[str | None] = []
+
+        @staticmethod
+        def fetch_candidates(handle: DocumentHandle) -> list[DocumentHandle]:
+            return [handle]
+
+        async def fetch(self, handle: DocumentHandle, *, query=None):
+            del query
+            self.urls.append(handle.url)
+            return DocumentContent(source=handle.source, text="custom locator", url=handle.url)
+
+    document_backend = NonHttpDocumentBackend()
+    service = _broker_service(
+        {"custom": NonHttpSearchBackend()},
+        document_backends={"custom": document_backend},
+    )
+    service.register_session(make_session(backends=["custom"]))
+
+    hit = (await service.call("token", "search.query", {"query": "locator"}))[0]
+    document = await service.call("token", "content.fetch", {"source": hit["source"]})
+
+    assert hit["source"] == "s3://Bucket/key#version"
+    assert document["text"] == "custom locator"
+    assert document_backend.urls == ["s3://Bucket/key#version"]
 
 
 async def test_broker_scopes_sources_and_fetches_content() -> None:
@@ -2093,6 +2170,13 @@ def test_canonical_url_folds_only_what_is_safe_to_fold() -> None:
         "https://example.com/a?id=7"
     )
     assert normalize_web_source("opaque-docid") == "opaque-docid"
+
+
+def test_search_source_rejects_control_characters() -> None:
+    hit = SearchHit(backend="custom", url="s3://bucket/unsafe\nkey", rank=1)
+
+    with pytest.raises(ValueError, match="control characters"):
+        source_for(hit)
 
 
 async def test_web_content_directly_admits_a_public_url() -> None:

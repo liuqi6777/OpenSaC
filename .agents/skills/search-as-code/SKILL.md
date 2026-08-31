@@ -6,7 +6,7 @@ description: Run evidence-grounded research with OpenSAC through the sac_run MCP
 # Search as Code
 
 Run one complete Python program through the model-visible MCP tool `sac_run(code)`. Import
-`BrokerError` and `sdk` from `opensac_sdk` when needed.
+`sdk` from `opensac_sdk` when needed.
 
 Choose the research strategy yourself. This skill teaches how to encode that strategy as OpenSAC
 code; it does not prescribe query counts, source choices, call stages, stopping rules, or one
@@ -17,7 +17,7 @@ workspace schema.
 - Treat one program as one semantic checkpoint. Compose mechanically linked capability calls and
   local transformations in that program; split only when the agent must make a new semantic choice,
   a separate output budget is useful, or durable recovery matters.
-- Search outcomes are candidate data. Pass source strings, not result records, to content methods.
+- Search results are candidate data. Pass source strings, not result records, to content methods.
   Fetch only the selected sources, inspect returned bodies locally, and keep each evidence excerpt
   beside its source and material requirement.
 - If another program may reuse a successful body, persist it immediately after fetch and before
@@ -28,7 +28,7 @@ workspace schema.
   source alignment—before a downstream capability call.
 - Represent cumulative state with stable material keys. Start unresolved fields as unknown, keep
   independently testable fields and relations separate, and carry failures and source conflicts.
-  For batches, align outcomes to inputs and derive later inputs from validated rows rather than
+  For batches, align results to inputs and derive later inputs from validated rows rather than
   retyping an anticipated list.
 - Preserve zero, one, or many records when a unit can yield multiple results. Do not collapse a
   record set to one convenient match; derive coverage from the normalized rows that will support the
@@ -42,7 +42,8 @@ completion label or every final row.
 
 ## Capability and evidence basics
 
-- Search with `sdk.search(...)` or `sdk.search.many(...)`; optionally fuse results.
+- Search with `sdk.search(...)` or `sdk.search.many(...)`; fuse aligned batches with
+  `sdk.search.fuse_rrf(queries, results, ...)` when useful.
 - Material claims require inspected page text. Snippets help select sources but are not claim
   evidence. Mirrors count as one source family.
 - Make `sdk.content.fetch(...)` or `sdk.content.fetch_many(...)` the first content call for a
@@ -59,7 +60,7 @@ failures, limits, and lifecycle semantics.
 ## Repeated and multi-call work
 
 Batch repeated units instead of using one `sac_run` per row. Validate upstream keys and membership
-before fan-out, map every success or failure back to its input, and persist cumulative rows only when
+before fan-out, map every available or missing result back to its input, and persist cumulative rows only when
 a later semantic checkpoint will reuse them.
 
 For closed sets or one-to-many enumerations, read
@@ -69,8 +70,8 @@ selected-artifact binding, or exact relation/conflict state, read
 not mandatory schemas.
 
 For recoverable external calls, persist a `started` marker only when replay ambiguity matters, then
-persist item outcomes before later transformation. Reconcile surviving state from durable data
-rather than blindly replaying the call.
+persist item availability or unresolved inputs before later transformation. Reconcile surviving
+state from durable data rather than blindly replaying the call.
 
 ## Return bounded observations
 
@@ -85,14 +86,16 @@ needed just to announce completion.
 
 ## Handle failures and state loss
 
-For `search.many`, branch on `status == "success"`; failed rows use `outcome.error`, while an
-empty successful result is valid. Carry failures rather than hard-coding zero failures.
-
-A caught `BrokerError` leaves that work unresolved. Return bounded failure data and let the next
-agent decision choose recovery; do not blindly retry external failures.
+Broker-backed single-item methods return a result or `None`; fan-out methods return an input-aligned
+list with `None` in failed positions. Check `is None`, never truthiness, because empty lists,
+strings, or objects can be successful results. Preserve the original inputs and use
+`zip(inputs, results, strict=True)` when failed-item identity matters. OpenSAC renders bounded
+external-failure warnings automatically, so do not add `try/except` or print failures merely to
+expose them. Persist unresolved inputs when later dataflow must remember them, and do not blindly
+retry them.
 
 Public web URLs remain reusable; local IDs are session-bound. On `state_lost`, the program was not
 replayed, so rebuild workspace artifacts and local-ID admission. Adapter failures occur outside the
-sandbox and may leave execution outcome unknown; inspect durable state before replaying.
+sandbox and may leave the execution result unknown; inspect durable state before replaying.
 
 Treat every example as a starting point, not a required pipeline.

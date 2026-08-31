@@ -17,14 +17,14 @@ OpenSAC 提供执行运行时，而不负责控制循环。智能体集成应只
 
 ## 前置条件
 
-按照主 README 的 [Docker 快速开始](../README.zh-CN.md#使用-docker-快速开始)启动公开的 `v0.8.3`
+按照主 README 的 [Docker 快速开始](../README.zh-CN.md#使用-docker-快速开始)启动公开的 `v0.8.4`
 服务镜像，服务本身不需要源码检出。项目不发布 PyPI 包，因此使用 CLI 或 MCP 适配器的宿主机需要检出
 相同的发布版本，以安装适配命令和 skill：
 
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-git checkout v0.8.3
+git checkout v0.8.4
 uv tool install --editable '/absolute/path/to/OpenSaC[mcp]'
 
 export SAC_API_BASE=http://127.0.0.1:8000
@@ -51,8 +51,10 @@ Rollout 开始时创建 session，跨轮次复用，并在结束时删除或中�
 处理 session ID；公开来源 URL 可以跨 session 传递。实验模式则使用
 `OpenSAC.create_session(execution_mode="persistent_interpreter")`，详见下文。
 
-应在 stdout 之前展示执行响应中有界的 `warnings` 列表。即使生成代码只打印成功值，这些 warning
-也能暴露局部或全部外部 item 失败，同时不会让原本成功的执行变成失败。
+应使用共享的紧凑 observation renderer。干净的成功执行原样返回程序 stdout；每条有界 warning
+在 stdout 前渲染为带 `[OpenSAC warning]` 前缀的 JSON 对象，执行错误则在 stdout 后渲染为带
+`[OpenSAC error]` 前缀的 JSON 对象；不展示 status 或 workspace 元数据。即使生成代码只打印成功值，
+warning 也能暴露局部或全部外部 item 失败，同时不会让原本成功的执行变成失败。
 
 可运行的 [sac_agent](../sac_agent/README.md) 展示了最小 OpenAI 兼容 ReAct loop。正式 harness 还应
 处理 lease、`worker_restarted`、`session_expired`、请求幂等性与 worker affinity。
