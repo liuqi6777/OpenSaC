@@ -108,8 +108,8 @@ async def test_codex_cli_calls_resume_one_session_without_exposing_context(
     first = await agent_cli.run_cli_code("write", environ=env, transport=transport)
     second = await agent_cli.run_cli_code("read", environ=env, transport=transport)
 
-    assert "exit_code=0" in first
-    assert "persisted=True" in second
+    assert first == "ok"
+    assert second == "persisted=True"
     assert "search_calls" not in first
     assert "docs_fetched" not in first
     assert len(server.create_payloads) == 2
@@ -131,7 +131,7 @@ async def test_claude_cli_uses_official_bash_session_environment(tmp_path: Path)
         transport=httpx.MockTransport(server),
     )
 
-    assert "exit_code=0" in observation
+    assert observation == "ok"
     request_id = server.create_payloads[0]["request_id"]
     assert request_id.startswith("agent:claude-cli:")
     assert "private-claude-session" not in request_id
@@ -148,7 +148,7 @@ async def test_claude_cloud_cli_uses_remote_session_environment(tmp_path: Path) 
         transport=httpx.MockTransport(server),
     )
 
-    assert "exit_code=0" in observation
+    assert observation == "ok"
     request_id = server.create_payloads[0]["request_id"]
     assert request_id.startswith("agent:claude-remote-cli:")
     assert "private-claude-cloud-session" not in request_id
@@ -197,7 +197,7 @@ async def test_explicit_context_supports_other_cli_agents(tmp_path: Path) -> Non
         transport=httpx.MockTransport(server),
     )
 
-    assert "exit_code=0" in observation
+    assert observation == "ok"
     request_id = server.create_payloads[0]["request_id"]
     assert request_id.startswith("agent:custom_agent:")
     assert "private-custom-session" not in request_id
@@ -217,7 +217,7 @@ async def test_explicit_context_overrides_inherited_nested_agent_hosts(tmp_path:
         transport=httpx.MockTransport(server),
     )
 
-    assert "exit_code=0" in observation
+    assert observation == "ok"
     request_id = server.create_payloads[0]["request_id"]
     assert request_id.startswith("agent:child-agent:")
     assert "private-child-session" not in request_id
@@ -283,9 +283,7 @@ async def test_cli_requests_persistent_execution_mode(tmp_path: Path) -> None:
     )
 
     assert server.create_payloads[0]["execution_mode"] == "persistent_interpreter"
-    assert "execution_mode=persistent_interpreter" in observation
-    assert "interpreter_state=ready" in observation
-    assert "namespace_symbols=3" in observation
+    assert observation == "ok"
 
 
 async def test_invalid_explicit_host_fails_before_http(tmp_path: Path) -> None:
@@ -312,7 +310,7 @@ async def test_cli_state_loss_rotates_without_replaying_program(tmp_path: Path) 
     recovered = await agent_cli.run_cli_code("fresh", environ=env, transport=transport)
 
     assert "state_lost" in lost
-    assert "exit_code=0" in recovered
+    assert recovered == "ok"
     assert [code for _, code in server.exec_calls].count("must-not-replay") == 1
     request_ids = [payload["request_id"] for payload in server.create_payloads]
     assert request_ids[0] == request_ids[1]
@@ -325,14 +323,14 @@ def test_agent_run_reads_program_from_stdin(monkeypatch) -> None:
 
     async def fake_run_cli_code(code: str, **_kwargs: object) -> str:
         programs.append(code)
-        return "[sac_run] ok"
+        return "ok"
 
     monkeypatch.setattr(agent_cli, "run_cli_code", fake_run_cli_code)
     result = CliRunner().invoke(cli.app, ["agent-run"], input="print('hello')\n")
 
     assert result.exit_code == 0
     assert programs == ["print('hello')\n"]
-    assert "[sac_run] ok" in result.stdout
+    assert result.stdout == "ok\n"
 
 
 def test_cli_and_mcp_adapters_do_not_import_each_other() -> None:

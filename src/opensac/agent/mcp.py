@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from mcp.server.fastmcp import FastMCP
 
 from opensac import _optional
+from opensac.agent.sac_run import render_error, render_observation
 from opensac.agent.session import (
     DEFAULT_LEASE_SECONDS,
     AgentContext,
@@ -27,39 +28,10 @@ from opensac.agent.session import (
     parse_lease_seconds,
 )
 
-_CONTEXT_UNAVAILABLE_OBSERVATION = (
-    "[sac_run] context_unavailable: The MCP host did not provide a Codex thread_id. "
-    "No OpenSAC session was created."
+_CONTEXT_UNAVAILABLE_OBSERVATION = render_error(
+    "context_unavailable",
+    "The MCP host did not provide a Codex thread_id. No OpenSAC session was created.",
 )
-
-
-def _render_stdout(payload: Mapping[str, Any]) -> str:
-    stdout = payload.get("stdout")
-    rendered_stdout = "" if stdout is None else str(stdout)
-    if payload.get("succeeded") is not False:
-        return rendered_stdout
-
-    error = payload.get("error")
-    if error:
-        diagnostic = f"[sac_run] {error}"
-    elif payload.get("interpreter_state") == "lost":
-        reason = payload.get("interpreter_loss_reason") or "unknown"
-        diagnostic = f"[sac_run] state_lost: The persistent interpreter was lost ({reason})."
-    elif payload.get("timed_out"):
-        diagnostic = "[sac_run] timed_out."
-    elif payload.get("output_limit_exceeded"):
-        diagnostic = "[sac_run] output_limit_exceeded."
-    elif stderr := str(payload.get("stderr") or "").strip():
-        diagnostic = f"[sac_run] execution_failed:\n{stderr}"
-    else:
-        diagnostic = (
-            f"[sac_run] execution_failed: Program exited with code {payload.get('exit_code')}."
-        )
-
-    failure_stdout = rendered_stdout.rstrip()
-    if failure_stdout:
-        return f"{failure_stdout}\n\n{diagnostic}"
-    return diagnostic
 
 
 @dataclass(frozen=True)
@@ -144,7 +116,7 @@ class OpenSACMCP:
             transport=transport,
             registry=registry,
             registry_name="mcp_sessions.sqlite3",
-            observation_renderer=_render_stdout,
+            observation_renderer=render_observation,
         )
         self._codex = CodexContextResolver()
         self._invocation_namespace = uuid.uuid4().hex
@@ -158,9 +130,9 @@ class OpenSACMCP:
         invocation_id: str | None = None,
     ) -> str:
         if not isinstance(code, str) or not code.strip():
-            return "[sac_run] Expected a non-empty string in the 'code' field."
+            return render_error("invalid_program", "Expected non-empty Python code.")
         if self._closed:
-            return "[sac_run] MCP adapter is closed."
+            return render_error("adapter_closed", "The MCP adapter is closed.")
         context = self._codex.resolve(meta)
         if context is None:
             return _CONTEXT_UNAVAILABLE_OBSERVATION
@@ -197,7 +169,8 @@ def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
         instructions=(
             "Run Search-as-Code programs with sac_run. The current agent conversation is "
             "bound by the MCP host; never create, pass, display, or delete OpenSAC sessions. "
-            "Only the program's stdout is returned, so print any result the agent needs. "
+            "Program stdout is returned with structured OpenSAC warnings and errors when present, "
+            "so print any successful result the agent needs. "
             f"The execution mode is {adapter.config.execution_mode}."
         ),
         lifespan=lifespan,
@@ -205,7 +178,7 @@ def create_server(bridge: OpenSACMCP | None = None) -> FastMCP:
     )
 
     async def sac_run(code: str, ctx: Any) -> str:
-        """Run Python code and return only stdout from this conversation's OpenSAC workspace."""
+        """Run Python code and return stdout plus structured OpenSAC diagnostics."""
         return await adapter.run_code(
             code,
             ctx.request_context.meta,

@@ -21,6 +21,7 @@ from opensac.agent.sac_run import (
     DEFAULT_TIMEOUT_SECONDS,
     AsyncSessionClient,
     contract_error_code,
+    render_error,
     render_observation,
     state_loss_code,
 )
@@ -28,27 +29,28 @@ from opensac.agent.sac_run import (
 DEFAULT_LEASE_SECONDS = 3_600
 MAX_LEASE_SECONDS = 86_400
 EXECUTION_MODES = frozenset({"program", "persistent_interpreter"})
-STATE_LOST_OBSERVATION = (
-    "[sac_run] state_lost: The OpenSAC session expired, its worker restarted, or its "
-    "persistent interpreter was lost. "
-    "The program was not replayed. The next sac_run call will start in a "
-    "clean session."
+STATE_LOST_OBSERVATION = render_error(
+    "state_lost",
+    "The OpenSAC session expired, its worker restarted, or its persistent interpreter was lost. "
+    "The program was not replayed. The next sac_run call will start in a clean session.",
 )
-EXEC_INDETERMINATE_OBSERVATION = (
-    "[sac_run] exec_indeterminate: OpenSAC found an unfinished record for this "
-    "execution. Its outcome is unknown, so the program was not replayed."
+EXEC_INDETERMINATE_OBSERVATION = render_error(
+    "exec_indeterminate",
+    "OpenSAC found an unfinished record for this execution. Its outcome is unknown, so the "
+    "program was not replayed.",
 )
-EXEC_ID_CONFLICT_OBSERVATION = (
-    "[sac_run] exec_id_conflict: The MCP request identifier was already used for a "
-    "different program. The program was not run."
+EXEC_ID_CONFLICT_OBSERVATION = render_error(
+    "exec_id_conflict",
+    "The MCP request identifier was already used for a different program. The program was not run.",
 )
-EXEC_OUTCOME_UNKNOWN_OBSERVATION = (
-    "[sac_run] execution_outcome_unknown: OpenSAC did not return a result after a "
-    "same-ID retry. The program may have completed, so it must not be rerun automatically."
+EXEC_OUTCOME_UNKNOWN_OBSERVATION = render_error(
+    "execution_outcome_unknown",
+    "OpenSAC did not return a result after a same-ID retry. The program may have completed, so it "
+    "must not be rerun automatically.",
 )
-IDEMPOTENT_EXEC_UNAVAILABLE_OBSERVATION = (
-    "[sac_run] idempotent_exec_unavailable: This OpenSAC server does not advertise "
-    "safe execution retries. The program was not run."
+IDEMPOTENT_EXEC_UNAVAILABLE_OBSERVATION = render_error(
+    "idempotent_exec_unavailable",
+    "This OpenSAC server does not advertise safe execution retries. The program was not run.",
 )
 _IDEMPOTENT_EXEC_FEATURE = "idempotent_exec"
 _EXEC_TRANSPORT_ATTEMPTS = 2
@@ -277,9 +279,9 @@ class AgentSessionManager:
         invocation_id: str | None = None,
     ) -> str:
         if not isinstance(code, str) or not code.strip():
-            return "[sac_run] Expected a non-empty Python program."
+            return render_error("invalid_program", "Expected a non-empty Python program.")
         if self._closed:
-            return "[sac_run] Agent session manager is closed."
+            return render_error("adapter_closed", "The agent session manager is closed.")
 
         hashed_context = context_hash(context)
         context_lock = await self._lock_for(hashed_context)
@@ -327,7 +329,10 @@ class AgentSessionManager:
             except httpx.TimeoutException:
                 if invocation_id is not None and exec_started:
                     return EXEC_OUTCOME_UNKNOWN_OBSERVATION
-                return f"[sac_run] Timed out after {DEFAULT_TIMEOUT_SECONDS:.0f}s."
+                return render_error(
+                    "request_timeout",
+                    f"OpenSAC timed out after {DEFAULT_TIMEOUT_SECONDS:.0f}s.",
+                )
             except httpx.HTTPStatusError as exc:
                 if state_loss_code(exc.response) is not None:
                     self._registry.advance(hashed_context, generation)
@@ -338,13 +343,25 @@ class AgentSessionManager:
                     return EXEC_INDETERMINATE_OBSERVATION
                 if error_code == "exec_id_conflict":
                     return EXEC_ID_CONFLICT_OBSERVATION
-                return f"[sac_run] OpenSAC request failed: HTTP {exc.response.status_code}."
+                return render_error(
+                    "request_failed",
+                    "The OpenSAC request failed.",
+                    http_status=exc.response.status_code,
+                )
             except httpx.TransportError as exc:
                 if invocation_id is not None and exec_started:
                     return EXEC_OUTCOME_UNKNOWN_OBSERVATION
-                return f"[sac_run] OpenSAC request failed: {type(exc).__name__}."
+                return render_error(
+                    "request_failed",
+                    "The OpenSAC request failed.",
+                    exception_type=type(exc).__name__,
+                )
             except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-                return f"[sac_run] OpenSAC request failed: {type(exc).__name__}."
+                return render_error(
+                    "request_failed",
+                    "The OpenSAC request failed.",
+                    exception_type=type(exc).__name__,
+                )
 
     async def close(self) -> None:
         if self._closed:

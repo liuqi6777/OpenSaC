@@ -12,6 +12,7 @@ import httpx
 from opensac.agent.sac_run import (
     DEFAULT_TIMEOUT_SECONDS,
     AsyncSessionClient,
+    render_error,
     render_observation,
     truncate_observation,
 )
@@ -141,7 +142,8 @@ Upgrade to `sdk.workspace` only when a growing candidate pool, evidence ledger, 
 history must survive several stages, avoid replay, or recover after uncertain execution. Derive a
 stable `runs/<research_id>/` namespace from the task, requirements, and source policy. Load needed
 artifacts before capability calls; persist progress before `NEXT:` and print a bounded handoff.
-Observations show workspace paths, not file contents, and Python variables do not survive calls.
+Print any workspace paths needed for handoff; observations do not add workspace metadata, and
+Python variables do not survive calls.
 
 Public web URLs remain reusable; local IDs and workspace artifacts are session-bound. On explicit
 `state_lost`, rebuild workspace artifacts and local-ID admission. For an unknown timeout or adapter
@@ -221,7 +223,7 @@ class SacRunTool:
     async def call(self, arguments: dict[str, Any]) -> str:
         code = arguments.get("code")
         if not isinstance(code, str) or not code.strip():
-            return "[sac_run] Expected a non-empty string in the 'code' field."
+            return render_error("invalid_program", "Expected non-empty Python code.")
 
         try:
             session_id = await self._ensure_session()
@@ -232,9 +234,16 @@ class SacRunTool:
             )
             return self._render(payload)
         except httpx.TimeoutException:
-            return f"[sac_run] Timed out after {DEFAULT_TIMEOUT_SECONDS:.0f}s."
+            return render_error(
+                "request_timeout",
+                f"OpenSAC timed out after {DEFAULT_TIMEOUT_SECONDS:.0f}s.",
+            )
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-            return f"[sac_run] OpenSAC request failed: {type(exc).__name__}: {exc}"
+            return render_error(
+                "request_failed",
+                str(exc),
+                exception_type=type(exc).__name__,
+            )
 
     def _render(self, payload: dict[str, Any]) -> str:
         return render_observation(payload)

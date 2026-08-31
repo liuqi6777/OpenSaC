@@ -215,10 +215,15 @@ def test_sac_observation_prioritizes_external_failure_warnings() -> None:
         }
     )
 
-    assert rendered.index("warnings:") < rendered.index("stdout:")
-    assert "content.passages succeeded for 1 item(s); 1 failed" in rendered
+    assert rendered.index("[OpenSAC warning]") < rendered.index("successful passage")
+    assert '"method":"content.passages"' in rendered
+    assert '"success_count":1' in rendered
+    assert '"failure_count":1' in rendered
     assert "provider_not_found" in rendered
     assert "successful passage" in rendered
+    assert "[OpenSAC status]" not in rendered
+    assert "[OpenSAC workspace]" not in rendered
+    assert "stdout:" not in rendered
     assert "search_calls" not in rendered
     assert "docs_fetched" not in rendered
     assert "usage" not in rendered

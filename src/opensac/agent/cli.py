@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 import typer
 
+from opensac.agent.sac_run import render_error
 from opensac.agent.session import (
     DEFAULT_LEASE_SECONDS,
     AgentContext,
@@ -24,11 +25,11 @@ from opensac.agent.session import (
 )
 
 _HOST_PATTERN = re.compile(r"^[a-z0-9_-]{1,32}$")
-_CONTEXT_UNAVAILABLE = (
-    "[sac_run] context_unavailable: No supported agent conversation identifier was "
-    "found. Expected CODEX_THREAD_ID, CLAUDE_CODE_SESSION_ID, "
-    "CLAUDE_CODE_REMOTE_SESSION_ID, or SAC_AGENT_CONTEXT_ID. No OpenSAC session "
-    "was created."
+_CONTEXT_UNAVAILABLE = render_error(
+    "context_unavailable",
+    "No supported agent conversation identifier was found. Expected CODEX_THREAD_ID, "
+    "CLAUDE_CODE_SESSION_ID, CLAUDE_CODE_REMOTE_SESSION_ID, or SAC_AGENT_CONTEXT_ID. No OpenSAC "
+    "session was created.",
 )
 
 
@@ -66,8 +67,10 @@ def resolve_cli_context(environ: Mapping[str, str] | None = None) -> AgentContex
         host = env.get("SAC_AGENT_HOST", "cli").strip().lower()
         if not _HOST_PATTERN.fullmatch(host):
             raise ValueError(
-                "[sac_run] context_invalid: SAC_AGENT_HOST must contain only lowercase "
-                "letters, digits, '_' or '-'."
+                render_error(
+                    "context_invalid",
+                    "SAC_AGENT_HOST must contain only lowercase letters, digits, '_' or '-'.",
+                )
             )
         return AgentContext(host=host, context_id=explicit_context)
 
@@ -86,8 +89,11 @@ def resolve_cli_context(environ: Mapping[str, str] | None = None) -> AgentContex
         raise ValueError(_CONTEXT_UNAVAILABLE)
     if len(candidates) > 1:
         raise ValueError(
-            "[sac_run] context_ambiguous: Multiple agent conversation identifiers were "
-            "found. Set SAC_AGENT_CONTEXT_ID and SAC_AGENT_HOST explicitly."
+            render_error(
+                "context_ambiguous",
+                "Multiple agent conversation identifiers were found. Set SAC_AGENT_CONTEXT_ID "
+                "and SAC_AGENT_HOST explicitly.",
+            )
         )
     return candidates[0]
 
@@ -100,7 +106,10 @@ async def run_cli_code(
 ) -> str:
     env = os.environ if environ is None else environ
     if not isinstance(code, str) or not code.strip():
-        return "[sac_run] Expected a non-empty Python program on stdin or in SOURCE."
+        return render_error(
+            "invalid_program",
+            "Expected a non-empty Python program on stdin or in SOURCE.",
+        )
     try:
         context = resolve_cli_context(env)
     except ValueError as exc:
@@ -109,7 +118,7 @@ async def run_cli_code(
     try:
         config = CLIConfig.from_env(env)
     except ValueError as exc:
-        return f"[sac_run] configuration_error: {exc}"
+        return render_error("configuration_error", str(exc))
 
     manager = AgentSessionManager(config, transport=transport, registry_name="cli_sessions.sqlite3")
     try:
@@ -131,5 +140,13 @@ def run_command(source: str) -> None:
 
     observation = asyncio.run(run_cli_code(code))
     typer.echo(observation)
-    if "[sac_run] context_" in observation or "configuration_error:" in observation:
+    if any(
+        f'"code":"{code}"' in observation
+        for code in (
+            "context_unavailable",
+            "context_invalid",
+            "context_ambiguous",
+            "configuration_error",
+        )
+    ):
         raise typer.Exit(2)
