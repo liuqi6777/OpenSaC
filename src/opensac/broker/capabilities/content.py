@@ -483,16 +483,20 @@ class ContentCapabilities(BaseCapabilities):
             if not isinstance(raw_source, str):
                 raise ValueError(f"content source at input index {input_index} must be a string")
             try:
-                source = (
-                    normalize_web_source(raw_source)
-                    if accepts_public_urls
-                    else normalize_source(raw_source)
-                )
+                source = normalize_source(raw_source)
             except ValueError as exc:
                 raise ValueError(
                     f"content source at input index {input_index} is invalid: {exc}"
                 ) from exc
             record = state.document_for_alias(source)
+            if record is None and accepts_public_urls:
+                try:
+                    source = normalize_web_source(raw_source)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"content source at input index {input_index} is invalid: {exc}"
+                    ) from exc
+                record = state.document_for_alias(source)
             if record is not None:
                 handle = record.handle.model_copy(update={"source": raw_source.strip()})
                 resolved.append(
@@ -517,11 +521,16 @@ class ContentCapabilities(BaseCapabilities):
             try:
                 web_source = public_web_url(source)
             except ValueError as exc:
-                absolute_web_url = (
-                    accepts_public_urls
-                    and urlsplit(source).scheme.lower() in {"http", "https"}
-                    and bool(urlsplit(source).netloc)
-                )
+                try:
+                    parts = urlsplit(source)
+                except ValueError:
+                    absolute_web_url = False
+                else:
+                    absolute_web_url = (
+                        accepts_public_urls
+                        and parts.scheme.lower() in {"http", "https"}
+                        and bool(parts.netloc)
+                    )
                 handle = DocumentHandle(
                     source=source,
                     url=source if absolute_web_url else None,
