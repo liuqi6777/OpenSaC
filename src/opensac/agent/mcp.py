@@ -35,7 +35,31 @@ _CONTEXT_UNAVAILABLE_OBSERVATION = (
 
 def _render_stdout(payload: Mapping[str, Any]) -> str:
     stdout = payload.get("stdout")
-    return "" if stdout is None else str(stdout)
+    rendered_stdout = "" if stdout is None else str(stdout)
+    if payload.get("succeeded") is not False:
+        return rendered_stdout
+
+    error = payload.get("error")
+    if error:
+        diagnostic = f"[sac_run] {error}"
+    elif payload.get("interpreter_state") == "lost":
+        reason = payload.get("interpreter_loss_reason") or "unknown"
+        diagnostic = f"[sac_run] state_lost: The persistent interpreter was lost ({reason})."
+    elif payload.get("timed_out"):
+        diagnostic = "[sac_run] timed_out."
+    elif payload.get("output_limit_exceeded"):
+        diagnostic = "[sac_run] output_limit_exceeded."
+    elif stderr := str(payload.get("stderr") or "").strip():
+        diagnostic = f"[sac_run] execution_failed:\n{stderr}"
+    else:
+        diagnostic = (
+            f"[sac_run] execution_failed: Program exited with code {payload.get('exit_code')}."
+        )
+
+    failure_stdout = rendered_stdout.rstrip()
+    if failure_stdout:
+        return f"{failure_stdout}\n\n{diagnostic}"
+    return diagnostic
 
 
 @dataclass(frozen=True)

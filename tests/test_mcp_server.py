@@ -152,19 +152,32 @@ class FakeOpenSAC:
                 self.executions.append((session_id, code))
                 if code == "write":
                     self.workspace[session_id].add("pool.jsonl")
+                interpreter_lost = code == "lose-kernel"
+                runtime_error = code == "runtime-error"
+                validator_error = code == "validator-error"
                 stdout = (
-                    f"persisted={'pool.jsonl' in self.workspace[session_id]}"
+                    "before failure\n"
+                    if runtime_error
+                    else f"persisted={'pool.jsonl' in self.workspace[session_id]}"
                     if code == "read"
                     else "stdout only"
                     if code == "rich-output"
+                    else ""
+                    if validator_error
                     else "ok"
                 )
-                interpreter_lost = code == "lose-kernel"
                 result = {
-                    "exit_code": 0,
+                    "exit_code": -1 if validator_error else 1 if runtime_error else 0,
                     "duration_seconds": 0.01,
                     "stdout": stdout,
-                    "stderr": "hidden stderr" if code == "rich-output" else "",
+                    "stderr": (
+                        "Traceback (most recent call last):\nValueError: boom"
+                        if runtime_error
+                        else "hidden stderr"
+                        if code == "rich-output"
+                        else ""
+                    ),
+                    "succeeded": not (interpreter_lost or runtime_error or validator_error),
                     "output": {"hidden": "output"} if code == "rich-output" else None,
                     "citations": (["https://example.com/hidden"] if code == "rich-output" else []),
                     "artifacts": (
@@ -187,7 +200,11 @@ class FakeOpenSAC:
                         if code == "rich-output"
                         else []
                     ),
-                    "error": None,
+                    "error": (
+                        "Rejected by the sandbox code validator: invalid Python"
+                        if validator_error
+                        else None
+                    ),
                     "execution_mode": self.execution_mode_by_session.get(session_id, "program"),
                     "interpreter_state": (
                         "lost"
@@ -328,6 +345,35 @@ async def test_mcp_returns_only_program_stdout(tmp_path: Path) -> None:
         await bridge.aclose()
 
     assert observation == "stdout only"
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (
+            "validator-error",
+            "[sac_run] Rejected by the sandbox code validator: invalid Python",
+        ),
+        (
+            "runtime-error",
+            "before failure\n\n[sac_run] execution_failed:\n"
+            "Traceback (most recent call last):\nValueError: boom",
+        ),
+    ],
+)
+async def test_mcp_returns_diagnostics_for_failed_programs(
+    tmp_path: Path,
+    code: str,
+    expected: str,
+) -> None:
+    server = FakeOpenSAC()
+    bridge = _bridge(tmp_path, server)
+    try:
+        observation = await bridge.run_code(code, {"thread_id": "program-error"})
+    finally:
+        await bridge.aclose()
+
+    assert observation == expected
 
 
 @pytest.mark.parametrize("loss_code", ["session_expired", "worker_restarted", "interpreter_lost"])
@@ -502,7 +548,7 @@ async def test_lost_interpreter_result_rotates_without_replaying_cell(tmp_path: 
     finally:
         await bridge.aclose()
 
-    assert lost == "ok"
+    assert "state_lost" in lost
     assert [code for _, code in server.exec_calls].count("lose-kernel") == 1
     assert recovered == "ok"
     assert len(server.create_payloads) == 2
