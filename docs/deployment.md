@@ -1,6 +1,6 @@
 # Deployment
 
-OpenSAC `v0.8.4` is available as version-matched service and sandbox images on GHCR.
+OpenSAC `v0.8.5` is available as version-matched service and sandbox images on GHCR.
 The Docker CLI provides a no-checkout quick start with one YAML profile. Docker Compose remains
 available for declarative deployments. Both run the API and capability broker from the service
 image and start an isolated sandbox container for each execution. Neither builds nor runs the
@@ -32,7 +32,7 @@ fields retain the validated built-in defaults.
 | `configs/local.yaml` | Source development with the local retrieval service | Complete reference profile; state paths resolve to the repository `.opensac` directory. |
 | `configs/web.yaml` | Normal Web retrieval with cold, per-execution sandboxes | Requires `OPENSAC_API_KEY`, `OPENSAC_SERPER_API_KEY`, and `OPENSAC_JINA_API_KEY` as needed. |
 | `configs/web-performance.yaml` | Eight-core Web deployments where warm sandboxes and a short result cache have been benchmarked | Starts directly with the performance settings; compare it against `web.yaml` on the target host. |
-| `configs/docker.yaml` | Docker CLI and Docker Compose deployments | Replace both storage paths with the same absolute host path used for the bind mount; use `darwin` for Docker Desktop on macOS. |
+| `configs/docker.yaml` | Docker CLI and Docker Compose deployments | Put `broker_socket` in a dedicated subdirectory of the bind-mounted data directory; use `darwin` for Docker Desktop on macOS. |
 
 For source deployments, start a profile directly:
 
@@ -50,14 +50,14 @@ startup, and relative `storage` paths resolve from the selected profile's direct
 
 ### Direct Docker run
 
-Download and edit the Docker configuration profile. Set both storage paths to the absolute runtime
-directory used below, and set `sandbox.docker_host_platform` to `darwin` when using Docker Desktop
-for macOS:
+Download and edit the Docker configuration profile. Set `storage.data_dir` to the absolute runtime
+directory used below and `storage.broker_socket` to `broker/broker.sock` below that directory. Set
+`sandbox.docker_host_platform` to `darwin` when using Docker Desktop for macOS:
 
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.4/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.5/configs/docker.yaml
 ```
 
 Export the provider credentials and host-specific runtime values in the current shell:
@@ -101,7 +101,7 @@ docker run --detach \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
-  ghcr.io/liuqi6777/opensac:0.8.4 \
+  ghcr.io/liuqi6777/opensac:0.8.5 \
   opensac serve --config /etc/opensac/opensac.yaml
 ```
 
@@ -130,19 +130,20 @@ source repository, build an image, or install Python packages:
 mkdir opensac-deploy
 cd opensac-deploy
 curl -fsSLo compose.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.4/compose.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.5/compose.yaml
 curl -fsSLo .env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.4/.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.5/.env.example
 curl -fsSLo compose.env \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.4/compose.env.example
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.5/compose.env.example
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.4/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.5/configs/docker.yaml
 mkdir -p "$PWD/.opensac"
 ```
 
 Set `OPENSAC_API_KEY`, `OPENSAC_SERPER_API_KEY`, and `OPENSAC_JINA_API_KEY` in `.env`. Then edit
-`configs/docker.yaml` so both storage paths equal the absolute `.opensac` path. Edit `compose.env`:
+`configs/docker.yaml`: set `storage.data_dir` to the absolute `.opensac` path and set
+`storage.broker_socket` to `<absolute .opensac path>/broker/broker.sock`. Edit `compose.env`:
 
 - Set `OPENSAC_CONTAINER_DATA_DIR` to the absolute path printed by `pwd`, followed by `/.opensac`.
 - Set `OPENSAC_UID` and `OPENSAC_GID` from `id -u` and `id -g`.
@@ -458,7 +459,7 @@ api:
   port: 8000
 storage:
   data_dir: /var/lib/opensac
-  broker_socket: /var/lib/opensac/broker.sock
+  broker_socket: /var/lib/opensac/broker/broker.sock
 deployment:
   worker_id: node-a-0
   build_commit: replace-with-git-commit

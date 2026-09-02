@@ -117,10 +117,27 @@ def test_no_config_uses_defaults() -> None:
     settings = load_settings()
 
     assert settings.api_host == "127.0.0.1"
+    assert settings.broker_socket == Path(".opensac/broker/broker.sock")
     assert settings.backend_name == "local"
     assert settings.backends.search.base_url == "http://127.0.0.1:8081"
     assert settings.backends.document.base_url == "http://127.0.0.1:8081"
     assert settings.dashboard_is_enabled is True
+
+
+def test_darwin_requires_a_dedicated_broker_socket_directory(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="dedicated subdirectory"):
+        Settings(
+            data_dir=tmp_path,
+            broker_socket=tmp_path / "broker.sock",
+            sandbox_docker_host_platform="darwin",
+        )
+
+    settings = Settings(
+        data_dir=tmp_path,
+        broker_socket=tmp_path / "broker" / "broker.sock",
+        sandbox_docker_host_platform="darwin",
+    )
+    assert settings.broker_socket == tmp_path / "broker" / "broker.sock"
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])

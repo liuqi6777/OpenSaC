@@ -20,7 +20,7 @@ from opensac.sandbox.docker import (
     broker_socket_mount_args,
     read_bounded_process_output,
 )
-from opensac.sandbox.docker_core import ExecutionWorkspace
+from opensac.sandbox.docker_core import ExecutionWorkspace, broker_socket_container_path
 
 
 class _CompletedProcess:
@@ -91,25 +91,28 @@ def test_docker_command_has_security_boundaries(tmp_path) -> None:
     assert "no-new-privileges" in joined
     assert "OPENSAC_SESSION_TOKEN=secret" in joined
     assert "OPENSAC_READY_PATH=/workspace/.opensac-output.json.ready" in joined
-    assert str(socket.resolve()) in joined
+    assert str(socket.resolve().parent) in joined
+    assert "OPENSAC_BROKER_SOCKET=/run/opensac/broker.sock" in joined
     assert all(argument in command for argument in broker_socket_mount_args(socket))
     assert str(workspace.resolve() / ".opensac-container-id") not in joined
 
 
-def test_broker_socket_mount_uses_docker_desktop_socket_forwarding(tmp_path) -> None:
-    socket = tmp_path / "broker.sock"
+def test_broker_socket_mount_uses_dedicated_directory_on_docker_desktop(tmp_path) -> None:
+    socket = tmp_path / "broker" / "custom.sock"
     destination = "/run/opensac/broker.sock"
 
     assert broker_socket_mount_args(socket, platform="darwin") == [
         "--volume",
-        f"{socket.resolve()}:{destination}:ro",
+        f"{socket.resolve().parent}:/run/opensac:ro",
         "--group-add",
         "0",
     ]
+    assert broker_socket_container_path(socket, platform="darwin") == "/run/opensac/custom.sock"
     assert broker_socket_mount_args(socket, platform="linux") == [
         "--mount",
         f"type=bind,src={socket.resolve()},dst={destination},readonly",
     ]
+    assert broker_socket_container_path(socket, platform="linux") == destination
 
 
 def test_docker_sandbox_accepts_an_explicit_docker_host_platform(tmp_path) -> None:

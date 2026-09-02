@@ -19,7 +19,7 @@ endpoint exposed inside sandbox programs as `sdk.llm.*`.
 
 ## Prerequisites
 
-Start the public `v0.8.4` service image by following the main README's
+Start the public `v0.8.5` service image by following the main README's
 [Docker quick start](../README.md#quick-start-with-docker). The service itself needs no source
 checkout. PyPI publication is not planned, so a host that uses the CLI or MCP adapter should check
 out the matching release to install the adapter and skills:
@@ -27,7 +27,7 @@ out the matching release to install the adapter and skills:
 ```bash
 git clone https://github.com/liuqi6777/OpenSaC.git
 cd OpenSaC
-git checkout v0.8.4
+git checkout v0.8.5
 uv tool install --editable '/absolute/path/to/OpenSaC[mcp]'
 
 export SAC_API_BASE=http://127.0.0.1:8000

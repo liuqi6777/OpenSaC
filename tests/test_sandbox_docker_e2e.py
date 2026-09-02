@@ -147,7 +147,7 @@ api:
   host: 0.0.0.0
 storage:
   data_dir: {data_dir}
-  broker_socket: {data_dir}/broker.sock
+  broker_socket: {data_dir}/broker/broker.sock
 backends:
   search:
     provider: serper
@@ -234,6 +234,12 @@ sandbox:
                 session = client.create_session()
                 session_ids.append(session["id"])
                 result = client.exec_code(session["id"], "print('compose-sandbox-ok')")
+                broker_result = client.exec_code(
+                    session["id"],
+                    "from opensac_sdk import sdk\n"
+                    "capabilities = sdk.capabilities()\n"
+                    "print(capabilities.contracts.capability)\n",
+                )
 
                 repl = client.create_session(execution_mode="persistent_interpreter")
                 session_ids.append(repl["id"])
@@ -253,6 +259,8 @@ sandbox:
         assert result["exit_code"] == 0
         assert result["stdout"] == "compose-sandbox-ok\n"
         assert result["succeeded"] is True
+        assert broker_result["stdout"] == "15\n"
+        assert broker_result["succeeded"] is True
         assert initialized["interpreter_state"] == "ready"
         assert initialized["namespace_symbol_count"] >= 2
         assert reused["stdout"] == "42\n"

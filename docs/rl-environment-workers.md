@@ -11,7 +11,7 @@ api:
   port: 8000
 storage:
   data_dir: /var/lib/opensac/worker-0
-  broker_socket: /var/lib/opensac/worker-0/broker.sock
+  broker_socket: /var/lib/opensac/worker-0/broker/broker.sock
 deployment:
   worker_id: node-a-0
   backend_metadata_hash: sha256:replace-with-index-metadata-hash

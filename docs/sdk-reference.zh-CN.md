@@ -332,6 +332,14 @@ sdk.workspace.list(prefix="") -> list[str]
 使用 Python `print(...)` 返回有界结果，并把精确 source 字符串与对应证据一起输出。更大的
 结构化数据应保存到 `sdk.workspace`，不要打印完整文档或 ledger。
 
+## 0.8.5 部署迁移
+
+生成程序 API 和 broker operation 没有变化。Docker Desktop 部署必须把
+`storage.broker_socket` 放进专用子目录，例如 `<data_dir>/broker/broker.sock`。v0.8.5 服务只把
+这个目录挂载到 sandbox，既绕过 Docker Desktop 无法传递响应的单文件 Unix socket 转发，也
+不会暴露 session workspace。Capability contract 15 和 sandbox contract 14 保持不变。详见
+[当前版本说明](opensac-0.8.5.md)。
+
 ## 0.8.4 Breaking 迁移
 
 Broker-backed 调用不再通过 `BrokerError` 暴露 operational failure。旧的直接返回值和

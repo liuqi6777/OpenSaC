@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -12,7 +13,13 @@ from opensac_sdk.transport import BrokerError, UnixSocketTransport
 from opensac.backends.document import DocumentContent, DocumentHandle
 from opensac.backends.llm import OpenAICompatibleBackend
 from opensac.backends.search import SearchHit
-from opensac.broker import BrokerAlreadyRunning, BrokerRuntime, BrokerService, RetrievalRoute
+from opensac.broker import (
+    BrokerAlreadyRunning,
+    BrokerRuntime,
+    BrokerService,
+    RetrievalRoute,
+    resolve_broker_socket_path,
+)
 from opensac.models import Mechanisms, ResourceBudget, Session
 from opensac.provider import ProviderRequestError
 
@@ -50,6 +57,16 @@ class SocketBackend:
     @staticmethod
     def fetch_candidates(hit: DocumentHandle) -> list[DocumentHandle]:
         return [hit]
+
+
+def test_long_broker_socket_path_uses_a_dedicated_temporary_directory(tmp_path) -> None:
+    configured = tmp_path / ("nested-" * 20) / "custom.sock"
+
+    resolved = resolve_broker_socket_path(configured)
+
+    assert resolved.parent.parent == Path("/tmp")
+    assert resolved.parent.name.startswith("opensac-")
+    assert resolved.name == "broker.sock"
 
 
 async def test_sdk_round_trip_over_real_unix_socket(tmp_path) -> None:

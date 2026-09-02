@@ -7,7 +7,9 @@ api:
 
 storage:
   data_dir: /absolute/path/to/opensac-data
-  broker_socket: /absolute/path/to/opensac-data/broker.sock
+  # Keep the socket in a dedicated directory. Docker Desktop mounts this
+  # directory into sandboxes without exposing session data.
+  broker_socket: /absolute/path/to/opensac-data/broker/broker.sock
 
 backends:
   search:
@@ -18,7 +20,7 @@ backends:
     provider: lexical
 
 sandbox:
-  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.4
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.5
   # Change to darwin when the service talks to Docker Desktop for macOS.
   docker_host_platform: linux
   mode: cold

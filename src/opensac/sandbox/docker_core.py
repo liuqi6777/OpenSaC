@@ -34,13 +34,14 @@ def broker_socket_mount_args(
     source = broker_socket.resolve()
     destination = "/run/opensac/broker.sock"
     if platform == "darwin":
-        # Docker Desktop's host-socket forwarder handles --volume/-v, while
-        # --mount is rewritten to an unavailable /socket_mnt source. The
-        # forwarded socket is root:root 0660 regardless of its host ownership,
-        # so keep the sandbox user non-root but allow it to connect via GID 0.
+        # Docker Desktop's single-file Unix-socket forwarder accepts connects
+        # to a socket created in another container but does not forward HTTP
+        # responses. A bind-mounted parent directory preserves the live socket.
+        # The forwarded directory is root-owned, so keep the sandbox user
+        # non-root but allow it to connect via GID 0.
         return [
             "--volume",
-            f"{source}:{destination}:ro",
+            f"{source.parent}:/run/opensac:ro",
             "--group-add",
             "0",
         ]
@@ -48,6 +49,16 @@ def broker_socket_mount_args(
         "--mount",
         f"type=bind,src={source},dst={destination},readonly",
     ]
+
+
+def broker_socket_container_path(
+    broker_socket: Path,
+    *,
+    platform: str = sys.platform,
+) -> str:
+    if platform == "darwin":
+        return f"/run/opensac/{broker_socket.resolve().name}"
+    return "/run/opensac/broker.sock"
 
 
 class DockerImageContractVerifier:
@@ -357,7 +368,11 @@ class DockerSandboxCore:
         )
         command += [
             "--env",
-            "OPENSAC_BROKER_SOCKET=/run/opensac/broker.sock",
+            "OPENSAC_BROKER_SOCKET="
+            + broker_socket_container_path(
+                self.broker_socket,
+                platform=self.docker_host_platform,
+            ),
             "--env",
             "OPENSAC_WORKSPACE=/workspace",
         ]

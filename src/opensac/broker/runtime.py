@@ -29,7 +29,7 @@ def resolve_broker_socket_path(path: Path) -> Path:
     if len(str(resolved).encode()) <= 100:
         return resolved
     digest = hashlib.sha256(str(resolved).encode()).hexdigest()[:20]
-    return Path("/tmp") / f"opensac-{digest}.sock"
+    return Path("/tmp") / f"opensac-{digest}" / "broker.sock"
 
 
 def _is_live_socket(path: Path) -> bool:

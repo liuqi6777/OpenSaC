@@ -352,6 +352,15 @@ Return bounded results with Python's `print(...)`, carrying exact source strings
 they support. Persist larger structured values with `sdk.workspace` instead of printing full documents
 or ledgers.
 
+## 0.8.5 deployment migration
+
+Generated-program APIs and broker operations are unchanged. Docker Desktop deployments must place
+`storage.broker_socket` in a dedicated child directory such as
+`<data_dir>/broker/broker.sock`. The v0.8.5 service mounts only that directory into sandboxes, which
+avoids Docker Desktop's non-functional single-file Unix-socket forwarding without exposing session
+workspaces. Capability contract 15 and sandbox contract 14 are unchanged. See the
+[current release notes](opensac-0.8.5.md).
+
 ## 0.8.4 breaking migration
 
 Broker-backed calls no longer expose operational failures as `BrokerError`. There is no compatibility

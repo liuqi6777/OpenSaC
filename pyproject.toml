@@ -63,6 +63,12 @@ packages = ["src/opensac", "sac_agent"]
 [tool.hatch.version]
 path = "src/opensac/_version.py"
 
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "src/opensac/_version.py" },
+]
+
 [tool.uv.workspace]
 members = ["packages/opensac-sdk"]
 

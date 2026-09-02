@@ -375,7 +375,7 @@ class Settings(BaseSettings):
         return (init_settings,)
 
     data_dir: Path = Path(".opensac")
-    broker_socket: Path = Path(".opensac/broker.sock")
+    broker_socket: Path = Path(".opensac/broker/broker.sock")
     api_host: str = "127.0.0.1"
     api_port: int = 8000
     api_key: str = ""
@@ -528,6 +528,18 @@ class Settings(BaseSettings):
     # /exec across many parallel rollouts would otherwise start one container
     # per in-flight tool call and exhaust the host.
     sandbox_max_concurrency: int = 8
+
+    @model_validator(mode="after")
+    def validate_darwin_broker_directory(self) -> Settings:
+        if (
+            self.sandbox_docker_host_platform == "darwin"
+            and self.broker_socket.resolve().parent == self.data_dir.resolve()
+        ):
+            raise ValueError(
+                "sandbox.docker_host_platform=darwin requires storage.broker_socket "
+                "inside a dedicated subdirectory of storage.data_dir"
+            )
+        return self
 
     max_concurrency: int = 12
     max_output_bytes: int = Field(default=1_000_000, ge=1024)
