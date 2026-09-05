@@ -14,5 +14,5 @@ backends:
     provider: lexical
 
 sandbox:
-  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.5
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.9.0
   mode: cold

@@ -49,9 +49,6 @@ if capabilities is None:
     raise RuntimeError("capabilities unavailable")
 capability_contract: int = capabilities.contracts.capability
 
-sdk.workspace.write_json("checkpoint.json", {"source": source})
-workspace_files: list[str] = sdk.workspace.list()
-checkpoint_source: object = sdk.workspace.read_json("checkpoint.json")["source"]
 
 extraction = sdk.llm.extract(
     {"text": text},
@@ -90,8 +87,6 @@ print(
         "match_line": match_line,
         "grep_exhaustive": grep_exhaustive,
         "capability_contract": capability_contract,
-        "workspace_files": workspace_files,
-        "checkpoint_source": checkpoint_source,
         "document_title": document_title,
         "fetched_document_title": fetched_document_title,
         "extracted_label": extracted_label,

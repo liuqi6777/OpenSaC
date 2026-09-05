@@ -115,7 +115,7 @@ Download `configs/docker.yaml`, then set its two `storage` paths to `$OPENSAC_RU
 ```bash
 mkdir -p configs
 curl -fsSLo configs/docker.yaml \
-  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.8.5/configs/docker.yaml
+  https://raw.githubusercontent.com/liuqi6777/OpenSaC/v0.9.0/configs/docker.yaml
 ```
 
 Start the published image:
@@ -216,7 +216,6 @@ Generated programs import the singleton with `from opensac_sdk import sdk`.
 | `sdk.search` | `search`, `many`, `fuse_rrf` | Retrieve and fuse candidates while preserving provenance |
 | `sdk.content` | `fetch`, `fetch_many`, `read`, `grep`, `passages` | Fetch, locate, and inspect evidence with explicit cursors |
 | `sdk.llm` | `extract`, `extract_many`, `complete` | Optional model calls and schema-checked extraction |
-| `sdk.workspace` | JSON/JSONL artifact helpers | Persist structured artifacts across executions in one session |
 | Top level | `capabilities` | Inspect active contracts, deployment limits, and mechanisms |
 
 Every broker-backed unary operation returns its result or `None`; fan-out operations return an
@@ -226,8 +225,8 @@ as bounded structured warnings. Each search hit has one
 `source`: a canonical web URL or local document ID. Empty search results are successful results.
 Content accepts URL/local-ID strings rather than result records. Web deployments can fetch bounded
 public HTTP(S) URLs directly; local IDs remain search-admitted. Generated programs return bounded,
-source-scoped results with `print(...)`; larger structured values belong in `sdk.workspace`. Core
-signatures and intentional advanced operations are split across the Search-as-Code Skill references.
+source-scoped results with `print(...)`; save larger structured values with standard Python file I/O
+in the session working directory. Core signatures and intentional advanced operations are split across the Search-as-Code Skill references.
 See the complete SDK API reference in
 [English](docs/sdk-reference.md) or [Chinese](docs/sdk-reference.zh-CN.md) for every public method and
 return shape.
@@ -295,7 +294,7 @@ service also exposes the live runtime dashboard at `http://127.0.0.1:8000/dashbo
 
 | Goal | Document |
 | --- | --- |
-| Upgrade to the current release | [Release notes](docs/opensac-0.8.5.md) |
+| Upgrade to the current release | [Release notes](docs/opensac-0.9.0.md) |
 | Choose a YAML configuration profile | [Configuration profiles](docs/deployment.md#configuration-profiles) |
 | Deploy or upgrade OpenSAC | [Deployment](docs/deployment.md) |
 | Add broker backends or capability modules | [Broker plugins](docs/broker-plugins.md) |

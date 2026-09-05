@@ -35,7 +35,6 @@ def test_cli_skill_preserves_its_adapter_boundary_and_routes_shared_references()
     assert "shell-capable environments" in frontmatter
     assert "opensac agent-run <<'PY'" in skill
     assert "uv run opensac agent-run" in skill
-    assert "sdk.workspace" in skill
     assert "state_lost" in skill
     assert "4,000" in skill
     assert linked_references == {f"references/{name}" for name in REFERENCE_NAMES}

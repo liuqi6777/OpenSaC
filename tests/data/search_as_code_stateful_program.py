@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+from pathlib import Path
 
 from opensac_sdk import sdk
 
@@ -27,23 +28,25 @@ research_manifest = {
 }
 manifest_text = json.dumps(research_manifest, ensure_ascii=True, sort_keys=True)
 research_id = hashlib.sha256(manifest_text.encode()).hexdigest()[:12]
-root = f"runs/{research_id}"
-pool_path = f"{root}/pool.jsonl"
-evidence_path = f"{root}/evidence.json"
-attempts_path = f"{root}/attempts.json"
-manifest_path = f"{root}/manifest.json"
+root = Path("runs") / research_id
+root.mkdir(parents=True, exist_ok=True)
+pool_path = root / "pool.jsonl"
+evidence_path = root / "evidence.json"
+attempts_path = root / "attempts.json"
+manifest_path = root / "manifest.json"
 
 POOL_LIMIT = 200
 CONTENT_BATCH = 40
 SCAN_LIMIT_PER_CONSTRAINT = 80
 READ_LIMIT_PER_CONSTRAINT = 6
 
-artifacts = set(sdk.workspace.list(f"{root}/"))
-sdk.workspace.write_json(manifest_path, research_manifest)
-pool = {
-    row.source: dict(row)
-    for row in (sdk.workspace.read_jsonl(pool_path) if pool_path in artifacts else [])
-}
+manifest_path.write_text(json.dumps(research_manifest, ensure_ascii=False), encoding="utf-8")
+pool = {}
+if pool_path.is_file():
+    for line in pool_path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            pool[row["source"]] = row
 
 # Use 2-4 focused variants for a known entity; expand only when discovery is ambiguous.
 queries = list(
@@ -86,11 +89,9 @@ for candidate in fusion:
         row["snippet"] = candidate.snippet[:400].replace("\n", " ")
     row["score"] = max(float(row.get("score") or 0.0), candidate.fused_score)
 
-# Merge first, then prune. Current-stage rank wins; historical score is only a fallback.
-sdk.workspace.upsert_jsonl(pool_path, list(pool.values()))
-merged = [dict(row) for row in sdk.workspace.read_jsonl(pool_path)]
+# The pool already merges by source. Current-stage rank wins over historical score.
 ordered = sorted(
-    merged,
+    pool.values(),
     key=lambda row: (
         0 if row["source"] in current_rank else 1,
         current_rank.get(row["source"], 1_000_000),
@@ -108,7 +109,13 @@ for row in ordered:
         selected_sources.append(row["source"])
 selected = set(selected_sources)
 bounded_pool = [row for row in ordered if row["source"] in selected]
-sdk.workspace.write_jsonl(pool_path, bounded_pool)
+# Replace complete checkpoints atomically so interruption does not leave partial JSON.
+pool_pending = pool_path.with_suffix(".tmp")
+pool_pending.write_text(
+    "".join(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n" for row in bounded_pool),
+    encoding="utf-8",
+)
+pool_pending.replace(pool_path)
 ordered_sources = [row["source"] for row in bounded_pool]
 pool_by_source = {row["source"]: row for row in bounded_pool}
 
@@ -123,13 +130,17 @@ fingerprints = {
     name: hashlib.sha256(json.dumps(spec, ensure_ascii=True, sort_keys=True).encode()).hexdigest()
     for name, spec in constraints.items()
 }
-loaded_evidence = sdk.workspace.read_json(evidence_path) if evidence_path in artifacts else {}
+loaded_evidence = (
+    json.loads(evidence_path.read_text(encoding="utf-8")) if evidence_path.is_file() else {}
+)
 evidence = {
     name: dict(row)
     for name, row in loaded_evidence.items()
     if name in fingerprints and row.get("fingerprint") == fingerprints[name]
 }
-loaded_attempts = sdk.workspace.read_json(attempts_path) if attempts_path in artifacts else {}
+loaded_attempts = (
+    json.loads(attempts_path.read_text(encoding="utf-8")) if attempts_path.is_file() else {}
+)
 attempted = {}
 for name in constraints:
     row = loaded_attempts.get(name, {})
@@ -193,14 +204,20 @@ for name, spec in constraints.items():
             break
 
 if evidence:
-    sdk.workspace.write_json(evidence_path, evidence)
-sdk.workspace.write_json(
-    attempts_path,
-    {
-        name: {"fingerprint": fingerprints[name], "sources": sorted(sources)}
-        for name, sources in attempted.items()
-    },
+    evidence_pending = evidence_path.with_suffix(".tmp")
+    evidence_pending.write_text(json.dumps(evidence, ensure_ascii=False), encoding="utf-8")
+    evidence_pending.replace(evidence_path)
+attempts_pending = attempts_path.with_suffix(".tmp")
+attempts_pending.write_text(
+    json.dumps(
+        {
+            name: {"fingerprint": fingerprints[name], "sources": sorted(sources)}
+            for name, sources in attempted.items()
+        }
+    ),
+    encoding="utf-8",
 )
+attempts_pending.replace(attempts_path)
 
 missing = [name for name in constraints if name not in evidence]
 print("unsupported:", missing or "none")

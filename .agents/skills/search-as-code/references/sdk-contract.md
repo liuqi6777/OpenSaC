@@ -1,9 +1,10 @@
 # OpenSAC SDK contract used by this skill
 
 Use this reference when exact signatures, fields, limits, or failure semantics matter. It documents
-the SDK subset used by this skill, not every SDK capability. Import only `sdk` from `opensac_sdk`.
+the SDK capabilities used by this skill. Import `sdk` from `opensac_sdk` as the program entry point.
 Structured results are mapping-backed records. Mapping access is canonical; known
-non-colliding fields also support `row.source`, and `dict(row)` serializes the record. Use key access
+non-colliding fields also support `row.source`, and `dict(row)` serializes the record. Use key
+access
 for fields such as `items`, `values`, or `get`.
 
 ## Capability surface
@@ -23,7 +24,7 @@ sdk.search.fuse_rrf(
 ) -> list[record]
 ```
 
-`fuse_rrf` is deterministic local Python and makes no RPC. Its provenance uses `input_index`.
+`fuse_rrf` runs entirely as deterministic local Python. Its provenance uses `input_index`.
 
 Content:
 
@@ -40,22 +41,15 @@ sdk.content.grep(
 ) -> list[record | None]
 ```
 
-Capabilities and workspace:
+Capabilities:
 
 ```python
 sdk.capabilities() -> record | None
-sdk.workspace.write_json(path, value)
-sdk.workspace.write_jsonl(path, rows)
-sdk.workspace.append_jsonl(path, rows)
-sdk.workspace.upsert_jsonl(path, rows, key="source") -> int
-sdk.workspace.read_json(path)
-sdk.workspace.read_jsonl(path)
-sdk.workspace.exists(path) -> bool
-sdk.workspace.list(prefix="") -> list[str]
 ```
 
-`search.many` and `content.fetch_many` are public aligned fan-out helpers. Broker-backed methods do
-not raise operational failures; branch on `result is None`.
+`search.many` and `content.fetch_many` are public aligned fan-out helpers. Broker-backed methods
+represent
+operational failures as `None`; branch on `result is None`.
 
 ## Exact result fields
 
@@ -82,16 +76,16 @@ Join capability results by `source`.
 ## Failure and continuation semantics
 
 - Provider, quota, deadline, transport, protocol, contract, and permission failures return `None`.
-  OpenSAC records bounded structured warnings with sanitized operational details; do not parse the
-  rendered warning as a program data contract.
+  OpenSAC renders bounded warnings with sanitized operational details for the agent. Programs use
+  result availability and aligned input positions for failure handling.
 - Local argument type, minimum-boundary, and strict-JSON errors raise `ValueError`. Configurable
   upper bounds are broker policy and are discoverable through a non-`None` `sdk.capabilities()`
   result.
 - Single operations return `T | None`. Fan-out operations preserve input order, duplicates, and
   partial success as aligned `list[T | None]`; even all-systemic failures remain aligned `None`.
-- Check `is None`, never truthiness, because an empty list, string, or object can be successful.
-  Use `zip(inputs, results, strict=True)` when failed-item identity matters. Do not add `try/except`
-  or print errors merely for visibility.
+- Check `is None` to identify failures: an empty list, string, or object can be successful.
+  Use `zip(inputs, results, strict=True)` when failed-item identity matters. OpenSAC provides
+  operational error visibility through its rendered warnings.
 - `read.window.next` is either `None` at EOF or the exact `start_line`/`start_character` for an
   unlossy follow-up call. This matters when `max_chars` stops within one long line.
 - For capped grep scans, continue each successful result from non-null `result.next_start_line`.
@@ -108,21 +102,23 @@ Join capability results by `source`.
 - Every source requested through `fetch`, `read`, or `grep` consumes public
   content-fetch budget even when session caching avoids backend work.
 - A non-`None` `sdk.capabilities()` result reports contract versions, active mechanisms, backend
-  support, and configured upper limits. Do not hard-code deployment maxima.
+  support, and configured upper limits. Read applicable deployment maxima from this result.
 
 ## Workspace, stdout, and lifecycle
 
-- `sdk.workspace` is the structured session-workspace interface.
-- Artifact paths are workspace-relative and cannot escape it. `sdk.workspace.list(prefix)` hides
-  internal runtime files. Applications choose their own artifact layout.
-- `upsert_jsonl` replaces whole rows by the chosen key; it does not merge object fields.
+- Use standard Python file I/O (`pathlib`, `json`) in the current working directory. The runtime
+  preserves this directory across calls in one live session when persistence is enabled.
+- Choose your own artifact paths; `.opensac-*` files belong to the runtime. Loaded JSON objects
+  are plain dictionaries: use `row["source"]`. SDK records can be serialized directly with `json`.
+- To update a candidate pool, load rows and merge by source before writing. For resumable
+  checkpoints, write a temporary file beside the destination and replace it with `Path.replace`.
 - Process-per-call programs lose Python variables between calls. Persistent-interpreter variants
   retain completed assignments until an explicit `state_lost` or `interpreter_lost` error. Files
   and live variables remain independent; `mechanisms.persistence` controls files only.
 - On `state_lost` or `interpreter_lost`, the failed program is not replayed. Restore trusted
   workspace data, re-admit local IDs, and reuse public URLs only when their deployment permits it.
-- Adapter failures occur outside the sandbox and are not SDK results; their execution result may be
-  unknown. Repeat external work only when durable progress proves it is missing.
+- Adapter failures occur outside the sandbox; the execution result may be unknown. Repeat external
+  work only when durable progress proves it is missing.
 
 ## Runtime documentation and sandbox constraints
 
@@ -133,6 +129,6 @@ print(sdk.__doc__)
 print(sdk.content.read.__doc__)
 ```
 
-Reading `__doc__` makes no broker call. `help()` remains blocked. Use ordinary Python for
-deterministic orchestration; network/process modules and dynamic execution helpers are blocked.
-Dunder access is rejected except for `__name__` and `__doc__`.
+Read `__doc__` directly for local runtime documentation. Use ordinary Python for local computation
+and the SDK for external capabilities. The sandbox supports `__name__` and `__doc__` for dunder
+introspection; use explicit Python control flow and the host adapter for execution.
