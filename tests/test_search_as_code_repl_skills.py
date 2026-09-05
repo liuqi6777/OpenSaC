@@ -19,8 +19,8 @@ def _linked_references(skill: str) -> set[str]:
 def _cli_invocation() -> str:
     skill = (CLI_DIR / "SKILL.md").read_text(encoding="utf-8")
     shell = skill.split("```bash", 1)[1].split("```", 1)[0].strip().splitlines()
-    assert shell[0] == "opensac agent-run <<'OPENSAC_PY'"
-    assert shell[-1] == "OPENSAC_PY"
+    assert shell[0] == "opensac agent-run <<'PY'"
+    assert shell[-1] == "PY"
     return "\n".join(shell[1:-1])
 
 
@@ -33,7 +33,7 @@ def test_repl_skills_preserve_separate_adapter_surfaces() -> None:
     assert "agent-run" not in mcp_skill
 
     assert "name: search-as-code-repl-cli" in cli_skill.split("---", 2)[1]
-    assert "opensac agent-run <<'OPENSAC_PY'" in cli_skill
+    assert "opensac agent-run <<'PY'" in cli_skill
     assert "uv run opensac agent-run" in cli_skill
     assert "sac_run(code)" not in cli_skill
 

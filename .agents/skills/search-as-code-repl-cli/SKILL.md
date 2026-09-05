@@ -8,12 +8,12 @@ description: Run evidence-grounded OpenSAC research through agent-run when the C
 Pipe one complete Python cell to `opensac agent-run`:
 
 ```bash
-opensac agent-run <<'OPENSAC_PY'
+opensac agent-run <<'PY'
 from opensac_sdk import sdk
 
 capabilities = sdk.capabilities()
 print(f"capabilities_available={capabilities is not None}")
-OPENSAC_PY
+PY
 ```
 
 Use a quoted heredoc and pass code only on stdin. The host binds the conversation; never create,

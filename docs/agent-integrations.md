@@ -110,10 +110,10 @@ cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" ~/.claude/skills/
 Test the adapter directly:
 
 ```bash
-opensac agent-run <<'OPENSAC_PY'
+opensac agent-run <<'PY'
 from opensac_sdk import sdk
 print(sdk.search("OpenSAC Search as Code", limit=3))
-OPENSAC_PY
+PY
 ```
 
 Local Codex tasks use `CODEX_THREAD_ID`; Claude Code shells use `CLAUDE_CODE_SESSION_ID`. If neither

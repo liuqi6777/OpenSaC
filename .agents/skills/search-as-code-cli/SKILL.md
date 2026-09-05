@@ -8,12 +8,12 @@ description: Run evidence-grounded OpenSAC Python research through the local age
 Pipe one complete Python research program to `opensac agent-run`:
 
 ```bash
-opensac agent-run <<'OPENSAC_PY'
+opensac agent-run <<'PY'
 from opensac_sdk import sdk
 
 capabilities = sdk.capabilities()
 print(f"capabilities_available={capabilities is not None}")
-OPENSAC_PY
+PY
 ```
 
 Use a quoted heredoc and send code only on stdin, never as a shell argument. The command is the

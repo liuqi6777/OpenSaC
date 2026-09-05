@@ -21,8 +21,8 @@ def _posix_program() -> str:
     blocks = _fenced_blocks(SKILL_PATH, "bash")
     assert len(blocks) == 1
     lines = blocks[0].splitlines()
-    assert lines[0] == "opensac agent-run <<'OPENSAC_PY'"
-    assert lines[-1] == "OPENSAC_PY"
+    assert lines[0] == "opensac agent-run <<'PY'"
+    assert lines[-1] == "PY"
     return "\n".join(lines[1:-1])
 
 
@@ -33,7 +33,7 @@ def test_cli_skill_preserves_its_adapter_boundary_and_routes_shared_references()
 
     assert "name: search-as-code-cli" in frontmatter
     assert "shell-capable environments" in frontmatter
-    assert "opensac agent-run <<'OPENSAC_PY'" in skill
+    assert "opensac agent-run <<'PY'" in skill
     assert "uv run opensac agent-run" in skill
     assert "sdk.workspace" in skill
     assert "state_lost" in skill

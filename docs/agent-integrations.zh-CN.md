@@ -98,10 +98,10 @@ cp -R "$OPENSAC_REPO/.agents/skills/search-as-code-cli" ~/.claude/skills/
 直接测试适配层：
 
 ```bash
-opensac agent-run <<'OPENSAC_PY'
+opensac agent-run <<'PY'
 from opensac_sdk import sdk
 print(sdk.search("OpenSAC Search as Code", limit=3))
-OPENSAC_PY
+PY
 ```
 
 本地 Codex task 使用 `CODEX_THREAD_ID`，Claude Code shell 使用 `CLAUDE_CODE_SESSION_ID`。两者都不存在
