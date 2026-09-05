@@ -25,14 +25,6 @@ def strict_json_dumps(
         raise ValueError(f"{field} must contain only strict JSON values: {exc}") from exc
 
 
-def strict_jsonl_dumps(rows: list[Any], *, field: str = "rows") -> str:
-    if not isinstance(rows, list):
-        raise ValueError(f"{field} must be a list")
-    return "".join(
-        strict_json_dumps(row, field=f"{field}[{index}]") + "\n" for index, row in enumerate(rows)
-    )
-
-
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(

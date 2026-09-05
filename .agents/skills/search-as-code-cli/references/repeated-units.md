@@ -5,13 +5,14 @@ or several requested records. The shapes are illustrative; rename fields to fit 
 
 ## Gate fan-out and preserve record sets
 
-Validate the upstream set before constructing downstream queries or sources. Build those inputs from
-the returned rows, not from a second hand-written list. For one-to-many results, keep every material
+Validate the upstream set before constructing downstream queries or sources. Build those inputs
+directly from
+the returned rows. For one-to-many results, keep every material
 record key and leave parser uncertainty unresolved. An exclusion counts only when inspected evidence
 validates why it falls outside the user's requested scope.
 
 ```python
-FINAL_FIELD_STATES = {"supported", "contradicted", "missing", "failed"}
+PROCESSED_FIELD_STATES = {"supported", "contradicted", "missing", "failed"}
 
 
 def gate_units(rows, *, expected_count=None):
@@ -49,9 +50,9 @@ def finalize_record_units(units):
             for field_name, field in fields.items():
                 state = field.get("state", "unknown")
                 field_states[state] = field_states.get(state, 0) + 1
-                if state not in FINAL_FIELD_STATES:
+                if state not in PROCESSED_FIELD_STATES:
                     problems.append(f"{record.get('key')}:{field_name}:{state}")
-                if state == "supported" and (not field.get("value") or not evidence):
+                if state == "supported" and (field.get("value") is None or not evidence):
                     problems.append(f"{record.get('key')}:{field_name}:ungrounded")
             answer_rows.append(
                 {
@@ -76,7 +77,7 @@ def finalize_record_units(units):
             {
                 "unit_key": unit.get("key", ""),
                 "records": len(records),
-                "complete": not problems,
+                "processing_complete": not problems,
                 "problems": problems,
             }
         )
@@ -84,14 +85,23 @@ def finalize_record_units(units):
     coverage = {
         "units": len(units),
         "records": len(answer_rows),
-        "complete_units": sum(row["complete"] for row in unit_rows),
+        "processed_units": sum(row["processing_complete"] for row in unit_rows),
         "field_states": field_states,
     }
     return {"answer_rows": answer_rows, "unit_rows": unit_rows, "coverage": coverage}
 ```
 
-Derive downstream inputs as a comprehension over `gate_units(...)` output. Record keys should express
-material identity rather than loop position. `scope_complete` means the inspected source region can
-support enumeration for that unit; if the sources do not justify exhaustiveness, leave it false.
-Persist the returned rows and coverage only if a later call needs them—no filename or terminal
-artifact is required by the skill.
+Derive downstream inputs as a comprehension over `gate_units(...)` output. Use stable material
+identity for record keys. `scope_complete` means the inspected source region can
+support exhaustive enumeration for that unit; keep it false while enumeration remains uncertain.
+`processing_complete` and `processed_units` describe bookkeeping: the unit's records and field
+states have been accounted for within the inspected scope. Evaluate answer sufficiency separately
+from this processing status. `missing` and `failed` fields remain evidence gaps even when processing
+is
+complete; use `field_states` and the retained rows to choose further work. Contradicted claims need
+task-specific interpretation. Answer sufficiency remains an agent-level evidence judgment.
+
+For supported fields, an absent or `None` value is missing; `0` and `False` are valid values.
+Validate whether empty strings or collections are meaningful for the particular field before
+calling this helper. Persist the returned rows and coverage when a later call needs them, using
+artifact paths chosen for the task.

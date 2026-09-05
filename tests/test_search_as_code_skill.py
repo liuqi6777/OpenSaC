@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import re
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from opensac_sdk._record import Record, record
-from opensac_sdk._resources import SearchResource, WorkspaceResource
+from opensac_sdk._resources import SearchResource
 
 from opensac.backends.search import SearchHit
 from opensac.sandbox.validator import validate_code
@@ -37,8 +39,8 @@ def _stateful_pattern() -> str:
     return STATEFUL_PROGRAM_PATH.read_text(encoding="utf-8")
 
 
-def _artifact(workspace: WorkspaceResource, name: str) -> str:
-    matches = [path for path in workspace.list() if path.endswith(f"/{name}")]
+def _artifact(workspace: Path, name: str) -> Path:
+    matches = list(workspace.glob(f"runs/*/{name}"))
     assert len(matches) == 1
     return matches[0]
 
@@ -327,13 +329,16 @@ def _run_pattern(
     sdk = SimpleNamespace(
         search=search,
         content=content,
-        workspace=WorkspaceResource(str(tmp_path)),
     )
     module = ModuleType("opensac_sdk")
     module.sdk = sdk
     printed = io.StringIO()
     source = program or _stateful_pattern()
-    with patch.dict(sys.modules, {"opensac_sdk": module}), contextlib.redirect_stdout(printed):
+    with (
+        patch.dict(sys.modules, {"opensac_sdk": module}),
+        contextlib.redirect_stdout(printed),
+        contextlib.chdir(tmp_path),
+    ):
         for turn in range(1, turns + 1):
             search.turn = turn
             content.turn = turn
@@ -364,7 +369,6 @@ def test_skill_keeps_the_core_contract_small_and_schema_neutral() -> None:
             "sac_run(code)",
             "sdk.search",
             "sdk.content.fetch",
-            "sdk.workspace",
             "result or `None`",
             "zip(inputs, results, strict=True)",
             "state_lost",
@@ -490,8 +494,6 @@ def test_contract_documents_mapping_records_and_workspace() -> None:
     assert "non-colliding fields" in contract
     assert "Fused candidate" in contract
     assert "sdk.content.passages(" not in contract
-    assert "structured session-workspace interface" in contract
-    assert "sdk.workspace" in contract
     assert "sdk.state" not in contract
     assert "sdk.output" not in contract
     assert "Adapter failures occur outside the sandbox" in contract
@@ -503,8 +505,6 @@ def test_contract_documents_mapping_records_and_workspace() -> None:
     assert "sdk.content.fetch_many(sources, *, concurrency=5)" in contract
     assert "Fetch result list" in contract
     assert "return `None`" in contract
-    assert "Check `is None`, never truthiness" in contract
-    assert "Do not add `try/except`" in contract
     assert "sdk.session" not in contract
 
 
@@ -527,8 +527,6 @@ def test_reference_programs_compile_and_pass_sandbox_validation() -> None:
         compile(program, f"<search-as-code-{name}-pattern>", "exec")
         validate_code(program)
         assert not any(token in program for token in ("NEXT:", "READY:", "ERROR:"))
-
-    assert "sdk.workspace." in programs["stateful-fixture"]
 
 
 def test_repeated_unit_helpers_gate_fanout_and_preserve_multiple_records() -> None:
@@ -601,10 +599,10 @@ def test_repeated_unit_helpers_gate_fanout_and_preserve_multiple_records() -> No
     assert result["coverage"] == {
         "units": 2,
         "records": 2,
-        "complete_units": 1,
+        "processed_units": 1,
         "field_states": {"supported": 3, "missing": 1},
     }
-    assert result["unit_rows"][0]["complete"] is True
+    assert result["unit_rows"][0]["processing_complete"] is True
     assert result["unit_rows"][1]["problems"] == ["unresolved_mentions"]
 
 
@@ -613,9 +611,9 @@ def test_pattern_keeps_one_ranked_pool_and_prints_sources_for_read_passages(
 ) -> None:
     sdk, content, printed = _run_pattern(tmp_path)
 
-    pool = sdk.workspace.read_jsonl(_artifact(sdk.workspace, "pool.jsonl"))
+    pool = [json.loads(line) for line in _artifact(tmp_path, "pool.jsonl").read_text().splitlines()]
     assert len(pool) == 4
-    assert pool[0].source == "doc_consensus"
+    assert pool[0]["source"] == "doc_consensus"
     assert set(pool[0]) == {
         "source",
         "title",
@@ -627,21 +625,26 @@ def test_pattern_keeps_one_ranked_pool_and_prints_sources_for_read_passages(
     assert content.grep_widths == [4, 4]
     assert "pool=4" in printed
 
-    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
+    evidence = json.loads(_artifact(tmp_path, "evidence.json").read_text())
     assert set(evidence) == {"phrase", "year"}
-    assert all(row.source in printed for row in evidence.values())
+    assert all(row["source"] in printed for row in evidence.values())
     assert "unsupported: none" in printed
 
 
 def test_pattern_pool_score_is_idempotent_across_replayed_stages(tmp_path: Path) -> None:
     sdk, _, _ = _run_pattern(tmp_path)
-    pool_path = _artifact(sdk.workspace, "pool.jsonl")
-    first = {row.source: row.score for row in sdk.workspace.read_jsonl(pool_path)}
+    pool_path = _artifact(tmp_path, "pool.jsonl")
+    first = {
+        row["source"]: row["score"]
+        for row in [json.loads(line) for line in pool_path.read_text().splitlines()]
+    }
 
     sdk, _, _ = _run_pattern(tmp_path, turns=2)
     replayed = {
-        row.source: row.score
-        for row in sdk.workspace.read_jsonl(_artifact(sdk.workspace, "pool.jsonl"))
+        row["source"]: row["score"]
+        for row in [
+            json.loads(line) for line in _artifact(tmp_path, "pool.jsonl").read_text().splitlines()
+        ]
     }
 
     assert replayed == first
@@ -652,18 +655,18 @@ def test_pattern_reports_an_unsupported_constraint_without_completion_token(tmp_
 
     assert "unsupported: ['year']" in printed
     assert not any(token in _stateful_pattern() for token in ("NEXT:", "READY:", "ERROR:"))
-    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
+    evidence = json.loads(_artifact(tmp_path, "evidence.json").read_text())
     assert set(evidence) == {"phrase"}
-    attempts = sdk.workspace.read_json(_artifact(sdk.workspace, "attempts.json"))
-    assert attempts.year.fingerprint
-    assert attempts.year.sources
+    attempts = json.loads(_artifact(tmp_path, "attempts.json").read_text())
+    assert attempts["year"]["fingerprint"]
+    assert attempts["year"]["sources"]
 
 
 def test_pattern_verifies_far_apart_constraints_in_the_same_document(tmp_path: Path) -> None:
     sdk, _, printed = _run_pattern(tmp_path, same_source=True)
 
-    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
-    assert {row.source for row in evidence.values()} == {"doc_consensus"}
+    evidence = json.loads(_artifact(tmp_path, "evidence.json").read_text())
+    assert {row["source"] for row in evidence.values()} == {"doc_consensus"}
     assert all(
         set(row) == {"fingerprint", "requirement", "source", "text"} for row in evidence.values()
     )
@@ -683,10 +686,10 @@ def test_pattern_unions_new_evidence_across_turns(tmp_path: Path) -> None:
     assert "EVIDENCE phrase:" in printed
     assert "EVIDENCE year:" in printed
     assert "unsupported: none" in printed
-    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
+    evidence = json.loads(_artifact(tmp_path, "evidence.json").read_text())
     assert set(evidence) == {"phrase", "year"}
-    assert evidence.phrase.source.startswith("doc_turn_1_")
-    assert evidence.year.source.startswith("doc_turn_2_")
+    assert evidence["phrase"]["source"].startswith("doc_turn_1_")
+    assert evidence["year"]["source"].startswith("doc_turn_2_")
 
 
 def test_pattern_keeps_matches_after_partial_fetch_failure(tmp_path: Path) -> None:
@@ -705,7 +708,7 @@ def test_pattern_bounds_pool_and_content_batches(tmp_path: Path) -> None:
         hits_per_query=10,
     )
 
-    pool = sdk.workspace.read_jsonl(_artifact(sdk.workspace, "pool.jsonl"))
+    pool = [json.loads(line) for line in _artifact(tmp_path, "pool.jsonl").read_text().splitlines()]
     assert len(pool) == 200
     assert content.grep_widths
     assert max(content.grep_widths) <= 40
@@ -746,8 +749,8 @@ def test_pattern_isolates_a_changed_task_in_a_new_workspace_namespace(tmp_path: 
     _run_pattern(tmp_path, program=original)
     sdk, _, _ = _run_pattern(tmp_path, program=changed)
 
-    pools = [path for path in sdk.workspace.list() if path.endswith("/pool.jsonl")]
-    manifests = [path for path in sdk.workspace.list() if path.endswith("/manifest.json")]
+    pools = list(tmp_path.glob("runs/*/pool.jsonl"))
+    manifests = list(tmp_path.glob("runs/*/manifest.json"))
     assert len(pools) == 2
     assert len(manifests) == 2
 
@@ -763,9 +766,72 @@ def test_pattern_revalidates_changed_regex_in_the_same_namespace(tmp_path: Path)
     _run_pattern(tmp_path, program=original)
     sdk, content, printed = _run_pattern(tmp_path, program=changed)
 
-    assert len([path for path in sdk.workspace.list() if path.endswith("/pool.jsonl")]) == 1
-    assert len([path for path in sdk.workspace.list() if path.endswith("/manifest.json")]) == 1
+    assert len(list(tmp_path.glob("runs/*/pool.jsonl"))) == 1
+    assert len(list(tmp_path.glob("runs/*/manifest.json"))) == 1
     assert any(pattern == "target phrase" for pattern, _ in content.grep_calls)
-    evidence = sdk.workspace.read_json(_artifact(sdk.workspace, "evidence.json"))
+    evidence = json.loads(_artifact(tmp_path, "evidence.json").read_text())
     assert set(evidence) == {"phrase", "year"}
     assert "unsupported: none" in printed
+
+
+@pytest.mark.parametrize(
+    ("field", "evidence", "processing_complete"),
+    [
+        ({"state": "supported", "value": 0}, [{"source": "s", "excerpt": "zero"}], True),
+        ({"state": "supported", "value": False}, [{"source": "s", "excerpt": "no"}], True),
+        ({"state": "supported", "value": ""}, [{"source": "s", "excerpt": "empty"}], True),
+        ({"state": "supported", "value": []}, [{"source": "s", "excerpt": "none"}], True),
+        ({"state": "supported", "value": None}, [{"source": "s", "excerpt": "text"}], False),
+        ({"state": "supported"}, [{"source": "s", "excerpt": "text"}], False),
+        ({"state": "supported", "value": 0}, [], False),
+    ],
+)
+def test_record_processing_distinguishes_missing_values_from_false_values(
+    field, evidence, processing_complete
+) -> None:
+    namespace = {}
+    exec(compile(_repeated_units_pattern(), "<repeated-units>", "exec"), namespace)
+    result = namespace["finalize_record_units"](
+        [
+            {
+                "key": "unit",
+                "requested_fields": ["value"],
+                "records": [{"key": "record", "fields": {"value": field}, "evidence": evidence}],
+                "scope_complete": True,
+            }
+        ]
+    )
+
+    row = result["unit_rows"][0]
+    assert row["processing_complete"] is processing_complete
+    assert row["problems"] == ([] if processing_complete else ["record:value:ungrounded"])
+    assert result["answer_rows"][0]["fields"]["value"] == field
+
+
+@pytest.mark.parametrize("state", ["missing", "failed"])
+def test_processed_records_retain_evidence_gaps(state) -> None:
+    namespace = {}
+    exec(compile(_repeated_units_pattern(), "<repeated-units>", "exec"), namespace)
+    field = {"state": state, "value": None}
+    result = namespace["finalize_record_units"](
+        [
+            {
+                "key": "unit",
+                "requested_fields": ["value"],
+                "records": [{"key": "record", "fields": {"value": field}, "evidence": []}],
+                "scope_complete": True,
+            }
+        ]
+    )
+
+    assert result["unit_rows"] == [
+        {"unit_key": "unit", "records": 1, "processing_complete": True, "problems": []}
+    ]
+    assert result["coverage"] == {
+        "units": 1,
+        "records": 1,
+        "processed_units": 1,
+        "field_states": {state: 1},
+    }
+    assert result["answer_rows"][0]["fields"] == {"value": field}
+    assert result["answer_rows"][0]["evidence"] == []

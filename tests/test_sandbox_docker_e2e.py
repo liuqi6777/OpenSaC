@@ -89,13 +89,13 @@ def test_built_image_exposes_contract_14_and_compact_sdk(sandbox_image: str) -> 
         "import importlib.util, json; "
         "from opensac_sdk import __version__; "
         "from opensac_sdk import _resources; "
-        "from opensac_sdk._resources import SearchResource, WorkspaceResource; "
+        "from opensac_sdk._resources import SearchResource; "
         "from opensac_sdk._surface import SDK_SURFACE; "
         "hit = {'source': 'doc_a', 'backend': 'local', 'rank': 1}; "
         "result = SearchResource(None).fuse_rrf(['q'], [[hit]]); "
         "print(json.dumps({'version': __version__, "
         "'fusion': result, "
-        "'workspace_resource': WorkspaceResource.__name__, "
+        "'has_workspace_resource': hasattr(_resources, 'WorkspaceResource'), "
         "'has_state_resource': hasattr(_resources, 'StateResource'), "
         "'workspace_surface': sum(item.resource == 'workspace' for item in SDK_SURFACE), "
         "'state_surface': sum(item.resource == 'state' for item in SDK_SURFACE), "
@@ -124,9 +124,9 @@ def test_built_image_exposes_contract_14_and_compact_sdk(sandbox_image: str) -> 
     assert payload["version"] == __version__
     assert payload["fusion"][0]["source"] == "doc_a"
     assert payload["fusion"][0]["fused_rank"] == 1
-    assert payload["workspace_resource"] == "WorkspaceResource"
+    assert payload["has_workspace_resource"] is False
     assert payload["has_state_resource"] is False
-    assert payload["workspace_surface"] == 9
+    assert payload["workspace_surface"] == 0
     assert payload["state_surface"] == 0
     assert payload["types_module"] is False
     assert payload["models_module"] is False
@@ -140,6 +140,9 @@ def test_compose_service_executes_a_sandbox_program(sandbox_image: str) -> None:
     data_dir = repo_root / f".opensac-service-e2e-{os.getpid()}"
     data_dir.mkdir()
     config_path = data_dir / "opensac.yaml"
+    # Ephemeral workspaces must be visible at the same path to the host Docker daemon.
+    environment_path = data_dir / "service.env"
+    environment_path.write_text(f"TMPDIR={data_dir}\n", encoding="utf-8")
     docker_host_platform = "darwin" if sys.platform == "darwin" else "linux"
     config_path.write_text(
         f"""
@@ -173,7 +176,7 @@ sandbox:
         "OPENSAC_UID": str(os.getuid()),
         "OPENSAC_GID": str(os.getgid()),
         "OPENSAC_DOCKER_GID": str(docker_gid),
-        "OPENSAC_ENV_FILE": "/dev/null",
+        "OPENSAC_ENV_FILE": str(environment_path),
         "OPENSAC_SERVICE_IMAGE": service_image,
         "OPENSAC_PORT": str(port),
     }
@@ -241,13 +244,47 @@ sandbox:
                     "print(capabilities.contracts.capability)\n",
                 )
 
+                saved = client.exec_code(
+                    session["id"],
+                    "import json\nfrom pathlib import Path\n"
+                    "transient = 41\n"
+                    "Path('checkpoint.json').write_text(json.dumps({'value': transient}))\n",
+                )
+                loaded = client.exec_code(
+                    session["id"],
+                    "import json\nfrom pathlib import Path\n"
+                    "print(json.loads(Path('checkpoint.json').read_text())['value'])\n"
+                    "print('transient' in globals())\n",
+                )
+                isolated = client.create_session()
+                session_ids.append(isolated["id"])
+                isolated_result = client.exec_code(
+                    isolated["id"],
+                    "from pathlib import Path\nprint(Path('checkpoint.json').exists())",
+                )
+                ephemeral = client.create_session(mechanisms={"persistence": False})
+                session_ids.append(ephemeral["id"])
+                ephemeral_saved = client.exec_code(
+                    ephemeral["id"],
+                    "from pathlib import Path\nPath('checkpoint.json').write_text('{}')",
+                )
+                ephemeral_loaded = client.exec_code(
+                    ephemeral["id"],
+                    "from pathlib import Path\nprint(Path('checkpoint.json').exists())",
+                )
+
                 repl = client.create_session(execution_mode="persistent_interpreter")
                 session_ids.append(repl["id"])
                 initialized = client.exec_code(
                     repl["id"],
+                    "from pathlib import Path\n"
+                    "Path('checkpoint.json').write_text('41')\n"
                     "value = 41\n\ndef plus_one(number):\n    return number + 1",
                 )
-                reused = client.exec_code(repl["id"], "print(plus_one(value))")
+                reused = client.exec_code(
+                    repl["id"],
+                    "print(plus_one(value))\nprint(Path('checkpoint.json').read_text())",
+                )
                 failed = client.exec_code(
                     repl["id"], "assigned_before_error = 7\nraise ValueError('ordinary')"
                 )
@@ -261,9 +298,17 @@ sandbox:
         assert result["succeeded"] is True
         assert broker_result["stdout"] == "15\n"
         assert broker_result["succeeded"] is True
+        assert saved["succeeded"] is True
+        assert loaded["succeeded"] is True
+        assert loaded["stdout"] == "41\nFalse\n"
+        assert isolated_result["succeeded"] is True
+        assert isolated_result["stdout"] == "False\n"
+        assert ephemeral_saved["succeeded"] is True, ephemeral_saved
+        assert ephemeral_loaded["succeeded"] is True, ephemeral_loaded
+        assert ephemeral_loaded["stdout"] == "False\n"
         assert initialized["interpreter_state"] == "ready"
         assert initialized["namespace_symbol_count"] >= 2
-        assert reused["stdout"] == "42\n"
+        assert reused["stdout"] == "42\n41\n"
         assert reused["execution_mode"] == "persistent_interpreter"
         assert failed["exit_code"] == 1
         assert failed["interpreter_state"] == "ready"

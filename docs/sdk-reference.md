@@ -53,7 +53,6 @@ programming exceptions still propagate.
 | Content | `content.fetch`, `content.fetch_many`, `content.read`, `content.grep`, `content.passages` |
 | LLM | `llm.complete`, `llm.extract`, `llm.extract_many` |
 | Top level | `capabilities` |
-| Workspace | JSON/JSONL operations including `workspace.upsert_jsonl` |
 
 ## Search
 
@@ -330,27 +329,44 @@ Returns `Record | None`. A successful result contains contract versions, search 
 content/LLM upper limits, and active mechanism switches. Generated programs should inspect it
 instead of hard-coding deployment maxima.
 
-## Workspace
+## Workspace files
 
-Artifact paths are workspace-relative and cannot escape the session workspace.
+Use standard Python file I/O in the current working directory. The runtime preserves files across
+calls in one live session when `mechanisms.persistence` is enabled (the default). In `program`
+mode, Python variables do not survive calls. The experimental `persistent_interpreter` mode still
+retains live variables independently of filesystem persistence.
 
 ```python
-sdk.workspace.write_json(path, value)
-sdk.workspace.read_json(path)
-sdk.workspace.write_jsonl(path, rows)
-sdk.workspace.append_jsonl(path, rows)
-sdk.workspace.upsert_jsonl(path, rows, key="source") -> int
-sdk.workspace.read_jsonl(path)
-sdk.workspace.exists(path) -> bool
-sdk.workspace.list(prefix="") -> list[str]
+import json
+from pathlib import Path
+
+path = Path("artifacts/checkpoint.json")
+path.parent.mkdir(parents=True, exist_ok=True)
+pending = path.with_suffix(".tmp")
+pending.write_text(
+    json.dumps({"sources": []}, ensure_ascii=False, allow_nan=False), encoding="utf-8"
+)
+pending.replace(path)
+
+# In a later call, reconstruct the relative path.
+state = json.loads(Path("artifacts/checkpoint.json").read_text(encoding="utf-8"))
 ```
 
-`upsert_jsonl` preserves first-seen order and replaces the complete row for an existing key; it is
-not a field-level merge.
+SDK records are dictionaries and can be serialized directly. After `json.loads`, use mapping
+access such as `row["source"]`; attribute access is not restored. For JSONL, serialize one row per
+line. To update a pool, merge rows by the chosen key before writing. Temporary-file replacement
+protects a single checkpoint from partial writes; it does not make several files one transaction.
+Choose your own artifact paths and leave `.opensac-*` runtime files alone. Files and local document
+IDs remain session-bound; do not assume they survive a host-reported `state_lost`.
 
 Return bounded results with Python's `print(...)`, carrying exact source strings beside the evidence
-they support. Persist larger structured values with `sdk.workspace` instead of printing full documents
-or ledgers.
+they support. Save larger structured values to files instead of printing full documents or ledgers.
+
+## 0.9.0 SDK migration
+
+`sdk.workspace` has been removed. Replace its methods with standard Python file I/O as shown above.
+Existing JSON/JSONL artifacts remain readable. Broker operations, capability contract 15, sandbox
+contract 14, and both execution modes are unchanged. See [release notes](opensac-0.9.0.md).
 
 ## 0.8.5 deployment migration
 
@@ -359,7 +375,7 @@ Generated-program APIs and broker operations are unchanged. Docker Desktop deplo
 `<data_dir>/broker/broker.sock`. The v0.8.5 service mounts only that directory into sandboxes, which
 avoids Docker Desktop's non-functional single-file Unix-socket forwarding without exposing session
 workspaces. Capability contract 15 and sandbox contract 14 are unchanged. See the
-[current release notes](opensac-0.8.5.md).
+[0.8.5 release notes](opensac-0.8.5.md).
 
 ## 0.8.4 breaking migration
 
@@ -375,22 +391,22 @@ shim for `Outcome`, its resource-specific variants, or the previous `fuse_rrf(re
 
 Use `is None`, not truthiness. The SDK catches only `BrokerError`; local `ValueError` and unexpected
 programming exceptions still propagate. This generated-program API change does not alter capability
-contract 15 or sandbox contract 14. See the [current release notes](opensac-0.8.4.md).
+contract 15 or sandbox contract 14. See the [0.8.4 release notes](opensac-0.8.4.md).
 
 ## 0.8.3 breaking migration
 
 No aliases or deprecation shims are provided. Host usage accounting, execution records, and dashboard
 metrics remain available outside the generated-program SDK.
 
-| 0.8.2 generated-program API | 0.8.3 replacement |
+| 0.8.2 generated-program API | Current replacement |
 | --- | --- |
 | `sdk.session.usage()` | Host REST, storage, or dashboard observability |
 | `sdk.session.capabilities()` | `sdk.capabilities()` |
-| `sdk.output.submit(...)` | Bounded `print(...)` and `sdk.workspace` artifacts |
-| `sdk.state.*` | `sdk.workspace.*` |
+| `sdk.output.submit(...)` | Bounded `print(...)` and standard file I/O |
+| `sdk.state.*` | Standard Python file I/O |
 
-The broker rejects `session.usage` under capability contract 15. The workspace and capability
-namespace changes add no broker operations. Sandbox contract 14 is unchanged. See the
+The broker rejects `session.usage` under capability contract 15. These namespace changes
+added no broker operations. In 0.9.0, workspace helpers are replaced by standard file I/O. Sandbox contract 14 is unchanged. See the
 [v0.8.3 release notes](opensac-0.8.3.md) for the full boundary.
 
 ## 0.8.2 breaking migration
@@ -411,7 +427,7 @@ capability contract 14 intentionally rejects the 0.8.1 wire surface.
 
 No aliases or deprecation shims are provided.
 
-| Removed or renamed | 0.8.1 replacement |
+| Removed or renamed | Current replacement |
 | --- | --- |
 | `search(..., domains=...)` | `include_domains=...` |
 | `search.many(..., limit_per_query=...)` | `limit=...` |
@@ -423,4 +439,4 @@ No aliases or deprecation shims are provided.
 | `content.passages(query, sources, max_per_source)` | keyword `sources=...`, `limit_per_source=...` |
 | `llm.complete_many(...)` | loop over `llm.complete(...)` |
 | legacy broker `llm.extract_many(...)` | SDK `llm.extract_many(...)` over unary `llm.extract` |
-| `state.merge_jsonl(...)` | `workspace.upsert_jsonl(...)` |
+| `state.merge_jsonl(...)` | Load rows, merge by key, and write with standard file I/O |

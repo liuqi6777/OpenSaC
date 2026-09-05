@@ -48,7 +48,8 @@ Core SDK surface:
 - Inspect documents with `sdk.content.grep(...)` and `sdk.content.read(...)`; read lines are
   1-based, character positions are 0-based, and `window.next` continues losslessly.
 - Use single-item `sdk.llm.extract(...)` only for bounded semantic transformation.
-- Persist artifacts with `sdk.workspace`; inspect deployment limits with `sdk.capabilities()`.
+- Persist artifacts with standard Python file I/O in the current working directory; inspect
+  deployment limits with `sdk.capabilities()`.
 - Return only bounded stdout, carrying exact source URLs or local IDs beside the evidence they
   support.
 
@@ -138,12 +139,11 @@ Default to bounded stdout handoff. Even an Explore then Verify flow can remain s
 chosen sources and checks fit safely in one observation. Passing five selected sources to the next
 stage needs no workspace; accumulating a 200-document pool and evidence across stages usually does.
 
-Upgrade to `sdk.workspace` only when a growing candidate pool, evidence ledger, or attempted-source
-history must survive several stages, avoid replay, or recover after uncertain execution. Derive a
-stable `runs/<research_id>/` namespace from the task, requirements, and source policy. Load needed
-artifacts before capability calls; persist progress before `NEXT:` and print a bounded handoff.
-Print any workspace paths needed for handoff; observations do not add workspace metadata, and
-Python variables do not survive calls.
+Use `pathlib` and `json` when a candidate pool, evidence ledger, or attempted-source history
+must survive stages. Derive a `runs/<research_id>/` namespace from the task, requirements, and
+source policy. Load artifacts before capability calls; save progress before `NEXT:`. Print needed
+paths for handoff. The runtime preserves files in the current working directory across calls in
+one live session. Python variables do not survive calls; JSON loads return plain dictionaries.
 
 Public web URLs remain reusable; local IDs and workspace artifacts are session-bound. On explicit
 `state_lost`, rebuild workspace artifacts and local-ID admission. For an unknown timeout or adapter

@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from opensac_sdk import sdk
 
 queries = [
@@ -26,9 +29,9 @@ report = sdk.content.passages(
 passages = report.passages if report is not None else []
 failures = report.failures if report is not None else []
 
-sdk.workspace.write_jsonl(
-    "evidence.jsonl",
-    [dict(item) for item in passages],
+Path("evidence.jsonl").write_text(
+    "".join(json.dumps(item, ensure_ascii=False, allow_nan=False) + "\n" for item in passages),
+    encoding="utf-8",
 )
 for item in passages[:8]:
     excerpt = " ".join(item.text.split())[:400]

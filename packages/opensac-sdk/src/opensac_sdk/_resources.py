@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
 import math
-import os
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -12,10 +9,10 @@ from ._diagnostics import (
     failure_detail,
     record_external_failures,
 )
-from ._json import atomic_write_text, strict_json_dumps, strict_jsonl_dumps
+from ._json import strict_json_dumps
 from ._many import _ManyFailure, _ManySuccess, _run_many
 from ._optional import capture_optional
-from ._record import Record, record, wrap
+from ._record import Record, record
 from ._validation import (
     boolean,
     finite_number,
@@ -644,7 +641,7 @@ class ContentResource:
 
         A successful document contains ``source``, ``title``, ``date``, ``text``, and
         provider-owned ``metadata``. Reuse it locally for several checks, optionally
-        persist one copy with ``sdk.workspace``, and never print the complete text.
+        persist one copy with standard Python file I/O, and never print the complete text.
         Operational failures return ``None`` and are recorded as structured warnings.
         """
         source = self._source(source)
@@ -1133,157 +1130,3 @@ class CapabilitiesResource:
             "capabilities",
             lambda: self._transport.call("session.capabilities", {}),
         )
-
-
-class WorkspaceResource:
-    """Persist structured artifacts across executions in one live session.
-
-    Paths are workspace-relative and cannot escape the session workspace. The
-    workspace is program memory, not a database; local document sources become
-    invalid if the host reports ``state_lost``. Public web URLs remain meaningful
-    across sessions.
-    """
-
-    def __init__(self, workspace: str | None) -> None:
-        self._workspace = Path(workspace).resolve() if workspace is not None else None
-
-    def _workspace_path(self) -> Path:
-        if self._workspace is not None:
-            return self._workspace
-        return Path(os.environ.get("OPENSAC_WORKSPACE", "/workspace")).resolve()
-
-    def _path(self, relative_path: str) -> Path:
-        workspace = self._workspace_path()
-        path = (workspace / relative_path).resolve()
-        if not path.is_relative_to(workspace):
-            raise ValueError("Workspace path must remain inside the session workspace")
-        return path
-
-    @staticmethod
-    def _dump(rows: list[Any]) -> str:
-        return strict_jsonl_dumps(rows)
-
-    def write_jsonl(self, relative_path: str, rows: list[Any]) -> None:
-        """Replace a JSONL artifact with ``rows``, creating parent directories.
-
-        SDK records can be written directly. Use ``append_jsonl`` to extend an event
-        log and ``upsert_jsonl`` to upsert a keyed candidate pool.
-
-        Raises:
-            ValueError: The path escapes the workspace.
-        """
-        encoded = self._dump(rows)
-        atomic_write_text(self._path(relative_path), encoded)
-
-    def append_jsonl(self, relative_path: str, rows: list[Any]) -> None:
-        """Append rows to a JSONL artifact without reading or rewriting it.
-
-        The file and parent directories are created when absent. This operation does
-        not deduplicate rows; use ``upsert_jsonl`` for keyed rows.
-
-        Raises:
-            ValueError: The path escapes the workspace.
-        """
-        path = self._path(relative_path)
-        encoded = self._dump(rows)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(encoded)
-
-    def upsert_jsonl(self, relative_path: str, rows: list[Any], key: str = "source") -> int:
-        """Upsert JSONL rows by ``key`` while preserving first-seen order.
-
-        An absent file behaves like an empty pool. A repeated key replaces its row
-        without moving it; pre-existing keyless rows are preserved.
-
-        Returns:
-            The total row count after the upsert.
-
-        Raises:
-            ValueError: A new row lacks ``key`` or the path escapes the workspace.
-        """
-        merged: dict[Any, Any] = {}
-        path = self._path(relative_path)
-        if path.is_file():
-            for existing in self.read_jsonl(relative_path):
-                identity = existing.get(key) if isinstance(existing, dict) else None
-                merged[identity if identity is not None else object()] = existing
-        for row in rows:
-            if not isinstance(row, dict) or key not in row:
-                shape = (
-                    ", ".join(sorted(map(str, row)))
-                    if isinstance(row, dict)
-                    else type(row).__name__
-                )
-                raise ValueError(
-                    f"upsert_jsonl needs a {key!r} field on every row to know what "
-                    f"is the same document. Got a row with: {shape}. Pass key= the "
-                    f"field you are deduplicating on, or use append_jsonl if these "
-                    f"rows have no identity."
-                )
-            merged[row[key]] = row
-        atomic_write_text(path, self._dump(list(merged.values())))
-        return len(merged)
-
-    def exists(self, relative_path: str) -> bool:
-        """Return whether a workspace-relative artifact exists.
-
-        Raises:
-            ValueError: The path escapes the workspace.
-        """
-        return self._path(relative_path).is_file()
-
-    def list(self, prefix: str = "") -> list[str]:
-        """List sorted workspace-relative artifact paths under ``prefix``.
-
-        Runtime files whose names start with ``.opensac-`` are hidden. An absent
-        workspace returns an empty list.
-        """
-        workspace = self._workspace_path()
-        if not workspace.exists():
-            return []
-        return sorted(
-            relative
-            for path in workspace.rglob("*")
-            if path.is_file() and not path.name.startswith(".opensac-")
-            for relative in [str(path.relative_to(workspace))]
-            if relative.startswith(prefix)
-        )
-
-    def read_jsonl(self, relative_path: str) -> list[Any]:
-        """Read non-empty JSONL lines as recursively wrapped JSON values.
-
-        Returned objects support both ``row.field`` and ``row["field"]`` reads.
-
-        Raises:
-            FileNotFoundError: The artifact does not exist.
-            ValueError: The path escapes the workspace or a line is invalid JSON.
-        """
-        with self._path(relative_path).open("r", encoding="utf-8") as handle:
-            return [wrap(json.loads(line)) for line in handle if line.strip()]
-
-    def write_json(self, relative_path: str, value: Any) -> None:
-        """Replace a JSON artifact, creating parent directories when needed.
-
-        SDK records and ordinary JSON values can be written directly.
-
-        Raises:
-            ValueError: The path escapes the workspace.
-        """
-        encoded = strict_json_dumps(value, field="value", indent=2)
-        atomic_write_text(self._path(relative_path), encoded)
-
-    def read_json(self, relative_path: str) -> Any:
-        """Read a JSON artifact and recursively wrap its object values.
-
-        Returned objects support both attribute and mapping field reads.
-
-        Raises:
-            FileNotFoundError: The artifact does not exist.
-            ValueError: The path escapes the workspace or the file is invalid JSON.
-        """
-        return wrap(json.loads(self._path(relative_path).read_text(encoding="utf-8")))
-
-    @classmethod
-    def from_environment(cls) -> WorkspaceResource:
-        return cls(None)

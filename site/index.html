@@ -233,11 +233,6 @@
               <p role="cell">Optional schema-checked extraction and model calls.</p>
             </div>
             <div class="sdk-row" role="row">
-              <code role="cell">sdk.workspace</code>
-              <span role="cell">JSON · JSONL · artifacts</span>
-              <p role="cell">Persist structured artifacts across executions in one session.</p>
-            </div>
-            <div class="sdk-row" role="row">
               <code role="cell">sdk.capabilities()</code>
               <span role="cell">top-level call</span>
               <p role="cell">Inspect active contracts, mechanisms, and deployment limits.</p>
@@ -249,14 +244,16 @@
       <section class="example content-width" id="start">
         <div class="section-heading compact-heading">
           <p class="section-label">Example</p>
-          <h2>A Search-as-Code program in twelve lines.</h2>
+          <h2>A Search-as-Code program.</h2>
         </div>
         <div class="code-panel">
           <div class="code-panel-header">
             <span>research.py</span>
             <button type="button" data-copy="#example-code"><span data-copy-label>Copy</span></button>
           </div>
-          <pre id="example-code"><code><span class="kw">from</span> opensac_sdk <span class="kw">import</span> sdk
+          <pre id="example-code"><code><span class="kw">import</span> json
+<span class="kw">from</span> pathlib <span class="kw">import</span> Path
+<span class="kw">from</span> opensac_sdk <span class="kw">import</span> sdk
 
 queries = [
     <span class="str">"Search as Code agents"</span>,
@@ -264,10 +261,10 @@ queries = [
 ]
 
 results = sdk.search.many(queries)
-evidence = sdk.search.fuse_rrf(results)
+evidence = sdk.search.fuse_rrf(queries, results)
 
-selected = [hit <span class="kw">for</span> hit <span class="kw">in</span> evidence <span class="kw">if</span> hit.score &gt; <span class="num">0.1</span>]
-sdk.workspace.write_json(<span class="str">"evidence.json"</span>, selected)
+selected = evidence[:<span class="num">8</span>]
+Path(<span class="str">"evidence.json"</span>).write_text(json.dumps(selected), encoding=<span class="str">"utf-8"</span>)
 <span class="kw">for</span> hit <span class="kw">in</span> selected[:<span class="num">8</span>]:
     print(<span class="str">f"EVIDENCE source={hit.source!r} title={hit.title!r}"</span>)</code></pre>
         </div>

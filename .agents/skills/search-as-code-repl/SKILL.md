@@ -1,63 +1,63 @@
 ---
 name: search-as-code-repl
-description: Run evidence-grounded OpenSAC research through sac_run when the host is explicitly configured for the experimental persistent_interpreter mode. Use only when invoked as $search-as-code-repl; use search-as-code for ordinary process-per-call sessions.
+description: Run evidence-grounded OpenSAC research through sac_run when the host is explicitly configured for the experimental persistent_interpreter mode. Use when explicitly invoked as $search-as-code-repl; use search-as-code for ordinary process-per-call sessions.
 ---
 
 # Search as Code REPL
 
-Invoke `sac_run(code)` with one complete Python cell. The MCP host binds the conversation and owns
-the OpenSAC session; never create, display, or delete REST sessions or kernel identifiers.
-`sac_run` is the outer adapter tool, not a Python API inside the sandbox. Put only the cell body in
-the `code` argument; never call `sac_run` from inside that cell. Import `sdk` from `opensac_sdk`
-when needed.
+Invoke `sac_run(code)` with one complete Python cell in the `code` argument. The MCP host owns
+conversation identity, REST sessions, and execution identifiers; let it manage their lifecycle and
+keep those details private. Use SDK calls and local Python computation inside the cell. Import
+`sdk` from `opensac_sdk` when needed.
 
 This skill is available only when the host is explicitly configured for
-`persistent_interpreter`; observations intentionally omit execution status metadata. Reuse the live
-interpreter until an explicit `state_lost` or `interpreter_lost` error reports that it was discarded.
+`persistent_interpreter`; observations contain program output and failure information. Reuse the
+live
+interpreter until an explicit `state_lost` or `interpreter_lost` error reports that it was
+discarded.
 
-Choose the research strategy yourself. This skill teaches how to encode that strategy as OpenSAC
-code; it does not prescribe query counts, source choices, cell stages, stopping rules, live-variable
-names, or one workspace schema.
+Choose queries, sources, stages, stopping criteria, and artifact layouts to fit the user's task.
+This skill provides SDK contracts and dataflow checks for implementing that research strategy.
 
 ## Core orchestration contract
 
 - Treat one cell as one semantic checkpoint. Compose mechanically linked capability calls and local
-  transformations in that cell; split only when the agent must make a new semantic choice, a separate
+  transformations in that cell; split only when the agent must make a new semantic choice, a
+  separate
   output budget is useful, or recovery/debugging matters.
-- Search results are candidate data. Pass source strings, not result records, to content methods.
-  Fetch only selected sources, inspect returned bodies locally, and keep each evidence excerpt beside
-  its source and material requirement.
+- Search results are candidate data. Pass source strings to content methods. Inspect selected
+  documents and keep each evidence excerpt beside its source and material requirement.
 - If another cell may reuse a successful body, keep the exact returned document in live memory while
-  the interpreter is ready. Persist it before parsing when recovery or reuse beyond live state matters.
-  Reuse that exact body instead of fetching again merely to try another parser or render evidence.
+  the interpreter is ready. Persist it before parsing when recovery or reuse beyond live state
+  matters.
+  Reuse that exact body for later parser attempts and evidence rendering.
 - Local parsing is local computation. When body shape is uncertain, try reasonable parser variants
-  in one cell and validate the task invariant—such as cardinality, unique keys, field shape, or source
+  in one cell and validate the task invariant—such as cardinality, unique keys, field shape, or
+  source
   alignment—before a downstream capability call.
 - Represent cumulative state with stable material keys. Start unresolved fields as unknown, keep
   independently testable fields and relations separate, and carry failures and source conflicts.
-  For batches, align results to inputs and derive later inputs from validated rows rather than
-  retyping an anticipated list.
-- Preserve zero, one, or many records when a unit can yield multiple results. Do not collapse a
-  record set to one convenient match; derive coverage from normalized rows supporting the answer.
-- Across cells, the final response must follow the current full live and durable state, not a
-  remembered answer or a subset printed in an earlier observation.
+  For batches, align results to inputs and derive later inputs from validated rows.
+- Preserve zero, one, or many records when a unit can yield multiple results. Derive coverage from
+  the normalized rows supporting the answer.
+- Across cells, the final response must follow the current full live and durable state.
 
-These are dataflow invariants, not a required pipeline. Completion is an agent-level evidence
-judgment, not a code token. stdout is a bounded audit projection; code does not need to print a
-completion label or every final row.
+Use these checks where they help the task. The agent judges completion from the evidence; stdout
+provides a bounded view of results and progress.
 
 ## Capability and evidence basics
 
 - Search with `sdk.search(...)` or `sdk.search.many(...)`; fuse aligned batches with
   `sdk.search.fuse_rrf(queries, results, ...)` when useful.
-- Material claims require inspected page text. Snippets help select sources but are not claim
-  evidence. Mirrors count as one source family.
-- Make `sdk.content.fetch(...)` or `sdk.content.fetch_many(...)` the first content call for a
-  selected source. Do not use `sdk.content.grep(...)` or `sdk.content.read(...)` merely to relocate
-  text already present in a fetched body, and never pass an unfetched source to content.
+- Use snippets to select sources and inspected page text to support material claims. Count mirrors
+  as one source family.
+- Use `sdk.content.fetch(...)` or `sdk.content.fetch_many(...)` when full bodies are needed for
+  local parsing or repeated checks. Use `sdk.content.grep(...)` or `sdk.content.read(...)` directly
+  for selected matches or windows. Reuse text already available locally for the same evidence.
 - Use deterministic Python for parsing, joins, deduplication, validation, and coverage. Keep claims
-  atomic enough to validate independently: nearby terms are candidates for a relation, not proof of
-  it. Give role- or time-sensitive relations explicit scope.
+  atomic enough to validate independently: use nearby terms to locate candidates, then inspect
+  whether the passage establishes
+  the exact relation. Give role- or time-sensitive relations explicit scope.
 - Read `sdk.capabilities()` only when a deployment mechanism or limit changes the cell.
 
 Read [the SDK contract](references/sdk-contract.md) for unfamiliar signatures, result fields,
@@ -65,47 +65,47 @@ failures, limits, and lifecycle semantics.
 
 ## Repeated and multi-cell work
 
-Batch repeated units instead of using one `sac_run` per row. Validate upstream keys and membership
-before fan-out, map every available or missing result back to its input, and retain cumulative rows only when a
+Batch repeated units in one invocation. Validate upstream keys and membership
+before fan-out, map every available or missing result back to its input, and retain cumulative rows
+only when a
 later semantic checkpoint will reuse them.
 
 For closed sets or one-to-many enumerations, read
 [repeated units and record sets](references/repeated-units.md). For uncertain local parsers,
 selected-artifact binding, or exact relation/conflict state, read
-[optional orchestration helpers](references/orchestration.md). These helpers are adaptable checks,
-not mandatory schemas.
+[optional orchestration helpers](references/orchestration.md). Adapt these helpers to the task.
 
 Python variables, functions, imports, and completed assignments survive ordinary exceptions while
-the interpreter remains ready. Treat live memory and `sdk.workspace` as independent mechanisms; use
-the workspace when durable recovery or reuse after state loss saves meaningful external work.
+the interpreter remains ready. Treat live memory and files as independent mechanisms. Use standard
+Python file I/O in the cell's working directory for reusable checkpoints; file retention follows
+`mechanisms.persistence`. After state loss, reuse only checkpoints that remain available and valid.
 
 For recoverable external calls, persist a `started` marker only when replay ambiguity matters, then
 persist item availability or unresolved inputs before later transformation. After an uncertain
-adapter failure, inspect
-relevant globals and durable rows before repeating an external operation.
+adapter failure, inspect relevant globals and durable rows before repeating an external operation.
 
 ## Return bounded observations
 
 Collect rows first and print once. Keep one global soft budget of about 4,000 characters across
-normal rows, failures, and total/shown/omitted counts. Every shown evidence row keeps its source.
-Do not print raw result lists, complete documents, live namespaces, or workspace ledgers.
+normal rows, failures, and total/shown/omitted counts. Print source-scoped excerpts and compact
+summaries; keep full documents and cumulative ledgers in program state or files.
 
-Cell output need not say whether research should continue. Once the full current state supports the
-request, answer the user directly; if material fields or enumeration scope remain unresolved, report
-a partial or inconclusive result. No finalization-only cell is needed merely to announce completion.
+Answer the user directly once the full current state supports the request. If material fields or
+enumeration scope remain unresolved and a useful next step is feasible within the task constraints,
+continue researching. Report a partial or inconclusive result when useful next steps are exhausted,
+a task constraint prevents continuing, or the user asks to stop; identify the remaining gaps.
 
 ## Handle interpreter and adapter failures
 
 Broker-backed single-item methods return a result or `None`; fan-out methods return an input-aligned
-list with `None` in failed positions. Check `is None`, never truthiness, because empty lists,
+list with `None` in failed positions. Check `is None` to identify failures: empty lists,
 strings, or objects can be successful results. Preserve the original inputs and use
 `zip(inputs, results, strict=True)` when failed-item identity matters. OpenSAC renders bounded
-external-failure warnings automatically, so do not add `try/except` or print failures merely to
-expose them. Persist unresolved inputs when later dataflow must remember them.
+external-failure warnings automatically. Branch on result availability. Persist unresolved inputs
+when later dataflow must remember them.
 
 If an observation reports `state_lost` or `interpreter_lost`, the cell is not replayed and the next
-invocation starts clean. Restore trustworthy workspace data if present, re-admit local IDs, and reuse
+invocation starts clean. Restore trustworthy workspace data if present, re-admit local IDs, and
+reuse
 public URLs only when permitted. Adapter failures occur outside the sandbox and may leave execution
 result unknown; inspect surviving state before replaying.
-
-Treat every referenced helper as a starting point, not a required pipeline.

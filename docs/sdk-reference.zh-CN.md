@@ -49,7 +49,6 @@ if hits is None:
 | Content | `content.fetch`、`content.fetch_many`、`content.read`、`content.grep`、`content.passages` |
 | LLM | `llm.complete`、`llm.extract`、`llm.extract_many` |
 | 顶层 | `capabilities` |
-| Workspace | JSON/JSONL 操作，包括 `workspace.upsert_jsonl` |
 
 ## Search
 
@@ -312,25 +311,41 @@ sdk.llm.extract_many(
 返回 `Record | None`。成功结果包含 contract 版本、search backend 支持、content/LLM
 上限和机制开关。生成程序应读取它，不要硬编码部署上限。
 
-## Workspace
+## Workspace 文件
 
-Artifact 路径相对 session workspace，不能逃逸：
+使用标准 Python 文件操作读写当前工作目录。`mechanisms.persistence` 开启时（默认），运行时会在
+同一个存活 session 的多次调用间保留文件。`program` 模式不保留 Python 变量；实验变体
+`persistent_interpreter` 继续保留内存变量，与文件持久化独立。
 
 ```python
-sdk.workspace.write_json(path, value)
-sdk.workspace.read_json(path)
-sdk.workspace.write_jsonl(path, rows)
-sdk.workspace.append_jsonl(path, rows)
-sdk.workspace.upsert_jsonl(path, rows, key="source") -> int
-sdk.workspace.read_jsonl(path)
-sdk.workspace.exists(path) -> bool
-sdk.workspace.list(prefix="") -> list[str]
+import json
+from pathlib import Path
+
+path = Path("artifacts/checkpoint.json")
+path.parent.mkdir(parents=True, exist_ok=True)
+pending = path.with_suffix(".tmp")
+pending.write_text(
+    json.dumps({"sources": []}, ensure_ascii=False, allow_nan=False), encoding="utf-8"
+)
+pending.replace(path)
+
+# 后续调用重新构造同一个相对路径。
+state = json.loads(Path("artifacts/checkpoint.json").read_text(encoding="utf-8"))
 ```
 
-`upsert_jsonl` 保留首次出现顺序，并按 key 替换整个旧行，不做字段级 merge。
+SDK record 是字典，可以直接序列化；`json.loads` 返回普通字典，请使用 `row["source"]`，不会恢复
+属性访问。JSONL 每行序列化一个对象；更新候选池时自行按 key 合并再写入。临时文件替换可以避免
+单个检查点出现半写入内容，但不提供多文件事务。自行选择 artifact 路径，保留 `.opensac-*` 运行时
+文件。文件和本地文档 ID 仍受 session 生命周期约束，不要假定它们在 `state_lost` 后仍然可用。
 
-使用 Python `print(...)` 返回有界结果，并把精确 source 字符串与对应证据一起输出。更大的
-结构化数据应保存到 `sdk.workspace`，不要打印完整文档或 ledger。
+使用 Python `print(...)` 返回有界结果，把精确 source 字符串与对应证据一起输出。更大的结构化
+数据保存到文件，不要打印完整文档或 ledger。
+
+## 0.9.0 SDK 迁移
+
+移除 `sdk.workspace`，使用上述标准 Python 文件操作替代。现有 JSON/JSONL 文件仍可读取。
+Broker operation、capability contract 15、sandbox contract 14 和两种执行模式均保持不变。
+详见[版本说明](opensac-0.9.0.md)。
 
 ## 0.8.5 部署迁移
 
@@ -338,7 +353,7 @@ sdk.workspace.list(prefix="") -> list[str]
 `storage.broker_socket` 放进专用子目录，例如 `<data_dir>/broker/broker.sock`。v0.8.5 服务只把
 这个目录挂载到 sandbox，既绕过 Docker Desktop 无法传递响应的单文件 Unix socket 转发，也
 不会暴露 session workspace。Capability contract 15 和 sandbox contract 14 保持不变。详见
-[当前版本说明](opensac-0.8.5.md)。
+[0.8.5 版本说明](opensac-0.8.5.md)。
 
 ## 0.8.4 Breaking 迁移
 
@@ -354,22 +369,23 @@ Broker-backed 调用不再通过 `BrokerError` 暴露 operational failure。旧�
 
 必须使用 `is None`，不能依赖 truthiness。SDK 只捕获 `BrokerError`；本地 `ValueError` 与非预期
 程序异常仍会传播。这个生成程序 API 变更不调整 capability contract 15 或 sandbox contract 14。
-完整边界见[当前版本说明](opensac-0.8.4.md)。
+完整边界见[0.8.4 版本说明](opensac-0.8.4.md)。
 
 ## 0.8.3 Breaking 迁移
 
 不提供 alias 或弃用 shim。Host usage 计量、execution 记录和 dashboard 指标继续保留在生成程序
 SDK 之外。
 
-| 0.8.2 生成程序 API | 0.8.3 替代 |
+| 0.8.2 生成程序 API | 当前替代 |
 | --- | --- |
 | `sdk.session.usage()` | Host REST、存储或 dashboard 观测 |
 | `sdk.session.capabilities()` | `sdk.capabilities()` |
-| `sdk.output.submit(...)` | 有界 `print(...)` 与 `sdk.workspace` artifact |
-| `sdk.state.*` | `sdk.workspace.*` |
+| `sdk.output.submit(...)` | 有界 `print(...)` 与标准文件操作 |
+| `sdk.state.*` | 标准 Python 文件操作 |
 
-Capability contract 15 下 broker 会拒绝 `session.usage`。Workspace 与 capability namespace
-调整不会新增 broker operation；sandbox contract 14 保持不变。完整边界见
+Capability contract 15 下 broker 会拒绝 `session.usage`。这些 namespace 调整没有新增 broker
+operation；0.9.0 将 workspace 辅助方法替换为标准文件操作。Sandbox contract 14 保持不变，
+0.8.3 的完整边界见
 [v0.8.3 版本说明](opensac-0.8.3.md)。
 
 ## 0.8.2 Breaking 迁移
@@ -390,7 +406,7 @@ Capability contract 15 下 broker 会拒绝 `session.usage`。Workspace 与 capa
 
 不提供 alias 或 deprecation shim。
 
-| 删除或重命名 | 0.8.1 替代 |
+| 删除或重命名 | 当前替代 |
 | --- | --- |
 | `search(..., domains=...)` | `include_domains=...` |
 | `search.many(..., limit_per_query=...)` | `limit=...` |
@@ -402,4 +418,4 @@ Capability contract 15 下 broker 会拒绝 `session.usage`。Workspace 与 capa
 | `content.passages(query, sources, max_per_source)` | keyword `sources=...`、`limit_per_source=...` |
 | `llm.complete_many(...)` | 循环调用 `llm.complete(...)` |
 | 旧 broker `llm.extract_many(...)` | SDK `llm.extract_many(...)` 组合 unary `llm.extract` |
-| `state.merge_jsonl(...)` | `workspace.upsert_jsonl(...)` |
+| `state.merge_jsonl(...)` | 读取行、按 key 合并，再用标准文件操作写回 |

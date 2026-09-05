@@ -1,11 +1,12 @@
 # Optional orchestration helpers
 
-These small helpers constrain local dataflow. They do not choose queries, sources, call counts, or a
-stopping policy, and a task need not use all of them.
+These small helpers validate local dataflow. Select the helpers that help your task and choose
+queries, sources, call counts, and stopping criteria through research judgment.
 
 ## Close local parser repair in one program
 
-A parser attempt is local computation, not a semantic checkpoint. Put plausible local parsers in one
+Treat parser attempts as local computation within one semantic checkpoint. Put plausible local
+parsers in one
 program and validate the real task invariant after each attempt.
 
 ```python
@@ -46,7 +47,8 @@ def bind_selected_artifact(selection, artifact_name, artifact):
     return (body if not problems else ""), problems
 ```
 
-If binding fails, project the problems and do not parse or fan out from that artifact.
+If binding fails, report the problems and correct the selected path or source before parsing or
+constructing downstream inputs.
 
 ## Finalize an exact scoped claim
 
@@ -78,5 +80,5 @@ def finalize_scoped_claim(claim):
 ```
 
 Represent independently testable facts as separate claims. Combine their finalized states in
-task-specific code; do not create one synthetic predicate merely because several terms occur in the
-same window. Different roles or times are separate scoped claims, not automatically a conflict.
+task-specific code after validating each exact relation. Model different roles or times as separate
+scoped claims, and evaluate conflicts within matching scopes.

@@ -20,7 +20,7 @@ backends:
     provider: lexical
 
 sandbox:
-  image: ghcr.io/liuqi6777/opensac-sandbox:0.8.5
+  image: ghcr.io/liuqi6777/opensac-sandbox:0.9.0
   # Change to darwin when the service talks to Docker Desktop for macOS.
   docker_host_platform: linux
   mode: cold
