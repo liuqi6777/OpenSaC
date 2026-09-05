@@ -1,0 +1,4 @@
+interface:
+  display_name: "Search as Code CLI v2"
+  short_description: "Example-driven web research through the OpenSAC CLI"
+  default_prompt: "Use $search-as-code-cli-v2 to research this question with the local OpenSAC CLI and cite the inspected source URLs."
