@@ -140,6 +140,21 @@ def test_build_sandbox_uses_image_from_yaml(monkeypatch, tmp_path: Path) -> None
     assert calls[0][calls[0].index("-t") + 1] == "example/opensac-sandbox:test"
 
 
+def test_build_sandbox_uses_configured_container_engine(monkeypatch, tmp_path: Path) -> None:
+    config = tmp_path / "opensac.yaml"
+    config.write_text("sandbox:\n  container_engine: podman\n", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, *, check: calls.append(command),
+    )
+
+    cli.build_sandbox(config=config)
+
+    assert calls[0][:2] == ["podman", "build"]
+
+
 def test_cli_configuration_error_exits_nonzero(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
 

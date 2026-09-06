@@ -83,6 +83,7 @@ class WarmDockerSandbox(DockerSandboxCore):
         *,
         image: str,
         broker_socket: Path,
+        container_engine: str = "docker",
         docker_host_platform: str = sys.platform,
         timeout_seconds: int = 120,
         memory: str = "512m",
@@ -96,6 +97,7 @@ class WarmDockerSandbox(DockerSandboxCore):
         super().__init__(
             image=image,
             broker_socket=broker_socket,
+            container_engine=container_engine,
             docker_host_platform=docker_host_platform,
             timeout_seconds=timeout_seconds,
             memory=memory,
@@ -177,7 +179,7 @@ class WarmDockerSandbox(DockerSandboxCore):
 
         try:
             process = await asyncio.create_subprocess_exec(
-                "docker",
+                self.container_engine,
                 "ps",
                 "--all",
                 "--quiet",
@@ -216,7 +218,7 @@ class WarmDockerSandbox(DockerSandboxCore):
 
         try:
             process = await asyncio.create_subprocess_exec(
-                "docker",
+                self.container_engine,
                 "top",
                 container_id,
                 "-eo",
@@ -252,7 +254,7 @@ class WarmDockerSandbox(DockerSandboxCore):
         session_digest = hashlib.sha256(key.encode()).hexdigest()[:16]
         try:
             process = await asyncio.create_subprocess_exec(
-                "docker",
+                self.container_engine,
                 "ps",
                 "--all",
                 "--quiet",
@@ -281,7 +283,7 @@ class WarmDockerSandbox(DockerSandboxCore):
     def execution_command(self, container_id: str, request: SandboxRequest) -> list[str]:
         execution_workspace = self.container_execution_workspace(request)
         command = [
-            "docker",
+            self.container_engine,
             "exec",
             "--user",
             f"{os.getuid()}:{os.getgid()}",
@@ -671,9 +673,8 @@ class WarmDockerSandbox(DockerSandboxCore):
             return f"The sandbox process could not be started: {first_line}"
         return None
 
-    @staticmethod
-    async def _remove_container(container_id: str) -> None:
-        await remove_docker_container(container_id)
+    async def _remove_container(self, container_id: str) -> None:
+        await remove_docker_container(container_id, container_engine=self.container_engine)
 
     async def _finish_close(self, key: str, state: _WarmSession) -> None:
         try:

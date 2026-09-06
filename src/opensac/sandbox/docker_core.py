@@ -64,16 +64,23 @@ def broker_socket_container_path(
 class DockerImageContractVerifier:
     """Lazily reject sandbox images built for an incompatible SDK contract."""
 
-    def __init__(self, image: str, *, expected: int = SANDBOX_CONTRACT) -> None:
+    def __init__(
+        self,
+        image: str,
+        *,
+        expected: int = SANDBOX_CONTRACT,
+        container_engine: str = "docker",
+    ) -> None:
         self.image = image
         self.expected = expected
+        self.container_engine = container_engine
         self._verified = False
         self._lock = asyncio.Lock()
 
     async def _inspect(self) -> tuple[int, bytes, bytes]:
         try:
             process = await asyncio.create_subprocess_exec(
-                "docker",
+                self.container_engine,
                 "image",
                 "inspect",
                 "--format",
@@ -92,7 +99,7 @@ class DockerImageContractVerifier:
     async def _pull(self) -> None:
         try:
             process = await asyncio.create_subprocess_exec(
-                "docker",
+                self.container_engine,
                 "pull",
                 self.image,
                 stdout=asyncio.subprocess.PIPE,
@@ -105,7 +112,7 @@ class DockerImageContractVerifier:
         _, stderr_bytes = await process.communicate()
         if process.returncode != 0:
             stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
-            detail = stderr or f"docker pull exited {process.returncode}"
+            detail = stderr or f"{self.container_engine} pull exited {process.returncode}"
             raise SandboxImageContractError(
                 f"Could not pull sandbox image {self.image!r}: {detail}"
             )
@@ -113,7 +120,8 @@ class DockerImageContractVerifier:
     @staticmethod
     def _image_is_missing(stderr_bytes: bytes) -> bool:
         stderr = stderr_bytes.decode("utf-8", errors="replace").lower()
-        return "no such image" in stderr or "no such object" in stderr
+        missing_markers = ("no such image", "no such object", "image not known")
+        return any(marker in stderr for marker in missing_markers)
 
     async def ensure_compatible(self) -> None:
         if self._verified:
@@ -127,7 +135,7 @@ class DockerImageContractVerifier:
                 returncode, stdout_bytes, stderr_bytes = await self._inspect()
             if returncode != 0:
                 stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
-                detail = stderr or f"docker image inspect exited {returncode}"
+                detail = stderr or f"{self.container_engine} image inspect exited {returncode}"
                 raise SandboxImageContractError(
                     f"Could not inspect sandbox image {self.image!r}: {detail}"
                 )
@@ -221,12 +229,12 @@ async def read_bounded_process_output(
     )
 
 
-async def remove_docker_container(container_id: str) -> None:
+async def remove_docker_container(container_id: str, *, container_engine: str = "docker") -> None:
     """Force-remove a container, treating an already-gone id as success."""
 
     try:
         cleanup = await asyncio.create_subprocess_exec(
-            "docker",
+            container_engine,
             "rm",
             "--force",
             container_id,
@@ -239,8 +247,11 @@ async def remove_docker_container(container_id: str) -> None:
         ) from exc
     _, stderr_bytes = await cleanup.communicate()
     stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
-    if cleanup.returncode != 0 and "No such container" not in stderr:
-        detail = stderr or f"docker rm exited {cleanup.returncode}"
+    missing = (
+        "no such container" in stderr.lower() or "no container with name or id" in stderr.lower()
+    )
+    if cleanup.returncode != 0 and not missing:
+        detail = stderr or f"{container_engine} rm exited {cleanup.returncode}"
         raise RuntimeError(f"Could not remove sandbox container {container_id}: {detail}")
 
 
@@ -303,6 +314,7 @@ class DockerSandboxCore:
         *,
         image: str,
         broker_socket: Path,
+        container_engine: str = "docker",
         docker_host_platform: str = sys.platform,
         timeout_seconds: int = 120,
         memory: str = "512m",
@@ -312,13 +324,14 @@ class DockerSandboxCore:
     ) -> None:
         self.image = image
         self.broker_socket = broker_socket.resolve()
+        self.container_engine = container_engine
         self.docker_host_platform = docker_host_platform
         self.timeout_seconds = timeout_seconds
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
         self.max_output_bytes = max_output_bytes
-        self._image_contract = DockerImageContractVerifier(image)
+        self._image_contract = DockerImageContractVerifier(image, container_engine=container_engine)
 
     def _docker_run_command(
         self,
@@ -329,7 +342,7 @@ class DockerSandboxCore:
         init: bool = False,
         extra_args: tuple[str, ...] = (),
     ) -> list[str]:
-        command = ["docker", "run"]
+        command = [self.container_engine, "run"]
         if detach:
             command.append("--detach")
         command.append("--rm")
@@ -422,6 +435,6 @@ class DockerSandboxCore:
         if returncode != 125:
             return None
         first_line = stderr.strip().splitlines()[0] if stderr.strip() else ""
-        if not first_line.startswith("docker:"):
+        if not first_line.startswith(("docker:", "Error:")):
             return None
         return f"The sandbox container could not be started: {first_line}"

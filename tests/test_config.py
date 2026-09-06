@@ -43,6 +43,7 @@ def test_local_template_defines_a_valid_complete_configuration() -> None:
     assert settings.capabilities.extraction.max_repair_attempts == 1
     assert settings.provider_services.search.concurrency is None
     assert settings.provider_services.llm.concurrency is None
+    assert settings.sandbox_container_engine == "docker"
     assert settings.sandbox_docker_host_platform in {"darwin", "linux"}
 
 
@@ -122,6 +123,13 @@ def test_no_config_uses_defaults() -> None:
     assert settings.backends.search.base_url == "http://127.0.0.1:8081"
     assert settings.backends.document.base_url == "http://127.0.0.1:8081"
     assert settings.dashboard_is_enabled is True
+
+
+def test_yaml_selects_podman_container_engine(tmp_path: Path) -> None:
+    config = tmp_path / "opensac.yaml"
+    config.write_text("sandbox:\n  container_engine: podman\n", encoding="utf-8")
+
+    assert load_settings(config).sandbox_container_engine == "podman"
 
 
 def test_darwin_requires_a_dedicated_broker_socket_directory(tmp_path: Path) -> None:

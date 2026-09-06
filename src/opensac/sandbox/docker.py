@@ -37,6 +37,7 @@ class DockerSandbox(DockerSandboxCore):
         *,
         image: str,
         broker_socket: Path,
+        container_engine: str = "docker",
         docker_host_platform: str = sys.platform,
         timeout_seconds: int = 120,
         memory: str = "512m",
@@ -47,6 +48,7 @@ class DockerSandbox(DockerSandboxCore):
         super().__init__(
             image=image,
             broker_socket=broker_socket,
+            container_engine=container_engine,
             docker_host_platform=docker_host_platform,
             timeout_seconds=timeout_seconds,
             memory=memory,
@@ -158,11 +160,10 @@ class DockerSandbox(DockerSandboxCore):
         workspace.cleanup()
         return result
 
-    @staticmethod
-    async def _remove_container(cid_path: Path) -> None:
+    async def _remove_container(self, cid_path: Path) -> None:
         if not cid_path.exists():
             return
         container_id = cid_path.read_text(encoding="utf-8").strip()
         if container_id:
-            await remove_docker_container(container_id)
+            await remove_docker_container(container_id, container_engine=self.container_engine)
         cid_path.unlink(missing_ok=True)

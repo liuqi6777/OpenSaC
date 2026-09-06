@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -151,6 +152,28 @@ async def test_sandbox_image_contract_is_inspected_once(
     assert calls[0][-1] == "opensac-test"
 
 
+async def test_sandbox_uses_configured_container_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    async def create_process(*command: str, **_: object) -> _CompletedProcess:
+        calls.append(command)
+        return _CompletedProcess(stdout=b"14\n")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    socket = tmp_path / "broker.sock"
+    socket.touch()
+    sandbox = DockerSandbox(image="opensac-test", broker_socket=socket, container_engine="podman")
+
+    await sandbox._image_contract.ensure_compatible()
+
+    assert calls[0][:3] == ("podman", "image", "inspect")
+    assert sandbox.command(SandboxRequest("pass", tmp_path / "workspace", "secret"))[0] == (
+        "podman"
+    )
+
+
 async def test_missing_sandbox_image_is_pulled_before_contract_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -175,6 +198,35 @@ async def test_missing_sandbox_image_is_pulled_before_contract_check(
         ("image", "inspect"),
         ("pull", "published:0.6.0"),
         ("image", "inspect"),
+    ]
+
+
+async def test_podman_missing_image_is_pulled_before_contract_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    results = iter(
+        [
+            _CompletedProcess(returncode=1, stderr=b"Error: image not known\n"),
+            _CompletedProcess(stdout=b"pulled\n"),
+            _CompletedProcess(stdout=b"14\n"),
+        ]
+    )
+
+    async def create_process(*command: str, **_: object) -> _CompletedProcess:
+        calls.append(command)
+        return next(results)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+
+    await DockerImageContractVerifier(
+        "published:0.6.0", container_engine="podman"
+    ).ensure_compatible()
+
+    assert [call[:3] for call in calls] == [
+        ("podman", "image", "inspect"),
+        ("podman", "pull", "published:0.6.0"),
+        ("podman", "image", "inspect"),
     ]
 
 
@@ -285,6 +337,13 @@ def test_docker_refusal_is_reported_as_a_launch_error() -> None:
     assert error is not None
     assert "could not be started" in error
     assert "NanoCPUs" in error
+
+
+def test_podman_refusal_is_reported_as_a_launch_error() -> None:
+    error = DockerSandbox._launch_error(125, "Error: crun: executable file not found\n")
+
+    expected = "The sandbox container could not be started: Error: crun: executable file not found"
+    assert error == expected
 
 
 def test_program_exiting_125_is_not_mistaken_for_a_docker_refusal() -> None:
