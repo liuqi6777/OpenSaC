@@ -61,7 +61,6 @@ _YAML_FIELDS = {
     },
     "sandbox": {
         "image": "sandbox_image",
-        "container_engine": "sandbox_container_engine",
         "docker_host_platform": "sandbox_docker_host_platform",
         "mode": "sandbox_mode",
         "experimental_persistent_interpreter": "experimental_persistent_interpreter",
@@ -504,7 +503,6 @@ class Settings(BaseSettings):
         return self
 
     sandbox_image: str = DEFAULT_SANDBOX_IMAGE
-    sandbox_container_engine: Literal["docker", "podman"] = "docker"
     # The API may itself run in a Linux container while talking to a macOS
     # Docker Desktop daemon. Keep the daemon host explicit so broker socket
     # mounts use Docker Desktop's socket-forwarding-compatible syntax.

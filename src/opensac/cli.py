@@ -68,7 +68,7 @@ def build_sandbox(
     ] = None,
     network: Annotated[
         str | None,
-        typer.Option(help="Container build network mode, for example 'host'."),
+        typer.Option(help="Docker build network mode, for example 'host'."),
     ] = None,
     pip_index_url: Annotated[
         str | None,
@@ -79,9 +79,9 @@ def build_sandbox(
         typer.Option(help="Trusted host for the custom pip index URL."),
     ] = None,
 ) -> None:
-    """Build the hardened sandbox image with the configured container engine."""
+    """Build the hardened sandbox image with Docker."""
     settings = _load_cli_settings(config)
-    command = [settings.sandbox_container_engine, "build"]
+    command = ["docker", "build"]
     if network is not None:
         command.extend(["--network", network])
     command.extend(

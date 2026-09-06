@@ -190,21 +190,6 @@ def test_warm_sandbox_accepts_an_explicit_docker_host_platform(tmp_path: Path) -
     )
 
 
-def test_warm_and_persistent_commands_use_configured_container_engine(tmp_path: Path) -> None:
-    request = _request(tmp_path)
-    warm = _sandbox(tmp_path, container_engine="podman")
-    persistent = PersistentDockerSandbox(
-        image="opensac-test",
-        broker_socket=warm.broker_socket,
-        container_engine="podman",
-    )
-
-    assert warm.container_command(request)[0] == "podman"
-    assert warm.execution_command("container-id", request)[0] == "podman"
-    assert persistent.container_command(request)[0] == "podman"
-    assert persistent.execution_command("container-id", request)[0] == "podman"
-
-
 async def test_reap_orphans_only_targets_this_broker_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -65,7 +65,7 @@ class PersistentDockerSandbox(WarmDockerSandbox):
     def execution_command(self, container_id: str, request: SandboxRequest) -> list[str]:
         workspace = self.container_execution_workspace(request)
         command = [
-            self.container_engine,
+            "docker",
             "exec",
             "--user",
             f"{os.getuid()}:{os.getgid()}",
