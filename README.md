@@ -170,7 +170,8 @@ controlled HTTP backends. It exercises all capabilities and local file output wi
 CLI, caching, cumulative usage accounting and RL integration are future work. Agent instructions
 are a [draft for a standalone skill](docs/agent-guide.md), not a package resource.
 See [architecture](docs/architecture.md), [roadmap](docs/implementation-plan.md),
-[examples](examples/) and [contributor instructions](AGENTS.md).
+[examples](examples/), [contributor instructions](AGENTS.md) and
+[publishing to PyPI](docs/releasing.md).
 
 Licensed under [MIT](LICENSE). Provider adaptation provenance is recorded in
 [architecture](docs/architecture.md#provenance).
