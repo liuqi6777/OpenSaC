@@ -65,10 +65,11 @@ Only selected text is sent to the rerank provider. No document identifier or ran
 
 ## Bounds and failures
 
-Operation deadlines include waiting for a concurrency slot. Built-in HTTP providers bound response
-bytes and sanitize upstream errors; custom providers must bound their own I/O. Batch results align
-with input order, including duplicates. Expected failures appear per item; invalid batch parameters
-fail the whole call. Cancellation propagates.
+Concurrency admission happens before the per-operation deadline starts, so queued batch items retain
+the full configured timeout once dispatched. Built-in HTTP providers bound response bytes and
+sanitize upstream errors; custom providers must bound their own I/O. Batch results align with input
+order, including duplicates. Expected failures appear per item; invalid batch parameters fail the
+whole call. Cancellation and unexpected failures cancel unfinished sibling work.
 
 Schema preparation and output validation run synchronously in process with size, depth and node
 limits. They are bounded work, not independently interruptible CPU tasks. References, regex and

@@ -58,6 +58,18 @@ _COMPLETION = TypeAdapter(Completion)
 _DEFAULT_INSTRUCTION = "Extract the requested information from the supplied text."
 
 
+async def _gather[T](awaitables: list[Awaitable[T]]) -> list[T]:
+    """Gather work without leaving sibling tasks running after a failure."""
+    tasks: list[asyncio.Future[T]] = [asyncio.ensure_future(item) for item in awaitables]
+    try:
+        return list(await asyncio.gather(*tasks))
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 def _validated[**P, T](method: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
     @wraps(method)
     def invoke(*args: P.args, **kwargs: P.kwargs) -> Awaitable[T]:
@@ -109,12 +121,12 @@ class Runtime:
 
     async def _run[T](self, operation: Callable[[], Awaitable[T]]) -> T:
         self._check_open()
-        try:
-            async with asyncio.timeout(self.settings.request_timeout):
-                async with self._slots:
+        async with self._slots:
+            try:
+                async with asyncio.timeout(self.settings.request_timeout):
                     return await operation()
-        except TimeoutError as exc:
-            raise RequestTimeoutError("Request deadline exceeded.") from exc
+            except TimeoutError as exc:
+                raise RequestTimeoutError("Request deadline exceeded.") from exc
 
     @staticmethod
     def _result[T](adapter: TypeAdapter[T], result: Any) -> T:
@@ -137,17 +149,7 @@ class Runtime:
 
         unique_queries = list(dict.fromkeys(query))
 
-        async def capture(variant: str) -> tuple[list[SearchHit] | None, Exception | None]:
-            try:
-                return await self._search(variant, limit), None
-            except Exception as exc:
-                return None, exc
-
-        outcomes = await asyncio.gather(*(capture(variant) for variant in unique_queries))
-        for _, error in outcomes:
-            if error is not None:
-                raise error
-        result_sets = [result for result, _ in outcomes if result is not None]
+        result_sets = await _gather([self._search(variant, limit) for variant in unique_queries])
         return fuse(result_sets)[:limit]
 
     @_validated
@@ -249,7 +251,7 @@ class Runtime:
                     error=ErrorInfo(code=exc.code, message=exc.message, retryable=exc.retryable)
                 )
 
-        return await asyncio.gather(*(one(item) for item in items))
+        return await _gather([one(item) for item in items])
 
     @_validated
     async def search_many(

@@ -34,7 +34,9 @@ BatchItem has exactly one non-null `data` or `error`. Its read-only `ok` propert
 including empty results; it is derived from `error` and is not an extra serialized field. ErrorInfo contains `code`, `message`, `retryable`.
 Empty search lists are successful data. Duplicate inputs and input order are preserved. Invalid batch
 parameters fail the whole call; expected provider failures affect their own items. Unexpected errors
-and cancellation propagate.
+and cancellation propagate and cancel unfinished sibling work. `request_timeout` applies after an
+item obtains a concurrency slot; time spent queued behind `max_concurrency` does not consume its
+provider-call deadline.
 
 Queries allow 1–2000 nonblank characters. A search accepts either one query string or 1–10
 reformulations of one intent; reformulations are searched independently, fused locally and share

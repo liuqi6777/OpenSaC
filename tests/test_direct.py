@@ -217,6 +217,35 @@ async def test_search_reformulations_fuse_rankings_and_surface_failures():
 
 
 @pytest.mark.asyncio
+async def test_search_reformulation_failure_cancels_unfinished_requests():
+    slow_started = asyncio.Event()
+    slow_cancelled = asyncio.Event()
+
+    class VariantSearch:
+        async def search(self, query, limit):
+            if query == "failed":
+                await slow_started.wait()
+                raise CapabilityError("provider_timeout", "Timed out.", 504, True)
+            slow_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                slow_cancelled.set()
+
+        async def aclose(self):
+            pass
+
+    runtime = Runtime(search_provider=VariantSearch())
+    try:
+        with pytest.raises(CapabilityError) as caught:
+            await runtime.search(["failed", "slow"])
+        assert caught.value.code == "provider_timeout"
+        assert slow_cancelled.is_set()
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_runtime_model_methods_accept_ordinary_arguments():
     from opensac import Completion
 

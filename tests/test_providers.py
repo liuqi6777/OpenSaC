@@ -129,6 +129,25 @@ async def test_timeout_releases_capacity_and_closes_provider() -> None:
 
 
 @pytest.mark.asyncio
+async def test_waiting_for_capacity_does_not_consume_request_timeout() -> None:
+    class SlowProvider(FakeProvider):
+        async def fetch(self, url):
+            await asyncio.sleep(0.2)
+            return await super().fetch(url)
+
+    runtime = Runtime(
+        Settings(request_timeout=0.3, max_concurrency=1), fetch_provider=SlowProvider()
+    )
+    try:
+        results = await runtime.fetch_many(
+            ["https://example.com/first", "https://example.com/queued"]
+        )
+        assert all(item.data is not None for item in results)
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
 async def test_provider_concurrency_is_bounded() -> None:
     class CountingProvider(FakeProvider):
         active = 0
