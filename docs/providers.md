@@ -73,6 +73,10 @@ enforces its operation timeout and concurrency around all providers, and caps se
 requested limit. Provider initialization failures are exposed as `configuration_error` (503) at the
 runtime boundary and cached as failures until a fresh runtime. Shared provider instances close once.
 
+Search reformulations are runtime composition, not an additional provider operation. Passing a list
+to `sdk.search` invokes the single-query provider once per distinct string, fuses rankings locally
+and applies one total result limit. Provider authors only implement `search(query, limit)`.
+
 Return `SearchHit(url, title, snippet, domain, date)` or `Document(url, text)`. URLs must already
 exist at the backend. Do not invent document identifiers or add a registration dependency. A fetch
 provider may support internal URLs, public URLs, or both, according to its actual implementation.

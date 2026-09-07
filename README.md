@@ -65,13 +65,9 @@ Combine searches, reorder the original results, fetch text and save artifacts us
 
 ```python
 from pathlib import Path
-from opensac import sdk, fuse
+from opensac import sdk
 
-batches = sdk.search.many(["retrieval evaluation", "evaluating retrieval quality"])
-for result in batches:
-    if not result.ok:
-        print("Search failed:", result.error.code)
-pool = fuse([result.data for result in batches if result.ok])
+pool = sdk.search(["retrieval evaluation", "evaluating retrieval quality"], limit=10)
 
 if pool:
     best = sdk.rerank("retrieval evaluation", pool[:100], top_n=min(3, len(pool)))
@@ -111,7 +107,7 @@ See [supported schemas and limits](docs/models.md).
 
 | Call | Result |
 | --- | --- |
-| `sdk.search(query)` | `list[SearchHit]`: URL, title, snippet, domain, date |
+| `sdk.search(query_or_reformulations)` | one `list[SearchHit]`: URL, title, snippet, domain, date |
 | `sdk.content.fetch(url)` | `Document`: URL and text |
 | `sdk.rerank(query, items)` | `list[T]`: selected original objects |
 | `sdk.llm.complete(prompt)` | `Completion`: text, model, optional token usage |
@@ -120,9 +116,11 @@ See [supported schemas and limits](docs/models.md).
 Search domains default to the URL hostname. Dates preserve provider text and are `None` when absent.
 Models support attribute access, `model_dump()` and `model_dump_json()`.
 
-`search.many`, `content.fetch_many`, `llm.complete_many` and `llm.extract_many` return input-aligned
-`BatchItem` lists. Use `result.ok`, then `result.data` or `result.error`. Empty search results are
-successful. Invalid batch arguments fail the whole call; expected provider failures affect their items.
+Pass up to 10 reformulations of one intent as a list to `search`; it sends one provider request per
+distinct string, fuses rankings locally and applies one total result limit. Use `search.many` only for
+independent questions. It and the other `*_many` methods return input-aligned `BatchItem` lists. Use
+`result.ok`, then `result.data` or `result.error`. Empty search results are successful. Invalid batch
+arguments fail the whole call; expected provider failures affect their items.
 
 Single-call failures raise `OpenSACError`. Import specific exceptions from `opensac.errors`, such as
 `InvalidRequestError`, `ProviderRateLimitError` and `StructuredOutputError`. Error messages omit

@@ -131,6 +131,8 @@ assert importlib.util.find_spec("fastapi") is None
 assert importlib.util.find_spec("uvicorn") is None
 assert importlib.util.find_spec("opensac.server") is None
 hits = sdk.search("direct wheel integration")
+reformulated = sdk.search(["direct wheel integration", "wheel integration direct"], limit=1)
+assert reformulated == hits
 assert dedup(hits + hits) == hits
 assert fuse([hits, hits]) == hits
 document = sdk.content.fetch(hits[0].url)

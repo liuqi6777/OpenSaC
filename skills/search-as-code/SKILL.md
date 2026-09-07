@@ -55,15 +55,29 @@ The remaining Python examples run in the same environment. Adapt queries, URLs a
 Search returns `list[SearchHit]`. A hit has `.url`, `.title`, `.snippet`, `.domain` and `.date`.
 Dates are optional text, not necessarily normalized publication dates. An empty list is a
 successful search. Use snippets to select candidates; inspect text before citing material claims.
+
+Pass one string for one query. Pass a list of 1–10 strings only when they are reformulations of the
+same search intent; OpenSaC searches each distinct string, fuses the rankings locally and returns one
+result list capped by the shared `limit`:
+
+```python
+hits = sdk.search(
+    ["Python 3.13 release notes", "Python 3.13 what's new"],
+    limit=5,
+)
+```
+
 Start with a concise query naming the subject and the evidence needed. Include a version, date or
-other qualifier when it changes the answer. Split independent entities or subquestions into batch
-queries, while keeping both sides together when their relationship is the question. Refine from
+other qualifier when it changes the answer. A single query is sufficient unless alternate wording
+addresses a concrete retrieval gap or ambiguity; the 10-item bound is not a target. Refine from
 result feedback rather than generating a fixed number of synonyms.
 Read [query design, search parameters and hit fields](references/search.md) when composing searches.
 
 ## Fan-out and local composition
 
-Batch independent information needs and keep each query paired with its outcome:
+Batch independent information needs with `search.many` and keep each query paired with its outcome.
+Do not use it for reformulations of one intent. Split independent entities or subquestions, while
+keeping both sides together when their relationship is the question. Batches accept 1–32 inputs:
 
 ```python
 from opensac import sdk, fuse
@@ -150,7 +164,7 @@ Answer directly with source URL citations. A completed batch is not proof of exh
 
 | Operation | Return value |
 | --- | --- |
-| `sdk.search(query, limit=5)` | `list[SearchHit]` with `.url`, `.title`, `.snippet`, `.domain`, `.date` |
+| `sdk.search(query_or_reformulations, limit=5)` | one fused `list[SearchHit]` |
 | `sdk.search.many(queries, limit=5)` | `list[BatchItem[list[SearchHit]]]` |
 | `sdk.content.fetch(url)` | `Document` with `.url` and `.text` |
 | `sdk.content.fetch_many(urls)` | `list[BatchItem[Document]]` |
@@ -187,8 +201,8 @@ ownership, use `with Client() as sac:`, importing `Client` from `opensac`.
 
 ## Common pitfalls
 
-1. Search returns a list directly; there is no `.results` envelope. Pass a string to `search` and
-   a list of strings to `search.many`; a list is not a single query's reformulations.
+1. Search returns a list directly; there is no `.results` envelope. Pass a string to `search`, or a
+   list of up to 10 reformulations of one intent.
 2. Batch success uses `.ok`, with the value in `.data`. There is no `.result` or `.spec` field.
    An empty list or document text is valid success, so do not use truthiness to detect failure.
 3. SDK models use attributes. Use `hit.url`, not `hit["url"]`, and `.model_dump(mode="json")`,
@@ -196,7 +210,7 @@ ownership, use `with Client() as sac:`, importing `Client` from `opensac`.
 4. Fetch accepts URL strings and returns text in `.text`. It does not accept a query or provide
    query-specific excerpts. A clipped preview is not the full evidence.
 5. Search only accepts `query` and `limit`; domain/date filters and concurrency are not call kwargs.
-   Batches accept 1–32 inputs, so chunk larger work and skip empty batches.
+   Reformulations accept 1–10 strings, so skip empty inputs.
 6. `fuse` and `dedup` are top-level imports from `opensac`, not methods on `sdk.search`. They compare
    exact URLs by default and retain original objects without adding scores or provenance.
 

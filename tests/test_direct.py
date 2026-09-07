@@ -170,6 +170,8 @@ async def test_invalid_batch_arguments_fail_before_any_provider_call(installed_p
     runtime = Runtime()
     try:
         for operation in [
+            lambda: runtime.search([]),
+            lambda: runtime.search(["query"] * 11),
             lambda: runtime.search_many(["valid", " "]),
             lambda: runtime.fetch_many(["https://example.com", "invalid"]),
             lambda: runtime.complete_many(["valid", ""]),
@@ -181,6 +183,35 @@ async def test_invalid_batch_arguments_fail_before_any_provider_call(installed_p
                 await operation()
             assert caught.value.code == "invalid_request"
         assert installed_providers == []
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.asyncio
+async def test_search_reformulations_fuse_rankings_and_surface_failures():
+    class VariantSearch:
+        async def search(self, query, limit):
+            if query == "failed":
+                raise CapabilityError("provider_timeout", "Timed out.", 504, True)
+            urls = {
+                "primary": ["a", "shared"],
+                "alternate": ["shared", "b"],
+            }[query]
+            return [
+                SearchHit(url=f"https://example.com/{url}", title=url, snippet="Evidence")
+                for url in urls[:limit]
+            ]
+
+        async def aclose(self):
+            pass
+
+    runtime = Runtime(search_provider=VariantSearch())
+    try:
+        hits = await runtime.search(["primary", "alternate"], limit=2)
+        assert [hit.title for hit in hits] == ["shared", "a"]
+        with pytest.raises(CapabilityError) as caught:
+            await runtime.search(["primary", "failed"])
+        assert caught.value.code == "provider_timeout"
     finally:
         await runtime.aclose()
 

@@ -5,7 +5,7 @@ The SDK returns Pydantic models and ordinary lists. Model values support attribu
 
 | Method | Return value |
 | --- | --- |
-| `sdk.search(query, limit=5)` | `list[SearchHit]` |
+| `sdk.search(query_or_reformulations, limit=5)` | one `list[SearchHit]` |
 | `sdk.search.many(queries, limit=5)` | `list[BatchItem[list[SearchHit]]]` |
 | `sdk.content.fetch(url)` | `Document` |
 | `sdk.content.fetch_many(urls)` | `list[BatchItem[Document]]` |
@@ -36,7 +36,9 @@ Empty search lists are successful data. Duplicate inputs and input order are pre
 parameters fail the whole call; expected provider failures affect their own items. Unexpected errors
 and cancellation propagate.
 
-Queries allow 1–2000 nonblank characters. Search limit is 1–100; batches contain 1–32 inputs.
+Queries allow 1–2000 nonblank characters. A search accepts either one query string or 1–10
+reformulations of one intent; reformulations are searched independently, fused locally and share
+one result limit. Search limit is 1–100; batches contain 1–32 independent inputs.
 Document URLs must be HTTP(S), at most 8192 characters; public and local service URLs share this
 contract. Fetch needs no preceding search or registration. Provider and runtime configuration use
 `opensac.config.Settings` or corresponding `OPENSAC_*` environment variables.
@@ -45,8 +47,9 @@ Rerank providers return input positions and scores. Runtime checks those positio
 returns the selected original objects. Provider details and HTTP backend request shapes are in
 [provider authoring](providers.md); these endpoints belong to backend services, not OpenSaC.
 
-Async Runtime methods use the same ordinary arguments, for example `await runtime.search(query)`
-and `await runtime.extract(text, schema)`. No request model needs to be constructed by the caller.
+Async Runtime methods use the same ordinary arguments, for example `await runtime.search(query)`,
+`await runtime.search([primary, alternate])` and `await runtime.extract(text, schema)`. No request
+model needs to be constructed by the caller.
 Runtime rerank returns validated provider indices/scores; SDK rerank maps them to original objects.
 
 ```python

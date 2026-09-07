@@ -9,6 +9,7 @@ from typing import Annotated, Any
 
 from pydantic import Field, StringConstraints, TypeAdapter, ValidationError, validate_call
 
+from .compose import fuse
 from .config import Settings
 from .contracts import (
     BatchItem,
@@ -39,6 +40,8 @@ from .provider import (
 from .structured import parse_extraction, schema_validator
 
 Query = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+QueryVariants = Annotated[list[Query], Field(min_length=1, max_length=10)]
+SearchQuery = Query | QueryVariants
 Text = Annotated[str, StringConstraints(min_length=1, max_length=200_000)]
 SearchLimit = Annotated[int, Field(ge=1, le=100, strict=True)]
 TopN = Annotated[int, Field(ge=1, le=100, strict=True)]
@@ -120,13 +123,32 @@ class Runtime:
         except ValidationError as exc:
             raise ProviderResponseError("Capability provider returned invalid data.") from exc
 
-    @_validated
-    async def search(self, query: Query, *, limit: SearchLimit = 5) -> list[SearchHit]:
+    async def _search(self, query: str, limit: int) -> list[SearchHit]:
         async def run() -> list[SearchHit]:
             result = await self.providers.search.get().search(query, limit)
             return self._result(_SEARCH_RESULTS, result)[:limit]
 
         return await self._run(run)
+
+    @_validated
+    async def search(self, query: SearchQuery, *, limit: SearchLimit = 5) -> list[SearchHit]:
+        if isinstance(query, str):
+            return await self._search(query, limit)
+
+        unique_queries = list(dict.fromkeys(query))
+
+        async def capture(variant: str) -> tuple[list[SearchHit] | None, Exception | None]:
+            try:
+                return await self._search(variant, limit), None
+            except Exception as exc:
+                return None, exc
+
+        outcomes = await asyncio.gather(*(capture(variant) for variant in unique_queries))
+        for _, error in outcomes:
+            if error is not None:
+                raise error
+        result_sets = [result for result, _ in outcomes if result is not None]
+        return fuse(result_sets)[:limit]
 
     @_validated
     async def fetch(self, url: URLString) -> Document:
@@ -276,6 +298,7 @@ class Runtime:
             ],
             limits={
                 "batch_size": 32,
+                "search_reformulations": 10,
                 "search_limit": 100,
                 "rerank_documents": 100,
                 "rerank_input_chars": 500_000,

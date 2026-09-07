@@ -37,7 +37,10 @@ Initialization failures remain failed until a fresh Runtime, avoiding repeated i
 
 SDK methods pass arguments directly to Runtime methods through the bridge. There is no operation
 registry, payload-dictionary conversion or request-type dispatcher. Simple search/fetch and batch
-inputs use method parameters. Rerank providers also accept ordinary arguments; Runtime checks top_n and total text length.
+inputs use method parameters. A search list represents reformulations of one intent: Runtime calls
+the single-query provider for each distinct string, fuses rankings locally and applies one total
+result limit. Rerank providers also accept ordinary arguments; Runtime checks top_n and total text
+length.
 LLM providers accept a prompt and optional schema directly. Model, token limit and temperature
 belong to Provider configuration. Result models remain typed and serializable. Input-only Annotated
 types live in Runtime; model-name validation lives in configuration, and output URL validation stays

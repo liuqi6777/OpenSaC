@@ -26,7 +26,7 @@ class Search:
     def __init__(self, client: Client) -> None:
         self._client = client
 
-    def __call__(self, query: str, *, limit: int = 5) -> list[SearchHit]:
+    def __call__(self, query: str | list[str], *, limit: int = 5) -> list[SearchHit]:
         return self._client._call(lambda runtime: runtime.search(query, limit=limit))
 
     def many(self, queries: list[str], *, limit: int = 5) -> list[BatchItem[list[SearchHit]]]:

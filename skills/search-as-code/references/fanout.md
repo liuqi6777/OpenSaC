@@ -1,9 +1,25 @@
 # Fan-out and state
 
-Read when batching queries, combining rankings or continuing from saved results.
+Read when batching independent queries, combining rankings or continuing from saved results.
 See [fanout_research.py](../examples/fanout_research.py) for a complete save-and-resume example.
 
 ## Batch alignment
+
+```python
+queries = [
+    "Python 3.13 free threading limitations",
+    "Python 3.13 experimental JIT support",
+]
+results = sdk.search.many(queries, limit=5)
+```
+
+Use `search.many` only for independent information needs; it accepts 1–32 query strings and applies
+the same `limit` to each. Reformulations of one search intent belong in `search([...])`, which returns
+one fused result list instead of per-query batch items. For multi-entity questions, search each entity
+separately when each needs its own evidence. Keep both names together when their relationship is the
+question, such as a direct comparison or an agreement between organizations. Wait for upstream
+results before forming queries whose entities or terminology depend on them. Chunk larger independent
+sets explicitly and skip empty batches.
 
 Use `zip(inputs, results, strict=True)` before filtering so failed-item identity is retained.
 Search batches return one `BatchItem[list[SearchHit]]` per query; fetch batches return one

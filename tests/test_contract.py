@@ -53,6 +53,15 @@ def test_search_many_includes_empty_success(sdk_client: Client) -> None:
     assert results[2].data[0].title == "last"
 
 
+def test_search_reformulations_return_one_deduplicated_result_list(
+    sdk_client: Client, provider: FakeProvider
+) -> None:
+    hits = sdk_client.search(["primary", "alternate", "primary"], limit=2)
+    assert len(hits) == 1
+    assert hits[0].title == "primary"
+    assert provider.calls == ["primary", "alternate"]
+
+
 def test_provider_error_is_structured(sdk_client: Client) -> None:
     with pytest.raises(OpenSACError) as caught:
         sdk_client.content.fetch("https://example.com/failed")
@@ -96,6 +105,7 @@ def test_target_acceptance_belongs_to_provider(sdk_client: Client, provider: Fak
 def test_capabilities(sdk_client: Client) -> None:
     result = sdk_client.capabilities()
     assert result.limits["batch_size"] == 32
+    assert result.limits["search_reformulations"] == 10
 
 
 def test_error_input_not_reflected(sdk_client):

@@ -3,8 +3,8 @@
 Read when fetching URLs or saving documents for later work.
 
 ```python
-sdk.content.fetch(url)          # Document
-sdk.content.fetch_many(urls)    # list[BatchItem[Document]]
+sdk.content.fetch(url)  # Document
+sdk.content.fetch_many(urls)  # list[BatchItem[Document]]
 ```
 
 Pass HTTP(S) URL strings, not hit records or lookup handles. Known URLs can be fetched directly;

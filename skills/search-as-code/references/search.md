@@ -1,16 +1,17 @@
 # Search
 
-Read when composing searches or interpreting candidates. For batching, fusion and resuming work,
-see [fan-out and state](fanout.md).
+Read when composing searches or interpreting candidates.
 
 ```python
-sdk.search(query, *, limit=5)          # list[SearchHit]
-sdk.search.many(queries, *, limit=5)    # list[BatchItem[list[SearchHit]]]
+sdk.search(query, *, limit=5)           # list[SearchHit]
+sdk.search(reformulations, *, limit=5)  # one fused list[SearchHit]
 ```
 
-`query` is a string of 1–2,000 characters after trimming; `limit` is an integer from 1 to 100.
-Batch inputs are lists of 1–32 strings. Chunk larger sets explicitly and skip empty batches.
-The same `limit` applies to every query in a batch. Search accepts only `query` and `limit`.
+`query` is a string of 1–2,000 characters after trimming. A list passed directly to `search` contains
+1–10 reformulations of one intent. Exact duplicate strings are requested once; the rankings are fused
+locally and the returned list is capped by one shared `limit`. If any reformulation fails, the logical
+search raises that failure rather than silently returning partial evidence. `limit` is an integer
+from 1 to 100. Search accepts only the query input and `limit`.
 
 Use this same interface for all searches. Filtering candidates by domain in Python only filters
 returned results and cannot establish exhaustive coverage of a site.
@@ -21,20 +22,9 @@ Start with a concise phrase naming the subject and the evidence needed. Include 
 terms such as a product version, organization, place or year when they change the answer. Avoid
 pasting the entire user request. There is no fixed word count: retain necessary context.
 
-Split independent information needs into separate queries. For example:
-
-```python
-queries = [
-    "Python 3.13 free threading limitations",
-    "Python 3.13 experimental JIT support",
-]
-results = sdk.search.many(queries, limit=5)
-```
-
-For multi-entity questions, search each entity separately when each needs its own evidence. Keep
-both names together when their relationship is the question, such as a direct comparison or an
-agreement between organizations. Batch independent searches; wait for upstream results before
-forming queries whose entities or terminology depend on them.
+Use one query unless alternate wording resolves an actual ambiguity or retrieval gap. When variants
+are useful, pass them together to `search([...])` so they produce one fused candidate list. Do not
+generate a fixed quota of variants.
 
 Target the desired evidence: use the version and API name for implementation behavior, or the
 reporting period and metric for official figures. Prefer primary sources for claims about their
@@ -68,7 +58,5 @@ For JSON, use `hit.model_dump(mode="json")` or `hit.model_dump_json()`. Restore 
 
 ## Outcomes
 
-An empty list is successful. A single search failure raises `OpenSACError` from `opensac.errors`.
-For a batch, use `if result.ok:`, then `result.data`; on failure inspect `result.error.code`.
-Invalid arguments can fail the whole batch before retrieval. Keep failures separate from empty
-successful searches, and use result feedback to decide whether a new query is useful.
+An empty list is successful. A search failure raises `OpenSACError` from `opensac.errors`. Use result
+feedback to decide whether a new query or reformulation is useful.

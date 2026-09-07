@@ -42,7 +42,7 @@ Schema 仅支持有大小、深度和节点限制的简单子集，在当前进�
 
 ## 已完成
 
-- search、fetch、rerank、LLM complete/extract 和批量调用。
+- search、同一意图的多 query 融合、fetch、rerank、LLM complete/extract 和批量调用。
 - 惰性 Provider 发现、生命周期、结构化错误、并发、超时和响应大小限制。
 - `rerank` 返回原对象；搜索结果无 rank 字段，排序由列表顺序表达。
 - 本地加权 RRF 融合、按 URL 去重；agent 指引维护在独立的 `skills/search-as-code/` 中。
