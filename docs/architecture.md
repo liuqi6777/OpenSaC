@@ -73,7 +73,7 @@ composition are unsupported. Non-finite output numbers are rejected, including i
 See [model contracts](models.md) and [SDK contracts](contracts.md).
 
 No shared cache, automatic retry, cumulative usage accounting or RL environment management is
-implemented. Agent instructions remain a documentation draft for a future standalone skill.
+implemented. Agent instructions live in the standalone [Search as Code skill](../skills/search-as-code/SKILL.md).
 
 ## Provenance
 

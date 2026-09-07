@@ -168,7 +168,7 @@ The wheel check uses an isolated Python 3.12 environment, an independently insta
 controlled HTTP backends. It exercises all capabilities and local file output without paid API calls.
 
 CLI, caching, cumulative usage accounting and RL integration are future work. Agent instructions
-are a [draft for a standalone skill](docs/agent-guide.md), not a package resource.
+live in the standalone [Search as Code skill](skills/search-as-code/SKILL.md), not a package resource.
 See [architecture](docs/architecture.md), [roadmap](docs/implementation-plan.md),
 [examples](examples/), [contributor instructions](AGENTS.md) and
 [publishing to PyPI](docs/releasing.md).
