@@ -26,6 +26,7 @@ from .errors import (
     ErrorInfo,
     InvalidRequestError,
     ProviderResponseError,
+    ProviderTimeoutError,
     RequestTimeoutError,
     RuntimeClosedError,
 )
@@ -122,11 +123,14 @@ class Runtime:
     async def _run[T](self, operation: Callable[[], Awaitable[T]]) -> T:
         self._check_open()
         async with self._slots:
+            deadline = asyncio.timeout(self.settings.request_timeout)
             try:
-                async with asyncio.timeout(self.settings.request_timeout):
+                async with deadline:
                     return await operation()
             except TimeoutError as exc:
-                raise RequestTimeoutError("Request deadline exceeded.") from exc
+                if deadline.expired():
+                    raise RequestTimeoutError("Request deadline exceeded.") from exc
+                raise ProviderTimeoutError("Provider request timed out.") from exc
 
     @staticmethod
     def _result[T](adapter: TypeAdapter[T], result: Any) -> T:

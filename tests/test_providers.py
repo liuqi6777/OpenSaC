@@ -6,7 +6,7 @@ from conftest import FakeProvider
 from pydantic import SecretStr
 
 from opensac.config import Settings
-from opensac.errors import CapabilityError
+from opensac.errors import CapabilityError, ProviderTimeoutError
 from opensac.provider import ProviderConfig, ProviderContext
 from opensac.providers.jina import JinaFetch
 from opensac.providers.serper import SerperSearch
@@ -126,6 +126,25 @@ async def test_timeout_releases_capacity_and_closes_provider() -> None:
     finally:
         await runtime.aclose()
     assert provider.closed
+
+
+@pytest.mark.asyncio
+async def test_provider_timeout_error_is_not_reclassified_as_runtime_timeout() -> None:
+    class TimeoutProvider(FakeProvider):
+        async def fetch(self, url):
+            raise TimeoutError
+
+    runtime = Runtime(Settings(request_timeout=30), fetch_provider=TimeoutProvider())
+    try:
+        with pytest.raises(ProviderTimeoutError) as caught:
+            await runtime.fetch("https://example.com/provider-timeout")
+        assert caught.value.code == "provider_timeout"
+
+        batch = await runtime.fetch_many(["https://example.com/provider-timeout"])
+        assert batch[0].error is not None
+        assert batch[0].error.code == "provider_timeout"
+    finally:
+        await runtime.aclose()
 
 
 @pytest.mark.asyncio

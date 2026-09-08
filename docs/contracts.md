@@ -82,6 +82,8 @@ All backend and model-output types above inherit ProviderError. Class defaults s
 error code, status and retryable flag; the message describes the individual failure. Specific errors
 accept `message` and an optional `retryable` override. `NotConfiguredError` denotes missing required
 provider configuration; ConfigurationError also covers provider loading and initialization failures.
+A provider-raised `TimeoutError` is normalized to `ProviderTimeoutError`; only expiry of the runtime's
+own operation deadline produces `RequestTimeoutError`.
 
 ```python
 from opensac.errors import ProviderRateLimitError, ProviderError
