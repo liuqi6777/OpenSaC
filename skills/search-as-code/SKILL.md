@@ -56,14 +56,14 @@ Search returns `list[SearchHit]`. A hit has `.url`, `.title`, `.snippet`, `.doma
 Dates are optional text, not necessarily normalized publication dates. An empty list is a
 successful search. Use snippets to select candidates; inspect text before citing material claims.
 
-Pass one string for one query. Pass a list of 1–10 strings only when they are reformulations of the
-same search intent; OpenSaC searches each distinct string, fuses the rankings locally and returns one
+Pass one string for one query. Pass a list of strings when they are reformulations of the same
+search intent; OpenSaC searches each distinct string, fuses the rankings locally and returns one
 result list capped by the shared `limit`:
 
 ```python
 hits = sdk.search(
     ["Python 3.13 release notes", "Python 3.13 what's new"],
-    limit=5,
+    limit=10,
 )
 ```
 
@@ -73,35 +73,27 @@ addresses a concrete retrieval gap or ambiguity; the 10-item bound is not a targ
 result feedback rather than generating a fixed number of synonyms.
 Read [query design, search parameters and hit fields](references/search.md) when composing searches.
 
-## Fan-out and local composition
+## Fan-out
 
-Batch independent information needs with `search.many` and keep each query paired with its outcome.
-Do not use it for reformulations of one intent. Split independent entities or subquestions, while
-keeping both sides together when their relationship is the question. Batches accept 1–32 inputs:
+Use `search.many` only when the task has multiple independent queries whose results and failures
+must remain separate. Do not use it for multiple reformulations of one query: pass those variants
+together to `sdk.search([...])` and receive one fused result list. Split independent entities or
+subquestions, while keeping both sides together when their relationship is the question:
 
 ```python
-from opensac import sdk, fuse
+from opensac import sdk
 
 queries = ["Python 3.13 free threading", "Python 3.13 JIT compiler"]
 batches = sdk.search.many(queries, limit=5)
-ranked_lists = []
-provenance = {}
 for query, result in zip(queries, batches, strict=True):
     if result.ok:
-        ranked_lists.append(result.data)
-        for hit in result.data:
-            provenance.setdefault(hit.url, []).append(query)
+        print(query, [hit.url for hit in result.data])
     else:
         print(f"Search failed: {query}: {result.error.code}")
-pool = fuse(ranked_lists)
-for hit in pool[:8]:
-    print(hit.title, hit.url, provenance[hit.url])
 ```
 
-`fuse` combines rankings locally; `dedup` keeps the first object per exact URL. Import both from
-`opensac`. Neither attaches provenance, scores or rank fields. Retain query provenance separately
-when useful. Both preserve original objects and accept `key=` for custom identities.
-Read [fan-out and saved state](references/fanout.md) when combining rankings or resuming work.
+Read [fan-out and saved state](references/fanout.md) when batching larger workloads or resuming
+work.
 
 Search accepts only `query` and `limit`. Domain filtering, sorting and slicing belong in Python;
 filtering returned hits does not turn retrieval into an exhaustive domain search.
