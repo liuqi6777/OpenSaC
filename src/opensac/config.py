@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Annotated, Any, Self
 
 from pydantic import Field, HttpUrl, SecretStr, StringConstraints, model_validator
@@ -31,6 +32,9 @@ class Settings(BaseSettings):
     request_timeout: float = Field(default=30, gt=0, le=300)
     max_concurrency: int = Field(default=8, ge=1, le=128)
     max_response_bytes: int = Field(default=2_000_000, ge=1024, le=20_000_000)
+    trace_dir: Path | None = None
+    trace_run_id: str | None = Field(default=None, min_length=1, max_length=200)
+    trace_action_id: str | None = Field(default=None, min_length=1, max_length=200)
 
     @model_validator(mode="after")
     def provider_endpoints(self) -> Self:

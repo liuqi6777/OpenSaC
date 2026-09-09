@@ -21,7 +21,8 @@ registries, remote code execution, MCP or agent-run interfaces.
 
 - `client.py`: synchronous SDK and lazy singleton.
 - `bridge.py`: one lazy AnyIO blocking portal, keeping async resources on a persistent event loop.
-- `runtime.py`: ordinary async methods with argument validation, batches, deadlines and concurrency.
+- `runtime.py`: ordinary async methods with argument validation, batches, deadlines, concurrency and
+  optional host-controlled tracing.
 - `contracts.py`: shared request/result models; no HTTP envelopes or request IDs.
 - `provider.py`: independent capability protocols, entry-point discovery and lazy instance ownership.
 - `providers/`: implementations grouped by service/protocol, sharing HTTP helpers in `base.py`.
@@ -76,8 +77,18 @@ limits. They are bounded work, not independently interruptible CPU tasks. Refere
 composition are unsupported. Non-finite output numbers are rejected, including in extra fields.
 See [model contracts](models.md) and [SDK contracts](contracts.md).
 
-No shared cache, automatic retry, cumulative usage accounting or RL environment management is
-implemented. Agent instructions live in the standalone [Search as Code skill](../skills/search-as-code/SKILL.md).
+No shared cache, automatic retry or RL environment management is implemented. Optional JSONL tracing
+is enabled by setting `OPENSAC_TRACE_DIR`; optional run and action IDs come from
+`OPENSAC_TRACE_RUN_ID` and `OPENSAC_TRACE_ACTION_ID`. It adds no agent-facing capability. Each JSONL
+line records one completed or failed public SDK operation with its normalized input and exact value
+returned to the caller.
+Aggregation, counting and size analysis happen offline. This records fetched text, prompts and model
+outputs, but not credentials, transport headers or raw provider responses. An enabled process
+generates a stable action ID unless the host overrides it. This maps one typical shell Python program
+to one action; persistent processes must provide a host action ID because dynamic action context is
+not implemented. Trace I/O is best effort, and the harness detects missing output. It is not
+tamper-proof because caller code and OpenSaC share a process. Agent instructions live in the standalone
+[Search as Code skill](../skills/search-as-code/SKILL.md).
 
 ## Provenance
 

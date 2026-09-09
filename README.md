@@ -145,6 +145,39 @@ Close after active calls finish. `sdk.close()` releases resources and allows the
 fresh settings on its next use; an explicit Client remains closed. Async applications can call
 `opensac.runtime.Runtime` methods directly and close with `await runtime.aclose()`.
 
+## Host-controlled research tracing
+
+Tracing is optional and disabled by default. It is configured by the host process, not by research
+programs: generated agent code continues to call only the SDK methods above. Trace events are never
+printed to stdout or stderr and are not returned by SDK calls.
+
+```bash
+export OPENSAC_TRACE_DIR=/absolute/path/outside-the-agent-workspace/opensac-traces
+export OPENSAC_TRACE_RUN_ID=browsecomp-001-sac
+export OPENSAC_TRACE_ACTION_ID=codex-turn-03  # optional host override
+codex ...
+```
+
+Setting `OPENSAC_TRACE_DIR` enables tracing. Each process writes its own `opensac-<pid>.jsonl` file.
+Every line is one completed or failed public SDK operation with its timestamp, duration, normalized
+input and the exact normalized value returned to the caller. Counts, sizes and workload summaries are
+derived offline rather than computed by the runtime.
+
+When tracing is enabled and `OPENSAC_TRACE_ACTION_ID` is absent, OpenSaC generates one stable action ID
+per Python process. A normal Codex shell invocation that runs one Python program can therefore be
+treated as one action. A persistent Python process should set `OPENSAC_TRACE_ACTION_ID` for each host
+action; dynamic action contexts are intentionally not implemented.
+
+The recorded values are OpenSaC operation values, not raw provider transport responses. They include
+search results, fetched text, prompts and model outputs, so trace files may be large and sensitive.
+Credentials and provider transport details are not operation inputs and are not recorded.
+The trace directory should be owned by the benchmark harness and kept outside the agent workspace.
+
+Writing is best effort: a trace I/O failure does not affect a research call. The harness should treat
+a missing trace file as a failed recording. Traces are not tamper-proof: OpenSaC runs in the same
+Python environment as the caller, so this design only keeps tracing out of the agent-facing SDK and
+model observations.
+
 ## Extend and develop
 
 Providers register through Python entry points: `opensac.search`, `opensac.fetch`, `opensac.rerank`
@@ -165,8 +198,8 @@ uv run python scripts/verify_wheels.py
 The wheel check uses an isolated Python 3.12 environment, an independently installed provider and
 controlled HTTP backends. It exercises all capabilities and local file output without paid API calls.
 
-CLI, caching, cumulative usage accounting and RL integration are future work. Agent instructions
-live in the standalone [Search as Code skill](skills/search-as-code/SKILL.md), not a package resource.
+CLI, caching and RL integration are future work. Agent instructions live in the standalone
+[Search as Code skill](skills/search-as-code/SKILL.md), not a package resource.
 See [architecture](docs/architecture.md), [roadmap](docs/implementation-plan.md),
 [examples](examples/), [contributor instructions](AGENTS.md) and
 [publishing to PyPI](docs/releasing.md).

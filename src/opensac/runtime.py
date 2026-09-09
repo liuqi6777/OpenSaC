@@ -39,6 +39,7 @@ from .provider import (
     SearchProvider,
 )
 from .structured import parse_extraction, schema_validator
+from .tracing import Tracer, traced_operation
 
 Query = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
 QueryVariants = Annotated[list[Query], Field(min_length=1, max_length=10)]
@@ -101,6 +102,11 @@ class Runtime:
         llm_provider: LLMProvider | None = None,
     ) -> None:
         self.settings = settings if settings is not None else Settings()
+        self._tracer = Tracer(
+            trace_dir=self.settings.trace_dir,
+            run_id=self.settings.trace_run_id,
+            action_id=self.settings.trace_action_id,
+        )
         self.context = ProviderContext(
             request_timeout=self.settings.request_timeout,
             max_response_bytes=self.settings.max_response_bytes,
@@ -120,7 +126,10 @@ class Runtime:
         if self._closed:
             raise RuntimeClosedError("The capability runtime is closed.")
 
-    async def _run[T](self, operation: Callable[[], Awaitable[T]]) -> T:
+    async def _run[T](
+        self,
+        operation: Callable[[], Awaitable[T]],
+    ) -> T:
         self._check_open()
         async with self._slots:
             deadline = asyncio.timeout(self.settings.request_timeout)
@@ -147,17 +156,16 @@ class Runtime:
         return await self._run(run)
 
     @_validated
+    @traced_operation("search")
     async def search(self, query: SearchQuery, *, limit: SearchLimit = 5) -> list[SearchHit]:
         if isinstance(query, str):
             return await self._search(query, limit)
 
         unique_queries = list(dict.fromkeys(query))
-
         result_sets = await _gather([self._search(variant, limit) for variant in unique_queries])
         return fuse(result_sets)[:limit]
 
-    @_validated
-    async def fetch(self, url: URLString) -> Document:
+    async def _fetch(self, url: str) -> Document:
         async def run() -> Document:
             result = await self.providers.fetch.get().fetch(url)
             document = self._result(_DOCUMENT, result)
@@ -168,6 +176,12 @@ class Runtime:
         return await self._run(run)
 
     @_validated
+    @traced_operation("fetch")
+    async def fetch(self, url: URLString) -> Document:
+        return await self._fetch(url)
+
+    @_validated
+    @traced_operation("rerank")
     async def rerank(
         self,
         query: Query,
@@ -201,13 +215,17 @@ class Runtime:
         *,
         schema: dict[str, Any] | None = None,
     ) -> Completion:
-        return self._result(
-            _COMPLETION, await self.providers.llm.get().complete(prompt, schema=schema)
-        )
+        async def run() -> Completion:
+            return self._result(
+                _COMPLETION, await self.providers.llm.get().complete(prompt, schema=schema)
+            )
+
+        return await self._run(run)
 
     @_validated
+    @traced_operation("llm.complete")
     async def complete(self, prompt: Prompt) -> Completion:
-        return await self._run(lambda: self._generate(prompt))
+        return await self._generate(prompt)
 
     async def _extract(
         self,
@@ -226,9 +244,10 @@ class Runtime:
             )
             return Extraction(data=data, model=completion.model, usage=completion.usage)
 
-        return await self._run(run)
+        return await run()
 
     @_validated
+    @traced_operation("llm.extract")
     async def extract(
         self,
         text: Text,
@@ -252,29 +271,43 @@ class Runtime:
                 return BatchItem(data=await call(item))
             except CapabilityError as exc:
                 return BatchItem(
-                    error=ErrorInfo(code=exc.code, message=exc.message, retryable=exc.retryable)
+                    error=ErrorInfo(
+                        code=exc.code,
+                        message=exc.message,
+                        retryable=exc.retryable,
+                    )
                 )
 
         return await _gather([one(item) for item in items])
 
     @_validated
+    @traced_operation("search_many")
     async def search_many(
         self,
         queries: QueryBatch,
         *,
         limit: SearchLimit = 5,
     ) -> list[BatchItem[list[SearchHit]]]:
-        return await self._batch(queries, lambda query: self.search(query, limit=limit))
+        return await self._batch(
+            queries,
+            lambda query: self._search(query, limit),
+        )
 
     @_validated
+    @traced_operation("fetch_many")
     async def fetch_many(self, urls: URLBatch) -> list[BatchItem[Document]]:
-        return await self._batch(urls, self.fetch)
+        return await self._batch(urls, self._fetch)
 
     @_validated
+    @traced_operation("llm.complete_many")
     async def complete_many(self, prompts: TextBatch) -> list[BatchItem[Completion]]:
-        return await self._batch(prompts, self.complete)
+        return await self._batch(
+            prompts,
+            self._generate,
+        )
 
     @_validated
+    @traced_operation("llm.extract_many")
     async def extract_many(
         self,
         texts: TextBatch,
@@ -285,7 +318,8 @@ class Runtime:
         self._check_open()
         schema_validator(schema)
         return await self._batch(
-            texts, lambda text: self._extract(text, schema, instruction=instruction)
+            texts,
+            lambda text: self._extract(text, schema, instruction=instruction),
         )
 
     def capabilities(self) -> Capabilities:
@@ -317,4 +351,7 @@ class Runtime:
     async def aclose(self) -> None:
         if not self._closed:
             self._closed = True
-            await self.providers.aclose()
+            try:
+                await self.providers.aclose()
+            finally:
+                self._tracer.close()
