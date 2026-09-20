@@ -70,7 +70,10 @@ Provider credentials and configuration belong to the caller’s environment.
 `ProviderContext` contains the request deadline and maximum provider-response bytes. Built-in HTTP
 providers honor the response bound; custom providers must also bound their own I/O. The shared runtime
 enforces its operation timeout and concurrency around all providers, and caps search results to the
-requested limit. Provider initialization failures are exposed as `configuration_error` (503) at the
+requested limit. Returned model instances are revalidated, including nested token usage; invalid
+updates or unchecked model construction cannot bypass the result contract. Malformed HTTP response
+encoding and excessively nested JSON become `ProviderResponseError` and remain per-item failures in
+batches. Provider initialization failures are exposed as `configuration_error` (503) at the
 runtime boundary and cached as failures until a fresh runtime. Shared provider instances close once.
 
 Search reformulations are runtime composition, not an additional provider operation. Passing a list

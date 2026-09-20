@@ -14,6 +14,7 @@ from opensac.config import Settings
 from opensac.runtime import Runtime
 
 from .errors import ClientClosedError, ConfigurationError
+from .tracing import Tracer
 
 
 class SyncRuntime:
@@ -48,6 +49,10 @@ class SyncRuntime:
                     raise
                 self._manager, self._portal, self._runtime = manager, portal, runtime
             return self._portal, self._runtime
+
+    @property
+    def tracer(self) -> Tracer:
+        return self._get()[1]._tracer
 
     @overload
     def call[T](self, operation: Callable[[Runtime], Awaitable[T]]) -> T: ...

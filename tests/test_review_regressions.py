@@ -157,3 +157,58 @@ async def test_provider_ownership_closes_shared_instances_once_even_after_failur
     await runtime.aclose()
     assert shared.closed == 1
     assert another.closed == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability", ["search", "fetch", "rerank", "complete", "usage"])
+async def test_provider_model_instances_are_revalidated(capability):
+    from opensac.contracts import Document, RerankResult, TokenUsage
+    from opensac.errors import ProviderResponseError
+
+    class InvalidModels:
+        async def search(self, query, limit):
+            return [
+                SearchHit(url="https://example.com", title="title", snippet="text").model_copy(
+                    update={"url": "not-a-url"}
+                )
+            ]
+
+        async def fetch(self, url):
+            return Document(url=url, text="text").model_copy(update={"text": 123})
+
+        async def rerank(self, query, documents, *, top_n=None):
+            return [RerankResult(index=0, relevance_score=1).model_copy(update={"index": -1})]
+
+        async def complete(self, prompt, *, schema=None):
+            result = Completion(text="text", model="test", usage=TokenUsage(total_tokens=1))
+            if capability == "usage":
+                result.usage.total_tokens = -1
+            else:
+                result.text = 123
+            return result
+
+        async def aclose(self):
+            pass
+
+    provider = InvalidModels()
+    runtime = Runtime(
+        search_provider=provider,
+        fetch_provider=provider,
+        rerank_provider=provider,
+        llm_provider=provider,
+    )
+    operations = {
+        "search": lambda: runtime.search("query"),
+        "fetch": lambda: runtime.fetch("https://example.com"),
+        "rerank": lambda: runtime.rerank("query", ["first", "last"], top_n=1),
+        "complete": lambda: runtime.complete("prompt"),
+        "usage": lambda: runtime.complete("prompt"),
+    }
+    try:
+        with pytest.raises(ProviderResponseError):
+            await operations[capability]()
+        if capability in {"complete", "usage"}:
+            results = await runtime.complete_many(["one", "two"])
+            assert all(item.error.code == "provider_invalid_response" for item in results)
+    finally:
+        await runtime.aclose()

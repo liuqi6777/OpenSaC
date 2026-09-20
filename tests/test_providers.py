@@ -215,3 +215,42 @@ async def test_jina_decides_target_acceptance(status):
         assert len(calls) == 1
     finally:
         await fetch.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["http", "serper"])
+@pytest.mark.parametrize("malformation", ["gzip", "deep_json"])
+async def test_malformed_responses_remain_item_failures(backend, malformation):
+    import json
+
+    from opensac.errors import ProviderResponseError
+    from opensac.providers.http import HTTPSearch
+
+    class BrokenGzip(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"not a gzip stream"
+
+    def handle(request):
+        payload = json.loads(request.content)
+        query = payload["query" if backend == "http" else "q"]
+        if query == "good":
+            return httpx.Response(200, json={"data" if backend == "http" else "organic": []})
+        if malformation == "gzip":
+            return httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=BrokenGzip())
+        return httpx.Response(200, content=b"[" * 50_000 + b"0" + b"]" * 50_000)
+
+    implementation = HTTPSearch if backend == "http" else SerperSearch
+    search = implementation(
+        ProviderConfig(base_url="https://example.com", api_key=SecretStr("key")),
+        ProviderContext(),
+        transport=httpx.MockTransport(handle),
+    )
+    runtime = Runtime(search_provider=search)
+    try:
+        with pytest.raises(ProviderResponseError):
+            await runtime.search("bad")
+        results = await runtime.search_many(["good", "bad", "good"])
+        assert results[0].data == results[2].data == []
+        assert results[1].error.code == "provider_invalid_response"
+    finally:
+        await runtime.aclose()

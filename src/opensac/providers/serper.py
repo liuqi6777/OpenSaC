@@ -36,5 +36,12 @@ class SerperSearch(ProviderHTTP):
                     )
                 )
             return hits
-        except (ValueError, KeyError, TypeError, AttributeError, CapabilityError) as exc:
+        except (
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            RecursionError,
+            CapabilityError,
+        ) as exc:
             raise ProviderResponseError("Search provider returned invalid data.") from exc

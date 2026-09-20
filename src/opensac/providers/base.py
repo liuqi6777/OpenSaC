@@ -59,6 +59,8 @@ class ProviderHTTP:
                 return bytes(chunks)
         except httpx.TimeoutException as exc:
             raise ProviderTimeoutError("Provider request timed out.") from exc
+        except httpx.DecodingError as exc:
+            raise ProviderResponseError("Provider returned invalid encoded data.") from exc
         except httpx.TransportError as exc:
             raise ProviderUnavailableError("Provider connection failed.") from exc
 
@@ -71,5 +73,5 @@ class ProviderHTTP:
         body = await self._request("POST", f"{base_url.rstrip('/')}/{path}", headers, payload)
         try:
             return json.loads(body)
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise ProviderResponseError("Provider returned invalid JSON.") from exc

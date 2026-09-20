@@ -8,11 +8,13 @@ Uses temporary Python 3.12 environments, no provider credentials, no paid servic
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
 import tempfile
 import threading
+import tomllib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -23,9 +25,26 @@ def command(args: list[str], *, cwd: Path | None = None, env: dict[str, str] | N
         raise RuntimeError(f"Command failed: {args[0]}\n{result.stdout}\n{result.stderr}")
 
 
+def select_wheel(root: Path, wheel: Path | None = None) -> Path:
+    """Select the current project version, never an arbitrary older distribution."""
+    with (root / "pyproject.toml").open("rb") as stream:
+        version = tomllib.load(stream)["project"]["version"]
+    prefix = f"opensac-{version}-"
+    candidates = [wheel] if wheel is not None else list((root / "dist").glob(f"{prefix}*.whl"))
+    if len(candidates) != 1:
+        raise ValueError("Expected one wheel for the current version; build it or pass --wheel.")
+    selected = candidates[0].resolve()
+    if not selected.is_file() or not selected.name.startswith(prefix) or selected.suffix != ".whl":
+        raise ValueError("The wheel must exist and match the current project version.")
+    return selected
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--wheel", type=Path, help="Exact wheel produced by the current build")
+    args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    wheel = next((root / "dist").glob("opensac-*.whl"))
+    wheel = select_wheel(root, args.wheel)
 
     class FetchService(BaseHTTPRequestHandler):
         def do_POST(self) -> None:

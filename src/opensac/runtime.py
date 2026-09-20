@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Annotated, Any
@@ -39,7 +40,7 @@ from .provider import (
     SearchProvider,
 )
 from .structured import parse_extraction, schema_validator
-from .tracing import Tracer, traced_operation
+from .tracing import Tracer, normalized_trace_inputs, traced_operation
 
 Query = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
 QueryVariants = Annotated[list[Query], Field(min_length=1, max_length=10)]
@@ -73,8 +74,13 @@ async def _gather[T](awaitables: list[Awaitable[T]]) -> list[T]:
 
 
 def _validated[**P, T](method: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
+    signature = inspect.signature(method)
+
     @wraps(method)
     def invoke(*args: P.args, **kwargs: P.kwargs) -> Awaitable[T]:
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        normalized_trace_inputs(bound.arguments["self"]._tracer, bound.arguments)
         return method(*args, **kwargs)
 
     checked = validate_call(invoke)
@@ -155,8 +161,8 @@ class Runtime:
 
         return await self._run(run)
 
-    @_validated
     @traced_operation("search")
+    @_validated
     async def search(self, query: SearchQuery, *, limit: SearchLimit = 5) -> list[SearchHit]:
         if isinstance(query, str):
             return await self._search(query, limit)
@@ -175,13 +181,13 @@ class Runtime:
 
         return await self._run(run)
 
-    @_validated
     @traced_operation("fetch")
+    @_validated
     async def fetch(self, url: URLString) -> Document:
         return await self._fetch(url)
 
-    @_validated
     @traced_operation("rerank")
+    @_validated
     async def rerank(
         self,
         query: Query,
@@ -202,7 +208,7 @@ class Runtime:
             if (
                 len(ranked) != expected
                 or len(set(indices)) != expected
-                or any(index >= len(documents) for index in indices)
+                or any(not 0 <= index < len(documents) for index in indices)
             ):
                 raise ProviderResponseError("Rerank provider returned invalid positions.")
             return sorted(ranked, key=lambda item: item.relevance_score, reverse=True)
@@ -222,8 +228,8 @@ class Runtime:
 
         return await self._run(run)
 
-    @_validated
     @traced_operation("llm.complete")
+    @_validated
     async def complete(self, prompt: Prompt) -> Completion:
         return await self._generate(prompt)
 
@@ -246,8 +252,8 @@ class Runtime:
 
         return await run()
 
-    @_validated
     @traced_operation("llm.extract")
+    @_validated
     async def extract(
         self,
         text: Text,
@@ -280,8 +286,8 @@ class Runtime:
 
         return await _gather([one(item) for item in items])
 
-    @_validated
     @traced_operation("search_many")
+    @_validated
     async def search_many(
         self,
         queries: QueryBatch,
@@ -293,21 +299,21 @@ class Runtime:
             lambda query: self._search(query, limit),
         )
 
-    @_validated
     @traced_operation("fetch_many")
+    @_validated
     async def fetch_many(self, urls: URLBatch) -> list[BatchItem[Document]]:
         return await self._batch(urls, self._fetch)
 
-    @_validated
     @traced_operation("llm.complete_many")
+    @_validated
     async def complete_many(self, prompts: TextBatch) -> list[BatchItem[Completion]]:
         return await self._batch(
             prompts,
             self._generate,
         )
 
-    @_validated
     @traced_operation("llm.extract_many")
+    @_validated
     async def extract_many(
         self,
         texts: TextBatch,

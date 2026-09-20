@@ -60,16 +60,17 @@ format validation accepts public and local service URLs. Target acceptance, reso
 policy belong to the backend. Jina Reader decides whether it can process a target; Serper/Jina
 adapters do not impose a public-address filter.
 
-Runtime validates provider results and enforces search limits, fetch URL preservation and rerank
-indices. SDK rerank maps indices back to original caller objects; ranking is represented by list order.
+Runtime revalidates provider results, including existing model instances and nested token usage,
+and enforces search limits, fetch URL preservation and nonnegative, in-range rerank indices.
+SDK rerank maps indices back to original caller objects; ranking is represented by list order.
 Only selected text is sent to the rerank provider. No document identifier or rank field is introduced.
 
 ## Bounds and failures
 
 Concurrency admission happens before the per-operation deadline starts, so queued batch items retain
 the full configured timeout once dispatched. Built-in HTTP providers bound response bytes and
-sanitize upstream errors; custom providers must bound their own I/O. Batch results align with input
-order, including duplicates. Expected failures appear per item; invalid batch parameters fail the
+sanitize upstream errors, including malformed compression and excessively nested JSON; custom
+providers must bound their own I/O. Batch results align with input order, including duplicates. Expected failures appear per item; invalid batch parameters fail the
 whole call. Cancellation and unexpected failures cancel unfinished sibling work.
 
 Schema preparation and output validation run synchronously in process with size, depth and node
@@ -79,12 +80,18 @@ See [model contracts](models.md) and [SDK contracts](contracts.md).
 
 No shared cache, automatic retry or RL environment management is implemented. Optional JSONL tracing
 is enabled by setting `OPENSAC_TRACE_DIR`; optional run and action IDs come from
-`OPENSAC_TRACE_RUN_ID` and `OPENSAC_TRACE_ACTION_ID`. It adds no agent-facing capability. Each JSONL
-line records one completed or failed public SDK operation with its normalized input and exact value
-returned to the caller.
+`OPENSAC_TRACE_RUN_ID` and `OPENSAC_TRACE_ACTION_ID`. It adds no agent-facing capability.
+Trace schema version 2 records each search, fetch, rerank or LLM call once at its entry point,
+with `layer: sdk` or `layer: runtime`. A context variable propagated through the sync bridge prevents
+SDK calls from also producing internal Runtime events. SDK rerank records original selected objects;
+direct Runtime rerank records indices and scores. Empty reranks, local callback failures and invalid
+arguments are included. Validated inputs are normalized; rejected arguments retain supplied values.
+JSON-compatible values and Pydantic models serialize to JSON; unsupported Python objects, callbacks,
+cycles and non-finite values use a `{"$unserializable": "TypeName"}` marker without calling `repr`.
+Initialization failures, calls after close, lifecycle methods and `capabilities()` are outside scope.
 Aggregation, counting and size analysis happen offline. This records fetched text, prompts and model
-outputs, but not credentials, transport headers or raw provider responses. An enabled process
-generates a stable action ID unless the host overrides it. This maps one typical shell Python program
+outputs, but not provider configuration, transport headers or raw provider responses. An enabled
+process generates a stable action ID unless the host overrides it. This maps one typical shell Python program
 to one action; persistent processes must provide a host action ID because dynamic action context is
 not implemented. Trace I/O is best effort, and the harness detects missing output. It is not
 tamper-proof because caller code and OpenSaC share a process. Agent instructions live in the standalone

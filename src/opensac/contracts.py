@@ -29,7 +29,7 @@ URLString = Annotated[
 
 
 class SearchHit(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
     url: URLString
     title: str
     snippet: str
@@ -44,7 +44,7 @@ class SearchHit(BaseModel):
 
 
 class Document(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
     url: URLString
     text: str
 
@@ -71,18 +71,20 @@ class Capabilities(BaseModel):
 
 
 class RerankResult(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
     index: int = Field(ge=0, strict=True)
     relevance_score: float = Field(allow_inf_nan=False)
 
 
 class TokenUsage(BaseModel):
+    model_config = ConfigDict(revalidate_instances="always")
     input_tokens: int | None = Field(default=None, ge=0, strict=True)
     output_tokens: int | None = Field(default=None, ge=0, strict=True)
     total_tokens: int | None = Field(default=None, ge=0, strict=True)
 
 
 class Completion(BaseModel):
+    model_config = ConfigDict(revalidate_instances="always")
     text: str
     model: str
     usage: TokenUsage | None = None

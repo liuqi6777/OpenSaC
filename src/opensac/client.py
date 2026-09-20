@@ -20,15 +20,18 @@ from .contracts import (
 )
 from .errors import ClientClosedError, InvalidRequestError
 from .runtime import Runtime
+from .tracing import traced_sdk_operation
 
 
 class Search:
     def __init__(self, client: Client) -> None:
         self._client = client
 
+    @traced_sdk_operation("search")
     def __call__(self, query: str | list[str], *, limit: int = 5) -> list[SearchHit]:
         return self._client._call(lambda runtime: runtime.search(query, limit=limit))
 
+    @traced_sdk_operation("search_many")
     def many(self, queries: list[str], *, limit: int = 5) -> list[BatchItem[list[SearchHit]]]:
         return self._client._call(lambda runtime: runtime.search_many(queries, limit=limit))
 
@@ -37,9 +40,11 @@ class Content:
     def __init__(self, client: Client) -> None:
         self._client = client
 
+    @traced_sdk_operation("fetch")
     def fetch(self, url: str) -> Document:
         return self._client._call(lambda runtime: runtime.fetch(url))
 
+    @traced_sdk_operation("fetch_many")
     def fetch_many(self, urls: list[str]) -> list[BatchItem[Document]]:
         return self._client._call(lambda runtime: runtime.fetch_many(urls))
 
@@ -48,6 +53,7 @@ class Rerank:
     def __init__(self, client: Client) -> None:
         self._client = client
 
+    @traced_sdk_operation("rerank")
     def __call__[T](
         self,
         query: str,
@@ -89,12 +95,15 @@ class LLM:
     def __init__(self, client: Client) -> None:
         self._client = client
 
+    @traced_sdk_operation("llm.complete")
     def complete(self, prompt: str) -> Completion:
         return self._client._call(lambda runtime: runtime.complete(prompt))
 
+    @traced_sdk_operation("llm.complete_many")
     def complete_many(self, prompts: list[str]) -> list[BatchItem[Completion]]:
         return self._client._call(lambda runtime: runtime.complete_many(prompts))
 
+    @traced_sdk_operation("llm.extract")
     def extract(
         self,
         text: str,
@@ -106,6 +115,7 @@ class LLM:
             lambda runtime: runtime.extract(text, schema, instruction=instruction)
         )
 
+    @traced_sdk_operation("llm.extract_many")
     def extract_many(
         self,
         texts: list[str],

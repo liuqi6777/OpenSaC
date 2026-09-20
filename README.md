@@ -159,9 +159,17 @@ codex ...
 ```
 
 Setting `OPENSAC_TRACE_DIR` enables tracing. Each process writes its own `opensac-<pid>.jsonl` file.
-Every line is one completed or failed public SDK operation with its timestamp, duration, normalized
-input and the exact normalized value returned to the caller. Counts, sizes and workload summaries are
-derived offline rather than computed by the runtime.
+Trace schema version 2 records each search, fetch, rerank or LLM call once, including empty reranks
+and argument validation failures. Each event has a timestamp, duration and `layer` (`sdk` or
+`runtime`). SDK calls record their final returned values; SDK rerank therefore records the selected
+original items. Direct Runtime rerank calls record indices and scores. Internal Runtime calls made
+by the SDK do not create extra events. Counts, sizes and workload summaries are derived offline.
+
+Validated inputs are normalized; rejected arguments retain their supplied values. JSON-compatible
+values and Pydantic models are recorded as JSON. Arbitrary Python objects, callbacks, cycles and
+non-finite numbers use a `{"$unserializable": "TypeName"}` marker without invoking `repr`.
+Tracing starts after runtime initialization and ends on close; configuration initialization failures,
+`capabilities()` and lifecycle calls are outside its scope.
 
 When tracing is enabled and `OPENSAC_TRACE_ACTION_ID` is absent, OpenSaC generates one stable action ID
 per Python process. A normal Codex shell invocation that runs one Python program can therefore be
@@ -195,8 +203,9 @@ uv build
 uv run python scripts/verify_wheels.py
 ```
 
-The wheel check uses an isolated Python 3.12 environment, an independently installed provider and
-controlled HTTP backends. It exercises all capabilities and local file output without paid API calls.
+The wheel check selects the current project version and rejects missing or ambiguous builds.
+Pass `--wheel dist/<filename>.whl` to select an exact current-version artifact. It uses an isolated
+Python 3.12 environment, an independently installed provider and controlled HTTP backends. It exercises all capabilities and local file output without paid API calls.
 
 CLI, caching and RL integration are future work. Agent instructions live in the standalone
 [Search as Code skill](skills/search-as-code/SKILL.md), not a package resource.

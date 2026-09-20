@@ -166,3 +166,146 @@ def test_closed_tracer_does_not_reopen_its_output(tmp_path: Path):
     tracer.record(**record)
 
     assert len(trace_path.read_text(encoding="utf-8").splitlines()) == line_count
+
+
+@pytest.fixture
+def traced_client(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from opensac import Client, provider
+
+    instances = []
+
+    def discover(*, group, name):
+        def factory(config, context):
+            implementation = {
+                "opensac.search": TraceSearch,
+                "opensac.fetch": TraceFetch,
+                "opensac.rerank": TraceRerank,
+                "opensac.llm": TraceLLM,
+            }[group]
+            instance = implementation()
+            instances.append(instance)
+            return instance
+
+        return [SimpleNamespace(load=lambda: factory)]
+
+    monkeypatch.setattr(provider, "entry_points", discover)
+    with Client(settings=Settings(trace_dir=tmp_path)) as client:
+        yield client, instances
+
+
+def test_sdk_records_final_objects_and_empty_rerank_once(traced_client, tmp_path):
+    client, instances = traced_client
+    assert client.rerank("query", []) == []
+    assert instances == []
+    hits = client.search("  query  ")
+    ranked = client.rerank("query", hits, top_n=1)
+    custom = [{"body": "document", "metadata": 42}]
+    custom_ranked = client.rerank("query", custom, text=lambda item: item["body"])
+
+    events = read_events(tmp_path)
+    assert len(events) == 4
+    assert all(event["layer"] == "sdk" for event in events)
+    assert events[0]["input"]["items"] == events[0]["output"] == []
+    assert events[1]["input"]["query"] == "query"
+    assert events[2]["output"] == [hit.model_dump(mode="json") for hit in ranked]
+    assert ranked[0] is hits[0]
+    assert events[3]["output"] == custom_ranked
+    assert custom_ranked[0] is custom[0]
+
+
+def test_sdk_records_validation_and_local_callback_failures(traced_client, tmp_path):
+    from opensac.errors import InvalidRequestError
+
+    client, instances = traced_client
+    with pytest.raises(InvalidRequestError):
+        client.search("")
+    with pytest.raises(InvalidRequestError):
+        client.rerank("query", [], top_n=0)
+    with pytest.raises(TypeError):
+        client.rerank("query", [object()])
+    with pytest.raises(TypeError):
+        client.search("query", unexpected=True)
+    assert instances == []
+    events = read_events(tmp_path)
+    assert len(events) == 4
+    assert all(event["status"] == "error" for event in events)
+    assert events[0]["input"]["query"] == ""
+    assert [event["error_type"] for event in events] == [
+        "InvalidRequestError",
+        "InvalidRequestError",
+        "TypeError",
+        "TypeError",
+    ]
+    assert events[2]["input"]["items"] == [{"$unserializable": "object"}]
+
+
+@pytest.mark.asyncio
+async def test_runtime_records_invalid_arguments_and_normalized_inputs(tmp_path):
+    from opensac.errors import InvalidRequestError
+
+    runtime = Runtime(Settings(trace_dir=tmp_path), search_provider=TraceSearch())
+    try:
+        with pytest.raises(InvalidRequestError):
+            await runtime.search("")
+        with pytest.raises(InvalidRequestError):
+            await runtime.search("query", unexpected=True)
+        await runtime.search("  query  ")
+    finally:
+        await runtime.aclose()
+    events = read_events(tmp_path)
+    assert len(events) == 3
+    assert all(event["layer"] == "runtime" for event in events)
+    assert events[0]["error_code"] == events[1]["error_code"] == "invalid_request"
+    assert events[2]["input"]["query"] == "query"
+
+
+def test_concurrent_sdk_calls_keep_independent_traces(traced_client, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    client, _ = traced_client
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(client.search, [f"query-{i}" for i in range(8)]))
+    events = read_events(tmp_path)
+    assert len(events) == 8
+    assert len({event["call_id"] for event in events}) == 8
+    assert {event["input"]["query"] for event in events} == {result[0].title for result in results}
+    assert all(event["input"]["query"] == event["output"][0]["title"] for event in events)
+
+
+def test_sdk_batches_and_models_record_one_final_result(traced_client, tmp_path):
+    client, _ = traced_client
+    results = [
+        client.search.many(["one", "two"]),
+        client.content.fetch("https://example.com/ok"),
+        client.content.fetch_many(["https://example.com/ok", "https://example.com/failed"]),
+        client.llm.complete("prompt"),
+        client.llm.complete_many(["one", "two"]),
+        client.llm.extract("source", {"type": "string"}),
+        client.llm.extract_many(["one", "two"], {"type": "string"}),
+    ]
+    events = read_events(tmp_path)
+    assert len(events) == len(results)
+    assert all(event["layer"] == "sdk" for event in events)
+    for event, result in zip(events, results, strict=True):
+        expected = (
+            [item.model_dump(mode="json") for item in result]
+            if isinstance(result, list)
+            else result.model_dump(mode="json")
+        )
+        assert event["output"] == expected
+
+
+def test_opaque_rerank_items_do_not_drop_traces_or_invoke_repr(traced_client, tmp_path):
+    class Opaque:
+        def __repr__(self):
+            raise AssertionError("Tracing must not call user repr")
+
+    client, _ = traced_client
+    item = Opaque()
+    result = client.rerank("query", [item], text=lambda value: "text")
+    assert result[0] is item
+    event = read_events(tmp_path)[0]
+    assert event["status"] == "ok"
+    assert event["output"] == [{"$unserializable": "Opaque"}]

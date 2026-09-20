@@ -44,3 +44,8 @@ The workflow runs the full CI matrix on the release commit, checks that the comm
 belongs to `main` and that the tag matches the package version, then builds and
 verifies the distributions before uploading them using PyPI Trusted Publishing.
 The version in `pyproject.toml` is authoritative; publishing does not change it.
+
+The wheel verifier selects only the version in `pyproject.toml`. If multiple builds of that version
+exist, specify the exact artifact with `--wheel dist/opensac-<version>-py3-none-any.whl` when invoking
+`scripts/verify_wheels.py`. Missing files and wheels from older versions
+are rejected instead of silently verifying a different build.
