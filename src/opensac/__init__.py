@@ -8,6 +8,7 @@ from .contracts import (
     BatchItem,
     Capabilities,
     Completion,
+    ConfigurationCheck,
     Document,
     Extraction,
     RerankResult,
@@ -22,6 +23,7 @@ atexit.register(sdk.close)
 __all__ = [
     "BatchItem",
     "Completion",
+    "ConfigurationCheck",
     "Extraction",
     "RerankResult",
     "TokenUsage",

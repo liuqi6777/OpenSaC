@@ -4,36 +4,40 @@ from typing import Any
 
 from ..contracts import Completion, TokenUsage
 from ..errors import (
-    ConfigurationError,
     GenerationIncompleteError,
     ModelRefusalError,
     NotConfiguredError,
     ProviderResponseError,
 )
+from ..provider import ProviderConfig
 from .base import ProviderHTTP
 
 
 class OpenAILLM(ProviderHTTP):
-    async def complete(self, prompt: str, *, schema: dict[str, Any] | None = None) -> Completion:
-        model = self.config.model
-        if self.config.base_url is None or not model:
+    reserved_options = {
+        "messages",
+        "model",
+        "stream",
+        "n",
+        "response_format",
+        "max_completion_tokens",
+        "max_tokens",
+        "temperature",
+        "tools",
+        "tool_choice",
+        "functions",
+        "function_call",
+    }
+
+    @classmethod
+    def validate_config(cls, config: ProviderConfig) -> None:
+        super().validate_config(config)
+        if config.base_url is None or not config.model:
             raise NotConfiguredError("LLM endpoint and model are required.")
-        reserved = {
-            "messages",
-            "model",
-            "stream",
-            "n",
-            "response_format",
-            "max_completion_tokens",
-            "max_tokens",
-            "temperature",
-            "tools",
-            "tool_choice",
-            "functions",
-            "function_call",
-        }
-        if reserved.intersection(self.config.options):
-            raise ConfigurationError("LLM options override managed fields.")
+
+    async def complete(self, prompt: str, *, schema: dict[str, Any] | None = None) -> Completion:
+        self.validate_config(self.config)
+        model = self.config.model
         body: dict[str, Any] = {
             **self.config.options,
             "model": model,

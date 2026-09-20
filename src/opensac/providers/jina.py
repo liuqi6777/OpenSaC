@@ -6,7 +6,10 @@ from .base import ProviderHTTP
 
 
 class JinaFetch(ProviderHTTP):
+    allowed_options = set()
+
     async def fetch(self, url: str) -> Document:
+        self.validate_config(self.config)
         key = self.config.api_key.get_secret_value()
         headers = {"X-Return-Format": "markdown"}
         if key:

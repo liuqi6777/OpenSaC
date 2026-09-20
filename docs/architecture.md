@@ -31,10 +31,17 @@ registries, remote code execution, MCP or agent-run interfaces.
 
 Import starts no thread or network request. First SDK use reads provider configuration; each provider
 loads on first capability use. The sync bridge works inside notebooks with an existing event loop.
-Async callers can use Runtime directly and close it with `await runtime.aclose()`.
+Async callers can use `async with Runtime()` or close it with `await runtime.aclose()`.
 Close Client/Runtime after active calls finish. Closing the singleton allows fresh configuration on
 next use; an explicit Client remains closed. Provider instances shared across capabilities close once.
-Initialization failures remain failed until a fresh Runtime, avoiding repeated initialization per batch item.
+Initialization failures remain failed until a fresh Runtime, avoiding repeated initialization per
+batch item. Capability slots serialize asynchronous loading; factories themselves remain synchronous.
+Rejected instances with async cleanup are disposed before failure is returned. Closing uses one
+shared task, shielded from waiter cancellation, and distinguishes closing from fully closed.
+Explicit Settings and nested options are copied at construction; Runtime exposes a detached settings
+copy. The synchronous SDK still reads environment settings lazily when none are explicitly supplied.
+Offline `check_configuration()` discovers factories and runs optional synchronous validators without
+constructing provider resources. External factories without validators remain `unverified`.
 
 SDK methods pass arguments directly to Runtime methods through the bridge. There is no operation
 registry, payload-dictionary conversion or request-type dispatcher. Simple search/fetch and batch
@@ -88,7 +95,7 @@ direct Runtime rerank records indices and scores. Empty reranks, local callback 
 arguments are included. Validated inputs are normalized; rejected arguments retain supplied values.
 JSON-compatible values and Pydantic models serialize to JSON; unsupported Python objects, callbacks,
 cycles and non-finite values use a `{"$unserializable": "TypeName"}` marker without calling `repr`.
-Initialization failures, calls after close, lifecycle methods and `capabilities()` are outside scope.
+Initialization failures, calls after close, lifecycle methods, `capabilities()` and `check_configuration()` are outside scope.
 Aggregation, counting and size analysis happen offline. This records fetched text, prompts and model
 outputs, but not provider configuration, transport headers or raw provider responses. An enabled
 process generates a stable action ID unless the host overrides it. This maps one typical shell Python program

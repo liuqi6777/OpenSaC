@@ -1,4 +1,4 @@
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -94,3 +94,10 @@ class Extraction(BaseModel):
     data: Any
     model: str
     usage: TokenUsage | None = None
+
+
+class ConfigurationCheck(BaseModel):
+    capability: str
+    provider: str
+    status: Literal["passed", "unverified", "failed"]
+    error: ErrorInfo | None = None

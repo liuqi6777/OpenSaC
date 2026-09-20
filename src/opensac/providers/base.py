@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 from pydantic import SecretStr
 
 from ..errors import (
+    ConfigurationError,
+    NotConfiguredError,
     ProviderError,
     ProviderRateLimitError,
     ProviderResponseError,
@@ -19,6 +21,25 @@ from ..provider import ProviderConfig, ProviderContext
 
 class ProviderHTTP:
     requires_base_url = False
+    reserved_options: ClassVar[set[str]] = set()
+    allowed_options: ClassVar[set[str] | None] = None
+
+    @classmethod
+    def validate_options(cls, config: ProviderConfig) -> None:
+        if cls.reserved_options.intersection(config.options):
+            raise ConfigurationError("Provider options override SDK-managed fields.")
+        if cls.allowed_options is not None and config.options.keys() - cls.allowed_options:
+            raise ConfigurationError("Provider options contain unsupported fields.")
+        try:
+            json.dumps(config.options, allow_nan=False)
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise ConfigurationError("Provider options must contain finite JSON data.") from exc
+
+    @classmethod
+    def validate_config(cls, config: ProviderConfig) -> None:
+        cls.validate_options(config)
+        if cls.requires_base_url and config.base_url is None:
+            raise NotConfiguredError("Provider endpoint is required.")
 
     def __init__(
         self,
@@ -27,7 +48,8 @@ class ProviderHTTP:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self.config = config
+        self.config = config.model_copy(deep=True)
+        self.validate_options(self.config)
         self.context = context
         if self.requires_base_url and config.base_url is None:
             raise ValueError("This provider requires base_url")

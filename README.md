@@ -142,8 +142,35 @@ with Client(settings=Settings(max_concurrency=4)) as client:
 ```
 
 Close after active calls finish. `sdk.close()` releases resources and allows the singleton to read
-fresh settings on its next use; an explicit Client remains closed. Async applications can call
-`opensac.runtime.Runtime` methods directly and close with `await runtime.aclose()`.
+fresh settings on its next use; an explicit Client remains closed. Explicit settings are copied when
+Client or Runtime is created, including nested options. Changing
+the original settings or `runtime.settings` does not change a running instance; create a new one.
+Without explicit settings, the synchronous SDK still reads environment configuration on first use.
+
+Async applications can use Runtime as a context manager:
+
+```python
+from opensac.runtime import Runtime
+
+async with Runtime() as runtime:
+    hits = await runtime.search("retrieval evaluation")
+```
+
+`await runtime.aclose()` is also supported. Cancelling a caller waiting for close leaves cleanup
+running; await `aclose()` again before stopping the event loop. Concurrent closers share one cleanup
+operation, and new capability calls are rejected once closing starts.
+
+To inspect local configuration without constructing providers or sending requests:
+
+```python
+for check in sdk.check_configuration():
+    print(check.capability, check.provider, check.status, check.error)
+```
+
+A check is `passed` when local validation succeeds, `failed` for discovery/configuration errors, or
+`unverified` for injected instances or external factories without an optional validator.
+It does not verify credentials,
+service connectivity or live backend compatibility. Provider imports and validators must be offline.
 
 ## Host-controlled research tracing
 
@@ -169,7 +196,7 @@ Validated inputs are normalized; rejected arguments retain their supplied values
 values and Pydantic models are recorded as JSON. Arbitrary Python objects, callbacks, cycles and
 non-finite numbers use a `{"$unserializable": "TypeName"}` marker without invoking `repr`.
 Tracing starts after runtime initialization and ends on close; configuration initialization failures,
-`capabilities()` and lifecycle calls are outside its scope.
+`capabilities()`, `check_configuration()` and lifecycle calls are outside its scope.
 
 When tracing is enabled and `OPENSAC_TRACE_ACTION_ID` is absent, OpenSaC generates one stable action ID
 per Python process. A normal Codex shell invocation that runs one Python program can therefore be

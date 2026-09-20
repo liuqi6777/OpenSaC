@@ -113,3 +113,49 @@ without exposing the other.
 `serper`, `jina`, `http` and `openai`. The `base` module shares bounded
 HTTP transport helpers. Sharing a module does not combine capability interfaces: HTTP search,
 fetch and rerank remain separate classes and entry points.
+
+## Options and local diagnostics
+
+Built-ins validate options before allocating an HTTP client and before sending requests. Options
+must be JSON data with finite numbers. Their behavior is capability-specific:
+
+| Provider | Options | Protected fields |
+| --- | --- | --- |
+| Serper search | `gl` and `hl`, both nonempty strings; forwarded in the search body | `q`, `num` |
+| Jina fetch | No options supported; nonempty options raise ConfigurationError | All options rejected |
+| HTTP search | Extra JSON body fields, validated by the configured backend | `query`, `limit` |
+| HTTP fetch | Extra JSON body fields, validated by the configured backend | `url` |
+| HTTP rerank | Extra JSON body fields, validated by the configured backend | `model`, `query`, `documents`, `top_n` |
+| OpenAI-compatible LLM | Extra JSON body fields, validated by the configured backend | Managed generation, message, schema and tool fields listed in `OpenAILLM.reserved_options` |
+
+For example, `OPENSAC_SEARCH_OPTIONS='{"gl":"us","hl":"en"}'` selects Serper's country and language
+fields. The adapter's supported subset is deliberately explicit; other Serper options fail locally.
+The HTTP adapters forward extension fields without claiming that a particular backend supports them.
+
+`sdk.check_configuration()`, `client.check_configuration()` and `runtime.check_configuration()`
+return per-capability ConfigurationCheck records. Discovery failures and missing built-in settings
+are reported without constructing instances or sending requests. This is a local check, not a
+credential, connectivity or model-availability probe.
+
+External factories may expose an optional synchronous `validate_config(config)` function or
+classmethod accepting ProviderConfig and returning None. It must perform no network I/O or resource allocation, and should
+raise ConfigurationError/NotConfiguredError with a safe, actionable message on failure. Factory
+imports must also be offline. Factories without this hook are reported as `unverified` rather than
+assumed valid. Unexpected import/validator exceptions are sanitized. Checks do not initialize or
+cache providers and do not consume their lazy initialization attempts. Explicitly injected Runtime
+providers are marked `provider="injected", status="unverified"`; settings for the replaced capability
+are not checked because they are not used to create that instance.
+
+## Initialization and cleanup ownership
+
+Factories remain synchronous `(config, context)` callables. The low-level Python helper
+`load_provider(...)` is now asynchronous and must be awaited so it can finish disposing an instance
+that fails interface validation. If a rejected instance exposes async `aclose()`, cleanup finishes
+before initialization reports failure; cancellation during this disposal is deferred until it ends.
+Factories are responsible for releasing resources if their constructor raises before returning an
+instance, and every returned instance must provide async `aclose()`.
+
+Runtime serializes initialization within each capability and caches failures until a fresh runtime.
+Concurrent `aclose()` callers share a cleanup task; cancelling a waiter does not cancel cleanup.
+A subsequent `aclose()` can join the task. Providers shared across capabilities are closed once,
+and one provider's cleanup failure does not prevent attempts to close the others.

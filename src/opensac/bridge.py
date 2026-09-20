@@ -25,7 +25,7 @@ class SyncRuntime:
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
-        self._settings = settings
+        self._settings = settings.model_copy(deep=True) if settings is not None else None
         self._manager: AbstractContextManager[BlockingPortal] | None = None
         self._portal: BlockingPortal | None = None
         self._runtime: Runtime | None = None

@@ -4,6 +4,7 @@ from pydantic import TypeAdapter
 
 from ..contracts import Document, RerankResult, SearchHit
 from ..errors import NotConfiguredError, ProviderResponseError
+from ..provider import ProviderConfig
 from .base import ProviderHTTP
 
 
@@ -11,13 +12,15 @@ class HTTPSearch(ProviderHTTP):
     """Adapt a search capability endpoint returning URL-based SearchHit objects."""
 
     requires_base_url = True
+    reserved_options = {"query", "limit"}
 
     async def search(self, query: str, limit: int) -> list[SearchHit]:
+        self.validate_config(self.config)
         payload = await self.request_json(
             str(self.config.base_url),
             "search",
             self.config.api_key,
-            {"query": query, "limit": limit},
+            {**self.config.options, "query": query, "limit": limit},
         )
         try:
             return TypeAdapter(list[SearchHit]).validate_python(payload["data"])[:limit]
@@ -29,13 +32,15 @@ class HTTPFetch(ProviderHTTP):
     """Adapt a fetch capability endpoint; URL resolution belongs to the endpoint."""
 
     requires_base_url = True
+    reserved_options = {"url"}
 
     async def fetch(self, url: str) -> Document:
+        self.validate_config(self.config)
         payload = await self.request_json(
             str(self.config.base_url),
             "fetch",
             self.config.api_key,
-            {"url": url},
+            {**self.config.options, "url": url},
         )
         try:
             document = Document.model_validate(payload["data"])
@@ -47,6 +52,14 @@ class HTTPFetch(ProviderHTTP):
 
 
 class HTTPRerank(ProviderHTTP):
+    reserved_options = {"model", "query", "documents", "top_n"}
+
+    @classmethod
+    def validate_config(cls, config: ProviderConfig) -> None:
+        super().validate_config(config)
+        if config.base_url is None or not config.model:
+            raise NotConfiguredError("Rerank endpoint and model are required.")
+
     async def rerank(
         self,
         query: str,
@@ -55,8 +68,7 @@ class HTTPRerank(ProviderHTTP):
         top_n: int | None = None,
     ) -> list[RerankResult]:
         model = self.config.model
-        if self.config.base_url is None or not model:
-            raise NotConfiguredError("Rerank endpoint and model are required.")
+        self.validate_config(self.config)
         payload = await self.request_json(
             str(self.config.base_url),
             "rerank",

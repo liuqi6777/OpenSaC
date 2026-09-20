@@ -8,6 +8,7 @@ from pydantic import HttpUrl, SecretStr
 from opensac import Client, provider
 from opensac.config import Settings
 from opensac.contracts import Document, SearchHit
+from opensac.errors import ConfigurationError
 from opensac.provider import ProviderConfig, ProviderContext, load_provider
 from opensac.providers.http import HTTPFetch, HTTPSearch
 from opensac.runtime import Runtime
@@ -79,8 +80,8 @@ def test_external_capability_providers_loaded_by_entry_points(monkeypatch) -> No
 
 @pytest.mark.asyncio
 async def test_installed_entry_points_resolve_independently() -> None:
-    search = load_provider("search", "serper", ProviderConfig(), ProviderContext())
-    fetch = load_provider("fetch", "jina", ProviderConfig(), ProviderContext())
+    search = await load_provider("search", "serper", ProviderConfig(), ProviderContext())
+    fetch = await load_provider("fetch", "jina", ProviderConfig(), ProviderContext())
     try:
         assert callable(search.search)
         assert callable(fetch.fetch)
@@ -92,18 +93,18 @@ async def test_installed_entry_points_resolve_independently() -> None:
 
 
 @pytest.mark.parametrize("count", [0, 2])
-def test_missing_or_ambiguous_provider_fails_at_startup(monkeypatch, count):
+async def test_missing_or_ambiguous_provider_fails_at_startup(monkeypatch, count):
     monkeypatch.setattr(provider, "entry_points", lambda **kwargs: [object()] * count)
-    with pytest.raises(ValueError):
-        load_provider("search", "ambiguous", ProviderConfig(), ProviderContext())
+    with pytest.raises(ConfigurationError):
+        await load_provider("search", "ambiguous", ProviderConfig(), ProviderContext())
 
 
-def test_wrong_capability_provider_is_rejected(monkeypatch):
+async def test_wrong_capability_provider_is_rejected(monkeypatch):
     monkeypatch.setattr(
         provider, "entry_points", lambda **kwargs: [SimpleNamespace(load=lambda: ExampleFetch)]
     )
     with pytest.raises(TypeError):
-        load_provider("search", "wrong", ProviderConfig(), ProviderContext())
+        await load_provider("search", "wrong", ProviderConfig(), ProviderContext())
 
 
 @pytest.mark.asyncio

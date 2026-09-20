@@ -15,6 +15,7 @@ The SDK returns Pydantic models and ordinary lists. Model values support attribu
 | `sdk.llm.extract(text, schema, ...)` | `Extraction` |
 | `sdk.llm.extract_many(texts, schema, ...)` | `list[BatchItem[Extraction]]` |
 | `sdk.capabilities()` | `Capabilities(methods, limits)` |
+| `sdk.check_configuration()` | `list[ConfigurationCheck]` with capability, provider, status, error |
 | `sdk.close()` | `None` |
 
 SearchHit contains `url`, `title`, `snippet`, `domain`, `date`. List order expresses ranking.
@@ -25,6 +26,10 @@ Document contains only `url` and `text`.
 Completion contains `text`, `model`, optional `usage`; Extraction contains Schema-validated
 JSON `data`, `model`, optional `usage`. See [models](models.md) for fields and bounds.
 Capabilities reports implemented methods and limits, not provider availability or credential validity.
+`check_configuration()` performs entry-point discovery/import and optional offline validation without
+constructing provider instances. Status is `passed`, `failed` (with ErrorInfo), or `unverified` when
+no validator is available. A passing check does not verify backend access or credentials. Runtime
+exposes the same synchronous diagnostic method; diagnostics are excluded from capability traces.
 
 Single-call expected failures raise OpenSACError with `code`, message, optional `status_code` and
 `retryable`. Status codes are error metadata, not an HTTP response from OpenSaC. Retryable identifies
@@ -53,6 +58,12 @@ Async Runtime methods use the same ordinary arguments, for example `await runtim
 `await runtime.search([primary, alternate])` and `await runtime.extract(text, schema)`. No request
 model needs to be constructed by the caller.
 Runtime rerank returns validated provider indices/scores; SDK rerank maps them to original objects.
+Runtime supports `async with` and `await runtime.aclose()`. Close after active requests finish.
+Closing rejects new requests, releases shared instances once and attempts the remaining providers
+if one fails or raises CancelledError. Cleanup failures are grouped. Cancelling an `aclose()` waiter
+does not cancel cleanup; await it again before shutting down the event loop.
+Explicit Settings are copied at Client/Runtime construction, including nested options. Runtime's
+`settings` property returns a detached copy. Reconfiguration requires a fresh Client/Runtime.
 
 ```python
 for r in sdk.search.many(["first query", "second query"]):

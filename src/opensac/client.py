@@ -14,6 +14,7 @@ from .contracts import (
     BatchItem,
     Capabilities,
     Completion,
+    ConfigurationCheck,
     Document,
     Extraction,
     SearchHit,
@@ -149,6 +150,10 @@ class Client:
         self._check_open()
         return self._runtime.call(lambda runtime: runtime.capabilities())
 
+    def check_configuration(self) -> list[ConfigurationCheck]:
+        self._check_open()
+        return self._runtime.call(lambda runtime: runtime.check_configuration())
+
     def close(self) -> None:
         if not self._closed:
             self._closed = True
@@ -197,6 +202,9 @@ class LazySDK:
 
     def capabilities(self) -> Capabilities:
         return self._get().capabilities()
+
+    def check_configuration(self) -> list[ConfigurationCheck]:
+        return self._get().check_configuration()
 
     def close(self) -> None:
         """Release connections after active calls finish; the next use reads config again."""

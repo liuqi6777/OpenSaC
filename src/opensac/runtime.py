@@ -6,7 +6,8 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from functools import wraps
-from typing import Annotated, Any
+from types import TracebackType
+from typing import Annotated, Any, Self
 
 from pydantic import Field, StringConstraints, TypeAdapter, ValidationError, validate_call
 
@@ -16,6 +17,7 @@ from .contracts import (
     BatchItem,
     Capabilities,
     Completion,
+    ConfigurationCheck,
     Document,
     Extraction,
     RerankResult,
@@ -38,6 +40,7 @@ from .provider import (
     Providers,
     RerankProvider,
     SearchProvider,
+    check_configuration,
 )
 from .structured import parse_extraction, schema_validator
 from .tracing import Tracer, normalized_trace_inputs, traced_operation
@@ -107,29 +110,30 @@ class Runtime:
         rerank_provider: RerankProvider | None = None,
         llm_provider: LLMProvider | None = None,
     ) -> None:
-        self.settings = settings if settings is not None else Settings()
+        self._settings = settings.model_copy(deep=True) if settings is not None else Settings()
         self._tracer = Tracer(
-            trace_dir=self.settings.trace_dir,
-            run_id=self.settings.trace_run_id,
-            action_id=self.settings.trace_action_id,
+            trace_dir=self._settings.trace_dir,
+            run_id=self._settings.trace_run_id,
+            action_id=self._settings.trace_action_id,
         )
         self.context = ProviderContext(
-            request_timeout=self.settings.request_timeout,
-            max_response_bytes=self.settings.max_response_bytes,
+            request_timeout=self._settings.request_timeout,
+            max_response_bytes=self._settings.max_response_bytes,
         )
         self.providers = Providers(
-            self.settings,
+            self._settings,
             self.context,
             search=search_provider,
             fetch=fetch_provider,
             rerank=rerank_provider,
             llm=llm_provider,
         )
-        self._slots = asyncio.Semaphore(self.settings.max_concurrency)
+        self._slots = asyncio.Semaphore(self._settings.max_concurrency)
         self._closed = False
+        self._close_task: asyncio.Task[None] | None = None
 
     def _check_open(self) -> None:
-        if self._closed:
+        if self._closed or self._close_task is not None:
             raise RuntimeClosedError("The capability runtime is closed.")
 
     async def _run[T](
@@ -138,7 +142,7 @@ class Runtime:
     ) -> T:
         self._check_open()
         async with self._slots:
-            deadline = asyncio.timeout(self.settings.request_timeout)
+            deadline = asyncio.timeout(self._settings.request_timeout)
             try:
                 async with deadline:
                     return await operation()
@@ -156,7 +160,7 @@ class Runtime:
 
     async def _search(self, query: str, limit: int) -> list[SearchHit]:
         async def run() -> list[SearchHit]:
-            result = await self.providers.search.get().search(query, limit)
+            result = await (await self.providers.search.get()).search(query, limit)
             return self._result(_SEARCH_RESULTS, result)[:limit]
 
         return await self._run(run)
@@ -173,7 +177,7 @@ class Runtime:
 
     async def _fetch(self, url: str) -> Document:
         async def run() -> Document:
-            result = await self.providers.fetch.get().fetch(url)
+            result = await (await self.providers.fetch.get()).fetch(url)
             document = self._result(_DOCUMENT, result)
             if document.url != url:
                 raise ProviderResponseError("Fetch provider changed the requested URL.")
@@ -201,7 +205,7 @@ class Runtime:
             raise InvalidRequestError("Rerank input exceeds limit.")
 
         async def run() -> list[RerankResult]:
-            result = await self.providers.rerank.get().rerank(query, documents, top_n=top_n)
+            result = await (await self.providers.rerank.get()).rerank(query, documents, top_n=top_n)
             ranked = self._result(_RERANK_RESULTS, result)
             expected = top_n or len(documents)
             indices = [item.index for item in ranked]
@@ -223,7 +227,7 @@ class Runtime:
     ) -> Completion:
         async def run() -> Completion:
             return self._result(
-                _COMPLETION, await self.providers.llm.get().complete(prompt, schema=schema)
+                _COMPLETION, await (await self.providers.llm.get()).complete(prompt, schema=schema)
             )
 
         return await self._run(run)
@@ -246,7 +250,7 @@ class Runtime:
                 schema=schema,
             )
             data = parse_extraction(
-                completion.text, schema, max_bytes=self.settings.max_response_bytes
+                completion.text, schema, max_bytes=self._settings.max_response_bytes
             )
             return Extraction(data=data, model=completion.model, usage=completion.usage)
 
@@ -350,14 +354,45 @@ class Runtime:
                 "rerank_input_chars": 500_000,
                 "llm_prompt_chars": 204_096,
                 "llm_text_chars": 200_000,
-                "response_bytes": self.settings.max_response_bytes,
+                "response_bytes": self._settings.max_response_bytes,
             },
         )
 
-    async def aclose(self) -> None:
-        if not self._closed:
+    @property
+    def settings(self) -> Settings:
+        """Return a detached configuration snapshot, not live mutable runtime state."""
+        return self._settings.model_copy(deep=True)
+
+    def check_configuration(self) -> list[ConfigurationCheck]:
+        self._check_open()
+        return check_configuration(self._settings, injected=self.providers.injected)
+
+    async def _close(self) -> None:
+        try:
+            await self.providers.aclose()
+        finally:
+            self._tracer.close()
             self._closed = True
-            try:
-                await self.providers.aclose()
-            finally:
-                self._tracer.close()
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+            # A cancelled waiter may never return; avoid an unobserved background exception.
+            self._close_task.add_done_callback(
+                lambda task: task.exception() if not task.cancelled() else None
+            )
+        await asyncio.shield(self._close_task)
+
+    async def __aenter__(self) -> Self:
+        self._check_open()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.aclose()

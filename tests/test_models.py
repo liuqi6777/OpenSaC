@@ -240,8 +240,8 @@ async def test_llm_failures_are_explicit_and_sanitized(payload, code):
 @pytest.mark.asyncio
 async def test_model_entry_points_are_independent_and_missing_config_is_lazy():
 
-    ranker = load_provider("rerank", "http", ProviderConfig(), ProviderContext())
-    llm = load_provider("llm", "openai", ProviderConfig(), ProviderContext())
+    ranker = await load_provider("rerank", "http", ProviderConfig(), ProviderContext())
+    llm = await load_provider("llm", "openai", ProviderConfig(), ProviderContext())
     try:
         assert not hasattr(ranker, "complete")
         assert not hasattr(llm, "rerank")
