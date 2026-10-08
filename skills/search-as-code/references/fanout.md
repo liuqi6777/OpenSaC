@@ -1,7 +1,7 @@
 # Fan-out and state
 
-Read when batching independent queries, combining rankings or continuing from saved results.
-See [fanout_research.py](../examples/fanout_research.py) for a complete save-and-resume example.
+Read when batching independent queries, combining rankings or continuing from saved results. See
+[fanout_research.py](../examples/fanout_research.py) for a complete save-and-resume example.
 
 ## Batch alignment
 
@@ -13,16 +13,16 @@ queries = [
 results = sdk.search.many(queries, limit=5)
 ```
 
-Use `search.many` only for independent information needs; it accepts 1–32 query strings and applies
-the same `limit` to each. Reformulations of one search intent belong in `search([...])`, which returns
-one fused result list instead of per-query batch items. For multi-entity questions, search each entity
-separately when each needs its own evidence. Keep both names together when their relationship is the
-question, such as a direct comparison or an agreement between organizations. Wait for upstream
-results before forming queries whose entities or terminology depend on them. Chunk larger independent
-sets explicitly and skip empty batches.
+Use `search.many` only for independent information needs; it applies the same `limit` to each query.
+Reformulations of one search intent belong in `search([...])`, which returns one fused result list
+instead of per-query batch items. For multi-entity questions, search each entity separately when
+each needs its own evidence. Keep both names together when their relationship is the question, such
+as a direct comparison or an agreement between organizations. Wait for upstream results before
+forming queries whose entities or terminology depend on them. Chunk larger independent sets
+explicitly and skip empty batches.
 
-Use `zip(inputs, results, strict=True)` before filtering so failed-item identity is retained.
-Search batches return one `BatchItem[list[SearchHit]]` per query; fetch batches return one
+Use `zip(inputs, results, strict=True)` before filtering so failed-item identity is retained. Search
+batches return one `BatchItem[list[SearchHit]]` per query; fetch batches return one
 `BatchItem[Document]` per URL. Both preserve input order and duplicates. Check `.ok`, then `.data`
 or `.error.code`. An empty successful hit list is completed work.
 
@@ -46,13 +46,21 @@ ranked = fuse(result_lists)
 
 Default identity is `.url`, compared exactly without normalization. One URL contributes once per
 list; equal fusion scores retain first-seen order. For saved dicts, either restore models or pass
-`key=lambda row: row["url"]`. Both run locally without network requests; neither merges metadata nor adds provenance.
-Keep a separate URL-to-query mapping when tracing which queries found each candidate.
+`key=lambda row: row["url"]`. Both run locally without network requests; neither merges metadata nor
+adds provenance. Import them from `opensac`, not from `sdk.search`. Keep a separate URL-to-query
+mapping when tracing which queries found each candidate.
 
 If supplying weights, align them with the lists actually passed after handling failures. Weights
 must be finite and nonnegative with at least one positive value for nonempty input. Leave `k=60`
 unless the task calls for different weighting. Slice the returned list to select a candidate pool;
 there is no `limit`, domain filter or per-domain cap argument on these functions.
+
+For independent subquestions, select relevant candidates within each group, then deduplicate URLs
+for fetching while retaining group membership. A shared URL can support several questions and only
+needs fetching once. Globally fusing and truncating all groups can hide a question's specialist
+sources; use a fused pool only alongside the per-question selections when global ranking is useful.
+The example previews two distinct candidates per query as a starting point, not a coverage target.
+Inspect the saved results to change selection or expand a group when the evidence calls for it.
 
 ## Save and resume
 
@@ -60,18 +68,21 @@ SDK models need `.model_dump(mode="json")` or `.model_dump_json()` before JSON s
 `json.loads` produces dicts; use `SearchHit.model_validate(row)` to restore search hits.
 `BatchItem.ok` is computed and is not stored in JSON.
 
-Choose a path scoped to the task and freshness requirements. Save successful
-empty batches as well as nonempty ones. Retain unresolved errors instead of replaying them on every
-invocation. The example records both and retries a failed query only after its saved error entry is
-removed deliberately. New queries can be added without repeating completed ones.
+Choose a path scoped to the task and freshness requirements. Save successful empty batches as well
+as nonempty ones. Retain unresolved errors instead of replaying them on every invocation. The
+example records both and retries a failed query only after its saved error entry is removed
+deliberately. New queries can be added without repeating completed ones. It reports empty searches
+separately from failures and retains all candidates in the state file, even when only a few are
+previewed. An empty search is completed retrieval with an evidence gap.
 
 Files are local; different Python processes do not share variables. Reuse saved data when it still
-addresses the question. Refresh deliberately when sources or retrieval requirements change. A completed
-search is not necessarily a resolved research question; use evidence gaps to decide the next action.
+addresses the question. Refresh deliberately when sources or retrieval requirements change. A
+completed search is not necessarily a resolved research question; use evidence gaps to decide the
+next action.
 
 ## Coverage
 
-Validate upstream membership and keys before deriving downstream inputs. One input can produce
-zero, one or several in-scope records; do not collapse that multiplicity accidentally. Missing
-fields and failed inputs remain gaps. Claim completeness only within an evidence-supported scope,
-not merely because every batch finished. Preserve valid `0` and `False` values when processing data.
+Validate upstream membership and keys before deriving downstream inputs. One input can produce zero,
+one or several in-scope records; do not collapse that multiplicity accidentally. Missing fields and
+failed inputs remain gaps. Claim completeness only within an evidence-supported scope, not merely
+because every batch finished. Preserve valid `0` and `False` values when processing data.

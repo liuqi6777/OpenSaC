@@ -22,7 +22,7 @@ try:
         results = sdk.content.fetch_many(chunk)
         for url, result in zip(chunk, results, strict=True):
             if result.ok:
-                print(result.data.url, result.data.text[:1500], sep="\n")
+                print(result.data.url, "Preview only:", result.data.text[:1500], sep="\n")
             else:
                 failed = True
                 print(f"Fetch failed: {url}: {result.error.code}", file=sys.stderr)

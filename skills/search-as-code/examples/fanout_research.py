@@ -8,11 +8,12 @@ remove their error entries to retry deliberately after addressing the cause.
 import json
 from pathlib import Path
 
-from opensac import fuse, sdk
+from opensac import dedup, sdk
 from opensac.contracts import SearchHit
 
 QUERIES = ["Python 3.13 free threading", "Python 3.13 JIT compiler"]
 LIMIT = 5
+CANDIDATES_PER_QUERY = 2  # A preview size; adapt selection to relevance and evidence gaps.
 STATE_PATH = Path("python-313-candidates.json")
 
 state = (
@@ -37,21 +38,28 @@ try:
         # Save each completed chunk so a later failure does not discard earlier work.
         STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    ranked_lists = []
-    provenance = {}
+    selected: list[SearchHit] = []
+    provenance: dict[str, list[str]] = {}
+    print(f"Saved search results: {STATE_PATH}")
     for query in dict.fromkeys(QUERIES):
         if query not in state["batches"]:
+            print(query, "search failed:", state["errors"][query]["code"])
             continue
         hits = [SearchHit.model_validate(row) for row in state["batches"][query]]
-        ranked_lists.append(hits)
         for hit in hits:
-            provenance.setdefault(hit.url, []).append(query)
-    pool = fuse(ranked_lists)
-    failed = [q for q in dict.fromkeys(QUERIES) if q in state["errors"]]
-    print(f"{len(pool)} candidates; {len(failed)} unresolved queries; state: {STATE_PATH}")
-    for query in failed:
-        print(query, state["errors"][query]["code"])
-    for hit in pool[:8]:
-        print(hit.title, hit.url, provenance[hit.url])
+            sources = provenance.setdefault(hit.url, [])
+            if query not in sources:
+                sources.append(query)
+        if not hits:
+            print(query, "no candidates; evidence gap remains")
+            continue
+        candidates = dedup(hits)[:CANDIDATES_PER_QUERY]
+        selected.extend(candidates)
+        print(query, f"{len(hits)} hits; previewing {len(candidates)} candidates:")
+        for hit in candidates:
+            print(hit.title, hit.url)
+    # Fetch each selected URL once, while retaining every query that found it.
+    fetch_urls = [hit.url for hit in dedup(selected)]
+    print(f"{len(fetch_urls)} distinct URLs selected for inspection; evidence is not yet verified")
 finally:
     sdk.close()
