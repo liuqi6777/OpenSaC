@@ -5,7 +5,14 @@ description = "Composable Python research capabilities"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.28,<1", "pydantic>=2.10,<3", "pydantic-settings>=2.10,<3", "anyio>=4,<5"]
+dependencies = [
+    "httpx>=0.28,<1",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.10,<3",
+    "anyio>=4,<5",
+    "pypdf>=6,<7",
+    "trafilatura>=2.3,<3",
+]
 
 [project.entry-points."opensac.search"]
 serper = "opensac.providers.serper:SerperSearch"

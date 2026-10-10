@@ -47,6 +47,17 @@ def main() -> None:
     wheel = select_wheel(root, args.wheel)
 
     class FetchService(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path != "/data.csv":
+                self.send_error(404)
+                return
+            body = b'a,b\r\n"x,y",2\r\n'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self) -> None:
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             if self.path == "/fetch":
@@ -139,12 +150,15 @@ class Search:
                     "OPENSAC_LLM_BASE_URL": f"http://127.0.0.1:{upstream.server_port}",
                     "OPENSAC_LLM_MODEL": "probe-model",
                     "NO_PROXY": "127.0.0.1,localhost",
+                    "FETCH_PROBE_URL": f"http://127.0.0.1:{upstream.server_port}/data.csv",
                 }
             )
             direct_code = """import importlib.util
 import json
+import os
 from pathlib import Path
-from opensac import sdk, fuse, dedup
+from opensac import Client, sdk, fuse, dedup
+from opensac.config import Settings
 
 assert importlib.util.find_spec("fastapi") is None
 assert importlib.util.find_spec("uvicorn") is None
@@ -166,6 +180,9 @@ assert sdk.llm.extract("three", schema).data == {"count": 3}
 assert sdk.llm.extract_many(["three"], schema)[0].data.data == {"count": 3}
 assert sdk.llm.complete_many(["hello"])[0].data.model == "probe-model"
 sdk.close()
+with Client(settings=Settings(fetch_provider="jina")) as direct_client:
+    csv_url = os.environ["FETCH_PROBE_URL"]
+    assert direct_client.content.fetch(csv_url).text == 'a,b\\r\\n"x,y",2\\r\\n'
 assert importlib.util.find_spec("opensac.server") is None
 """
             command([str(sdk_python), "-c", direct_code], cwd=directory, env=env)

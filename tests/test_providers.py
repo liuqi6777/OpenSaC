@@ -72,6 +72,12 @@ async def test_provider_failure_and_size_bound(status, body, code) -> None:
 
     def handle(request):
         calls.append(request)
+        if request.url.host != "r.jina.ai":
+            return httpx.Response(
+                500 if status == 302 else status,
+                content=body,
+                headers={"Content-Type": "text/html"},
+            )
         return httpx.Response(status, content=body, headers={"Location": "http://127.0.0.1"})
 
     provider = JinaFetch(
@@ -84,7 +90,7 @@ async def test_provider_failure_and_size_bound(status, body, code) -> None:
             await provider.fetch("https://example.com")
         assert caught.value.code == code
         assert "secret" not in caught.value.message
-        assert len(calls) == 1
+        assert len(calls) == 2
     finally:
         await provider.aclose()
 
@@ -194,15 +200,17 @@ async def test_provider_concurrency_is_bounded() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [200, 422])
-async def test_jina_decides_target_acceptance(status):
+async def test_jina_acceptance_and_local_target_fallback(status):
     url = "http://localhost:9000/paper"
     calls = []
 
     def handle(request):
         calls.append(request)
-        assert request.url.host == "r.jina.ai"
-        assert request.url.path == f"/{url}"
-        return httpx.Response(status, text="Reader response")
+        if request.url.host == "r.jina.ai":
+            assert request.url.path == f"/{url}"
+            return httpx.Response(status, text="Reader response")
+        assert str(request.url) == url
+        return httpx.Response(status, text="Source response")
 
     fetch = JinaFetch(ProviderConfig(), ProviderContext(), transport=httpx.MockTransport(handle))
     try:
@@ -212,7 +220,7 @@ async def test_jina_decides_target_acceptance(status):
             with pytest.raises(CapabilityError) as caught:
                 await fetch.fetch(url)
             assert caught.value.code == "provider_error"
-        assert len(calls) == 1
+        assert len(calls) == (1 if status == 200 else 2)
     finally:
         await fetch.aclose()
 

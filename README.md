@@ -31,6 +31,10 @@ export OPENSAC_FETCH_PROVIDER=jina
 python examples/research.py
 ```
 
+Default fetch downloads `.pdf`, `.json`, and `.csv` URLs directly: PDF becomes text, while JSON/CSV
+retain their decoded text and formatting. Ordinary pages use Jina first, then fall back to a direct
+HTTP download and body extraction on failure. See [fetch behavior](docs/providers.md#jina-file-handling-and-fallback).
+
 Configure only the capabilities you use. Jina's API key is optional. See [.env.example](.env.example)
 for available settings; export the variables in your environment or pass explicit `Settings` to a
 `Client`. The SDK does not automatically load a `.env` file.

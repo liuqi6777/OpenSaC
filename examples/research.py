@@ -1,4 +1,8 @@
-"""Save research artifacts in this Python environment; resume by reading the JSON files."""
+"""Save research artifacts in this Python environment; resume by reading the JSON files.
+
+Default Jina fetch extracts PDF text, preserves JSON/CSV text, and falls back to
+source downloads for ordinary pages when Reader fails.
+"""
 
 from pathlib import Path
 

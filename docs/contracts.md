@@ -22,7 +22,9 @@ SearchHit contains `url`, `title`, `snippet`, `domain`, `date`. List order expre
 `domain` defaults to the URL hostname, preserving subdomains, localhost or IP addresses. An explicit
 provider value is retained. `date` is an optional provider-supplied string, including relative dates;
 missing dates are `None`. Dates are not inferred or normalized.
-Document contains only `url` and `text`.
+Document contains only `url` and `text`. The default Jina fetch provider returns extracted PDF or
+HTML text and preserves decoded JSON/CSV text, including whitespace and line endings. The URL
+remains the requested URL even after redirects. See [fetch behavior](providers.md#jina-file-handling-and-fallback).
 Completion contains `text`, `model`, optional `usage`; Extraction contains Schema-validated
 JSON `data`, `model`, optional `usage`. See [models](models.md) for fields and bounds.
 Capabilities reports implemented methods and limits, not provider availability or credential validity.

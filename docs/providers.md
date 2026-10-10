@@ -98,7 +98,7 @@ compatible opensac versions when publishing an external provider.
 ## Built-ins
 
 - `opensac.search:serper`: Serper search API, using search-specific config.
-- `opensac.fetch:jina`: Jina Reader API, using fetch-specific config.
+- `opensac.fetch:jina`: Jina Reader with direct file handling and source-download fallback.
 - `opensac.search:http`: POST `<base_url>/search` with query/limit; expects `{"data": [SearchHit, ...]}`.
 - `opensac.fetch:http`: POST `<base_url>/fetch` with url; expects `{"data": Document}`.
 
@@ -106,11 +106,45 @@ The two HTTP providers work with independent endpoints and credentials. They are
 adapters, not adapters for a legacy document-ID service. A service can implement either capability
 without exposing the other.
 
+## Jina file handling and fallback
+
+The default fetch provider automatically downloads URLs whose path ends in `.pdf`, `.json`, or
+`.csv` (case-insensitive, ignoring query parameters). Other URLs use Jina Reader first; request
+failures, rate limits, timeouts, oversized responses, and invalid or empty Reader text trigger one
+source download. No preliminary HEAD request or retry loop is added. HTTP and third-party fetch
+providers retain their own behavior.
+
+Downloads follow at most five HTTP(S) redirects, preserve the requested `Document.url`, and never
+send the Jina API key to the source. PDF signatures take precedence over metadata; concrete response
+media types take precedence over filename suffixes. Missing or generic media types use the final
+URL suffix, PDF signature, or an HTML document prefix. A suffix-free file uses local parsing only
+if Reader fails and a source download occurs.
+
+PDF text is extracted locally with pypdf and joined in page order with blank lines. Password-protected
+PDFs that cannot be opened with an empty password, damaged PDFs, and PDFs without extractable text
+raise `ProviderResponseError`; OCR is not included. JSON and CSV are decoded using the declared
+charset (UTF-8 by default) and returned without parsing, reformatting, or trimming. HTML is converted
+to plain text with Trafilatura, excluding comments; cleaned page text is used when body extraction
+fails to find content. Other explicit text media types are preserved; unknown binary content and
+invalid text encodings raise `ProviderResponseError`.
+
+Reader receives at most half of `request_timeout`, reserving time for fallback. One full deadline
+covers Reader, source download, and parsing, including direct provider calls; Runtime retains its
+own operation deadline and concurrency admission. Downloads enforce `max_response_bytes` on
+decompressed bytes, and extracted UTF-8 text has the same limit. Local parsing runs in a worker
+thread; cancelling the wait does not forcibly stop an already running parser.
+
+Direct file failures are returned immediately. If both Reader and fallback fail, the source-stage
+error is raised with the Reader error chained as its cause. Public errors omit upstream response
+bodies and credentials. Configuration errors, external cancellation, and unexpected exceptions
+propagate without fallback. Both HTTP clients are released by `aclose()`.
+
 ## Built-in module layout
 
 `opensac.provider` defines capability protocols, configuration and entry-point loading.
 `opensac.providers` contains implementations grouped by service or protocol:
-`serper`, `jina`, `http` and `openai`. The `base` module shares bounded
+`serper`, `jina`, `http` and `openai`; `direct` supports Jina source downloads and extraction.
+The `base` module shares bounded
 HTTP transport helpers. Sharing a module does not combine capability interfaces: HTTP search,
 fetch and rerank remain separate classes and entry points.
 

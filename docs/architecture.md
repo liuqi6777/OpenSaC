@@ -64,8 +64,9 @@ no core registry edits. Hot replacement is not implemented.
 
 Search returns backend-native URLs; fetch accepts those URLs without registration. Shared HTTP(S)
 format validation accepts public and local service URLs. Target acceptance, resolution and access
-policy belong to the backend. Jina Reader decides whether it can process a target; Serper/Jina
-adapters do not impose a public-address filter.
+policy belong to the selected provider. The Jina provider handles PDF/JSON/CSV file URLs directly
+and falls back to a source download when Reader fails; neither Serper nor Jina imposes a
+public-address filter. See [file handling and fallback](providers.md#jina-file-handling-and-fallback).
 
 Runtime revalidates provider results, including existing model instances and nested token usage,
 and enforces search limits, fetch URL preservation and nonnegative, in-range rerank indices.
